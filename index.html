@@ -10,6 +10,7 @@
 <!-- PWA -->
 <link rel="manifest" href="./manifest.json">
 <meta name="theme-color" content="#0a1628">
+<meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="Seahorse">
@@ -1669,7 +1670,7 @@ body{min-height:100vh;background-image:radial-gradient(circle at 20% 0%,rgba(184
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='1.24.0';            // bumped on each release
+const APP_VERSION='1.25.0';            // bumped on each release
 
 /* ============================================================
    PWA — Service Worker registration + Install prompt
@@ -4084,6 +4085,31 @@ function segmentChip(seg){
 
 /* ===== NAV ===== */
 function navigateToPage(pageId){
+  // SECURITY GUARD: enforce tab permission for non-admin users
+  // Prevents bypass via JS console, DevTools, or programmatic navigation
+  if(CURRENT_ROLE==='user' && CURRENT_USER){
+    const allowed=CURRENT_USER.tabs||[];
+    // Dashboard always admin-only
+    if(pageId==='dashboard'){
+      console.warn('[security] User attempted to access admin-only Dashboard, blocked');
+      pageId=allowed[0]||'plan';
+    }
+    // Approval tab requires approve permission
+    else if(pageId==='approval'){
+      if(!canApproveL1() && !canApproveL2()){
+        console.warn('[security] User without approve permission attempted to access Approval tab, blocked');
+        try{ logAuditEvent('permission_denied',{tab:pageId}); }catch(e){}
+        pageId=allowed[0]||'plan';
+      }
+    }
+    // Regular tabs: check allowed list
+    else if(allowed.length && !allowed.includes(pageId)){
+      console.warn('[security] User attempted to access disallowed tab:',pageId,'allowed:',allowed);
+      try{ logAuditEvent('permission_denied',{tab:pageId,allowed:allowed.join(',')}); }catch(e){}
+      pageId=allowed[0]||'plan';
+    }
+  }
+
   // Clear all active states
   document.querySelectorAll('.nav-item').forEach(n=>{n.classList.remove('active');n.classList.remove('parent-active');});
   document.querySelectorAll('.nav-sub-item').forEach(n=>n.classList.remove('active'));
@@ -11507,6 +11533,47 @@ function applyBranding(){
   }catch(e){}
 }
 
+/* Helper: check if current user can access a given tab.
+   Used to skip rendering for tabs not in user's allowed list. */
+function canAccessTab(tabId){
+  if(CURRENT_ROLE==='admin') return true;
+  if(!CURRENT_USER) return false;
+  if(tabId==='dashboard') return false;  // admin-only
+  if(tabId==='approval') return canApproveL1()||canApproveL2();
+  return (CURRENT_USER.tabs||[]).includes(tabId);
+}
+
+/* Clear page content for tabs user can't access — prevents F12 DOM inspection leaks */
+function clearForbiddenPages(){
+  if(CURRENT_ROLE!=='user' || !CURRENT_USER) return;
+  // Map tab id → list of container IDs to clear inside that page
+  const TAB_CONTAINERS={
+    dashboard:['dashboard-grid'],
+    plan:['plan-list'],
+    projects:['projects-list'],
+    vessels:['vessels-list','onhires-list','events-list'],
+    receivables:['ar-list'],
+    payables:['ap-list'],
+    vessel_expense:['vessel-expense-list'],
+    hr_expense:['hr-expense-list'],
+    qn_expense:['qn-expense-list'],
+    operations:['op-vessels-list','op-tx-list'],
+    approval:['approval-list'],
+    inventory:['inv-groups-list','inv-movements-block'],
+    fixed_assets:['fa-list'],
+    tools:['tl-list'],
+    reports:['rep-trend','rep-vessel-drill','rep-margin','rep-util','rep-pnl-project-block','rep-mmr-block','rep-cf-block','rep-aging-block','rep-top-cust-block','rep-cost-block'],
+    rates:['rates-list']
+  };
+  Object.keys(TAB_CONTAINERS).forEach(tab=>{
+    if(canAccessTab(tab)) return;
+    TAB_CONTAINERS[tab].forEach(id=>{
+      const el=document.getElementById(id);
+      if(el) el.innerHTML='';
+    });
+  });
+}
+
 function renderAll(){
   applyBranding();
   renderPresenceUI();
@@ -11516,29 +11583,24 @@ function renderAll(){
   fillVesselPicker();
   fillOpVesselPicker();
   refreshTxCategory();
-  renderDashboard();
-  renderPlanList();
-  renderProjects();
-  renderVessels();
-  renderEvents();
-  renderOnhire();
-  // renderTxList removed — Thu Chi page deleted, transactions migrated to Receivables/Payables
-  renderAR();
-  fillVesselExpensePickers();
-  renderVesselExpense();
-  fillHrExpensePickers();
-  renderHrExpense();
-  fillQnExpensePickers();
-  renderQnExpense();
-  renderApprovalList();
-  renderFixedAssets();
-  renderTools();
-  renderBankAccounts();
-  renderOpVessels();
-  renderOpTxList();
-  renderInventory();
-  renderReports();
-  renderRates();
+  // Only render tabs the user can access — prevents data leak via DOM inspection
+  if(canAccessTab('dashboard')) renderDashboard();
+  if(canAccessTab('plan')) renderPlanList();
+  if(canAccessTab('projects')) renderProjects();
+  if(canAccessTab('vessels')){ renderVessels(); renderEvents(); renderOnhire(); }
+  if(canAccessTab('receivables') || canAccessTab('payables')) renderAR();
+  if(canAccessTab('vessel_expense')){ fillVesselExpensePickers(); renderVesselExpense(); }
+  if(canAccessTab('hr_expense')){ fillHrExpensePickers(); renderHrExpense(); }
+  if(canAccessTab('qn_expense')){ fillQnExpensePickers(); renderQnExpense(); }
+  if(canAccessTab('approval')) renderApprovalList();
+  if(canAccessTab('fixed_assets')) renderFixedAssets();
+  if(canAccessTab('tools')) renderTools();
+  if(canAccessTab('operations')){ renderBankAccounts(); renderOpVessels(); renderOpTxList(); }
+  if(canAccessTab('inventory')) renderInventory();
+  if(canAccessTab('reports')) renderReports();
+  if(canAccessTab('rates')) renderRates();
+  // Clear forbidden tabs' content (defense in depth)
+  clearForbiddenPages();
   upgradeNumericInputs();
 }
 
