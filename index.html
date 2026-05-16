@@ -1563,7 +1563,7 @@ body{min-height:100vh;background-image:radial-gradient(circle at 20% 0%,rgba(184
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='1.13.1';            // bumped on each release
+const APP_VERSION='1.14.0';            // bumped on each release
 let CRYPTO_KEY=null;
 let CURRENT_ROLE=null;               // 'admin' | 'user'
 let CURRENT_USER=null;               // user object if role==='user'
@@ -1887,6 +1887,7 @@ function openSettings(){
       <td>${(u.tabs||[]).map(t=>{const T=ALL_TABS.find(x=>x.id===t);return T?`<span class="chip chip-5" style="margin-right:3px">${T.label}</span>`:'';}).join(' ')}</td>
       <td style="white-space:nowrap"><div class="row-actions">
         <button class="icon-btn" title="Sửa" onclick="editUser(${i})">✎</button>
+        ${u.email?`<button class="icon-btn" title="Gửi email mời" onclick="sendInviteEmail(${i})">✉</button>`:''}
         <button class="icon-btn danger" title="Xóa" onclick="deleteUser(${i})">✕</button>
       </div></td>
     </tr>
@@ -2069,6 +2070,16 @@ function userEditorModal(initial,idx){
         <label>Tên nhân viên (hiển thị trên badge)</label>
         <input type="text" id="user-name" value="${(initial.name||'').replace(/"/g,'&quot;')}" placeholder="VD: Lan (kế toán)">
       </div>
+      <div class="form-grid" style="grid-template-columns:1fr 1fr">
+        <div class="field">
+          <label>Email (để gửi mời + liên hệ)</label>
+          <input type="email" id="user-email" value="${(initial.email||'').replace(/"/g,'&quot;')}" placeholder="VD: lan.kt@seahorse.com.vn">
+        </div>
+        <div class="field">
+          <label>Số điện thoại</label>
+          <input type="tel" id="user-phone" value="${(initial.phone||'').replace(/"/g,'&quot;')}" placeholder="VD: 0912 345 678">
+        </div>
+      </div>
       <div class="field">
         <label>${isEdit?'Mật khẩu mới (để trống = giữ nguyên)':'Mật khẩu'} (tối thiểu 8 ký tự)</label>
         <input type="password" id="user-pw" placeholder="${isEdit?'Để trống nếu không đổi':''}">
@@ -2159,6 +2170,8 @@ function editUser(idx){
   if(!u){toast('Không tìm thấy','bad');return;}
   userEditorModal({
     name:u.name,
+    email:u.email||'',
+    phone:u.phone||'',
     tabs:u.tabs||[],
     canConfirmPayment:!!u.canConfirmPayment,
     canApproveL1:!!u.canApproveL1,
@@ -2173,6 +2186,8 @@ async function saveUser(idx){
   const err=document.getElementById('user-err');
   err.textContent='';
   const name=document.getElementById('user-name').value.trim();
+  const email=document.getElementById('user-email').value.trim();
+  const phone=document.getElementById('user-phone').value.trim();
   const pw=document.getElementById('user-pw').value;
   const pw2=document.getElementById('user-pw2').value;
   const tabs=Array.from(document.querySelectorAll('input[data-tab]:checked')).map(c=>c.dataset.tab);
@@ -2203,6 +2218,8 @@ async function saveUser(idx){
       u.assignedVesselIds=assignedVesselIds;
       u.assignedProjectIds=assignedProjectIds;
       u.assignedOpVesselIds=assignedOpVesselIds;
+      u.email=email;
+      u.phone=phone;
       if(pw){
         const salt=bytesToB64(rand(16));
         const hash=await sha256Hex(pw+salt);
@@ -2215,7 +2232,7 @@ async function saveUser(idx){
       const hash=await sha256Hex(pw+salt);
       const wrap=await wrapMasterKey(CRYPTO_KEY, await deriveWrappingKey(pw,salt));
       cfg.users=cfg.users||[];
-      cfg.users.push({name,salt,hash,wrap,tabs,canConfirmPayment,canApproveL1,canApproveL2,assignedVesselIds,assignedProjectIds,assignedOpVesselIds});
+      cfg.users.push({name,email,phone,salt,hash,wrap,tabs,canConfirmPayment,canApproveL1,canApproveL2,assignedVesselIds,assignedProjectIds,assignedOpVesselIds});
       toast('Đã tạo nhân viên '+name);
     }
     setAuthConfig(cfg);
@@ -2229,6 +2246,112 @@ async function saveUser(idx){
     }
   }
 }
+
+/* Send email invite via mailto:
+   Opens default email client with pre-filled subject + body containing:
+   - App URL
+   - Username + tạm password placeholder
+   - Permissions assigned
+   - Login instructions */
+function sendInviteEmail(idx){
+  const cfg=getAuthConfig();
+  const u=(cfg.users||[])[idx];
+  if(!u){toast('Không tìm thấy NV','bad');return;}
+  if(!u.email){toast('NV chưa có email — sửa NV để thêm','bad');return;}
+
+  // Build content
+  const appUrl=window.location.origin+window.location.pathname.replace(/\/index\.html$/,'/');
+  const company=(S.companyInfo&&S.companyInfo.name)||(S.companyInfo&&S.companyInfo.nameEn)||'Seahorse Marine & Energy';
+  const adminContact=actorName()||'Admin';
+
+  // Tabs list
+  const tabLabels=(u.tabs||[]).map(t=>{const T=ALL_TABS.find(x=>x.id===t);return T?T.label:t;}).join(', ')||'(chưa gán tab)';
+  // Vessel assignments
+  const vesselList=(u.assignedVesselIds||[]).map(id=>{const v=S.vessels.find(x=>x.id===id);return v?v.name:null;}).filter(Boolean).join(', ');
+  const projectList=(u.assignedProjectIds||[]).map(id=>{const p=S.projects.find(x=>x.id===id);return p?p.code:null;}).filter(Boolean).join(', ');
+  const opVesselList=(u.assignedOpVesselIds||[]).map(id=>{const v=S.opVessels.find(x=>x.id===id);return v?v.name:null;}).filter(Boolean).join(', ');
+  // Approval roles
+  const roles=[];
+  if(u.canApproveL1) roles.push('Duyệt cấp 1 (L1)');
+  if(u.canApproveL2) roles.push('Duyệt cấp 2 (L2)');
+  if(u.canConfirmPayment) roles.push('Xác nhận thanh toán');
+
+  const subject=`[${company}] Tài khoản truy cập Seahorse Manager`;
+  const body=[
+    `Chào ${u.name},`,
+    ``,
+    `Bạn đã được cấp tài khoản truy cập phần mềm Seahorse Manager của ${company}.`,
+    ``,
+    `═══════════════════════════════════════`,
+    `THÔNG TIN ĐĂNG NHẬP`,
+    `═══════════════════════════════════════`,
+    `• URL truy cập: ${appUrl}`,
+    `• Tên đăng nhập: ${u.name}`,
+    `• Mật khẩu tạm: ******** (xem tin nhắn riêng / Zalo từ ${adminContact})`,
+    ``,
+    `LƯU Ý: Vì lý do bảo mật, mật khẩu được gửi riêng qua kênh khác (SMS/Zalo/gặp trực tiếp).`,
+    ``,
+    `═══════════════════════════════════════`,
+    `QUYỀN HẠN CỦA BẠN`,
+    `═══════════════════════════════════════`,
+    `• Tab được phép truy cập: ${tabLabels}`,
+    vesselList?`• Tàu (Seahorse) phụ trách: ${vesselList}`:'',
+    projectList?`• Dự án O&M phụ trách: ${projectList}`:'',
+    opVesselList?`• Tàu QL hộ phụ trách: ${opVesselList}`:'',
+    roles.length?`• Quyền đặc biệt: ${roles.join(', ')}`:'',
+    ``,
+    `═══════════════════════════════════════`,
+    `HƯỚNG DẪN ĐĂNG NHẬP LẦN ĐẦU`,
+    `═══════════════════════════════════════`,
+    `1. Mở trình duyệt (Chrome/Edge/Safari) và truy cập URL trên`,
+    `2. Nhập "Tên đăng nhập" + "Mật khẩu" → bấm Đăng nhập`,
+    `3. Đọc qua các tab bạn có quyền để làm quen`,
+    `4. Nếu có thắc mắc → liên hệ ${adminContact}`,
+    ``,
+    `═══════════════════════════════════════`,
+    `LƯU Ý QUAN TRỌNG`,
+    `═══════════════════════════════════════`,
+    `• Mật khẩu KHÔNG khôi phục được nếu mất — ghi nhớ kỹ`,
+    `• Mỗi NV chỉ thấy dữ liệu trong phạm vi được phân quyền`,
+    `• Mọi thao tác đều được log lại (Người tạo + Ngày tạo)`,
+    `• KHÔNG chia sẻ tài khoản cho người khác`,
+    ``,
+    `Chúc bạn làm việc hiệu quả!`,
+    ``,
+    `${adminContact}`,
+    `${company}`
+  ].filter(Boolean).join('\n');
+
+  // Open mailto
+  const mailto=`mailto:${encodeURIComponent(u.email)}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
+  // mailto length limit ~2000 chars on some clients — for safety, copy fallback
+  if(mailto.length>2000){
+    // Copy to clipboard + open empty mailto
+    navigator.clipboard.writeText(body).then(()=>{
+      toast('Nội dung email đã copy vào clipboard. Mở mail thủ công và paste.','warn');
+      window.open(`mailto:${encodeURIComponent(u.email)}?subject=${encodeURIComponent(subject)}`,'_blank');
+    }).catch(()=>{
+      // Fallback: show in modal
+      _showEmailFallback(u.email, subject, body);
+    });
+  } else {
+    window.open(mailto,'_blank');
+    toast('Mở email client...');
+  }
+}
+
+function _showEmailFallback(toEmail, subject, body){
+  openModal('✉ Nội dung email mời',
+    `<div style="font-size:12px;line-height:1.6">
+      <p><b>Gửi đến:</b> ${toEmail}</p>
+      <p><b>Tiêu đề:</b> ${subject}</p>
+      <p><b>Nội dung:</b></p>
+      <textarea readonly style="width:100%;min-height:300px;font-family:var(--font-mono);font-size:11px">${body}</textarea>
+      <p style="color:var(--muted);font-style:italic;margin-top:8px">Email client tự động không mở được. Copy nội dung trên và paste vào Gmail/Outlook.</p>
+    </div>`,
+    `<button class="btn-sec" onclick="closeModal()">Đóng</button>`);
+}
+
 function deleteUser(idx){
   const cfg=getAuthConfig();
   const u=cfg.users[idx];if(!u)return;
