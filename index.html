@@ -476,6 +476,15 @@ body{min-height:100vh;background-image:radial-gradient(circle at 20% 0%,rgba(184
   </div>
   <div class="topbar-actions">
     <div class="sync-status" id="sync-status" title="Trạng thái đồng bộ"><span class="dot"></span><span id="sync-label">Offline</span></div>
+    <div class="presence-wrap" id="presence-wrap" style="position:relative">
+      <button class="btn btn-ghost" id="presence-btn" onclick="togglePresencePopup(event)" title="Đang online" style="border:1px solid rgba(246,241,232,.4);padding:4px 10px;display:none">
+        <span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--good);margin-right:6px;vertical-align:middle"></span>
+        <span id="presence-count">0</span> online
+      </button>
+      <div class="menu-pop" id="presence-pop" style="display:none;min-width:240px;right:0;left:auto;background:var(--paper);color:var(--ink);border:1px solid var(--rule);box-shadow:0 4px 16px rgba(0,0,0,.12);position:absolute;top:100%;margin-top:4px;z-index:1000;padding:6px 0">
+        <div id="presence-list"></div>
+      </div>
+    </div>
     <button class="btn btn-ghost" onclick="cloudSync()" id="sync-btn" title="Đồng bộ lên cloud">↻ Sync</button>
     <div class="fx-block">
       <label class="fx-label">FX <span style="opacity:.55">VND/USD</span></label>
@@ -1563,7 +1572,7 @@ body{min-height:100vh;background-image:radial-gradient(circle at 20% 0%,rgba(184
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='1.14.1';            // bumped on each release
+const APP_VERSION='1.16.0';            // bumped on each release
 let CRYPTO_KEY=null;
 let CURRENT_ROLE=null;               // 'admin' | 'user'
 let CURRENT_USER=null;               // user object if role==='user'
@@ -1721,7 +1730,7 @@ async function authAction(){
       // Mark that we just logged in — block auto-push for next 5s so pull completes cleanly
       _suppressAutoSync=true;
       setTimeout(()=>{ _suppressAutoSync=false; }, 5000);
-      setTimeout(()=>cloudSync('pull'),300);
+      setTimeout(()=>cloudSync('pull').then(()=>{ presenceStart(); }),300);
     }
     // Check for app update silently — auto-reload if new version available
     setTimeout(()=>checkForUpdate(),1500);
@@ -1841,7 +1850,7 @@ const TAB_TO_FIELDS={
   rates:          ['vessels','onhires','events','receivables','payables']
 };
 /* Shared/config fields that everyone (incl. users) can load — non-sensitive. */
-const SHARED_FIELDS=['fxRate','displayCcy','companyInfo','meta','vesselExpenseCats','omProjectExpenseCats','hrExpenseCats','qnExpenseCats'];
+const SHARED_FIELDS=['fxRate','displayCcy','companyInfo','meta','presence','vesselExpenseCats','omProjectExpenseCats','hrExpenseCats','qnExpenseCats'];
 /* All possible data fields (used by admin or for save-merge) */
 const ALL_DATA_FIELDS=[
   'plans','projects','vessels','onhires','events',
@@ -2035,20 +2044,61 @@ async function saveSettings(){
 
 function previewLogoUpload(ev){
   const f=ev.target.files[0]; if(!f) return;
-  if(f.size>200*1024){toast('File quá lớn (>200KB) — chọn ảnh nhỏ hơn','bad');ev.target.value='';return;}
+  // Hard limit: 2MB raw input (will be compressed)
+  if(f.size>2*1024*1024){toast('Ảnh quá lớn (>2MB) — chọn ảnh nhỏ hơn','bad');ev.target.value='';return;}
   const reader=new FileReader();
   reader.onload=e=>{
-    const dataUrl=e.target.result;
-    S.companyInfo=S.companyInfo||{};
-    S.companyInfo.logo=dataUrl;
-    // Update preview thumbnail
-    const prev=document.getElementById('logo-preview');
-    if(prev) prev.innerHTML=`<img src="${dataUrl}" style="max-width:100%;max-height:100%;object-fit:contain">`;
-    saveState();
-    toast('Đã cập nhật logo (bấm Lưu cài đặt để áp dụng)');
+    const rawDataUrl=e.target.result;
+    // Auto-compress: resize max 256×256, JPEG quality 80
+    _compressLogo(rawDataUrl).then(compressed=>{
+      const sizeKB=Math.round(compressed.length/1024);
+      if(sizeKB>30){
+        toast(`Logo sau nén vẫn lớn (${sizeKB}KB) — chọn ảnh đơn giản hơn`,'bad');
+        return;
+      }
+      S.companyInfo=S.companyInfo||{};
+      S.companyInfo.logo=compressed;
+      const prev=document.getElementById('logo-preview');
+      if(prev) prev.innerHTML=`<img src="${compressed}" style="max-width:100%;max-height:100%;object-fit:contain">`;
+      saveState();
+      toast(`Đã cập nhật logo (~${sizeKB}KB sau nén). Bấm Lưu cài đặt để áp dụng.`);
+    }).catch(err=>{
+      console.error('Logo compress error:',err);
+      toast('Lỗi xử lý ảnh: '+err.message,'bad');
+    });
   };
   reader.onerror=()=>toast('Lỗi đọc file','bad');
   reader.readAsDataURL(f);
+}
+
+/* Compress image to max 256×256 JPEG quality 0.8.
+   Input: data URL (any format). Output: compressed data URL (JPEG or PNG if has transparency). */
+function _compressLogo(dataUrl){
+  return new Promise((resolve,reject)=>{
+    const img=new Image();
+    img.onload=()=>{
+      const MAX=256;
+      let w=img.naturalWidth, h=img.naturalHeight;
+      if(w>MAX || h>MAX){
+        const scale=Math.min(MAX/w, MAX/h);
+        w=Math.round(w*scale);
+        h=Math.round(h*scale);
+      }
+      const canvas=document.createElement('canvas');
+      canvas.width=w;
+      canvas.height=h;
+      const ctx=canvas.getContext('2d');
+      // White background for JPEG (preserves transparency awareness)
+      ctx.fillStyle='#ffffff';
+      ctx.fillRect(0,0,w,h);
+      ctx.drawImage(img,0,0,w,h);
+      // Output JPEG quality 0.8 (good balance)
+      const compressed=canvas.toDataURL('image/jpeg',0.8);
+      resolve(compressed);
+    };
+    img.onerror=()=>reject(new Error('Không đọc được ảnh'));
+    img.src=dataUrl;
+  });
 }
 
 function removeLogo(){
@@ -2674,8 +2724,30 @@ function applyRoleUI(){
   }
 }
 
-function logout(){
+async function logout(){
   if(!confirm('Đăng xuất? Dữ liệu vẫn được giữ trong thiết bị.')) return;
+  // Clean up presence before logging out
+  try{ presenceCleanup(); }catch(e){}
+  clearInterval(_presenceTimer);
+
+  // CRITICAL: Force sync any pending changes BEFORE logging out
+  // Prevents race condition where new user/data is local-only but cloud has old state
+  const cfg=getAuthConfig();
+  if(cfg && cfg.scriptUrl && CRYPTO_KEY){
+    clearTimeout(_autoSyncTimer);
+    _suppressAutoSync=false;
+    try{
+      toast('Đang đồng bộ trước khi đăng xuất...');
+      await cloudSync('push');
+      await new Promise(r=>setTimeout(r,500));
+    }catch(e){
+      console.error('[logout sync] failed:',e);
+      if(!confirm('Đồng bộ cloud thất bại. Đăng xuất bây giờ có thể mất dữ liệu cuối. Vẫn đăng xuất?')){
+        return;
+      }
+    }
+  }
+
   CRYPTO_KEY=null;
   CURRENT_ROLE=null;
   CURRENT_USER=null;
@@ -2836,6 +2908,16 @@ async function cloudSync(mode){
         }
       }
       const payload=await encryptJSON(toEncrypt);
+      // Size guard: Apps Script PropertiesService limit ~9KB, Sheet cell ~50KB
+      // We chunk to "data" sheet which can hold larger, but practical safe limit ~80KB
+      const payloadSize=JSON.stringify(payload).length;
+      if(payloadSize>80*1024){
+        const sizeKB=Math.round(payloadSize/1024);
+        console.error('[sync push] payload too large:',sizeKB,'KB');
+        updateSyncStatus('error',`Payload quá lớn (${sizeKB}KB)`);
+        toast(`Dữ liệu quá lớn (${sizeKB}KB) — không sync được. Có thể logo công ty quá to. Vào Cài đặt → xóa/giảm logo.`,'bad');
+        return;
+      }
       const res=await fetch(cfg.scriptUrl,{
         method:'POST',
         headers:{'Content-Type':'text/plain'},
@@ -3011,6 +3093,7 @@ function defaultState(){
       addr:'Vietnam',
       logo:''  // base64 data URL
     },
+    presence:{},  // online presence: {username: {lastSeen, role}}
     meta:{created:new Date().toISOString()}
   };
 }
@@ -3039,6 +3122,150 @@ function scheduleAutoSync(){
   _autoSyncTimer=setTimeout(()=>cloudSync('push'),3000); // 3s debounce
 }
 function uid(){return Date.now().toString(36)+Math.random().toString(36).slice(2,7);}
+
+/* ============================================================
+   ONLINE PRESENCE — team awareness (who's online)
+   - Heartbeat: cập nhật S.presence[me].lastSeen mỗi 30s
+   - Cloud sync: push presence cùng các field SHARED khác
+   - UI: chip "N online" trong header + popup list
+   - Skip heartbeat khi tab inactive (tiết kiệm fetch)
+   ============================================================ */
+
+let _presenceTimer=null;
+const PRESENCE_HEARTBEAT_MS = 30000;        // 30 giây
+const PRESENCE_ONLINE_THRESHOLD_MS = 60000; // 60s → online
+const PRESENCE_RECENT_THRESHOLD_MS = 300000; // 5 phút → "vừa rồi"
+
+function presenceStart(){
+  if(!CRYPTO_KEY) return;
+  // First heartbeat immediately
+  presenceHeartbeat();
+  // Schedule recurring
+  clearInterval(_presenceTimer);
+  _presenceTimer=setInterval(presenceHeartbeat, PRESENCE_HEARTBEAT_MS);
+  // Cleanup on tab close
+  window.addEventListener('beforeunload', presenceCleanup, {once:true});
+  // Visibility change: skip while hidden
+  document.addEventListener('visibilitychange', ()=>{
+    if(document.visibilityState==='visible'){
+      presenceHeartbeat();
+    }
+  });
+}
+
+function presenceHeartbeat(){
+  if(document.visibilityState==='hidden') return;  // Skip when tab not visible
+  if(!CRYPTO_KEY) return;
+  const me=actorName();
+  if(!me || me==='?') return;
+  if(!S.presence) S.presence={};
+  S.presence[me]={
+    lastSeen: new Date().toISOString(),
+    role: CURRENT_ROLE||'user',
+    displayName: (CURRENT_USER&&CURRENT_USER.name)|| (CURRENT_ROLE==='admin'?'Admin':me)
+  };
+  // Don't trigger full save — just push presence silently via lightweight sync
+  // (saveState would push entire state; we want minimal)
+  saveState();  // OK to use full save — debounce handles batching
+  renderPresenceUI();
+}
+
+function presenceCleanup(){
+  if(!S.presence) return;
+  const me=actorName();
+  if(me && me!=='?') delete S.presence[me];
+  // Synchronous best-effort save (page closing)
+  try{ saveState(); }catch(e){}
+}
+
+/* Returns list of online users sorted by lastSeen desc */
+function presenceList(){
+  if(!S.presence) return [];
+  const now=Date.now();
+  const out=[];
+  Object.entries(S.presence).forEach(([username, info])=>{
+    if(!info||!info.lastSeen) return;
+    const t=new Date(info.lastSeen).getTime();
+    const ageMs=now-t;
+    if(ageMs > PRESENCE_RECENT_THRESHOLD_MS) return;  // Skip offline >5min
+    let status='offline';
+    if(ageMs < PRESENCE_ONLINE_THRESHOLD_MS) status='online';
+    else if(ageMs < PRESENCE_RECENT_THRESHOLD_MS) status='recent';
+    out.push({
+      username,
+      displayName: info.displayName||username,
+      role: info.role||'user',
+      ageMs,
+      lastSeen: info.lastSeen,
+      status,
+      isMe: username===actorName()
+    });
+  });
+  out.sort((a,b)=>a.ageMs-b.ageMs);
+  return out;
+}
+
+function _fmtAge(ms){
+  if(ms<60000) return Math.max(1, Math.floor(ms/1000))+'s';
+  if(ms<3600000) return Math.floor(ms/60000)+' phút';
+  return Math.floor(ms/3600000)+' giờ';
+}
+
+function renderPresenceUI(){
+  const btn=document.getElementById('presence-btn');
+  const cnt=document.getElementById('presence-count');
+  const list=document.getElementById('presence-list');
+  if(!btn||!cnt||!list) return;
+
+  // Only show if cloud sync is configured (otherwise no sense)
+  const cfg=getAuthConfig();
+  if(!cfg||!cfg.scriptUrl){
+    btn.style.display='none';
+    return;
+  }
+
+  const all=presenceList();
+  const online=all.filter(u=>u.status==='online');
+  if(online.length===0 && all.length===0){
+    btn.style.display='none';
+    return;
+  }
+  btn.style.display='inline-block';
+  cnt.textContent=online.length;
+
+  list.innerHTML=`<div style="padding:8px 14px;border-bottom:1px solid var(--rule);font-size:10px;color:var(--muted);letter-spacing:.1em;text-transform:uppercase;font-weight:600">Team đang online · ${online.length}</div>` +
+    all.map(u=>{
+      const dot = u.status==='online' ? '🟢' : '🟡';
+      const tag = u.role==='admin' ? '<span style="font-size:9px;background:var(--accent);color:#fff;padding:1px 6px;border-radius:2px;margin-left:6px;letter-spacing:.1em">ADMIN</span>' : '';
+      const meTag = u.isMe ? '<span style="font-size:10px;color:var(--muted);margin-left:6px">(bạn)</span>' : '';
+      return `<div style="padding:8px 14px;font-size:12px;display:flex;align-items:center;gap:8px;border-bottom:1px solid rgba(0,0,0,.04)">
+        <span style="font-size:10px">${dot}</span>
+        <div style="flex:1">
+          <div style="font-weight:600">${u.displayName}${tag}${meTag}</div>
+          <div style="font-size:10px;color:var(--muted);font-family:var(--font-mono)">${u.status==='online' ? 'hoạt động · '+_fmtAge(u.ageMs) : _fmtAge(u.ageMs)+' trước'}</div>
+        </div>
+      </div>`;
+    }).join('');
+}
+
+function togglePresencePopup(e){
+  if(e) e.stopPropagation();
+  const pop=document.getElementById('presence-pop');
+  if(!pop) return;
+  pop.style.display = pop.style.display==='none' ? 'block' : 'none';
+}
+
+// Click outside to close
+document.addEventListener('click', e=>{
+  const wrap=document.getElementById('presence-wrap');
+  if(wrap && !wrap.contains(e.target)){
+    const pop=document.getElementById('presence-pop');
+    if(pop) pop.style.display='none';
+  }
+});
+
+// Auto-refresh UI every 15s to update "X giây trước" labels (without heartbeat fetch)
+setInterval(()=>{ if(CRYPTO_KEY) renderPresenceUI(); }, 15000);
 
 /* ============================================================
    NUMBER INPUT FORMATTING — display thousand separators while typing
@@ -9545,6 +9772,7 @@ function applyBranding(){
 
 function renderAll(){
   applyBranding();
+  renderPresenceUI();
   fillYearPickers();
   fillProjectPicker();
   fillProjectVesselPicker();
