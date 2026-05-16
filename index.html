@@ -1563,7 +1563,7 @@ body{min-height:100vh;background-image:radial-gradient(circle at 20% 0%,rgba(184
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='1.14.0';            // bumped on each release
+const APP_VERSION='1.14.1';            // bumped on each release
 let CRYPTO_KEY=null;
 let CURRENT_ROLE=null;               // 'admin' | 'user'
 let CURRENT_USER=null;               // user object if role==='user'
@@ -1717,7 +1717,12 @@ async function authAction(){
       return;
     }
     updateSyncStatus(cfg.scriptUrl?'idle':'offline');
-    if(cfg.scriptUrl){setTimeout(()=>cloudSync('pull'),300);}
+    if(cfg.scriptUrl){
+      // Mark that we just logged in — block auto-push for next 5s so pull completes cleanly
+      _suppressAutoSync=true;
+      setTimeout(()=>{ _suppressAutoSync=false; }, 5000);
+      setTimeout(()=>cloudSync('pull'),300);
+    }
     // Check for app update silently — auto-reload if new version available
     setTimeout(()=>checkForUpdate(),1500);
   }catch(e){err.textContent='Lỗi xác thực: '+e.message;}
@@ -2808,9 +2813,26 @@ async function cloudSync(mode){
           });
           toEncrypt=merged;
         }catch(mergeErr){
-          updateSyncStatus('error','Không pull được để merge: '+mergeErr.message);
-          toast('Sync thất bại: cần kết nối để merge dữ liệu','bad');
-          return;
+          const detail=mergeErr.message||String(mergeErr);
+          console.error('[sync push merge] failed:', mergeErr);
+          // Common causes:
+          // - Cloud trống (Apps Script chưa setup data): allow push direct without merge
+          // - Network error: keep error and retry later
+          // - Decrypt error: master key mismatch (rare)
+          if(/network|fetch|connection|failed to fetch/i.test(detail) || !navigator.onLine){
+            updateSyncStatus('error','Không kết nối được cloud');
+            toast('Mạng yếu — thử lại sau','bad');
+            return;
+          }
+          if(/cloud trống|empty|payload|undefined.*iv|cannot read.*payload/i.test(detail)){
+            // Cloud chưa có data → push trực tiếp state hiện tại của NV (lần đầu)
+            console.log('[sync push] cloud empty, pushing direct');
+            toEncrypt=S;
+          } else {
+            updateSyncStatus('error','Không pull được để merge: '+detail);
+            toast('Sync thất bại: '+detail+' — bấm F12 → Console để xem chi tiết','bad');
+            return;
+          }
         }
       }
       const payload=await encryptJSON(toEncrypt);
@@ -3008,9 +3030,11 @@ function saveState(){
 }
 
 let _autoSyncTimer=null;
+let _suppressAutoSync=false;  // Set true temporarily to block auto-push (e.g., during login pull)
 function scheduleAutoSync(){
   const cfg=getAuthConfig();
   if(!cfg||!cfg.scriptUrl) return;
+  if(_suppressAutoSync) return;  // Skip auto-push during login/pull
   clearTimeout(_autoSyncTimer);
   _autoSyncTimer=setTimeout(()=>cloudSync('push'),3000); // 3s debounce
 }
