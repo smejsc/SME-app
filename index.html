@@ -3,6 +3,8 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta http-equiv="X-Content-Type-Options" content="nosniff">
+<meta name="referrer" content="strict-origin-when-cross-origin">
 <title>SEAHORSE · Quản trị Vận hành</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -1655,7 +1657,7 @@ body{min-height:100vh;background-image:radial-gradient(circle at 20% 0%,rgba(184
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='1.21.0';            // bumped on each release
+const APP_VERSION='1.23.0';            // bumped on each release
 let CRYPTO_KEY=null;
 let CURRENT_ROLE=null;               // 'admin' | 'user'
 let CURRENT_USER=null;               // user object if role==='user'
@@ -1708,11 +1710,19 @@ function rand(n){const a=new Uint8Array(n);crypto.getRandomValues(a);return a;}
 function bytesToB64(u8){let s='';u8.forEach(b=>s+=String.fromCharCode(b));return btoa(s);}
 function b64ToBytes(b64){const s=atob(b64);const u=new Uint8Array(s.length);for(let i=0;i<s.length;i++)u[i]=s.charCodeAt(i);return u;}
 
-async function deriveWrappingKey(password,saltB64){
+/* PBKDF2 iterations:
+   - Old default (legacy): 100,000 — pre-v1.23.0 NV/admin still use this
+   - New default (OWASP 2023): 600,000 — applied on new wrap or password change
+   - Stored per-wrap in user record: u.iter (fallback 100000 if missing) */
+const PBKDF2_ITER_LEGACY=100000;
+const PBKDF2_ITER_NEW=600000;
+
+async function deriveWrappingKey(password,saltB64,iterations){
+  const iter=iterations||PBKDF2_ITER_LEGACY;
   const salt=b64ToBytes(saltB64);
   const baseKey=await crypto.subtle.importKey('raw',new TextEncoder().encode(password),'PBKDF2',false,['deriveKey']);
   return crypto.subtle.deriveKey(
-    {name:'PBKDF2',salt,iterations:100000,hash:'SHA-256'},
+    {name:'PBKDF2',salt,iterations:iter,hash:'SHA-256'},
     baseKey,
     {name:'AES-GCM',length:256},
     false,['encrypt','decrypt']
@@ -1775,7 +1785,7 @@ async function authAction(){
         document.getElementById('auth-pw').value='';
         return;
       }
-      const wrappingKey=await deriveWrappingKey(pw,cfg.admin.salt);
+      const wrappingKey=await deriveWrappingKey(pw,cfg.admin.salt,cfg.admin.iter);
       CRYPTO_KEY=await unwrapMasterKey(cfg.admin.wrap,wrappingKey);
       CURRENT_ROLE='admin';
       CURRENT_USER=null;
@@ -1792,7 +1802,7 @@ async function authAction(){
         document.getElementById('auth-pw').value='';
         return;
       }
-      const wrappingKey=await deriveWrappingKey(pw,matched.salt);
+      const wrappingKey=await deriveWrappingKey(pw,matched.salt,matched.iter);
       CRYPTO_KEY=await unwrapMasterKey(matched.wrap,wrappingKey);
       CURRENT_ROLE='user';
       CURRENT_USER=matched;
@@ -1807,6 +1817,19 @@ async function authAction(){
       // Re-show login overlay
       document.getElementById('auth-overlay').classList.remove('hide');
       return;
+    }
+    // Log + start idle timer
+    try{ logAuditEvent('login',{role:CURRENT_ROLE}); }catch(e){}
+    resetIdleTimer();
+    // Reminder backup if last export >7 days ago (admin only)
+    if(CURRENT_ROLE==='admin'){
+      const lastBak=cfg.lastBackup?new Date(cfg.lastBackup).getTime():0;
+      const daysSinceBak=lastBak?Math.floor((Date.now()-lastBak)/86400000):999;
+      if(daysSinceBak>=7){
+        setTimeout(()=>{
+          toast(`📦 Lần backup gần nhất: ${lastBak?daysSinceBak+' ngày trước':'CHƯA BAO GIỜ'}. Khuyến nghị: ≡ Menu → Export backup (.json)`,'warn');
+        },2500);
+      }
     }
     updateSyncStatus(cfg.scriptUrl?'idle':'offline');
     if(cfg.scriptUrl){
@@ -1832,10 +1855,10 @@ async function authSetup(){
     const masterKey=await generateMasterKey();
     const saltAdmin=bytesToB64(rand(16));
     const hashAdmin=await sha256Hex(pw1+saltAdmin);
-    const wrappingAdmin=await deriveWrappingKey(pw1,saltAdmin);
+    const wrappingAdmin=await deriveWrappingKey(pw1,saltAdmin,PBKDF2_ITER_NEW);
     const wrapAdmin=await wrapMasterKey(masterKey,wrappingAdmin);
     const cfg={
-      admin:{salt:saltAdmin,hash:hashAdmin,wrap:wrapAdmin},
+      admin:{salt:saltAdmin,hash:hashAdmin,wrap:wrapAdmin,iter:PBKDF2_ITER_NEW},
       users:[],
       scriptUrl:scriptUrl||'',
       lastSync:null,
@@ -1871,7 +1894,7 @@ async function authRestore(){
     if(!backup.auth.admin||!backup.auth.admin.salt) throw new Error('File backup format cũ — không hỗ trợ');
     const hashAdmin=await sha256Hex(pw+backup.auth.admin.salt);
     if(hashAdmin!==backup.auth.admin.hash) throw new Error('Mật khẩu admin không khớp file backup');
-    const wrappingKey=await deriveWrappingKey(pw,backup.auth.admin.salt);
+    const wrappingKey=await deriveWrappingKey(pw,backup.auth.admin.salt,backup.auth.admin.iter);
     CRYPTO_KEY=await unwrapMasterKey(backup.auth.admin.wrap,wrappingKey);
     CURRENT_ROLE='admin';
     CURRENT_USER=null;
@@ -1933,7 +1956,7 @@ const TAB_TO_FIELDS={
   rates:          ['vessels','onhires','events','receivables','payables']
 };
 /* Shared/config fields that everyone (incl. users) can load — non-sensitive. */
-const SHARED_FIELDS=['fxRate','displayCcy','companyInfo','meta','presence','vesselExpenseCats','omProjectExpenseCats','hrExpenseCats','qnExpenseCats'];
+const SHARED_FIELDS=['fxRate','displayCcy','companyInfo','meta','presence','auditLog','vesselExpenseCats','omProjectExpenseCats','hrExpenseCats','qnExpenseCats'];
 /* All possible data fields (used by admin or for save-merge) */
 const ALL_DATA_FIELDS=[
   'plans','projects','vessels','onhires','events',
@@ -1979,7 +2002,7 @@ function openSettings(){
   if(!isAdmin()){toast('Chỉ admin truy cập được cài đặt','bad');return;}
   const userListHtml=(cfg.users||[]).map((u,i)=>`
     <tr>
-      <td><b>${u.name||'(không tên)'}</b>${u.isViewer?' <span class="chip" style="font-size:9px;margin-left:4px;background:#b8472e;color:#fff" title="Viewer — chỉ đọc báo cáo">👁 VIEWER</span>':''}${u.canConfirmPayment?' <span class="chip chip-warn" style="font-size:9px;margin-left:4px" title="Có quyền xác nhận TT (Vận hành tàu)">XÁC NHẬN TT</span>':''}${u.canApproveL1?' <span class="chip" style="font-size:9px;margin-left:4px;background:#c5876d;color:#fff" title="Phê duyệt cấp 1">DUYỆT L1</span>':''}${u.canApproveL2?' <span class="chip" style="font-size:9px;margin-left:4px;background:#8b3a2a;color:#fff" title="Phê duyệt cấp 2">DUYỆT L2</span>':''}${(u.assignedVesselIds||[]).length>0?` <span class="chip" style="font-size:9px;margin-left:4px;background:#1c3a5c;color:#fff" title="Tàu: ${(u.assignedVesselIds||[]).map(id=>{const v=S.vessels.find(x=>x.id===id);return v?v.name:'?';}).join(', ')}">⛵ ${(u.assignedVesselIds||[]).length}</span>`:''}${(u.assignedProjectIds||[]).length>0?` <span class="chip" style="font-size:9px;margin-left:4px;background:#4a6b2c;color:#fff" title="Dự án O&M: ${(u.assignedProjectIds||[]).map(id=>{const p=S.projects.find(x=>x.id===id);return p?p.code:'?';}).join(', ')}">⚙ ${(u.assignedProjectIds||[]).length}</span>`:''}${(u.assignedOpVesselIds||[]).length>0?` <span class="chip" style="font-size:9px;margin-left:4px;background:#5a4a8c;color:#fff" title="Tàu QL hộ: ${(u.assignedOpVesselIds||[]).map(id=>{const v=S.opVessels.find(x=>x.id===id);return v?v.name:'?';}).join(', ')}">🚢 ${(u.assignedOpVesselIds||[]).length}</span>`:''}</td>
+      <td><b>${esc(u.name) || '(không tên)'}</b>${u.isViewer?' <span class="chip" style="font-size:9px;margin-left:4px;background:#b8472e;color:#fff" title="Viewer — chỉ đọc báo cáo">👁 VIEWER</span>':''}${u.canConfirmPayment?' <span class="chip chip-warn" style="font-size:9px;margin-left:4px" title="Có quyền xác nhận TT (Vận hành tàu)">XÁC NHẬN TT</span>':''}${u.canApproveL1?' <span class="chip" style="font-size:9px;margin-left:4px;background:#c5876d;color:#fff" title="Phê duyệt cấp 1">DUYỆT L1</span>':''}${u.canApproveL2?' <span class="chip" style="font-size:9px;margin-left:4px;background:#8b3a2a;color:#fff" title="Phê duyệt cấp 2">DUYỆT L2</span>':''}${(u.assignedVesselIds||[]).length>0?` <span class="chip" style="font-size:9px;margin-left:4px;background:#1c3a5c;color:#fff" title="Tàu: ${esc((u.assignedVesselIds||[]).map(id=>{const v=S.vessels.find(x=>x.id===id);return v?v.name:'?';}).join(', '))}">⛵ ${(u.assignedVesselIds||[]).length}</span>`:''}${(u.assignedProjectIds||[]).length>0?` <span class="chip" style="font-size:9px;margin-left:4px;background:#4a6b2c;color:#fff" title="Dự án O&M: ${esc((u.assignedProjectIds||[]).map(id=>{const p=S.projects.find(x=>x.id===id);return p?p.code:'?';}).join(', '))}">⚙ ${(u.assignedProjectIds||[]).length}</span>`:''}${(u.assignedOpVesselIds||[]).length>0?` <span class="chip" style="font-size:9px;margin-left:4px;background:#5a4a8c;color:#fff" title="Tàu QL hộ: ${esc((u.assignedOpVesselIds||[]).map(id=>{const v=S.opVessels.find(x=>x.id===id);return v?v.name:'?';}).join(', '))}">🚢 ${(u.assignedOpVesselIds||[]).length}</span>`:''}</td>
       <td style="font-family:var(--font-mono);font-size:11px;color:var(--muted)">${(u.tabs||[]).length} tab</td>
       <td>${(u.tabs||[]).map(t=>{const T=ALL_TABS.find(x=>x.id===t);return T?`<span class="chip chip-5" style="margin-right:3px">${T.label}</span>`:'';}).join(' ')}</td>
       <td style="white-space:nowrap"><div class="row-actions">
@@ -2000,10 +2023,29 @@ function openSettings(){
         <div style="font-family:var(--font-mono);font-size:12px;color:var(--muted);padding:6px 0">${cfg.lastSync?new Date(cfg.lastSync).toLocaleString('vi-VN')+' ('+timeAgo(cfg.lastSync)+')':'Chưa sync lần nào'}</div>
       </div>
       <div class="field">
+        <label>Tự động đăng xuất khi không hoạt động</label>
+        <select id="set-idle-logout" style="padding:6px 10px;border:1px solid var(--rule);background:var(--paper);font-size:12px">
+          <option value="0" ${(cfg.idleLogoutMinutes===0)?'selected':''}>Tắt</option>
+          <option value="15" ${(cfg.idleLogoutMinutes===15)?'selected':''}>15 phút</option>
+          <option value="30" ${(!cfg.idleLogoutMinutes||cfg.idleLogoutMinutes===30)?'selected':''}>30 phút (khuyến nghị)</option>
+          <option value="60" ${(cfg.idleLogoutMinutes===60)?'selected':''}>1 giờ</option>
+          <option value="120" ${(cfg.idleLogoutMinutes===120)?'selected':''}>2 giờ</option>
+        </select>
+        <div style="font-size:11px;color:var(--muted);font-style:italic;margin-top:4px">Sau X phút không click/gõ phím → tự đăng xuất. Cảnh báo 1 phút trước.</div>
+      </div>
+      <div class="field">
         <label>Phiên bản phần mềm</label>
         <div style="font-family:var(--font-mono);font-size:12px;color:var(--muted);padding:6px 0">
           v${APP_VERSION} · <button onclick="checkForUpdate();toast('Đang kiểm tra...');" style="background:none;border:none;color:var(--accent);cursor:pointer;text-decoration:underline;font-family:inherit;font-size:inherit">Kiểm tra bản mới</button>
         </div>
+      </div>
+      <div class="field">
+        <label>Audit Log <span style="text-transform:none;font-weight:400;color:var(--muted)">(${(S.auditLog||[]).length} sự kiện)</span></label>
+        <div style="display:flex;gap:8px;margin-top:4px">
+          <button class="btn-sec" onclick="showAuditLog()" style="font-size:11px">📋 Xem nhật ký</button>
+          <button class="btn-sec" onclick="exportAuditLog()" style="font-size:11px">⬇ Export CSV</button>
+        </div>
+        <div style="font-size:11px;color:var(--muted);font-style:italic;margin-top:4px">Nhật ký login/logout/duyệt/từ chối/sync. Giữ 500 sự kiện gần nhất.</div>
       </div>
 
       <hr style="border:none;border-top:1px solid var(--rule);margin:8px 0">
@@ -2080,6 +2122,8 @@ async function saveSettings(){
   const err=document.getElementById('set-err');
   err.textContent='';
   cfg.scriptUrl=document.getElementById('set-script-url').value.trim();
+  const idleEl=document.getElementById('set-idle-logout');
+  if(idleEl) cfg.idleLogoutMinutes=+idleEl.value;
   // Company info
   S.companyInfo=S.companyInfo||{};
   const nameEl=document.getElementById('set-co-name');
@@ -2107,8 +2151,8 @@ async function saveSettings(){
       if(hashOld!==cfg.admin.hash){err.textContent='MK admin hiện tại sai';return;}
       const newSalt=bytesToB64(rand(16));
       const newHash=await sha256Hex(pwNew+newSalt);
-      const newWrap=await wrapMasterKey(CRYPTO_KEY, await deriveWrappingKey(pwNew,newSalt));
-      cfg.admin={salt:newSalt,hash:newHash,wrap:newWrap};
+      const newWrap=await wrapMasterKey(CRYPTO_KEY, await deriveWrappingKey(pwNew,newSalt,PBKDF2_ITER_NEW));
+      cfg.admin={salt:newSalt,hash:newHash,wrap:newWrap,iter:PBKDF2_ITER_NEW};
       toast('Đã đổi mật khẩu admin');
     }catch(e){
       if(/extractable|exportKey/i.test(e.message)){
@@ -2238,7 +2282,7 @@ function userEditorModal(initial,idx){
           <div style="font-size:11px;color:var(--muted);font-style:italic;margin-bottom:6px">Tick tàu NV này được phép nhập chi phí trong tab "06". Để trống = không phụ trách tàu nào.</div>
           ${S.vessels.length===0?'<div style="color:var(--muted)">Chưa có tàu trong hệ thống. Tạo tàu ở tab "Tàu & Onhire" trước.</div>':S.vessels.map(v=>{
             const checked=(initial.assignedVesselIds||[]).includes(v.id)?'checked':'';
-            return `<label style="display:inline-flex;align-items:center;gap:6px;padding:4px 12px 4px 0;cursor:pointer"><input type="checkbox" data-vessel="${v.id}" ${checked}> <span>⛵ ${v.name} <span style="color:var(--muted);font-size:11px">(${v.type==='SERVICE'?'DV':'KT'})</span></span></label>`;
+            return `<label style="display:inline-flex;align-items:center;gap:6px;padding:4px 12px 4px 0;cursor:pointer"><input type="checkbox" data-vessel="${v.id}" ${checked}> <span>⛵ ${esc(v.name)} <span style="color:var(--muted);font-size:11px">(${v.type==='SERVICE'?'DV':'KT'})</span></span></label>`;
           }).join('')}
         </div>
       </div>
@@ -2251,7 +2295,7 @@ function userEditorModal(initial,idx){
             if(omProjs.length===0) return '<div style="color:var(--muted)">Chưa có dự án nào được đánh dấu O&M. Vào "Dự án" tick "Là Dự án O&M độc lập" khi tạo/sửa.</div>';
             return omProjs.map(p=>{
               const checked=(initial.assignedProjectIds||[]).includes(p.id)?'checked':'';
-              return `<label style="display:inline-flex;align-items:center;gap:6px;padding:4px 12px 4px 0;cursor:pointer"><input type="checkbox" data-project="${p.id}" ${checked}> <span>⚙ ${p.code} · ${p.name}</span></label>`;
+              return `<label style="display:inline-flex;align-items:center;gap:6px;padding:4px 12px 4px 0;cursor:pointer"><input type="checkbox" data-project="${p.id}" ${checked}> <span>⚙ ${esc(p.code)} · ${esc(p.name)}</span></label>`;
             }).join('');
           })()}
         </div>
@@ -2262,7 +2306,7 @@ function userEditorModal(initial,idx){
           <div style="font-size:11px;color:var(--muted);font-style:italic;margin-bottom:6px">Tick tàu QL hộ NV được phép thu/chi hộ. Để trống = thấy tất cả tàu QL hộ (backward compat). Người có quyền duyệt L1/L2 luôn thấy hết.</div>
           ${S.opVessels.length===0?'<div style="color:var(--muted)">Chưa có tàu QL hộ. Tạo ở tab "Vận hành tàu" trước.</div>':S.opVessels.map(v=>{
             const checked=(initial.assignedOpVesselIds||[]).includes(v.id)?'checked':'';
-            return `<label style="display:inline-flex;align-items:center;gap:6px;padding:4px 12px 4px 0;cursor:pointer"><input type="checkbox" data-opvessel="${v.id}" ${checked}> <span>🚢 ${v.name} <span style="color:var(--muted);font-size:11px">(${v.owner||'—'})</span></span></label>`;
+            return `<label style="display:inline-flex;align-items:center;gap:6px;padding:4px 12px 4px 0;cursor:pointer"><input type="checkbox" data-opvessel="${v.id}" ${checked}> <span>🚢 ${esc(v.name)} <span style="color:var(--muted);font-size:11px">(${esc(v.owner) || '—'})</span></span></label>`;
           }).join('')}
         </div>
       </div>
@@ -2340,7 +2384,7 @@ function userEditorModal(initial,idx){
           <div style="border:1px solid var(--rule);padding:8px 14px;background:var(--paper)">
             ${S.vessels.length===0?'<div style="color:var(--muted)">Chưa có tàu</div>':S.vessels.map(v=>{
               const checked=(initial.viewerVesselIds||[]).includes(v.id)?'checked':'';
-              return `<label style="display:inline-flex;align-items:center;gap:6px;padding:4px 12px 4px 0;cursor:pointer"><input type="checkbox" data-viewer-vessel="${v.id}" ${checked}> <span>⛵ ${v.name}</span></label>`;
+              return `<label style="display:inline-flex;align-items:center;gap:6px;padding:4px 12px 4px 0;cursor:pointer"><input type="checkbox" data-viewer-vessel="${v.id}" ${checked}> <span>⛵ ${esc(v.name)}</span></label>`;
             }).join('')}
           </div>
         </div>
@@ -2350,7 +2394,7 @@ function userEditorModal(initial,idx){
           <div style="border:1px solid var(--rule);padding:8px 14px;background:var(--paper);max-height:140px;overflow-y:auto">
             ${S.projects.length===0?'<div style="color:var(--muted)">Chưa có dự án</div>':S.projects.map(p=>{
               const checked=(initial.viewerProjectIds||[]).includes(p.id)?'checked':'';
-              return `<label style="display:inline-flex;align-items:center;gap:6px;padding:4px 12px 4px 0;cursor:pointer"><input type="checkbox" data-viewer-project="${p.id}" ${checked}> <span>${p.code} · ${p.name}</span></label>`;
+              return `<label style="display:inline-flex;align-items:center;gap:6px;padding:4px 12px 4px 0;cursor:pointer"><input type="checkbox" data-viewer-project="${p.id}" ${checked}> <span>${esc(p.code)} · ${esc(p.name)}</span></label>`;
             }).join('')}
           </div>
         </div>
@@ -2443,17 +2487,17 @@ async function saveUser(idx){
       if(pw){
         const salt=bytesToB64(rand(16));
         const hash=await sha256Hex(pw+salt);
-        const wrap=await wrapMasterKey(CRYPTO_KEY, await deriveWrappingKey(pw,salt));
-        u.salt=salt; u.hash=hash; u.wrap=wrap;
+        const wrap=await wrapMasterKey(CRYPTO_KEY, await deriveWrappingKey(pw,salt,PBKDF2_ITER_NEW));
+        u.salt=salt; u.hash=hash; u.wrap=wrap; u.iter=PBKDF2_ITER_NEW;
       }
       toast('Đã cập nhật '+name);
     } else {
       const salt=bytesToB64(rand(16));
       const hash=await sha256Hex(pw+salt);
-      const wrap=await wrapMasterKey(CRYPTO_KEY, await deriveWrappingKey(pw,salt));
+      const wrap=await wrapMasterKey(CRYPTO_KEY, await deriveWrappingKey(pw,salt,PBKDF2_ITER_NEW));
       cfg.users=cfg.users||[];
       cfg.users.push({
-        name, email, phone, salt, hash, wrap,
+        name, email, phone, salt, hash, wrap, iter:PBKDF2_ITER_NEW,
         tabs:finalTabs,
         canConfirmPayment:isViewer?false:canConfirmPayment,
         canApproveL1:isViewer?false:canApproveL1,
@@ -2512,7 +2556,7 @@ function sendInviteEmail(idx){
 
   const subject=`[${company}] Tài khoản truy cập Seahorse Manager`;
   const body=[
-    `Chào ${u.name},`,
+    `Chào ${esc(u.name)},`,
     ``,
     `Bạn đã được cấp tài khoản truy cập phần mềm Seahorse Manager của ${company}.`,
     ``,
@@ -2520,7 +2564,7 @@ function sendInviteEmail(idx){
     `THÔNG TIN ĐĂNG NHẬP`,
     `═══════════════════════════════════════`,
     `• URL truy cập: ${appUrl}`,
-    `• Tên đăng nhập: ${u.name}`,
+    `• Tên đăng nhập: ${esc(u.name)}`,
     `• Mật khẩu tạm: ******** (xem tin nhắn riêng / Zalo từ ${adminContact})`,
     ``,
     `LƯU Ý: Vì lý do bảo mật, mật khẩu được gửi riêng qua kênh khác (SMS/Zalo/gặp trực tiếp).`,
@@ -2590,7 +2634,7 @@ function deleteUser(idx){
   const cfg=getAuthConfig();
   const u=cfg.users[idx];if(!u)return;
   confirmDelete('nhân viên "'+u.name+'"',
-    `Sau khi xóa, mật khẩu của ${u.name} sẽ không đăng nhập được nữa.`,
+    `Sau khi xóa, mật khẩu của ${esc(u.name)} sẽ không đăng nhập được nữa.`,
     ()=>{
       cfg.users.splice(idx,1);
       setAuthConfig(cfg);
@@ -2677,10 +2721,10 @@ function wfBadge(r){
   const s=wfState(r);
   let title=s.label;
   if(r){
-    if(r.status==='rejected') title=`Từ chối bởi ${r.rejectedBy||'?'} (L${r.rejectedAtLevel||'?'}): ${r.rejectReason||''}`;
-    else if(r.status==='approved') title=`Đã duyệt L1: ${r.approvedL1By||'?'} ${r.approvedL1At?r.approvedL1At.slice(0,10):''}\nĐã duyệt L2: ${r.approvedL2By||'?'} ${r.approvedL2At?r.approvedL2At.slice(0,10):''}`;
-    else if(r.status==='pending_l1') title=`Đã gửi bởi ${r.submittedBy||'?'} ${r.submittedAt?r.submittedAt.slice(0,10):''}`;
-    else if(r.status==='pending_l2') title=`L1 đã duyệt bởi ${r.approvedL1By||'?'} ${r.approvedL1At?r.approvedL1At.slice(0,10):''}`;
+    if(r.status==='rejected') title=`Từ chối bởi ${esc(r.rejectedBy) || '?'} (L${esc(r.rejectedAtLevel) || '?'}): ${esc(r.rejectReason) || ''}`;
+    else if(r.status==='approved') title=`Đã duyệt L1: ${esc(r.approvedL1By) || '?'} ${r.approvedL1At?r.approvedL1At.slice(0,10):''}\nĐã duyệt L2: ${esc(r.approvedL2By) || '?'} ${r.approvedL2At?r.approvedL2At.slice(0,10):''}`;
+    else if(r.status==='pending_l1') title=`Đã gửi bởi ${esc(r.submittedBy) || '?'} ${r.submittedAt?r.submittedAt.slice(0,10):''}`;
+    else if(r.status==='pending_l2') title=`L1 đã duyệt bởi ${esc(r.approvedL1By) || '?'} ${r.approvedL1At?r.approvedL1At.slice(0,10):''}`;
   }
   return `<span class="chip ${s.chip}" title="${title.replace(/"/g,'&quot;')}">${s.short}</span>`;
 }
@@ -2847,6 +2891,7 @@ function wfApproveL1(r){
   r.status='pending_l2';
   r.approvedL1By=actorName();
   r.approvedL1At=new Date().toISOString();
+  try{ logAuditEvent('approve_l1',{recordId:r.id,partner:r.partner||r.desc,amount:r.amount,ccy:r.ccy}); }catch(e){}
   return true;
 }
 /* Approve L2 → final approved */
@@ -2855,6 +2900,7 @@ function wfApproveL2(r){
   r.status='approved';
   r.approvedL2By=actorName();
   r.approvedL2At=new Date().toISOString();
+  try{ logAuditEvent('approve_l2',{recordId:r.id,partner:r.partner||r.desc,amount:r.amount,ccy:r.ccy}); }catch(e){}
   return true;
 }
 /* Reject at current level */
@@ -2867,6 +2913,7 @@ function wfReject(r,reason){
   r.rejectedAt=new Date().toISOString();
   r.rejectReason=reason||'';
   r.rejectedAtLevel=at;
+  try{ logAuditEvent('reject',{recordId:r.id,partner:r.partner||r.desc,level:at,reason:reason||''}); }catch(e){}
   return true;
 }
 /* Return approved record back to draft for re-edit (admin only or original approver) */
@@ -2956,9 +3003,12 @@ function applyRoleUI(){
 
 async function logout(){
   if(!confirm('Đăng xuất? Dữ liệu vẫn được giữ trong thiết bị.')) return;
+  try{ logAuditEvent('logout',{}); }catch(e){}
   // Clean up presence before logging out
   try{ presenceCleanup(); }catch(e){}
   clearInterval(_presenceTimer);
+  clearTimeout(_idleTimer);
+  clearTimeout(_idleWarnTimer);
 
   // CRITICAL: Force sync any pending changes BEFORE logging out
   // Prevents race condition where new user/data is local-only but cloud has old state
@@ -3324,6 +3374,7 @@ function defaultState(){
       logo:''  // base64 data URL
     },
     presence:{},  // online presence: {username: {lastSeen, role}}
+    auditLog:[],  // {ts, actor, role, action, detail}
     meta:{created:new Date().toISOString()}
   };
 }
@@ -3344,6 +3395,150 @@ function saveState(){
 
 let _autoSyncTimer=null;
 let _suppressAutoSync=false;  // Set true temporarily to block auto-push (e.g., during login pull)
+
+/* ============================================================
+   AUTO-LOGOUT khi idle (không tương tác trong X phút)
+   - Cấu hình qua cfg.idleLogoutMinutes (default 30 phút)
+   - 0 = tắt
+   - Cảnh báo 1 phút trước khi logout
+   - Reset timer khi user tương tác (mouse/keyboard/scroll/touch)
+   ============================================================ */
+let _idleTimer=null;
+let _idleWarnTimer=null;
+let _idleWarnShown=false;
+
+function getIdleLogoutMs(){
+  const cfg=getAuthConfig();
+  const m=cfg?(cfg.idleLogoutMinutes!=null?cfg.idleLogoutMinutes:30):30;
+  return m>0?m*60*1000:0;
+}
+
+function resetIdleTimer(){
+  const ms=getIdleLogoutMs();
+  clearTimeout(_idleTimer);
+  clearTimeout(_idleWarnTimer);
+  if(_idleWarnShown){
+    const w=document.getElementById('idle-warn-toast');
+    if(w) w.remove();
+    _idleWarnShown=false;
+  }
+  if(ms<=0 || !CRYPTO_KEY) return;
+  _idleWarnTimer=setTimeout(()=>{
+    _idleWarnShown=true;
+    const w=document.createElement('div');
+    w.id='idle-warn-toast';
+    w.style.cssText='position:fixed;top:20px;right:20px;background:var(--accent);color:#fff;padding:14px 20px;border-radius:4px;z-index:99999;font-size:13px;box-shadow:0 4px 16px rgba(0,0,0,.3);max-width:340px';
+    w.innerHTML='⚠ <b>Sắp tự đăng xuất</b><br>Bạn không hoạt động lâu. Sẽ đăng xuất trong <span id="idle-countdown">60</span>s.<br><button onclick="resetIdleTimer()" style="margin-top:8px;background:#fff;color:var(--accent);border:none;padding:6px 14px;cursor:pointer;font-weight:600;border-radius:2px">Tiếp tục làm việc</button>';
+    document.body.appendChild(w);
+    let count=60;
+    const cd=setInterval(()=>{
+      count--;
+      const el=document.getElementById('idle-countdown');
+      if(el) el.textContent=count;
+      if(count<=0 || !document.getElementById('idle-warn-toast')){
+        clearInterval(cd);
+      }
+    },1000);
+  }, ms-60000);
+  _idleTimer=setTimeout(async()=>{
+    console.log('[idle] Auto-logout after',ms/60000,'min idle');
+    try{ logAuditEvent('auto_logout',{reason:'idle',minutes:ms/60000}); }catch(e){}
+    try{ presenceCleanup(); }catch(e){}
+    clearInterval(_presenceTimer);
+    if(CRYPTO_KEY){
+      try{ await cloudSync('push'); }catch(e){}
+    }
+    CRYPTO_KEY=null;
+    CURRENT_ROLE=null;
+    CURRENT_USER=null;
+    location.reload();
+  }, ms);
+}
+
+['mousedown','keydown','scroll','touchstart','mousemove'].forEach(ev=>{
+  document.addEventListener(ev, ()=>resetIdleTimer(), {passive:true});
+});
+
+/* ============================================================
+   AUDIT LOG — ghi lại sự kiện bảo mật quan trọng
+   Sự kiện: login, logout, auto_logout, approve_l1/l2, reject,
+   sync_push, sync_pull, password_change, user_create, user_delete,
+   export_backup, import_backup
+   Giới hạn: 500 events gần nhất (FIFO).
+   ============================================================ */
+function logAuditEvent(action, detail){
+  if(!S.auditLog) S.auditLog=[];
+  S.auditLog.push({
+    ts:new Date().toISOString(),
+    actor:actorName()||'?',
+    role:CURRENT_ROLE||'?',
+    action,
+    detail:detail||null
+  });
+  if(S.auditLog.length>500){
+    S.auditLog=S.auditLog.slice(-500);
+  }
+}
+
+function showAuditLog(){
+  if(!isAdmin()){toast('Chỉ admin xem được Audit Log','bad');return;}
+  const log=S.auditLog||[];
+  const ACTION_LABELS={
+    login:'🔓 Đăng nhập',
+    logout:'🔒 Đăng xuất',
+    auto_logout:'⏱ Tự đăng xuất (idle)',
+    approve_l1:'✓ Duyệt L1',
+    approve_l2:'✓✓ Duyệt L2',
+    reject:'✗ Từ chối',
+    sync_push:'↑ Push cloud',
+    sync_pull:'↓ Pull cloud',
+    password_change:'🔑 Đổi mật khẩu',
+    user_create:'+ Tạo NV',
+    user_delete:'– Xóa NV',
+    export_backup:'⬇ Export backup',
+    import_backup:'⬆ Import backup'
+  };
+  const recent=log.slice(-200).reverse();
+  let body='<div style="max-height:60vh;overflow-y:auto"><table class="tbl" style="font-size:11px"><thead><tr><th>Thời gian</th><th>NV</th><th>Vai trò</th><th>Hành động</th><th>Chi tiết</th></tr></thead><tbody>';
+  if(!recent.length) body+='<tr><td class="empty" colspan="5">Chưa có sự kiện nào</td></tr>';
+  recent.forEach(e=>{
+    const d=new Date(e.ts);
+    const detail=e.detail?Object.entries(e.detail).map(([k,v])=>`${esc(k)}: ${esc(String(v))}`).join(', '):'';
+    body+=`<tr>
+      <td class="mono" style="white-space:nowrap">${d.toLocaleString('vi-VN')}</td>
+      <td><b>${esc(e.actor)}</b></td>
+      <td><span class="chip" style="font-size:9px">${esc(e.role)}</span></td>
+      <td>${ACTION_LABELS[e.action]||esc(e.action)}</td>
+      <td style="font-size:10px;color:var(--muted)">${detail}</td>
+    </tr>`;
+  });
+  body+='</tbody></table></div>';
+  if(log.length>200) body+=`<div style="font-size:11px;color:var(--muted);font-style:italic;margin-top:8px">Hiển thị 200 sự kiện gần nhất. Tổng: ${log.length}/500 (cũ hơn bị xóa FIFO).</div>`;
+  openModal('📋 Audit Log · Nhật ký hoạt động', body,
+    `<button class="btn-sec" onclick="exportAuditLog()">⬇ Export CSV</button>
+     <button class="btn-sec" onclick="closeModal()">Đóng</button>`);
+}
+
+function exportAuditLog(){
+  if(!isAdmin()){toast('Chỉ admin','bad');return;}
+  const log=S.auditLog||[];
+  if(!log.length){toast('Chưa có sự kiện nào','bad');return;}
+  const rows=['Timestamp,Actor,Role,Action,Detail'];
+  log.forEach(e=>{
+    const detail=e.detail?JSON.stringify(e.detail).replace(/"/g,'""'):'';
+    rows.push(`${e.ts},"${(e.actor||'').replace(/"/g,'""')}",${e.role||''},${e.action},"${detail}"`);
+  });
+  const csv='\ufeff'+rows.join('\n');  // UTF-8 BOM for Excel
+  const blob=new Blob([csv],{type:'text/csv;charset=utf-8'});
+  const url=URL.createObjectURL(blob);
+  const a=document.createElement('a');
+  a.href=url;
+  a.download=`SM-AuditLog-${todayISO()}.csv`;
+  a.click();
+  URL.revokeObjectURL(url);
+  toast('Đã tải Audit Log CSV');
+}
+
 function scheduleAutoSync(){
   const cfg=getAuthConfig();
   if(!cfg||!cfg.scriptUrl) return;
@@ -3612,6 +3807,19 @@ function toDisplay(amount,sourceCcy){
   if(src==='VND'&&dst==='USD') return amount/fxRate();
   return amount;
 }
+/* HTML escape — XSS protection.
+   Use whenever interpolating user-controlled strings into innerHTML/template literals.
+   Dữ liệu cần escape: tên đối tác, diễn giải, tên tàu, tên dự án, tên NV, ghi chú... */
+function esc(s){
+  if(s==null) return '';
+  return String(s)
+    .replace(/&/g,'&amp;')
+    .replace(/</g,'&lt;')
+    .replace(/>/g,'&gt;')
+    .replace(/"/g,'&quot;')
+    .replace(/'/g,'&#39;');
+}
+
 function fmt(n,sourceCcy){
   // n is in sourceCcy; convert to display ccy then format with full digits + thousand separators
   if(sourceCcy!==undefined) n=toDisplay(n,sourceCcy);
@@ -3908,7 +4116,7 @@ function delPlan(id){
   if(!isAdmin()){toast('Chỉ admin mới xóa được dòng kế hoạch','bad');return;}
   const p=S.plans.find(x=>x.id===id);if(!p)return;
   confirmDelete('dòng kế hoạch này',
-    `${SEGMENTS[p.segment].name} · ${p.name}<br>Năm ${p.year} · ${p.days} ngày × ${fmt(p.rate,p.ccy)} = ${fmt(p.revenue,p.ccy)}`,
+    `${SEGMENTS[p.segment].name} · ${esc(p.name)}<br>Năm ${p.year} · ${p.days} ngày × ${fmt(p.rate,p.ccy)} = ${fmt(p.revenue,p.ccy)}`,
     ()=>{S.plans=S.plans.filter(x=>x.id!==id);saveState();toast('Đã xóa');renderAll();});
 }
 function editPlan(id){
@@ -3939,7 +4147,7 @@ function renderPlanList(){
     totRev+=p.revenue;totCost+=p.cost;
     html+=`<tr>
       <td>${segmentChip(p.segment)}</td>
-      <td>${p.name}</td>
+      <td>${esc(p.name)}</td>
       <td class="r num">${p.days.toLocaleString()}</td>
       <td class="r num">${fmt(p.rate,p.ccy)}</td>
       <td class="mono">${p.ccy}</td>
@@ -3992,7 +4200,7 @@ function delProject(id){
   const p=S.projects.find(x=>x.id===id);if(!p)return;
   const linked=S.transactions.filter(t=>t.projectId===id).length;
   confirmDelete('dự án này',
-    `${p.code} · ${p.name}<br>${p.client||''} · ${SEGMENTS[p.segment].name}<br>${linked?`<b style="color:var(--bad)">⚠ ${linked} bút toán đang liên kết</b> sẽ bị mất tham chiếu (vẫn giữ trong sổ).`:'Không có bút toán liên kết.'}`,
+    `${esc(p.code)} · ${esc(p.name)}<br>${esc(p.client) || ''} · ${SEGMENTS[p.segment].name}<br>${linked?`<b style="color:var(--bad)">⚠ ${linked} bút toán đang liên kết</b> sẽ bị mất tham chiếu (vẫn giữ trong sổ).`:'Không có bút toán liên kết.'}`,
     ()=>{S.projects=S.projects.filter(x=>x.id!==id);saveState();toast('Đã xóa dự án');renderAll();});
 }
 function editProject(id){
@@ -4026,8 +4234,8 @@ function renderProjects(){
     const prog=p.value?Math.min(100,(rev/p.value)*100):0;
     const v=p.vesselId?S.vessels.find(v=>v.id===p.vesselId):null;
     html+=`<tr>
-      <td class="mono">${p.code}</td>
-      <td><b>${p.name}</b>${p.isOM?' <span class="chip" style="background:#4a6b2c;color:#fff;font-size:9px;margin-left:4px" title="Dự án O&M độc lập — có NV phụ trách riêng">⚙ O&M</span>':''}<br><span style="color:var(--muted);font-size:11px">${p.client||'—'}</span></td>
+      <td class="mono">${esc(p.code)}</td>
+      <td><b>${esc(p.name)}</b>${p.isOM?' <span class="chip" style="background:#4a6b2c;color:#fff;font-size:9px;margin-left:4px" title="Dự án O&M độc lập — có NV phụ trách riêng">⚙ O&M</span>':''}<br><span style="color:var(--muted);font-size:11px">${esc(p.client) || '—'}</span></td>
       <td>${segmentChip(p.segment)}</td>
       <td>${v?'<b>'+v.name+'</b>':'<span style="color:var(--muted)">—</span>'}</td>
       <td class="mono">${p.start||'—'}<br>${p.end||'—'}</td>
@@ -4050,7 +4258,7 @@ function fillProjectPicker(){
   if(!sel) return;
   const cur=sel.value;
   sel.innerHTML='<option value="">— Không gắn dự án —</option>'+
-    S.projects.map(p=>`<option value="${p.id}">${p.code} · ${p.name} [${SEGMENTS[p.segment].short}]</option>`).join('');
+    S.projects.map(p=>`<option value="${p.id}">${esc(p.code)} · ${esc(p.name)} [${SEGMENTS[p.segment].short}]</option>`).join('');
   sel.value=cur;
 }
 function fillProjectVesselPicker(){
@@ -4058,7 +4266,7 @@ function fillProjectVesselPicker(){
   if(!sel) return;
   const cur=sel.value;
   sel.innerHTML='<option value="">— Không gắn —</option>'+
-    S.vessels.map(v=>`<option value="${v.id}">${v.name} (${v.type==='SERVICE'?'DV':'KT'})</option>`).join('');
+    S.vessels.map(v=>`<option value="${v.id}">${esc(v.name)} (${v.type==='SERVICE'?'DV':'KT'})</option>`).join('');
   sel.value=cur;
 }
 
@@ -4085,7 +4293,7 @@ function delVessel(id){
   const v=S.vessels.find(x=>x.id===id);if(!v)return;
   const oh=S.onhires.filter(o=>o.vesselId===id).length;
   confirmDelete('tàu này',
-    `${v.name} · ${v.type==='SERVICE'?'Tàu dịch vụ':'Tàu kỹ thuật'} · IMO ${v.imo||'—'}<br>${oh?`<b style="color:var(--bad)">⚠ ${oh} bản ghi onhire</b> cũng sẽ bị xóa kèm.`:'Không có bản ghi onhire.'}`,
+    `${esc(v.name)} · ${v.type==='SERVICE'?'Tàu dịch vụ':'Tàu kỹ thuật'} · IMO ${esc(v.imo) || '—'}<br>${oh?`<b style="color:var(--bad)">⚠ ${oh} bản ghi onhire</b> cũng sẽ bị xóa kèm.`:'Không có bản ghi onhire.'}`,
     ()=>{S.vessels=S.vessels.filter(x=>x.id!==id);S.onhires=S.onhires.filter(o=>o.vesselId!==id);saveState();toast('Đã xóa tàu');renderAll();});
 }
 function editVessel(id){
@@ -4105,7 +4313,7 @@ function fillVesselPicker(){
   const sel=document.getElementById('oh-vessel');
   if(!sel)return;
   const cur=sel.value;
-  sel.innerHTML=S.vessels.map(v=>`<option value="${v.id}">${v.name} (${v.type==='SERVICE'?'DV':'KT'})</option>`).join('');
+  sel.innerHTML=S.vessels.map(v=>`<option value="${v.id}">${esc(v.name)} (${v.type==='SERVICE'?'DV':'KT'})</option>`).join('');
   sel.value=cur;
 }
 function renderVessels(){
@@ -4114,9 +4322,9 @@ function renderVessels(){
   let html=`<thead><tr><th>Tên tàu</th><th>Loại</th><th class="mono">IMO</th><th class="r">DWT</th><th class="r">Năm</th><th></th></tr></thead><tbody>`;
   S.vessels.forEach(v=>{
     html+=`<tr>
-      <td><b>${v.name}</b></td>
+      <td><b>${esc(v.name)}</b></td>
       <td>${v.type==='SERVICE'?'<span class="chip chip-1">Dịch vụ</span>':'<span class="chip chip-2">Kỹ thuật</span>'}</td>
-      <td class="mono">${v.imo||'—'}</td>
+      <td class="mono">${esc(v.imo) || '—'}</td>
       <td class="r num">${v.dwt.toLocaleString()}</td>
       <td class="r mono">${v.year}</td>
       <td><div class="row-actions">
@@ -4250,9 +4458,9 @@ function openEventModal(eventId){
     }
   }
 
-  const vesselOpts=S.vessels.map(v=>`<option value="${v.id}" ${v.id===e.vesselId?'selected':''}>${v.name} (${v.type==='SERVICE'?'DV':'KT'})</option>`).join('');
+  const vesselOpts=S.vessels.map(v=>`<option value="${v.id}" ${v.id===e.vesselId?'selected':''}>${esc(v.name)} (${v.type==='SERVICE'?'DV':'KT'})</option>`).join('');
   const typeOpts=EVENT_TYPES.map(t=>`<option value="${t.key}" ${t.key===e.type?'selected':''}>${t.label}</option>`).join('');
-  const projectOpts=`<option value="">— Không liên kết —</option>`+S.projects.map(p=>`<option value="${p.id}" ${p.id===e.projectId?'selected':''}>${p.code} · ${p.name}</option>`).join('');
+  const projectOpts=`<option value="">— Không liên kết —</option>`+S.projects.map(p=>`<option value="${p.id}" ${p.id===e.projectId?'selected':''}>${esc(p.code)} · ${esc(p.name)}</option>`).join('');
 
   const fuelRow=(group,fk)=>{
     const f=(e[group]&&e[group][fk.key])||(group==='fuelPumped'?fuelPumpDefault():fuelStockDefault());
@@ -4468,7 +4676,7 @@ function renderEvents(){
   filterEl.innerHTML='<option value="">— Tất cả tàu —</option>'+
     S.vessels.map(v=>{
       const count=S.events.filter(e=>e.vesselId===v.id).length;
-      return `<option value="${v.id}" ${v.id===cur?'selected':''}>${v.name} (${v.type==='SERVICE'?'DV':'KT'}) · ${count} đoạn</option>`;
+      return `<option value="${v.id}" ${v.id===cur?'selected':''}>${esc(v.name)} (${v.type==='SERVICE'?'DV':'KT'}) · ${count} đoạn</option>`;
     }).join('');
   filterEl.value=cur; // restore
   const selectedVid=filterEl.value;
@@ -4503,7 +4711,7 @@ function renderEvents(){
     }
     html+=`<div style="margin-bottom:24px;border:1px solid var(--rule);border-top:3px solid var(--accent)">
       <div style="padding:10px 14px;background:var(--paper-2);font-family:var(--font-display);font-weight:600;display:flex;justify-content:space-between;align-items:center">
-        <span>${v.name} <span class="chip ${v.type==='SERVICE'?'chip-1':'chip-2'}">${v.type==='SERVICE'?'DV':'KT'}</span></span>
+        <span>${esc(v.name)} <span class="chip ${v.type==='SERVICE'?'chip-1':'chip-2'}">${v.type==='SERVICE'?'DV':'KT'}</span></span>
         <span style="font-family:var(--font-mono);font-size:11px;color:var(--muted)">${evs.length} đoạn</span>
       </div>`;
     if(warnings.length){
@@ -4684,7 +4892,7 @@ function delTx(id){
   }
   const p=S.projects.find(p=>p.id===t.projectId);
   confirmDelete('bút toán này',
-    `${t.date} · ${t.type==='REV'?'Doanh thu':'Chi phí'} · ${t.category||''}<br>${p?p.code+' · ':''}${t.desc||'—'}<br><b>${fmtFull(t.amount,t.ccy)}</b> · ${t.paid?'Đã TT':'Chưa TT'}`,
+    `${t.date} · ${t.type==='REV'?'Doanh thu':'Chi phí'} · ${esc(t.category) || ''}<br>${p?p.code+' · ':''}${esc(t.desc) || '—'}<br><b>${fmtFull(t.amount,t.ccy)}</b> · ${t.paid?'Đã TT':'Chưa TT'}`,
     ()=>{S.transactions=S.transactions.filter(x=>x.id!==id);saveState();toast('Đã xóa bút toán');renderAll();});
 }
 function editTx(id){
@@ -4697,7 +4905,7 @@ function editTx(id){
   }
   // Build category options based on current segment
   const buildCats=(seg,type)=>(type==='REV'?REV_CATS:COST_CATS)[seg]||[];
-  const projOpts=[{v:'',t:'— Không gắn dự án —'}].concat(S.projects.map(p=>({v:p.id,t:`${p.code} · ${p.name} [${SEGMENTS[p.segment].short}]`})));
+  const projOpts=[{v:'',t:'— Không gắn dự án —'}].concat(S.projects.map(p=>({v:p.id,t:`${esc(p.code)} · ${esc(p.name)} [${SEGMENTS[p.segment].short}]`})));
   openEditModal('Sửa bút toán',[
     {key:'date',label:'Ngày',type:'date'},
     {key:'type',label:'Loại',type:'select',options:[{v:'REV',t:'Doanh thu'},{v:'COST',t:'Chi phí'}]},
@@ -4796,8 +5004,8 @@ function renderTxList(){
       <td>${t.type==='REV'?'<span class="chip chip-good">Thu</span>':'<span class="chip chip-bad">Chi</span>'}</td>
       <td>${segmentChip(t.segment)}</td>
       <td>${p?p.code:'<span style="color:var(--muted)">—</span>'}</td>
-      <td style="font-size:12px">${t.category||'—'}</td>
-      <td>${t.desc||'—'}</td>
+      <td style="font-size:12px">${esc(t.category) || '—'}</td>
+      <td>${esc(t.desc) || '—'}</td>
       <td class="r num">${fmt(t.amount,t.ccy)} <span class="mono" style="color:var(--muted);font-size:10px">${t.ccy}</span></td>
       <td class="c"><button class="icon-btn ${t.paid?'good':'warn'}" title="${t.paid?'Đã thanh toán':'Chưa thanh toán — click để đổi'}" onclick="togglePaid('${t.id}')">${t.paid?'✓':'○'}</button></td>
       <td class="c">${wfBadge(t)}</td>
@@ -4922,14 +5130,14 @@ function fillDeptPickers(prefix, catList){
   if(prjSel){
     const cur=prjSel.value;
     prjSel.innerHTML='<option value="">— Không gắn dự án —</option>'+
-      S.projects.map(p=>`<option value="${p.id}">${p.code} · ${p.name}</option>`).join('');
+      S.projects.map(p=>`<option value="${p.id}">${esc(p.code)} · ${esc(p.name)}</option>`).join('');
     if(cur && S.projects.find(p=>p.id===cur)) prjSel.value=cur;
   }
   const vesSel=document.getElementById(prefix+'-vessel');
   if(vesSel){
     const cur=vesSel.value;
     vesSel.innerHTML='<option value="">— Không gắn tàu —</option>'+
-      S.vessels.map(v=>`<option value="${v.id}">${v.name} (${v.type==='SERVICE'?'DV':'KT'})</option>`).join('');
+      S.vessels.map(v=>`<option value="${v.id}">${esc(v.name)} (${v.type==='SERVICE'?'DV':'KT'})</option>`).join('');
     if(cur && S.vessels.find(v=>v.id===cur)) vesSel.value=cur;
   }
   const dEl=document.getElementById(prefix+'-date');
@@ -5109,9 +5317,9 @@ function renderDeptExpense(prefix, origin, pageId){
     }
     const rowBg=wfS==='approved'?'':'background:rgba(196,138,57,.03)';
     h+=`<tr style="${rowBg}">
-      <td style="font-size:12px"><b>${r.costCategory||'—'}</b></td>
-      <td>${r.partner||'—'}</td>
-      <td style="max-width:200px;font-size:12px">${r.desc||'—'}</td>
+      <td style="font-size:12px"><b>${esc(r.costCategory) || '—'}</b></td>
+      <td>${esc(r.partner) || '—'}</td>
+      <td style="max-width:200px;font-size:12px">${esc(r.desc) || '—'}</td>
       <td style="font-size:11px;color:var(--muted)">${proj?proj.code:'—'}</td>
       <td class="mono" style="font-size:11px">${r.issueDate||'—'}</td>
       <td class="mono" style="font-size:11px">${r.dueDate||'—'}</td>
@@ -5233,19 +5441,19 @@ function fillApprovalFilterDropdowns(){
     const opts=['<option value="">Tất cả</option>'];
     if(S.vessels.length){
       opts.push('<optgroup label="Tàu">');
-      S.vessels.forEach(v=>opts.push(`<option value="VESSEL:${v.id}">⛵ ${v.name}</option>`));
+      S.vessels.forEach(v=>opts.push(`<option value="VESSEL:${v.id}">⛵ ${esc(v.name)}</option>`));
       opts.push('</optgroup>');
     }
     const omProjs=S.projects.filter(p=>p.isOM);
     if(omProjs.length){
       opts.push('<optgroup label="Dự án O&M">');
-      omProjs.forEach(p=>opts.push(`<option value="PROJECT:${p.id}">⚙ ${p.code}</option>`));
+      omProjs.forEach(p=>opts.push(`<option value="PROJECT:${p.id}">⚙ ${esc(p.code)}</option>`));
       opts.push('</optgroup>');
     }
     const otherProjs=S.projects.filter(p=>!p.isOM);
     if(otherProjs.length){
       opts.push('<optgroup label="Dự án khác">');
-      otherProjs.forEach(p=>opts.push(`<option value="PROJECT:${p.id}">${p.code}</option>`));
+      otherProjs.forEach(p=>opts.push(`<option value="PROJECT:${p.id}">${esc(p.code)}</option>`));
       opts.push('</optgroup>');
     }
     entSel.innerHTML=opts.join('');
@@ -5388,7 +5596,7 @@ function renderApprovalList(){
     let entityLabel='—';
     if(r.vesselId){
       const v=S.vessels.find(x=>x.id===r.vesselId);
-      entityLabel=v?`⛵ ${v.name}`:'?';
+      entityLabel=v?`⛵ ${esc(v.name)}`:'?';
     } else if(r.projectId){
       const p=S.projects.find(x=>x.id===r.projectId);
       entityLabel=p?(p.isOM?'⚙ ':'')+p.code:'?';
@@ -5396,11 +5604,11 @@ function renderApprovalList(){
     h+=`<tr style="cursor:pointer">
       <td class="c"><input type="checkbox" data-appr-id="${c.id}" ${checked} onchange="toggleApprovalRow('${c.id}')" onclick="event.stopPropagation()"></td>
       <td class="mono" style="font-size:11px" onclick="approvalOpenDetail('${c.kind}','${c.id}')">${r.issueDate||'—'}</td>
-      <td onclick="approvalOpenDetail('${c.kind}','${c.id}')"><b>${r.createdBy||'?'}</b></td>
+      <td onclick="approvalOpenDetail('${c.kind}','${c.id}')"><b>${esc(r.createdBy) || '?'}</b></td>
       <td onclick="approvalOpenDetail('${c.kind}','${c.id}')"><span class="chip chip-${c.kindClass}" style="font-size:10px">${c.kindLabel}</span></td>
-      <td onclick="approvalOpenDetail('${c.kind}','${c.id}')">${r.partner||'—'}</td>
+      <td onclick="approvalOpenDetail('${c.kind}','${c.id}')">${esc(r.partner) || '—'}</td>
       <td onclick="approvalOpenDetail('${c.kind}','${c.id}')" style="font-size:11px">${entityLabel}</td>
-      <td onclick="approvalOpenDetail('${c.kind}','${c.id}')" style="max-width:200px;font-size:12px;color:var(--muted)">${r.desc||'—'}</td>
+      <td onclick="approvalOpenDetail('${c.kind}','${c.id}')" style="max-width:200px;font-size:12px;color:var(--muted)">${esc(r.desc) || '—'}</td>
       <td class="r num" onclick="approvalOpenDetail('${c.kind}','${c.id}')"><b>${fmt(+r.amountGross||+r.amount||0, r.ccy)}</b></td>
       <td><div class="row-actions"><button class="icon-btn" title="Xem chi tiết" onclick="approvalOpenDetail('${c.kind}','${c.id}')">👁</button></div></td>
     </tr>`;
@@ -5545,7 +5753,7 @@ function deleteFixedAsset(id){
       toast('TSCĐ đã có lịch sử ghi nhận — không xóa được. Liên hệ admin.','bad');return;
     }
   }
-  confirmDelete('TSCĐ này', `<b>${a.code}</b> · ${a.name}<br>Nguyên giá: ${fmtFull(a.originalCost,a.ccy)}<br>${(a.history||[]).length?`⚠ Có ${a.history.length} lịch sử ghi nhận`:'Không có lịch sử'}`,
+  confirmDelete('TSCĐ này', `<b>${esc(a.code)}</b> · ${esc(a.name)}<br>Nguyên giá: ${fmtFull(a.originalCost,a.ccy)}<br>${(a.history||[]).length?`⚠ Có ${a.history.length} lịch sử ghi nhận`:'Không có lịch sử'}`,
     ()=>{S.fixedAssets=S.fixedAssets.filter(x=>x.id!==id);saveState();toast('Đã xóa');renderAll();});
 }
 
@@ -5602,8 +5810,8 @@ function openAssetDetail(kind, id){
 
   const body=`
     <div style="margin-bottom:14px;padding:10px;background:var(--paper-2);border-left:3px solid var(--accent)">
-      <div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.1em">${a.code}</div>
-      <div style="font-size:16px;font-weight:600;margin-top:2px">${a.name}</div>
+      <div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.1em">${esc(a.code)}</div>
+      <div style="font-size:16px;font-weight:600;margin-top:2px">${esc(a.name)}</div>
       <div style="margin-top:6px;font-size:12px;color:var(--muted)">
         ${groupOrDept} · ${a.location||'—'} · <span class="chip ${stat.cls}" style="font-size:10px">${stat.label}</span>
       </div>
@@ -5646,7 +5854,7 @@ function openAssetDetail(kind, id){
   `;
   const foot=`<button class="btn-sec" onclick="closeModal()">Đóng</button>
               <button class="btn-primary" onclick="closeModal();${isFa?'editFixedAsset':'editTool'}('${id}')">✎ Sửa thông tin</button>`;
-  openModal(`Chi tiết tài sản · ${a.code}`,body,foot);
+  openModal(`Chi tiết tài sản · ${esc(a.code)}`,body,foot);
 }
 
 function addAssetEvent(kind, assetId){
@@ -5667,7 +5875,7 @@ function addAssetEvent(kind, assetId){
     S.payables.push({
       id:pid,
       partner:'(Sửa chữa/bảo trì TS)',
-      desc:`[${a.code}] ${type}: ${desc||a.name}`,
+      desc:`[${esc(a.code)}] ${type}: ${desc||a.name}`,
       costCategory:type,
       amountNet:amount,
       vatPercent:0,
@@ -5788,7 +5996,7 @@ function renderFixedAssets(){
     const totalMonths=(+a.depreciationYears||0)*12;
     const histCount=(a.history||[]).length;
     h+=`<tr style="cursor:pointer" onclick="openAssetDetail('fa','${a.id}')">
-      <td><b style="color:var(--accent)">${a.code}</b><br><span style="font-size:11px">${a.name}</span></td>
+      <td><b style="color:var(--accent)">${esc(a.code)}</b><br><span style="font-size:11px">${esc(a.name)}</span></td>
       <td><span style="color:${g.color||'var(--muted)'};font-weight:600">${g.icon} ${g.label}</span></td>
       <td style="font-size:11px;color:var(--muted)">${a.location||'—'}</td>
       <td class="mono" style="font-size:11px">${a.purchaseDate||'—'}</td>
@@ -5830,7 +6038,7 @@ function fillToolVesselPicker(){
   if(!sel) return;
   const cur=sel.value;
   sel.innerHTML='<option value="">— Chưa gán tàu —</option>'+
-    S.vessels.map(v=>`<option value="${v.id}">${v.name} (${v.type==='SERVICE'?'DV':'KT'})</option>`).join('');
+    S.vessels.map(v=>`<option value="${v.id}">${esc(v.name)} (${v.type==='SERVICE'?'DV':'KT'})</option>`).join('');
   if(cur && S.vessels.find(v=>v.id===cur)) sel.value=cur;
   updateTlVesselVisibility();
 }
@@ -5899,7 +6107,7 @@ function deleteTool(id){
       toast('CCDC/MMTB đã có lịch sử ghi nhận — không xóa được. Liên hệ admin.','bad');return;
     }
   }
-  confirmDelete('CCDC/MMTB này', `<b>${a.code}</b> · ${a.name}<br>Nguyên giá: ${fmtFull(a.originalCost,a.ccy)}<br>${(a.history||[]).length?`⚠ Có ${a.history.length} lịch sử`:'Không có lịch sử'}`,
+  confirmDelete('CCDC/MMTB này', `<b>${esc(a.code)}</b> · ${esc(a.name)}<br>Nguyên giá: ${fmtFull(a.originalCost,a.ccy)}<br>${(a.history||[]).length?`⚠ Có ${a.history.length} lịch sử`:'Không có lịch sử'}`,
     ()=>{S.tools=S.tools.filter(x=>x.id!==id);saveState();toast('Đã xóa');renderAll();});
 }
 
@@ -6090,12 +6298,12 @@ function fillVesselExpensePickers(){
     const opts=[];
     if(myVessels.length){
       opts.push('<optgroup label="Tàu">');
-      myVessels.forEach(v=>opts.push(`<option value="VESSEL:${v.id}">⛵ ${v.name} (${v.type==='SERVICE'?'DV':'KT'})</option>`));
+      myVessels.forEach(v=>opts.push(`<option value="VESSEL:${v.id}">⛵ ${esc(v.name)} (${v.type==='SERVICE'?'DV':'KT'})</option>`));
       opts.push('</optgroup>');
     }
     if(myProjects.length){
       opts.push('<optgroup label="Dự án O&M">');
-      myProjects.forEach(p=>opts.push(`<option value="PROJECT:${p.id}">⚙ ${p.code} · ${p.name}</option>`));
+      myProjects.forEach(p=>opts.push(`<option value="PROJECT:${p.id}">⚙ ${esc(p.code)} · ${esc(p.name)}</option>`));
       opts.push('</optgroup>');
     }
     if(opts.length===0){
@@ -6113,12 +6321,12 @@ function fillVesselExpensePickers(){
     const opts=['<option value="">Tất cả Tàu/Dự án phụ trách</option>'];
     if(myVessels.length){
       opts.push('<optgroup label="Tàu">');
-      myVessels.forEach(v=>opts.push(`<option value="VESSEL:${v.id}">⛵ ${v.name}</option>`));
+      myVessels.forEach(v=>opts.push(`<option value="VESSEL:${v.id}">⛵ ${esc(v.name)}</option>`));
       opts.push('</optgroup>');
     }
     if(myProjects.length){
       opts.push('<optgroup label="Dự án O&M">');
-      myProjects.forEach(p=>opts.push(`<option value="PROJECT:${p.id}">⚙ ${p.code}</option>`));
+      myProjects.forEach(p=>opts.push(`<option value="PROJECT:${p.id}">⚙ ${esc(p.code)}</option>`));
       opts.push('</optgroup>');
     }
     filterEntity.innerHTML=opts.join('');
@@ -6354,9 +6562,9 @@ function renderVesselExpense(){
     const rowBg=wfS==='approved'?'':'background:rgba(196,138,57,.03)';
     h+=`<tr style="${rowBg}">
       <td><b style="color:var(--accent)">${entityIcon} ${entityLabel}</b></td>
-      <td style="font-size:12px">${r.costCategory||'—'}</td>
-      <td>${r.partner||'—'}</td>
-      <td style="max-width:220px;font-size:12px">${r.desc||'—'}</td>
+      <td style="font-size:12px">${esc(r.costCategory) || '—'}</td>
+      <td>${esc(r.partner) || '—'}</td>
+      <td style="max-width:220px;font-size:12px">${esc(r.desc) || '—'}</td>
       <td class="mono" style="font-size:11px">${r.issueDate||'—'}</td>
       <td class="mono" style="font-size:11px">${r.dueDate||'—'}</td>
       <td class="r num">${fmt(net,r.ccy)}</td>
@@ -6565,9 +6773,9 @@ function renderArAp(kind){
 
     const rowBg=wfS==='approved'?'':'background:rgba(196,138,57,.03)';
     h+=`<tr style="${rowBg}">
-      <td><b>${r.partner||'—'}</b></td>
+      <td><b>${esc(r.partner) || '—'}</b></td>
       <td><span class="chip ${SEGMENTS[r.segment]?SEGMENTS[r.segment].chip:''}">${segLabel}</span>${link?' '+link:''}</td>
-      <td style="max-width:240px">${r.desc||'—'}</td>
+      <td style="max-width:240px">${esc(r.desc) || '—'}</td>
       <td class="mono" style="font-size:11px">${r.issueDate||'—'}</td>
       <td class="mono" style="font-size:11px">${r.dueDate||'—'}</td>
       ${isAp?`<td class="mono" style="font-size:11px;color:var(--accent);font-weight:600">${r.dueMonth||'—'}</td>`:''}
@@ -6628,9 +6836,9 @@ function arReturn(kind,id){
 
 /* ===== Create / edit modals for receivable & payable ===== */
 function _arEditorBody(r,isPayable){
-  const segOpts=Object.entries(SEGMENTS).map(([k,v])=>`<option value="${k}" ${k===(r.segment||'')?'selected':''}>${v.name}</option>`).join('');
-  const projOpts='<option value="">— Không gắn dự án —</option>'+S.projects.map(p=>`<option value="${p.id}" ${p.id===r.projectId?'selected':''}>${p.code} · ${p.name}</option>`).join('');
-  const vesselOpts='<option value="">— Không gắn tàu —</option>'+S.vessels.map(v=>`<option value="${v.id}" ${v.id===r.vesselId?'selected':''}>${v.name} (${v.type==='SERVICE'?'DV':'KT'})</option>`).join('');
+  const segOpts=Object.entries(SEGMENTS).map(([k,v])=>`<option value="${k}" ${k===(r.segment||'')?'selected':''}>${esc(v.name)}</option>`).join('');
+  const projOpts='<option value="">— Không gắn dự án —</option>'+S.projects.map(p=>`<option value="${p.id}" ${p.id===r.projectId?'selected':''}>${esc(p.code)} · ${esc(p.name)}</option>`).join('');
+  const vesselOpts='<option value="">— Không gắn tàu —</option>'+S.vessels.map(v=>`<option value="${v.id}" ${v.id===r.vesselId?'selected':''}>${esc(v.name)} (${v.type==='SERVICE'?'DV':'KT'})</option>`).join('');
   // Determine locked state from workflow
   const locked = !isAdmin() && !wfCanEdit(r) && (r.status==='approved' || r.status==='pending_l1' || r.status==='pending_l2');
   const lockedAttr = locked ? 'disabled' : '';
@@ -6809,7 +7017,7 @@ function addArPayment(kind,id){
   const isUsd=r.ccy==='USD';
   const body=`
     <div style="font-size:12px;color:var(--muted);margin-bottom:10px">
-      <b>${r.partner}</b> · ${r.desc||''}<br>
+      <b>${esc(r.partner)}</b> · ${esc(r.desc) || ''}<br>
       Tổng (sau VAT): <b>${fmtFull(r.amount,r.ccy)}</b> · Còn lại: <b style="color:${kind==='ap'?'var(--bad)':'var(--accent)'}">${fmtFull(rem,r.ccy)}</b>
     </div>
     <div class="form-grid" style="grid-template-columns:1fr 1fr 1fr">
@@ -6885,7 +7093,7 @@ function deleteAr(kind,id){
     return;
   }
   const pd=arPaidTotal(r);
-  const detail=`<b>${r.partner}</b> · ${fmtFull(r.amount,r.ccy)}${pd>0?'<br><b style="color:var(--bad)">Cảnh báo:</b> Đã có '+r.payments.length+' lần TT ('+fmtFull(pd,r.ccy)+')':''}`;
+  const detail=`<b>${esc(r.partner)}</b> · ${fmtFull(r.amount,r.ccy)}${pd>0?'<br><b style="color:var(--bad)">Cảnh báo:</b> Đã có '+r.payments.length+' lần TT ('+fmtFull(pd,r.ccy)+')':''}`;
   confirmDialog('Xóa khoản '+(kind==='ap'?'phải trả':'phải thu')+'?',detail,null,
     ()=>{S[list]=S[list].filter(x=>x.id!==id);saveState();toast('Đã xóa');renderAll();});
 }
@@ -6913,7 +7121,7 @@ function renderBankAccounts(){
     total+=disp;
     html+=`<tr>
       <td><b>${a.name||'(không tên)'}</b></td>
-      <td style="color:var(--muted);font-size:12px">${a.note||'—'}</td>
+      <td style="color:var(--muted);font-size:12px">${esc(a.note) || '—'}</td>
       <td class="c"><span class="chip ${a.ccy==='VND'?'chip-3':'chip-2'}">${a.ccy||'USD'}</span></td>
       <td class="r num">${bal.toLocaleString(a.ccy==='USD'?'en-US':'vi-VN')} ${a.ccy||'USD'}</td>
       <td class="r num"><b>${fmt(disp)}</b></td>
@@ -6981,7 +7189,7 @@ function delOpVessel(id){
   const v=S.opVessels.find(x=>x.id===id);if(!v)return;
   const tx=S.opTransactions.filter(t=>t.vesselId===id).length;
   confirmDelete('tàu quản lý này',
-    `${v.name} · ${v.owner||'—'}<br>Số dư hiện tại: ${fmt(opBalance(id),v.ccy)}<br>${tx?`<b style="color:var(--bad)">⚠ ${tx} bút toán thu/chi hộ</b> cũng bị xóa kèm.`:''}`,
+    `${esc(v.name)} · ${esc(v.owner) || '—'}<br>Số dư hiện tại: ${fmt(opBalance(id),v.ccy)}<br>${tx?`<b style="color:var(--bad)">⚠ ${tx} bút toán thu/chi hộ</b> cũng bị xóa kèm.`:''}`,
     ()=>{S.opVessels=S.opVessels.filter(x=>x.id!==id);S.opTransactions=S.opTransactions.filter(t=>t.vesselId!==id);saveState();toast('Đã xóa');renderAll();});
 }
 function editOpVessel(id){
@@ -7004,7 +7212,7 @@ function fillOpVesselPicker(){
   // Only allow tàu QL hộ NV được gán
   const allowedIds=userAssignedOpVesselIds();
   const visible=S.opVessels.filter(v=>allowedIds.includes(v.id));
-  sel.innerHTML=visible.map(v=>`<option value="${v.id}">${v.name} · ${v.owner||''}</option>`).join('');
+  sel.innerHTML=visible.map(v=>`<option value="${v.id}">${esc(v.name)} · ${esc(v.owner) || ''}</option>`).join('');
   if(cur && visible.find(v=>v.id===cur)) sel.value=cur;
 }
 function opBalance(vid){
@@ -7042,8 +7250,8 @@ function renderOpVessels(){
     else if(bal<v.min*1.2){status='⚡ GẦN NGƯỠNG';statusCls='chip-warn';}
     else{status='✓ AN TOÀN';statusCls='chip-good';}
     html+=`<tr>
-      <td><b>${v.name}</b></td>
-      <td>${v.owner||'—'}</td>
+      <td><b>${esc(v.name)}</b></td>
+      <td>${esc(v.owner) || '—'}</td>
       <td class="r num" style="font-weight:600;color:${bal<v.min?'var(--bad)':bal<v.min*1.2?'var(--warn)':'var(--ink)'}">${fmt(bal,v.ccy)}</td>
       <td class="r num">${fmt(v.min,v.ccy)}</td>
       <td class="r num">${fmt(v.fee,v.ccy)}</td>
@@ -7094,7 +7302,7 @@ function delOpTx(id){
   }
   const v=S.opVessels.find(v=>v.id===t.vesselId);
   confirmDelete('bút toán thu/chi hộ',
-    `${t.date} · ${v?v.name:'?'} · ${t.type==='IN'?'Thu hộ':'Chi hộ'}<br>${t.desc||'—'}<br><b>${fmtFull(t.amount,v?v.ccy:'VND')}</b>`,
+    `${t.date} · ${v?v.name:'?'} · ${t.type==='IN'?'Thu hộ':'Chi hộ'}<br>${esc(t.desc) || '—'}<br><b>${fmtFull(t.amount,v?v.ccy:'VND')}</b>`,
     ()=>{S.opTransactions=S.opTransactions.filter(x=>x.id!==id);saveState();toast('Đã xóa');renderAll();});
 }
 function editOpTx(id){
@@ -7102,7 +7310,7 @@ function editOpTx(id){
   if(t.paid){toast('Bút toán đã xác nhận TT — chỉ người xác nhận sửa được (nút ✎ trong dòng)','bad');return;}
   openEditModal('Sửa bút toán thu/chi hộ',[
     {key:'date',label:'Ngày',type:'date'},
-    {key:'vesselId',label:'Tàu QL',type:'select',options:S.opVessels.map(v=>({v:v.id,t:`${v.name} · ${v.owner||''}`})),span:2},
+    {key:'vesselId',label:'Tàu QL',type:'select',options:S.opVessels.map(v=>({v:v.id,t:`${esc(v.name)} · ${esc(v.owner) || ''}`})),span:2},
     {key:'type',label:'Loại',type:'select',options:[{v:'IN',t:'Thu hộ'},{v:'OUT',t:'Chi hộ'}]},
     {key:'amount',label:'Số tiền',type:'number'},
     {key:'desc',label:'Diễn giải',span:2}
@@ -7133,7 +7341,7 @@ function confirmOpPayment(id){
   const defaultBankFee = lastFee ? lastFee.bankFee : 0;
   const body=`
     <div style="font-size:12px;color:var(--muted);margin-bottom:10px">
-      <b>${v?v.name:'?'}</b> · ${t.type==='IN'?'Thu hộ':'Chi hộ'} · ${t.desc||'—'}<br>
+      <b>${v?v.name:'?'}</b> · ${t.type==='IN'?'Thu hộ':'Chi hộ'} · ${esc(t.desc) || '—'}<br>
       Số tiền gốc: <b>${fmtFull(t.amount,ccy)}</b>
     </div>
     <div class="form-grid" style="grid-template-columns:1fr 1fr">
@@ -7291,7 +7499,7 @@ function renderOpTxList(){
   vSel.innerHTML='<option value="">— Tất cả tàu —</option>'+
     visibleVessels.map(v=>{
       const n=allTxScoped.filter(t=>t.vesselId===v.id).length;
-      return `<option value="${v.id}" ${v.id===curV?'selected':''}>${v.name} · ${n}</option>`;
+      return `<option value="${v.id}" ${v.id===curV?'selected':''}>${esc(v.name)} · ${n}</option>`;
     }).join('');
   vSel.value=curV;
   // Months: derive from scoped data
@@ -7361,7 +7569,7 @@ function renderOpTxList(){
         html+=`<tr style="${t.paid?'':'background:rgba(196,138,57,.04)'}">
           <td class="mono">${t.date}</td>
           <td>${v?v.name:'—'}</td>
-          <td>${t.desc||'—'}</td>
+          <td>${esc(t.desc) || '—'}</td>
           <td class="r num">${fmt(t.amount,ccy)}</td>
           <td class="r num mono" style="font-size:11px;color:var(--muted)" title="${feeTooltip}">${fees?fmt(fees,ccy):'—'}</td>
           <td class="c">${t.paid
@@ -7421,7 +7629,7 @@ function openOpReportModal(){
   const lastDay=new Date(now.getFullYear(),now.getMonth()+1,0).toISOString().slice(0,10);
   const vesselChecks=S.opVessels.map(v=>
     `<label style="display:flex;align-items:center;gap:8px;padding:5px 0;cursor:pointer">
-      <input type="checkbox" data-vessel-id="${v.id}" checked> <span><b>${v.name}</b> ${v.owner?'· '+v.owner:''}</span>
+      <input type="checkbox" data-vessel-id="${v.id}" checked> <span><b>${esc(v.name)}</b> ${v.owner?'· '+v.owner:''}</span>
     </label>`).join('');
   const body=`
     <div class="form-grid" style="grid-template-columns:1fr 1fr">
@@ -7608,7 +7816,7 @@ function generateOpReport(){
       <h1>${t.title}</h1>
       <h2>${t.sub}</h2>
       <div class="pr-vessel">
-        <b>${t.vessel}:</b> ${v.name} &nbsp;·&nbsp; <b>${t.owner}:</b> ${v.owner||'—'}<br>
+        <b>${t.vessel}:</b> ${esc(v.name)} &nbsp;·&nbsp; <b>${t.owner}:</b> ${esc(v.owner) || '—'}<br>
         <b>${t.period}:</b> ${t.from} <b>${fmtDate(from)}</b> ${t.to} <b>${fmtDate(to)}</b>
       </div>
 
@@ -7616,7 +7824,7 @@ function generateOpReport(){
       <table>
         <thead><tr>
           <th style="width:11%">${t.date}</th>
-          <th>${t.desc}</th>
+          <th>${esc(t.desc)}</th>
           <th class="r" style="width:15%">${t.amount}</th>
           <th class="r" style="width:11%">${t.fee}</th>
           <th style="width:11%">${t.paidDate}</th>
@@ -7636,7 +7844,7 @@ function generateOpReport(){
       <table>
         <thead><tr>
           <th style="width:11%">${t.date}</th>
-          <th>${t.desc}</th>
+          <th>${esc(t.desc)}</th>
           <th class="r" style="width:15%">${t.amount}</th>
           <th class="r" style="width:11%">${t.fee}</th>
           <th style="width:11%">${t.paidDate}</th>
@@ -7667,7 +7875,7 @@ function generateOpReport(){
         <div class="pr-sign-block">
           <div class="pr-sign-title">${t.sigOwner}</div>
           <div class="pr-sign-sub">(${t.signDate} ...........)</div>
-          <div class="pr-sign-line">${v.owner||'.................................................'}</div>
+          <div class="pr-sign-line">${esc(v.owner) || '.................................................'}</div>
         </div>
         <div class="pr-sign-block">
           <div class="pr-sign-title">${t.sigCo}</div>
@@ -7702,9 +7910,9 @@ function renderDashboard(){
   S.opVessels.forEach(v=>{
     const bal=opBalance(v.id);
     if(bal<v.min){
-      alerts+=`<div class="alert danger"><div class="alert-text"><b>⚠ ${v.name}</b> · Số dư thu hộ–chi hộ <b>${fmt(bal,v.ccy)}</b> dưới ngưỡng tối thiểu <b>${fmt(v.min,v.ccy)}</b>. Cần bổ sung gấp.</div><button class="btn-sec" onclick="navTo('operations')">Xem chi tiết</button></div>`;
+      alerts+=`<div class="alert danger"><div class="alert-text"><b>⚠ ${esc(v.name)}</b> · Số dư thu hộ–chi hộ <b>${fmt(bal,v.ccy)}</b> dưới ngưỡng tối thiểu <b>${fmt(v.min,v.ccy)}</b>. Cần bổ sung gấp.</div><button class="btn-sec" onclick="navTo('operations')">Xem chi tiết</button></div>`;
     } else if(bal<v.min*1.2){
-      alerts+=`<div class="alert"><div class="alert-text"><b>⚡ ${v.name}</b> · Số dư ${fmt(bal,v.ccy)} gần ngưỡng ${fmt(v.min,v.ccy)}.</div><button class="btn-sec" onclick="navTo('operations')">Xem</button></div>`;
+      alerts+=`<div class="alert"><div class="alert-text"><b>⚡ ${esc(v.name)}</b> · Số dư ${fmt(bal,v.ccy)} gần ngưỡng ${fmt(v.min,v.ccy)}.</div><button class="btn-sec" onclick="navTo('operations')">Xem</button></div>`;
     }
   });
   alertsEl.innerHTML=alerts;
@@ -7841,7 +8049,7 @@ function renderInvGroupsTable(){
   S.invGroups.forEach(g=>{
     const n=(S.invMovements||[]).filter(m=>m.groupId===g.id).length;
     h+=`<tr>
-      <td><b>${g.name}</b></td>
+      <td><b>${esc(g.name)}</b></td>
       <td class="mono" style="font-size:11px">${g.unit||'—'}</td>
       <td style="color:var(--muted);font-size:12px">${g.note||'—'}</td>
       <td class="c mono">${n}</td>
@@ -7901,7 +8109,7 @@ function deleteInvGroup(id){
   if(!isAdmin()){toast('Chỉ admin mới xóa được nhóm vật tư','bad');return;}
   const g=S.invGroups.find(x=>x.id===id);if(!g)return;
   const n=(S.invMovements||[]).filter(m=>m.groupId===id).length;
-  const detail=`<b>${g.name}</b>${n>0?`<br><b style="color:var(--bad)">Cảnh báo:</b> nhóm này có ${n} bản ghi vật tư sẽ bị xóa cùng`:''}`;
+  const detail=`<b>${esc(g.name)}</b>${n>0?`<br><b style="color:var(--bad)">Cảnh báo:</b> nhóm này có ${n} bản ghi vật tư sẽ bị xóa cùng`:''}`;
   confirmDialog('Xóa nhóm vật tư?',detail,null,()=>{
     S.invGroups=S.invGroups.filter(x=>x.id!==id);
     S.invMovements=(S.invMovements||[]).filter(m=>m.groupId!==id);
@@ -7937,9 +8145,9 @@ function openInvMovementModal(id){
     openValue:0,inValue:0,outValue:0
   };
 
-  const groupOpts=S.invGroups.map(g=>`<option value="${g.id}" ${g.id===m.groupId?'selected':''}>${g.name}${g.unit?' ('+g.unit+')':''}</option>`).join('');
-  const vesselOpts='<option value="">— Chọn tàu —</option>'+S.vessels.map(v=>`<option value="${v.id}" ${v.id===m.vesselId?'selected':''}>${v.name} (${v.type==='SERVICE'?'DV':'KT'})</option>`).join('');
-  const projOpts='<option value="">— Chọn dự án —</option>'+S.projects.map(p=>`<option value="${p.id}" ${p.id===m.projectId?'selected':''}>${p.code} · ${p.name}</option>`).join('');
+  const groupOpts=S.invGroups.map(g=>`<option value="${g.id}" ${g.id===m.groupId?'selected':''}>${esc(g.name)}${g.unit?' ('+g.unit+')':''}</option>`).join('');
+  const vesselOpts='<option value="">— Chọn tàu —</option>'+S.vessels.map(v=>`<option value="${v.id}" ${v.id===m.vesselId?'selected':''}>${esc(v.name)} (${v.type==='SERVICE'?'DV':'KT'})</option>`).join('');
+  const projOpts='<option value="">— Chọn dự án —</option>'+S.projects.map(p=>`<option value="${p.id}" ${p.id===m.projectId?'selected':''}>${esc(p.code)} · ${esc(p.name)}</option>`).join('');
 
   const body=`
     <div class="form-grid" style="grid-template-columns:1fr 1fr 1fr">
@@ -8169,11 +8377,11 @@ function renderInventory(){
     let scopeTxt='Chung công ty', scopeCls='';
     if(r.scope==='vessel'){
       const v=S.vessels.find(x=>x.id===r.vesselId);
-      scopeTxt=v?`Tàu ${v.name}`:'Tàu (đã xóa)';
+      scopeTxt=v?`Tàu ${esc(v.name)}`:'Tàu (đã xóa)';
       scopeCls='chip-1';
     } else if(r.scope==='project'){
       const p=S.projects.find(x=>x.id===r.projectId);
-      scopeTxt=p?`DA ${p.code}`:'DA (đã xóa)';
+      scopeTxt=p?`DA ${esc(p.code)}`:'DA (đã xóa)';
       scopeCls='chip-2';
     }
     const unit=g?g.unit||'':'';
@@ -8257,7 +8465,7 @@ function fillReportVesselPicker(){
   // Filter vessels by viewer scope
   const allowedVessels=isViewer()?S.vessels.filter(v=>viewerCanSeeVessel(v.id)):S.vessels;
   sel.innerHTML='<option value="">— Chọn tàu để xem chi tiết —</option>'+
-    allowedVessels.map(v=>`<option value="${v.id}">${v.name} (${v.type==='SERVICE'?'DV':'KT'})</option>`).join('');
+    allowedVessels.map(v=>`<option value="${v.id}">${esc(v.name)} (${v.type==='SERVICE'?'DV':'KT'})</option>`).join('');
   sel.value=cur;
 }
 
@@ -8410,7 +8618,7 @@ function renderVesselDrilldown(){
 
   let html=`
     <div class="kpi-grid" style="margin-bottom:18px">
-      <div class="kpi"><div class="kpi-label">Tàu</div><div class="kpi-value" style="font-size:22px">${v.name}</div><div class="kpi-sub">${v.type==='SERVICE'?'Tàu dịch vụ':'Tàu kỹ thuật'} · ${v.dwt?v.dwt.toLocaleString()+' DWT':''} · IMO ${v.imo||'—'}</div></div>
+      <div class="kpi"><div class="kpi-label">Tàu</div><div class="kpi-value" style="font-size:22px">${esc(v.name)}</div><div class="kpi-sub">${v.type==='SERVICE'?'Tàu dịch vụ':'Tàu kỹ thuật'} · ${v.dwt?v.dwt.toLocaleString()+' DWT':''} · IMO ${esc(v.imo) || '—'}</div></div>
       <div class="kpi"><div class="kpi-label">Tổng DT (tất cả năm)</div><div class="kpi-value">${fmt(totRev)}</div><div class="kpi-sub">${projects.length} dự án · ${allTxs.length} bút toán</div></div>
       <div class="kpi"><div class="kpi-label">Margin tích lũy</div><div class="kpi-value" style="color:${totRev-totCost>=0?'var(--good)':'var(--bad)'}">${fmt(totRev-totCost)}</div><div class="kpi-sub">${totRev?((totRev-totCost)/totRev*100).toFixed(1)+'%':'—'}</div></div>
       <div class="kpi"><div class="kpi-label">Đơn giá BQ</div><div class="kpi-value">${fmt(avgSell)}</div><div class="kpi-sub">Opex/On ${fmt(avgOpex)} · Fuel/On ${fmt(avgFuel)}</div></div>
@@ -8453,8 +8661,8 @@ function renderVesselDrilldown(){
       const m=r-c;
       const prog=p.value?(r/p.value)*100:0;
       html+=`<tr>
-        <td class="mono">${p.code}</td>
-        <td><b>${p.name}</b><br><span style="color:var(--muted);font-size:11px">${p.client||'—'}</span></td>
+        <td class="mono">${esc(p.code)}</td>
+        <td><b>${esc(p.name)}</b><br><span style="color:var(--muted);font-size:11px">${esc(p.client) || '—'}</span></td>
         <td>${segmentChip(p.segment)}</td>
         <td class="mono">${p.start||'—'}<br>${p.end||'—'}</td>
         <td class="r num">${fmt(p.value,p.ccy)}</td>
@@ -8466,7 +8674,7 @@ function renderVesselDrilldown(){
       </tr>`;
     });
     html+=`<tr class="total">
-      <td colspan="4">TỔNG TÀU ${v.name}</td>
+      <td colspan="4">TỔNG TÀU ${esc(v.name)}</td>
       <td class="r">${fmt(pVal)}</td>
       <td class="r">${fmt(pRev)}</td>
       <td class="r">${fmt(pCost)}</td>
@@ -8565,8 +8773,8 @@ function renderProjectMarginTable(){
     const r=projRev(p.id),c=projCost(p.id);
     const v=p.vesselId?S.vessels.find(v=>v.id===p.vesselId):null;
     h3+=`<tr>
-      <td class="mono">${p.code}</td>
-      <td>${p.name}</td>
+      <td class="mono">${esc(p.code)}</td>
+      <td>${esc(p.name)}</td>
       <td>${segmentChip(p.segment)}</td>
       <td>${v?v.name:'<span style="color:var(--muted)">—</span>'}</td>
       <td class="r num">${fmt(r,p.ccy)}</td>
@@ -8637,7 +8845,7 @@ function renderVesselUtilization(){
     totDays+=total; totOn+=on; totOff+=off; totSb+=sb; totDock+=dock;
 
     html+=`<tr>
-      <td><b>${v.name}</b></td>
+      <td><b>${esc(v.name)}</b></td>
       <td><span class="chip chip-5" style="font-size:10px">${v.type==='SERVICE'?'DV':'KT'}</span></td>
       <td class="r num">${total||'<span style="color:var(--muted)">—</span>'}</td>
       <td class="r num" style="color:var(--good);font-weight:600">${on}</td>
@@ -8683,7 +8891,7 @@ function fillPnlProjectPicker(){
       })
     : S.projects;
   sel.innerHTML='<option value="">— Chọn dự án —</option>'+
-    projects.map(p=>`<option value="${p.id}">${p.code} · ${p.name}</option>`).join('');
+    projects.map(p=>`<option value="${p.id}">${esc(p.code)} · ${esc(p.name)}</option>`).join('');
   if(cur && projects.find(p=>p.id===cur)) sel.value=cur;
 }
 
@@ -8742,9 +8950,9 @@ function renderProjectPnL(){
     <div style="display:grid;grid-template-columns:2fr 1fr 1fr 1fr;gap:14px;margin-bottom:18px">
       <div style="background:var(--paper-2);padding:14px;border:1px solid var(--rule)">
         <div style="font-family:var(--font-mono);font-size:10px;color:var(--muted);letter-spacing:.12em;text-transform:uppercase">Thông tin dự án</div>
-        <div style="font-family:var(--font-display);font-size:18px;font-weight:600;margin-top:6px">${p.code} · ${p.name}</div>
+        <div style="font-family:var(--font-display);font-size:18px;font-weight:600;margin-top:6px">${esc(p.code)} · ${esc(p.name)}</div>
         <div style="font-size:12px;color:var(--muted);margin-top:4px">
-          KH: <b>${p.client||'—'}</b> · Mảng: ${segmentChip(p.segment)} · Tàu: ${v?v.name:'—'} · Năm: ${p.year||'—'}
+          KH: <b>${esc(p.client) || '—'}</b> · Mảng: ${segmentChip(p.segment)} · Tàu: ${v?v.name:'—'} · Năm: ${p.year||'—'}
         </div>
       </div>
       <div style="background:var(--paper-2);padding:14px;border:1px solid var(--rule);text-align:right">
@@ -8799,7 +9007,7 @@ function renderProjectPnL(){
     sortedCats.forEach(([cat,amt])=>{
       const pct=totCost?(amt/totCost*100):0;
       html+=`<tr>
-        <td>${cat}</td>
+        <td>${esc(cat)}</td>
         <td class="r num">${fmt(amt,p.ccy)}</td>
         <td class="r num" style="color:var(--muted)">${pct.toFixed(1)}%</td>
       </tr>`;
@@ -8819,7 +9027,7 @@ function renderProjectPnL(){
     topSuppliers.forEach(([sup,amt])=>{
       const pct=totCost?(amt/totCost*100):0;
       html+=`<tr>
-        <td><b>${sup}</b></td>
+        <td><b>${esc(sup)}</b></td>
         <td class="r num">${fmt(amt,p.ccy)}</td>
         <td class="r num" style="color:var(--muted)">${pct.toFixed(1)}%</td>
       </tr>`;
@@ -8904,7 +9112,7 @@ function renderMMR(){
         <div style="font-family:var(--font-display);font-size:18px;font-weight:700;letter-spacing:.04em">${companyName}</div>
         ${ci.nameEn && ci.nameEn!==ci.name?`<div style="font-size:11px;color:var(--muted);margin-top:2px">${ci.nameEn}</div>`:''}
         <div style="font-family:var(--font-display);font-size:24px;font-weight:600;margin-top:14px;color:var(--accent)">BÁO CÁO QUẢN TRỊ THÁNG ${m}/${y}</div>
-        <div style="font-size:11px;color:var(--muted);margin-top:4px">Kỳ: ${monthStart} → ${monthEnd} · Phát hành: ${todayISO()} · Người lập: ${actorName()}</div>
+        <div style="font-size:11px;color:var(--muted);margin-top:4px">Kỳ: ${monthStart} → ${monthEnd} · Phát hành: ${todayISO()} · Người lập: ${esc(actorName())}</div>
       </div>
 
       <!-- A. KPI 4 SỐ CHÍNH -->
@@ -8975,7 +9183,7 @@ function renderMMR(){
                 if(!tot) return;
                 const color=pct>=80?'var(--good)':pct>=50?'var(--warn)':'var(--bad)';
                 rows+=`<tr>
-                  <td><b>${v.name}</b></td>
+                  <td><b>${esc(v.name)}</b></td>
                   <td class="r num" style="color:var(--good)">${on}</td>
                   <td class="r num">${off||'—'}</td>
                   <td class="r num">${sb||'—'}</td>
@@ -9008,7 +9216,7 @@ function renderMMR(){
                 });
                 const sorted=Object.entries(byCust).sort((a,b)=>b[1]-a[1]).slice(0,5);
                 if(!sorted.length) return '<tr><td class="empty" colspan="2">Không có doanh thu</td></tr>';
-                return sorted.map(([cust,amt])=>`<tr><td><b>${cust}</b></td><td class="r num">${fmt(amt,'USD')}</td></tr>`).join('');
+                return sorted.map(([cust,amt])=>`<tr><td><b>${esc(cust)}</b></td><td class="r num">${fmt(amt,'USD')}</td></tr>`).join('');
               })()}
             </tbody>
           </table>
@@ -9028,7 +9236,7 @@ function renderMMR(){
                 });
                 const sorted=Object.entries(bySup).sort((a,b)=>b[1]-a[1]).slice(0,5);
                 if(!sorted.length) return '<tr><td class="empty" colspan="2">Không có chi phí</td></tr>';
-                return sorted.map(([sup,amt])=>`<tr><td><b>${sup}</b></td><td class="r num">${fmt(amt,'USD')}</td></tr>`).join('');
+                return sorted.map(([sup,amt])=>`<tr><td><b>${esc(sup)}</b></td><td class="r num">${fmt(amt,'USD')}</td></tr>`).join('');
               })()}
             </tbody>
           </table>
@@ -9123,7 +9331,7 @@ function renderMMR(){
       <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:20px;margin-top:30px;padding-top:20px;border-top:1px solid var(--rule);font-size:11px;color:var(--muted)">
         <div>
           <div style="font-weight:600;color:var(--ink)">Người lập</div>
-          <div style="margin-top:4px">${actorName()}</div>
+          <div style="margin-top:4px">${esc(actorName())}</div>
           <div style="margin-top:24px;font-size:10px">(ký, ghi rõ họ tên)</div>
         </div>
         <div>
@@ -9415,8 +9623,8 @@ function renderAgingReport(){
       <table class="tbl"><thead><tr><th>Đối tác</th><th>Diễn giải</th><th class="r">Hạn TT</th><th class="r">Quá hạn</th><th class="r">Số tiền</th></tr></thead><tbody>`;
       overdue.forEach(it=>{
         html+=`<tr>
-          <td><b>${it.partner}</b></td>
-          <td style="font-size:11px;color:var(--muted)">${it.desc||'—'}</td>
+          <td><b>${esc(it.partner)}</b></td>
+          <td style="font-size:11px;color:var(--muted)">${esc(it.desc) || '—'}</td>
           <td class="r mono" style="font-size:11px">${it.dueStr}</td>
           <td class="r num" style="color:var(--bad);font-weight:600">${it.days} ngày</td>
           <td class="r num">${fmt(it.amount,it.ccy)}</td>
@@ -9525,7 +9733,7 @@ function renderTopCustomers(){
     const barWidth=Math.min(100,pct*2);
     html+=`<tr>
       <td class="num" style="color:var(--muted)">${i+1}</td>
-      <td><b>${cust}</b></td>
+      <td><b>${esc(cust)}</b></td>
       <td class="r num">${fmt(amt,'USD')}</td>
       <td class="r num" style="font-weight:600">${pct.toFixed(1)}%</td>
       <td><div style="background:var(--paper-2);height:14px;width:100%;position:relative;border:1px solid var(--rule)"><div style="background:${pct>30?'var(--bad)':pct>15?'var(--warn)':'var(--good)'};height:100%;width:${barWidth}%"></div><span style="position:absolute;left:6px;top:-1px;font-size:10px;font-family:var(--font-mono);color:var(--ink)">${cum.toFixed(0)}%</span></div></td>
@@ -9646,7 +9854,7 @@ function renderCostBreakdown(){
     const yoy=prevAmt?((amt-prevAmt)/prevAmt*100):null;
     const color=palette[i%palette.length];
     html+=`<tr>
-      <td><span style="display:inline-block;width:10px;height:10px;background:${color};margin-right:8px"></span><b>${cat}</b></td>
+      <td><span style="display:inline-block;width:10px;height:10px;background:${color};margin-right:8px"></span><b>${esc(cat)}</b></td>
       <td class="r num">${fmt(amt,'USD')}</td>
       <td class="r num" style="font-weight:600">${pct.toFixed(1)}%</td>
       <td class="r num" style="color:var(--muted)">${prevAmt?fmt(prevAmt,'USD'):'—'}</td>
@@ -9777,7 +9985,7 @@ function renderRates(){
       const marg=sell-opexOn-fuelOn;
       const utilCls=utilization>=.85?'good':utilization>=.7?'':'warn';
       h+=`<tr>
-        <td><b>${v.name}</b> ${v.type==='SERVICE'?'<span class="chip chip-1">DV</span>':'<span class="chip chip-2">KT</span>'}</td>
+        <td><b>${esc(v.name)}</b> ${v.type==='SERVICE'?'<span class="chip chip-1">DV</span>':'<span class="chip chip-2">KT</span>'}</td>
         <td class="r num">${m.days.on}</td>
         <td class="r num">${m.days.total}</td>
         <td class="r num" style="white-space:nowrap"><span style="font-family:var(--font-mono);font-size:11px">${pct(utilization)}</span><div class="bar" style="margin-top:2px;height:3px"><div class="bar-fill ${utilCls}" style="width:${Math.min(100,utilization*100)}%"></div></div></td>
@@ -9836,7 +10044,7 @@ function renderRates(){
       const offR=m.days.off?m.fuelByState.off/m.days.off:0;
       const sbR=m.days.sb?m.fuelByState.sb/m.days.sb:0;
       h+=`<tr>
-        <td><b>${v.name}</b></td>
+        <td><b>${esc(v.name)}</b></td>
         <td class="r num">${m.days.on}</td>
         <td class="r num">${fmt(m.fuelByState.on)}</td>
         <td class="r num"><b>${fmt(onR)}</b></td>
@@ -9872,7 +10080,7 @@ function renderRates(){
         });
         const first=rates.find(r=>r!=null), last=[...rates].reverse().find(r=>r!=null);
         const delta=(first!=null&&last!=null&&first!==last)?((last-first)/first):null;
-        h+=`<tr><td><b>${v.name}</b> ${v.type==='SERVICE'?'<span class="chip chip-1">DV</span>':'<span class="chip chip-2">KT</span>'}</td>`+
+        h+=`<tr><td><b>${esc(v.name)}</b> ${v.type==='SERVICE'?'<span class="chip chip-1">DV</span>':'<span class="chip chip-2">KT</span>'}</td>`+
           rates.map(r=>`<td class="r num">${r==null?'<span style="color:var(--muted)">—</span>':fmt(r)}</td>`).join('')+
           `<td class="r num" style="color:${delta==null?'var(--muted)':delta>=0?'var(--good)':'var(--bad)'}">${delta==null?'—':(delta>=0?'+':'')+pct(delta)}</td></tr>`;
       });
@@ -9892,7 +10100,7 @@ function renderRates(){
         });
         const first=rates.find(r=>r!=null), last=[...rates].reverse().find(r=>r!=null);
         const delta=(first!=null&&last!=null&&first!==last)?((last-first)/first):null;
-        h+=`<tr><td><b>${p.code}</b> · ${p.name} <span class="chip chip-3">O&M</span></td>`+
+        h+=`<tr><td><b>${esc(p.code)}</b> · ${esc(p.name)} <span class="chip chip-3">O&M</span></td>`+
           rates.map(r=>`<td class="r num">${r==null?'<span style="color:var(--muted)">—</span>':fmt(r)}</td>`).join('')+
           `<td class="r num" style="color:${delta==null?'var(--muted)':delta>=0?'var(--good)':'var(--bad)'}">${delta==null?'—':(delta>=0?'+':'')+pct(delta)}</td></tr>`;
       });
@@ -9931,8 +10139,8 @@ function renderRates(){
       const margPct=rev?((rev-cost)/rev):0;
       totMD+=md;totRev+=rev;totCost+=cost;totExp+=exp;totWD+=wd;
       h+=`<tr>
-        <td class="mono">${p.code}</td>
-        <td><b>${p.name}</b><br><span style="color:var(--muted);font-size:11px">${p.client||'—'}</span></td>
+        <td class="mono">${esc(p.code)}</td>
+        <td><b>${esc(p.name)}</b><br><span style="color:var(--muted);font-size:11px">${esc(p.client) || '—'}</span></td>
         <td class="r num">${exp}</td>
         <td class="r num">${wd}</td>
         <td class="r num"><b>${md.toLocaleString()}</b></td>
@@ -9992,7 +10200,7 @@ function renderRates(){
       const rate=off?m.vesselCost/off:0;
       gOff+=off; gCost+=m.vesselCost;
       rows.push(`<tr>
-        <td style="padding-left:18px"><b>${v.name}</b> <span class="chip chip-1">DV</span></td>
+        <td style="padding-left:18px"><b>${esc(v.name)}</b> <span class="chip chip-1">DV</span></td>
         <td class="r num">${fmt(m.vesselCost)}</td>
         <td class="r num">${fmt(m.vesselCost)}</td>
         <td class="r num" style="color:var(--muted)">—</td>
@@ -10035,7 +10243,7 @@ function renderRates(){
       const rate=off?totC/off:0;
       gOff+=off; gVesC+=m.vesselCost; gTechC+=m.techCost;
       rows.push(`<tr>
-        <td style="padding-left:18px"><b>${v.name}</b> <span class="chip chip-2">KT</span></td>
+        <td style="padding-left:18px"><b>${esc(v.name)}</b> <span class="chip chip-2">KT</span></td>
         <td class="r num">${fmt(totC)}</td>
         <td class="r num">${fmt(m.vesselCost)}</td>
         <td class="r num">${fmt(m.techCost)}</td>
@@ -10138,7 +10346,11 @@ async function exportJSON(){
   a.download=`seahorse_backup_${todayISO()}.json`;
   a.click();
   URL.revokeObjectURL(url);
-  toast('Đã xuất JSON');
+  // Track last backup
+  cfg.lastBackup=new Date().toISOString();
+  setAuthConfig(cfg);
+  try{ logAuditEvent('export_backup',{filename:`seahorse_backup_${todayISO()}.json`}); }catch(e){}
+  toast('Đã xuất JSON · Backup ghi nhận');
 }
 function importJSON(ev){
   const f=ev.target.files[0];if(!f)return;
@@ -10359,7 +10571,7 @@ function openExcelImport(){
       <div class="field">
         <label>Loại bút toán cần import *</label>
         <select id="xls-import-type">
-          ${Object.entries(EXCEL_TEMPLATES).map(([k,v])=>`<option value="${k}">${v.name}</option>`).join('')}
+          ${Object.entries(EXCEL_TEMPLATES).map(([k,v])=>`<option value="${k}">${esc(v.name)}</option>`).join('')}
         </select>
       </div>
     </div>
