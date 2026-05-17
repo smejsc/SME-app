@@ -552,7 +552,7 @@ body{min-height:100vh;background-image:radial-gradient(circle at 20% 0%,rgba(184
       <button class="nav-sub-item" data-page="qn_expense"><span class="sub-dot"></span>Quản lý chung</button>
     </div>
   </div>
-  <button class="nav-item" data-page="banking"><span class="num">⛌</span>Ngân hàng</button>
+  <button class="nav-item" data-page="banking"><span class="num">05</span>Ngân hàng</button>
   <button class="nav-item" data-page="operations"><span class="num">06</span>Vận hành tàu</button>
   <button class="nav-item" data-page="approval" id="nav-approval"><span class="num">07</span>Phê duyệt</button>
   <button class="nav-item" data-page="inventory"><span class="num">08</span>Kho vật tư</button>
@@ -1775,7 +1775,7 @@ body{min-height:100vh;background-image:radial-gradient(circle at 20% 0%,rgba(184
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='1.32.2';            // bumped on each release
+const APP_VERSION='1.34.0';            // bumped on each release
 
 /* ============================================================
    PWA — Service Worker registration + Install prompt
@@ -3771,6 +3771,9 @@ const DEFAULT_EXPENSE_TYPES = [
   {id:'ET-UTIL',          code:'UTIL',          group:'OVERHEAD', label:'Điện nước, internet',     icon:'💡', isPO:false},
   {id:'ET-RENT',          code:'RENT',          group:'OVERHEAD', label:'Thuê (VP, xe...)',        icon:'🏢', isPO:false},
   {id:'ET-ENTERTAIN',     code:'ENTERTAIN',     group:'OVERHEAD', label:'Tiếp khách',              icon:'🍽', isPO:false},
+  // TÀI CHÍNH (auto từ Banking)
+  {id:'ET-INTEREST',      code:'INTEREST',      group:'FINANCE',  label:'Lãi vay ngân hàng',       icon:'💸', isPO:false, hint:'Auto tạo khi NV tích "đã trả" kỳ vay (Tab Ngân hàng)'},
+  {id:'ET-BANK_FEE',      code:'BANK_FEE',      group:'FINANCE',  label:'Phí ngân hàng',           icon:'🏦', isPO:false, hint:'Phí prepay, phí chuyển tiền, phí khác từ NH'},
   // KHÁC
   {id:'ET-OTHER',         code:'OTHER',         group:'OTHER',    label:'Chi phí khác',            icon:'📝', isPO:false},
   // BOD-ONLY (nội bộ — chỉ BOD/Admin xem)
@@ -3860,6 +3863,7 @@ const EXPENSE_GROUPS = {
   HR:       {label:'👥 Nhân sự',             color:'#4a6b2c'},
   TRAVEL:   {label:'✈ Di chuyển',           color:'#5a4a8c'},
   OVERHEAD: {label:'🏢 Quản lý chung',       color:'#c5876d'},
+  FINANCE:  {label:'💸 Tài chính',           color:'#5a4a8c'},
   OTHER:    {label:'🔧 Khác',               color:'#6b6b6b'},
   BOD:      {label:'🔒 Nội bộ BOD',         color:'#8b3a2a'}
 };
@@ -8818,6 +8822,14 @@ function renderBanking(){
       totalInterestThisMonth += toDisplay(p.interest||0, ccy);
     });
   });
+  // v1.34: Total interest + bank fees đã ghi nhận thực tế (từ AP linked) năm nay
+  const thisYear = todayISO().slice(0,4);
+  let actualInterestYTD = 0, actualBankFeeYTD = 0;
+  (S.payables||[]).forEach(ap=>{
+    if(!(ap.issueDate||'').startsWith(thisYear)) return;
+    if(ap.autoSource==='loan_interest') actualInterestYTD += toDisplay(+ap.amountNet||+ap.amount||0, ap.ccy||'VND');
+    else if(ap.autoSource==='loan_prepay_fee') actualBankFeeYTD += toDisplay(+ap.amountNet||+ap.amount||0, ap.ccy||'VND');
+  });
 
   const kpi = document.getElementById('bank-kpi');
   if(kpi){
@@ -8836,6 +8848,11 @@ function renderBanking(){
         <div class="kpi-label">Lãi phải trả tháng này</div>
         <div class="kpi-value" style="color:var(--bad)">${fmt(totalInterestThisMonth)}</div>
         <div class="kpi-sub">Tổng lãi đáo hạn trong ${todayISO().slice(0,7)}</div>
+      </div>
+      <div class="kpi">
+        <div class="kpi-label">💸 Lãi vay đã ghi CP (${thisYear})</div>
+        <div class="kpi-value" style="color:var(--accent)">${fmt(actualInterestYTD)}</div>
+        <div class="kpi-sub">+ Phí NH: ${fmt(actualBankFeeYTD)} · auto từ schedule</div>
       </div>`;
   }
 
@@ -8921,11 +8938,15 @@ function renderBanking(){
                   <div style="font-size:11px;color:var(--muted);margin-top:2px">
                     ${esc(l.startDate||'?')} → ${esc(l.endDate||'?')} ·
                     Lãi suất: <b>${l.interestRate||0}%/năm</b> ·
-                    ${l.termMonths||0} tháng
+                    ${l.termMonths||0} tháng ·
+                    Trả ${({1:'tháng',3:'quý',6:'nửa năm',12:'năm'})[+l.paymentFrequency||1]||'tháng'}
+                    ${(+l.gracePeriodMonths>0)?` · <span style="color:var(--accent)">Ân hạn ${l.gracePeriodMonths}T</span>`:''}
+                    ${(l.prepayments||[]).length>0?` · <span style="color:var(--accent)">${l.prepayments.length} lần trả trước</span>`:''}
                   </div>
                 </div>
                 <div style="display:flex;gap:4px">
                   <button class="icon-btn" onclick="viewLoanSchedule('${esc(l.id)}')" title="Lịch trả nợ">📅</button>
+                  ${(l.loanType==='medium'||l.loanType==='long') && l.status!=='closed' ? `<button class="icon-btn" onclick="loanAddPrepay('${esc(l.id)}')" title="Trả trước hạn" style="color:var(--accent)">💵</button>` : ''}
                   <button class="icon-btn" onclick="editLoan('${esc(l.id)}')" title="Sửa">✎</button>
                   <button class="icon-btn danger" onclick="deleteLoan('${esc(l.id)}')" title="Xóa">✕</button>
                 </div>
@@ -8972,75 +8993,260 @@ function loanRemainingPrincipal(loan){
 
 /* Generate payment schedule for a loan
    methods: equal_principal (gốc đều), equal_total (niên kim - lãi gốc bằng nhau), bullet (gốc cuối kỳ) */
+/* Generate payment schedule for a loan
+   methods: equal_principal (gốc đều), equal_total (niên kim), bullet (gốc cuối kỳ)
+   v1.33 added:
+     - gracePeriodMonths: N tháng đầu CHỈ trả lãi (gốc=0), giảm dần cho các kỳ sau
+     - paymentFrequency: 1=tháng, 3=quý, 6=nửa năm, 12=năm
+*/
 function generateLoanSchedule(loan){
   const P = +loan.principal||0;
-  const r = (+loan.interestRate||0)/100/12;  // monthly rate
-  const n = +loan.termMonths||1;
+  const annualRate = (+loan.interestRate||0)/100;
+  const termMonths = +loan.termMonths||1;
   const start = loan.startDate;
-  if(!P||!n||!start) return [];
-  const schedule=[];
+  if(!P||!termMonths||!start) return [];
+  const freq = +loan.paymentFrequency || 1;  // months per period (1/3/6/12)
+  const grace = +loan.gracePeriodMonths || 0;  // số tháng ân hạn (chỉ trả lãi)
+  const r = annualRate * freq / 12;  // rate per period
+
   const startDate = new Date(start);
+  const schedule=[];
+
+  // Calculate total periods: grace + payment periods
+  // - Grace periods: 1 entry mỗi `freq` months trong thời gian ân hạn
+  // - Payment periods: remainingMonths / freq
+  const gracePeriods = Math.floor(grace / freq);  // số kỳ ân hạn (chỉ lãi)
+  const remainingMonths = Math.max(termMonths - grace, freq);
+  const paymentPeriods = Math.ceil(remainingMonths / freq);  // số kỳ trả gốc+lãi
+  const totalPeriods = gracePeriods + paymentPeriods;
+
+  let balance = P;
+  let periodIdx = 1;
+
+  // PHASE 1: GRACE PERIOD — chỉ trả lãi, gốc = 0
+  for(let i=0;i<gracePeriods;i++){
+    const due = new Date(startDate);
+    due.setMonth(due.getMonth() + (i+1)*freq);
+    const interest = balance * r;
+    schedule.push({
+      period: periodIdx++,
+      dueDate: due.toISOString().slice(0,10),
+      principal: 0,
+      interest: Math.round(interest),
+      total: Math.round(interest),
+      isGrace: true,
+      paid: false,
+      paidDate: null
+    });
+  }
+
+  // PHASE 2: REGULAR PAYMENTS
+  const monthsOffset = gracePeriods * freq;
 
   if(loan.repayMethod==='bullet'){
-    // Trả lãi hằng tháng, gốc trả 1 lần cuối kỳ
-    let balance = P;
-    for(let i=1;i<=n;i++){
+    // Trả lãi mỗi kỳ, gốc trả cuối kỳ cuối cùng
+    for(let i=0;i<paymentPeriods;i++){
       const due = new Date(startDate);
-      due.setMonth(due.getMonth()+i);
+      due.setMonth(due.getMonth() + monthsOffset + (i+1)*freq);
       const interest = balance * r;
-      const principal = (i===n) ? balance : 0;
+      const principal = (i===paymentPeriods-1) ? balance : 0;
       schedule.push({
-        period:i,
+        period: periodIdx++,
         dueDate: due.toISOString().slice(0,10),
         principal: Math.round(principal),
         interest: Math.round(interest),
         total: Math.round(principal+interest),
-        paid:false,
-        paidDate:null
+        isGrace: false,
+        paid: false,
+        paidDate: null
       });
       balance -= principal;
     }
   } else if(loan.repayMethod==='equal_total'){
-    // Niên kim: tổng trả mỗi kỳ bằng nhau
-    const M = r===0 ? P/n : P*r*Math.pow(1+r,n)/(Math.pow(1+r,n)-1);
-    let balance = P;
-    for(let i=1;i<=n;i++){
+    // Niên kim trên số kỳ trả thực tế
+    const n = paymentPeriods;
+    const M = r===0 ? balance/n : balance*r*Math.pow(1+r,n)/(Math.pow(1+r,n)-1);
+    for(let i=0;i<n;i++){
       const due = new Date(startDate);
-      due.setMonth(due.getMonth()+i);
+      due.setMonth(due.getMonth() + monthsOffset + (i+1)*freq);
       const interest = balance * r;
       const principal = M - interest;
       schedule.push({
-        period:i,
+        period: periodIdx++,
         dueDate: due.toISOString().slice(0,10),
         principal: Math.round(principal),
         interest: Math.round(interest),
         total: Math.round(M),
-        paid:false,
-        paidDate:null
+        isGrace: false,
+        paid: false,
+        paidDate: null
       });
       balance -= principal;
     }
   } else {
-    // equal_principal: gốc bằng nhau, lãi giảm dần (default)
-    const principalEach = P/n;
-    let balance = P;
-    for(let i=1;i<=n;i++){
+    // equal_principal: gốc đều
+    const principalEach = balance / paymentPeriods;
+    for(let i=0;i<paymentPeriods;i++){
       const due = new Date(startDate);
-      due.setMonth(due.getMonth()+i);
+      due.setMonth(due.getMonth() + monthsOffset + (i+1)*freq);
       const interest = balance * r;
       schedule.push({
-        period:i,
+        period: periodIdx++,
         dueDate: due.toISOString().slice(0,10),
         principal: Math.round(principalEach),
         interest: Math.round(interest),
         total: Math.round(principalEach+interest),
-        paid:false,
-        paidDate:null
+        isGrace: false,
+        paid: false,
+        paidDate: null
       });
       balance -= principalEach;
     }
   }
+
   return schedule;
+}
+
+/* ===== PREPAY (Trả trước hạn) v1.33 =====
+   Mode 'reduce_term': prepay → giảm số kỳ, mỗi kỳ giữ nguyên gốc
+   Mode 'reduce_payment': prepay → giữ số kỳ, mỗi kỳ giảm gốc+lãi (recalc)
+*/
+function loanApplyPrepay(loan, prepayId){
+  // Rebuild schedule from scratch: original + apply all prepayments in order
+  // Use original principal & terms, then walk through and apply prepays at their dates
+  if(!loan) return;
+  const prepayments = (loan.prepayments||[]).slice().sort((a,b)=>(a.date||'').localeCompare(b.date||''));
+  if(prepayments.length===0){
+    loan.paymentSchedule = generateLoanSchedule(loan);
+    return;
+  }
+  // Start with fresh schedule, then apply each prepay
+  let schedule = generateLoanSchedule(loan);
+  const freq = +loan.paymentFrequency||1;
+  const r = (+loan.interestRate||0)/100 * freq / 12;
+
+  prepayments.forEach(pp => {
+    // Find next unpaid period AFTER pp.date
+    const cutoffIdx = schedule.findIndex(p => !p.paid && (p.dueDate||'') >= pp.date);
+    if(cutoffIdx < 0) return;  // prepay after last period — ignore
+    // Compute remaining balance BEFORE the cutoff period
+    let balance = +loan.principal||0;
+    for(let i=0;i<cutoffIdx;i++){
+      if(!schedule[i].isGrace) balance -= schedule[i].principal;
+    }
+    // Subtract any prior prepays already applied
+    // (since we rebuild, this iteration applies them one by one in order)
+    balance -= (+pp.amount||0);
+    if(balance <= 0){
+      // Fully paid off — remove future periods, add a final prepay marker
+      const removedCount = schedule.length - cutoffIdx;
+      schedule = schedule.slice(0, cutoffIdx);
+      // Add 1 final entry recording prepay
+      const dt = new Date(pp.date);
+      schedule.push({
+        period: schedule.length+1,
+        dueDate: pp.date,
+        principal: Math.round(balance + (+pp.amount||0)),
+        interest: 0,
+        total: Math.round(balance + (+pp.amount||0)),
+        isGrace: false,
+        isPrepayPayoff: true,
+        prepayId: pp.id,
+        paid: true,
+        paidDate: pp.date
+      });
+      loan.status='closed';
+      return;
+    }
+    // Recalc future periods from cutoff onwards
+    const futurePeriods = schedule.slice(cutoffIdx).filter(p=>!p.isPrepayPayoff);
+    const nRemaining = futurePeriods.length;
+    if(pp.mode === 'reduce_payment'){
+      // Giữ số kỳ, giảm gốc+lãi
+      if(loan.repayMethod==='equal_total'){
+        const M = r===0 ? balance/nRemaining : balance*r*Math.pow(1+r,nRemaining)/(Math.pow(1+r,nRemaining)-1);
+        let bal = balance;
+        for(let i=0;i<nRemaining;i++){
+          const sp = schedule[cutoffIdx+i];
+          if(sp.paid) continue;  // skip already-paid
+          const interest = bal * r;
+          const principal = M - interest;
+          sp.principal = Math.round(principal);
+          sp.interest = Math.round(interest);
+          sp.total = Math.round(M);
+          bal -= principal;
+        }
+      } else if(loan.repayMethod==='bullet'){
+        // Bullet: lãi giảm theo balance, gốc cuối cùng
+        let bal = balance;
+        for(let i=0;i<nRemaining;i++){
+          const sp = schedule[cutoffIdx+i];
+          if(sp.paid) continue;
+          const interest = bal * r;
+          const principal = (i===nRemaining-1) ? bal : 0;
+          sp.principal = Math.round(principal);
+          sp.interest = Math.round(interest);
+          sp.total = Math.round(principal+interest);
+          bal -= principal;
+        }
+      } else {
+        // equal_principal: gốc đều mới
+        const newPrincipal = balance / nRemaining;
+        let bal = balance;
+        for(let i=0;i<nRemaining;i++){
+          const sp = schedule[cutoffIdx+i];
+          if(sp.paid) continue;
+          const interest = bal * r;
+          sp.principal = Math.round(newPrincipal);
+          sp.interest = Math.round(interest);
+          sp.total = Math.round(newPrincipal+interest);
+          bal -= newPrincipal;
+        }
+      }
+    } else {
+      // 'reduce_term' (mặc định): giữ số tiền mỗi kỳ, giảm số kỳ
+      // Tính số kỳ mới = ceil(balance / principalEach) (cho equal_principal)
+      // Hoặc tính lại bằng cách trừ dần từ cutoff
+      if(loan.repayMethod==='bullet'){
+        // Bullet: vẫn 1 lần cuối, nhưng balance giảm
+        let bal = balance;
+        for(let i=0;i<nRemaining;i++){
+          const sp = schedule[cutoffIdx+i];
+          if(sp.paid) continue;
+          const interest = bal * r;
+          const principal = (i===nRemaining-1) ? bal : 0;
+          sp.principal = Math.round(principal);
+          sp.interest = Math.round(interest);
+          sp.total = Math.round(principal+interest);
+          bal -= principal;
+        }
+      } else {
+        // equal_principal hoặc equal_total: số kỳ giảm
+        const oldPrincipalEach = futurePeriods[0] ? (+futurePeriods[0].principal||0) : (balance/nRemaining);
+        if(oldPrincipalEach <= 0){return;}
+        const newNPeriods = Math.ceil(balance / oldPrincipalEach);
+        // Cắt bớt kỳ
+        const newFuture = [];
+        let bal = balance;
+        for(let i=0;i<newNPeriods && bal > 0.5;i++){
+          const interest = bal * r;
+          const principal = Math.min(oldPrincipalEach, bal);
+          const sp = futurePeriods[i] || {period: schedule.length+i+1, dueDate: futurePeriods[Math.min(i,futurePeriods.length-1)]?.dueDate, isGrace:false, paid:false, paidDate:null};
+          sp.principal = Math.round(principal);
+          sp.interest = Math.round(interest);
+          sp.total = Math.round(principal+interest);
+          newFuture.push(sp);
+          bal -= principal;
+        }
+        // Replace future periods
+        schedule = schedule.slice(0, cutoffIdx).concat(newFuture);
+        // Renumber
+        schedule.forEach((p,idx)=>p.period=idx+1);
+      }
+    }
+  });
+
+  loan.paymentSchedule = schedule;
 }
 
 /* ===== BANK ACCOUNT CRUD ===== */
@@ -9302,13 +9508,27 @@ function _loanModal(l){
           <option value="bullet" ${l.repayMethod==='bullet'?'selected':''}>Bullet — chỉ trả lãi hằng tháng, gốc cuối kỳ</option>
         </select>
       </div>
+      <div class="field">
+        <label>Tần suất thanh toán *</label>
+        <select id="ln-freq">
+          <option value="1" ${(+l.paymentFrequency===1||!l.paymentFrequency)?'selected':''}>Hằng tháng</option>
+          <option value="3" ${+l.paymentFrequency===3?'selected':''}>Hằng quý (3 tháng)</option>
+          <option value="6" ${+l.paymentFrequency===6?'selected':''}>Nửa năm (6 tháng)</option>
+          <option value="12" ${+l.paymentFrequency===12?'selected':''}>Hằng năm (12 tháng)</option>
+        </select>
+      </div>
+      <div class="field">
+        <label>Ân hạn gốc (tháng)</label>
+        <input type="number" id="ln-grace" value="${l.gracePeriodMonths||0}" step="1" min="0" placeholder="0">
+        <div style="font-size:10px;color:var(--muted);font-style:italic;margin-top:2px">N tháng đầu CHỈ trả lãi, không trả gốc. 0 = không ân hạn.</div>
+      </div>
       <div class="field" style="grid-column:1/3">
         <label>Ghi chú</label>
         <input type="text" id="ln-note" value="${esc(l.note||'')}" placeholder="VD: Tài sản đảm bảo: tàu SH-Aries...">
       </div>
       <div style="grid-column:1/3;font-size:11px;color:var(--muted);font-style:italic;background:rgba(184,71,46,.05);padding:6px 10px">
-        ℹ Khi lưu, lịch trả nợ sẽ được tự sinh theo phương thức + lãi suất + kỳ hạn.
-        ${isEdit?'Sửa lại các thông số → schedule cũ sẽ bị thay thế (trạng thái paid được giữ).':''}
+        ℹ Khi lưu, lịch trả nợ sẽ được tự sinh theo phương thức + lãi suất + kỳ hạn + ân hạn + tần suất.
+        ${isEdit?'Sửa lại các thông số → schedule cũ sẽ bị thay thế (trạng thái paid được giữ, prepayments được apply lại).':''}
       </div>
       <div id="ln-err" style="grid-column:1/3;color:var(--bad);font-size:12px"></div>
     </div>`;
@@ -9329,12 +9549,23 @@ function _saveLoan(id){
   const start=document.getElementById('ln-start').value;
   const end=document.getElementById('ln-end').value;
   const method=document.getElementById('ln-method').value;
+  const paymentFrequency=+document.getElementById('ln-freq').value||1;
+  let gracePeriodMonths=parseInt(document.getElementById('ln-grace').value,10)||0;
   const note=document.getElementById('ln-note').value.trim();
   if(!bank){err.textContent='Nhập tên NH';return;}
   if(!(principal>0)){err.textContent='Số tiền vay phải > 0';return;}
   if(isNaN(rate)||rate<0){err.textContent='Lãi suất không hợp lệ';return;}
   if(!(term>0)){err.textContent='Số kỳ phải > 0';return;}
   if(!start){err.textContent='Nhập ngày giải ngân';return;}
+  // v1.33: Ân hạn chỉ áp dụng cho vay trung-dài hạn
+  if(type==='short' && gracePeriodMonths>0){
+    err.textContent='Vay ngắn hạn không hỗ trợ ân hạn gốc. Đổi loại vay sang Trung/Dài hạn hoặc đặt ân hạn = 0.';
+    return;
+  }
+  if(gracePeriodMonths >= term){
+    err.textContent='Ân hạn không thể >= số kỳ tổng. Vd: vay 12T thì ân hạn max 11T.';
+    return;
+  }
   // Auto-compute endDate if not provided
   const finalEnd = end || (()=>{ const d=new Date(start); d.setMonth(d.getMonth()+term); return d.toISOString().slice(0,10); })();
   if(!S.loans) S.loans=[];
@@ -9345,9 +9576,9 @@ function _saveLoan(id){
     // Preserve paid status from old schedule
     const oldPaid={};
     (loan.paymentSchedule||[]).forEach(p=>{if(p.paid)oldPaid[p.period]=p;});
-    Object.assign(loan,{bankName:bank,loanType:type,contractNo:contract,principal,ccy,interestRate:rate,termMonths:term,startDate:start,endDate:finalEnd,repayMethod:method,note,updatedAt:new Date().toISOString()});
-    loan.paymentSchedule=generateLoanSchedule(loan);
-    // Re-apply paid flags
+    Object.assign(loan,{bankName:bank,loanType:type,contractNo:contract,principal,ccy,interestRate:rate,termMonths:term,startDate:start,endDate:finalEnd,repayMethod:method,paymentFrequency,gracePeriodMonths,note,updatedAt:new Date().toISOString()});
+    // Regenerate schedule + re-apply prepays + paid flags
+    loanApplyPrepay(loan);  // builds schedule from base + applies all prepayments
     loan.paymentSchedule.forEach(p=>{if(oldPaid[p.period]){p.paid=true; p.paidDate=oldPaid[p.period].paidDate;}});
   } else {
     loan={
@@ -9355,6 +9586,8 @@ function _saveLoan(id){
       bankName:bank, loanType:type, contractNo:contract,
       principal, ccy, interestRate:rate, termMonths:term,
       startDate:start, endDate:finalEnd, repayMethod:method,
+      paymentFrequency, gracePeriodMonths,
+      prepayments:[],
       note, status:'active',
       createdAt:new Date().toISOString(), createdBy:actorName()
     };
@@ -9370,10 +9603,20 @@ function deleteLoan(id){
   if(!isAdmin()){toast('Chỉ admin','bad');return;}
   const l=(S.loans||[]).find(x=>x.id===id);
   if(!l)return;
-  if(!confirm(`Xóa món vay "${l.contractNo||l.bankName}"?\nLịch trả nợ và các kỳ đã đánh dấu trả cũng sẽ bị xóa.`))return;
+  // v1.34: Count linked AP records (interest + prepay fee)
+  const linkedAPs=(S.payables||[]).filter(p=>p.linkedLoanId===id);
+  const linkedMsg=linkedAPs.length>0
+    ? `\n⚠ Có ${linkedAPs.length} bút toán AP (lãi vay + phí NH) đã tạo tự động từ vay này — cũng sẽ bị xóa.`
+    : '';
+  if(!confirm(`Xóa món vay "${l.contractNo||l.bankName}"?\nLịch trả nợ và các kỳ đã đánh dấu trả cũng sẽ bị xóa.${linkedMsg}`))return;
   S.loans=S.loans.filter(x=>x.id!==id);
+  // Remove linked APs
+  if(linkedAPs.length>0){
+    S.payables=(S.payables||[]).filter(p=>p.linkedLoanId!==id);
+  }
+  try{logAuditEvent('loan_delete',{loanId:id,linkedApsRemoved:linkedAPs.length});}catch(e){}
   saveState();
-  toast('Đã xóa món vay');
+  toast(`Đã xóa món vay${linkedAPs.length>0?` + ${linkedAPs.length} AP liên kết`:''}`);
   renderBanking();
 }
 
@@ -9385,13 +9628,45 @@ function viewLoanSchedule(id){
   const totalPrincipal=sched.reduce((s,p)=>s+(+p.principal||0),0);
   const totalInterest=sched.reduce((s,p)=>s+(+p.interest||0),0);
   const paidCount=sched.filter(p=>p.paid).length;
+  const isLongTerm = l.loanType==='medium' || l.loanType==='long';
+  const prepays = (l.prepayments||[]).slice().sort((a,b)=>(a.date||'').localeCompare(b.date||''));
+  const totalPrepay = prepays.reduce((s,p)=>s+(+p.amount||0),0);
+  const freqLabel = {1:'Tháng',3:'Quý',6:'Nửa năm',12:'Năm'}[+l.paymentFrequency||1]||'Tháng';
+
   const body=`
     <div style="font-size:12px">
-      <div style="margin-bottom:12px;padding:8px 12px;background:rgba(184,71,46,.05);font-size:11px">
-        <b>${esc(l.bankName)}</b> · ${esc(l.contractNo||'(không số HĐ)')} · ${l.interestRate}%/năm · ${l.termMonths} kỳ
-        <br>Đã trả: <b style="color:var(--good)">${paidCount}/${sched.length}</b> kỳ
+      <div style="margin-bottom:12px;padding:10px 14px;background:rgba(184,71,46,.05);font-size:11px;border-left:3px solid var(--accent)">
+        <b>${esc(l.bankName)}</b> · ${esc(l.contractNo||'(không số HĐ)')} · ${l.interestRate}%/năm
+        <br>Kỳ hạn: <b>${l.termMonths}</b> tháng · Trả: <b>${freqLabel}</b>${(+l.gracePeriodMonths>0)?` · Ân hạn gốc: <b style="color:var(--accent)">${l.gracePeriodMonths} tháng</b>`:''}
+        <br>Đã trả: <b style="color:var(--good)">${paidCount}/${sched.length}</b> kỳ${totalPrepay>0?` · Đã trả trước: <b style="color:var(--accent)">${totalPrepay.toLocaleString()} ${esc(l.ccy)}</b>`:''}
       </div>
-      <div style="max-height:400px;overflow-y:auto">
+
+      ${isLongTerm ? `
+      <div style="margin-bottom:14px;padding:10px 14px;background:var(--paper-2);border:1px solid var(--rule)">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+          <b style="font-size:12px">💵 Trả trước hạn (${prepays.length} lần)</b>
+          <button class="btn-sec" onclick="loanAddPrepay('${esc(l.id)}')" style="font-size:11px">+ Trả trước hạn</button>
+        </div>
+        ${prepays.length>0 ? `
+          <table class="table" style="font-size:11px;margin-top:6px">
+            <thead><tr><th>Ngày</th><th class="num">Số tiền</th><th class="num">Phí</th><th>Loại</th><th>Ghi chú</th><th></th></tr></thead>
+            <tbody>
+              ${prepays.map(pp=>`
+                <tr>
+                  <td>${esc(pp.date||'')}</td>
+                  <td class="num" style="font-weight:600;color:var(--accent)">${(+pp.amount||0).toLocaleString()} ${esc(l.ccy)}</td>
+                  <td class="num">${(+pp.fee||0).toLocaleString()}</td>
+                  <td>${pp.mode==='reduce_payment'?'Giữ kỳ, giảm/kỳ':'Rút kỳ, giữ/kỳ'}</td>
+                  <td style="font-size:10px;color:var(--muted)">${esc(pp.note||'')}</td>
+                  <td><button class="icon-btn danger" onclick="loanDeletePrepay('${esc(l.id)}','${esc(pp.id)}')" title="Xóa prepay (schedule sẽ tính lại)">✕</button></td>
+                </tr>`).join('')}
+            </tbody>
+          </table>
+        `:'<div style="font-size:11px;color:var(--muted);font-style:italic">Chưa có lần trả trước hạn nào</div>'}
+      </div>
+      `:''}
+
+      <div style="max-height:380px;overflow-y:auto">
         <table class="table" style="font-size:11px">
           <thead style="position:sticky;top:0;background:var(--paper)">
             <tr>
@@ -9400,25 +9675,36 @@ function viewLoanSchedule(id){
               <th class="num">Gốc</th>
               <th class="num">Lãi</th>
               <th class="num">Tổng</th>
+              <th>Loại</th>
               <th>Trạng thái</th>
               <th></th>
             </tr>
           </thead>
           <tbody>
-            ${sched.map(p=>`
-              <tr style="${p.paid?'opacity:.6':''}">
+            ${sched.map(p=>{
+              const rowStyle = p.paid ? 'opacity:.55' : (p.isGrace ? 'background:rgba(197,135,109,.08)' : (p.isPrepayPayoff ? 'background:rgba(184,71,46,.1);font-weight:600' : ''));
+              const typeChip = p.isPrepayPayoff
+                ? '<span class="chip" style="background:var(--accent);color:#fff;font-size:9px">TT TRƯỚC</span>'
+                : (p.isGrace
+                  ? '<span class="chip chip-warn" style="font-size:9px">ÂN HẠN</span>'
+                  : '<span style="color:var(--muted);font-size:10px">—</span>');
+              return `
+              <tr style="${rowStyle}">
                 <td>${p.period}</td>
                 <td>${esc(p.dueDate)}</td>
                 <td class="num">${(+p.principal||0).toLocaleString()}</td>
                 <td class="num">${(+p.interest||0).toLocaleString()}</td>
                 <td class="num"><b>${(+p.total||0).toLocaleString()}</b></td>
+                <td>${typeChip}</td>
                 <td>${p.paid?'<span class="chip chip-good" style="font-size:9px">ĐÃ TRẢ '+(p.paidDate?esc(p.paidDate):'')+'</span>':'<span class="chip chip-warn" style="font-size:9px">CHƯA</span>'}</td>
                 <td>
-                  ${p.paid
-                    ? `<button class="icon-btn" onclick="_loanUnmarkPaid('${esc(l.id)}',${p.period})" title="Bỏ đánh dấu">↩</button>`
-                    : `<button class="icon-btn" onclick="_loanMarkPaid('${esc(l.id)}',${p.period})" title="Đánh dấu đã trả">✓</button>`}
+                  ${p.isPrepayPayoff ? ''  // Prepay payoff: cannot toggle, handled via prepay delete
+                    : (p.paid
+                      ? `<button class="icon-btn" onclick="_loanUnmarkPaid('${esc(l.id)}',${p.period})" title="Bỏ đánh dấu">↩</button>`
+                      : `<button class="icon-btn" onclick="_loanMarkPaid('${esc(l.id)}',${p.period})" title="Đánh dấu đã trả">✓</button>`)}
                 </td>
-              </tr>`).join('')}
+              </tr>`;
+            }).join('')}
           </tbody>
           <tfoot>
             <tr style="font-weight:700;border-top:2px solid var(--rule);background:rgba(184,71,46,.05)">
@@ -9426,7 +9712,7 @@ function viewLoanSchedule(id){
               <td class="num">${totalPrincipal.toLocaleString()}</td>
               <td class="num">${totalInterest.toLocaleString()}</td>
               <td class="num">${(totalPrincipal+totalInterest).toLocaleString()} ${esc(l.ccy)}</td>
-              <td colspan="2"></td>
+              <td colspan="3"></td>
             </tr>
           </tfoot>
         </table>
@@ -9434,6 +9720,132 @@ function viewLoanSchedule(id){
     </div>`;
   openModal(`📅 Lịch trả nợ · ${esc(l.bankName)}`, body,
     '<button class="btn-sec" onclick="closeModal()">Đóng</button>');
+}
+
+/* ===== PREPAY CRUD ===== */
+function loanAddPrepay(loanId){
+  if(!isAdmin()){toast('Chỉ admin','bad');return;}
+  const l=(S.loans||[]).find(x=>x.id===loanId);
+  if(!l){toast('Không tìm thấy','bad');return;}
+  if(l.loanType==='short'){toast('Trả trước hạn chỉ áp dụng vay trung-dài hạn','bad');return;}
+  const remaining = loanRemainingPrincipal(l);
+  const body=`
+    <div style="font-size:13px;display:grid;grid-template-columns:1fr 1fr;gap:10px">
+      <div style="grid-column:1/3;padding:8px 12px;background:rgba(184,71,46,.05);font-size:11px;border-left:3px solid var(--accent)">
+        <b>${esc(l.bankName)}</b> · ${esc(l.contractNo||'')} · Dư nợ còn: <b style="color:var(--accent)">${remaining.toLocaleString()} ${esc(l.ccy)}</b>
+      </div>
+      <div class="field">
+        <label>Ngày trả trước *</label>
+        <input type="date" id="pp-date" value="${todayISO()}">
+      </div>
+      <div class="field">
+        <label>Số tiền trả trước *</label>
+        <input type="number" id="pp-amt" step="any" placeholder="0" max="${remaining}">
+        <div style="font-size:10px;color:var(--muted);font-style:italic;margin-top:2px">Tối đa ${remaining.toLocaleString()} (= dư nợ).</div>
+      </div>
+      <div class="field">
+        <label>Phí trả trước hạn</label>
+        <input type="number" id="pp-fee" step="any" value="0" placeholder="0">
+        <div style="font-size:10px;color:var(--muted);font-style:italic;margin-top:2px">Phí do NH tính. Nếu miễn phí → 0.</div>
+      </div>
+      <div class="field">
+        <label>Phương thức xử lý *</label>
+        <select id="pp-mode">
+          <option value="reduce_term">Rút ngắn kỳ hạn (giữ số tiền mỗi kỳ)</option>
+          <option value="reduce_payment">Giữ số kỳ (giảm gốc+lãi mỗi kỳ)</option>
+        </select>
+        <div style="font-size:10px;color:var(--muted);font-style:italic;margin-top:2px">Rút ngắn = tất toán sớm hơn. Giữ kỳ = áp lực dòng tiền hằng kỳ giảm.</div>
+      </div>
+      <div class="field" style="grid-column:1/3">
+        <label>Ghi chú</label>
+        <input type="text" id="pp-note" placeholder="VD: Bán tàu, có nguồn dư...">
+      </div>
+      <div id="pp-err" style="grid-column:1/3;color:var(--bad);font-size:12px"></div>
+    </div>`;
+  openModal('💵 Trả trước hạn — '+esc(l.bankName), body,
+    `<button class="btn-sec" onclick="closeModal()">Hủy</button>
+     <button class="btn-primary" onclick="_loanDoPrepay('${esc(loanId)}')">Ghi nhận</button>`);
+}
+
+function _loanDoPrepay(loanId){
+  const err=document.getElementById('pp-err');
+  err.textContent='';
+  const l=(S.loans||[]).find(x=>x.id===loanId);
+  if(!l)return;
+  const date=document.getElementById('pp-date').value;
+  const amount=+document.getElementById('pp-amt').value;
+  const fee=+document.getElementById('pp-fee').value||0;
+  const mode=document.getElementById('pp-mode').value;
+  const note=document.getElementById('pp-note').value.trim();
+  if(!date){err.textContent='Nhập ngày';return;}
+  if(!(amount>0)){err.textContent='Số tiền phải > 0';return;}
+  const remaining = loanRemainingPrincipal(l);
+  if(amount > remaining + 1){err.textContent=`Vượt dư nợ (${remaining.toLocaleString()})`;return;}
+  // Add prepayment
+  if(!l.prepayments) l.prepayments=[];
+  l.prepayments.push({
+    id:'PP-'+uid().slice(-6),
+    date, amount, fee, mode, note,
+    addedBy:actorName(), addedAt:new Date().toISOString()
+  });
+  // Recalc schedule
+  const oldPaid={};
+  (l.paymentSchedule||[]).forEach(p=>{if(p.paid && !p.isPrepayPayoff)oldPaid[p.period]=p;});
+  loanApplyPrepay(l);
+  // Restore paid flags (only for periods that still exist)
+  l.paymentSchedule.forEach(p=>{
+    if(!p.isPrepayPayoff && oldPaid[p.period]){
+      p.paid=true; p.paidDate=oldPaid[p.period].paidDate;
+    }
+  });
+  // Close loan if all paid (loanApplyPrepay handles this for full payoff)
+  if((l.paymentSchedule||[]).every(x=>x.paid)) l.status='closed';
+  // v1.34: Auto-create AP for prepay fee if fee > 0
+  let feeApMsg = '';
+  if(fee > 0){
+    const pp = l.prepayments[l.prepayments.length-1];
+    const apId = _loanCreatePrepayFeeAP(l, pp);
+    if(apId){
+      pp.linkedFeeApId = apId;
+      feeApMsg = ` · 🏦 Auto-tạo AP phí NH ${fee.toLocaleString()}`;
+    }
+  }
+  try{logAuditEvent('loan_prepay',{loanId,amount,mode,fee});}catch(e){}
+  saveState();
+  toast(`💵 Đã ghi nhận trả trước ${amount.toLocaleString()} ${l.ccy}${feeApMsg}`);
+  closeModal();
+  setTimeout(()=>viewLoanSchedule(loanId),100);
+  renderBanking();
+}
+
+function loanDeletePrepay(loanId, ppId){
+  if(!isAdmin()){toast('Chỉ admin','bad');return;}
+  const l=(S.loans||[]).find(x=>x.id===loanId);
+  if(!l||!l.prepayments)return;
+  const pp=l.prepayments.find(x=>x.id===ppId);
+  if(!pp)return;
+  if(!confirm(`Xóa lần trả trước ${(+pp.amount||0).toLocaleString()} ${l.ccy} (${pp.date})?\nLịch trả nợ sẽ tính lại như chưa có lần này.${pp.linkedFeeApId?'\nAP phí NH đã tạo cũng sẽ bị xóa.':''}`))return;
+  // v1.34: Remove linked fee AP if any
+  if(pp.linkedFeeApId){
+    const idx = (S.payables||[]).findIndex(x=>x.id===pp.linkedFeeApId);
+    if(idx>=0) S.payables.splice(idx,1);
+  }
+  l.prepayments=l.prepayments.filter(x=>x.id!==ppId);
+  // Recalc schedule
+  const oldPaid={};
+  (l.paymentSchedule||[]).forEach(p=>{if(p.paid && !p.isPrepayPayoff)oldPaid[p.period]=p;});
+  loanApplyPrepay(l);
+  l.paymentSchedule.forEach(p=>{
+    if(!p.isPrepayPayoff && oldPaid[p.period]){p.paid=true; p.paidDate=oldPaid[p.period].paidDate;}
+  });
+  // Update status
+  if((l.paymentSchedule||[]).every(x=>x.paid)){l.status='closed';}
+  else if(l.status==='closed'){l.status='active';}
+  try{logAuditEvent('loan_prepay_delete',{loanId,ppId});}catch(e){}
+  saveState();
+  toast('Đã xóa lần trả trước');
+  setTimeout(()=>viewLoanSchedule(loanId),100);
+  renderBanking();
 }
 function _loanMarkPaid(loanId, period){
   if(!isAdmin()){toast('Chỉ admin','bad');return;}
@@ -9443,10 +9855,21 @@ function _loanMarkPaid(loanId, period){
   if(!p)return;
   p.paid=true;
   p.paidDate=todayISO();
+  // v1.34: AUTO-CREATE AP record for interest (if interest > 0)
+  // (Principal is just debt reduction, not an expense)
+  const interest = +p.interest||0;
+  let apCreated = '';
+  if(interest > 0){
+    const apId = _loanCreateInterestAP(l, p);
+    if(apId){
+      p.linkedApId = apId;
+      apCreated = ` · 💸 Auto-tạo AP lãi vay ${interest.toLocaleString()} ${l.ccy}`;
+    }
+  }
   // Update loan status if all paid
   if((l.paymentSchedule||[]).every(x=>x.paid)) l.status='closed';
   saveState();
-  toast(`Đã đánh dấu trả kỳ ${period}`);
+  toast(`Đã đánh dấu trả kỳ ${period}${apCreated}`);
   viewLoanSchedule(loanId);  // refresh modal
 }
 function _loanUnmarkPaid(loanId, period){
@@ -9457,9 +9880,133 @@ function _loanUnmarkPaid(loanId, period){
   if(!p)return;
   p.paid=false;
   p.paidDate=null;
+  // v1.34: Remove linked AP record (if any)
+  let apRemoved='';
+  if(p.linkedApId){
+    const idx = (S.payables||[]).findIndex(x=>x.id===p.linkedApId);
+    if(idx>=0){
+      S.payables.splice(idx,1);
+      apRemoved = ` · 🗑 Xóa AP lãi vay đã tạo`;
+    }
+    delete p.linkedApId;
+  }
   if(l.status==='closed') l.status='active';
   saveState();
+  toast(`Đã bỏ đánh dấu kỳ ${period}${apRemoved}`);
   viewLoanSchedule(loanId);
+}
+
+/* v1.34: Auto-create AP record for loan interest payment.
+   Returns newly-created AP id (or null if failed). */
+function _loanCreateInterestAP(loan, scheduleEntry){
+  if(!loan || !scheduleEntry) return null;
+  if((+scheduleEntry.interest||0) <= 0) return null;
+  const partner = (loan.bankName||'').trim();
+  if(!partner) return null;
+  // Get or create vendor from bank name
+  const vendor = (typeof getOrCreateVendor==='function') ? getOrCreateVendor(partner) : null;
+  const interest = Math.round(+scheduleEntry.interest||0);
+  const nowISO_ = new Date().toISOString();
+  const me = actorName();
+  const apRecord = {
+    id: uid(),
+    partner,
+    vendorId: vendor ? vendor.id : '',
+    desc: `Lãi vay ${esc(loan.contractNo||loan.id.slice(-6))} · Kỳ ${scheduleEntry.period} (${esc(scheduleEntry.dueDate)})`,
+    invoiceNo: `LOAN-${loan.id.slice(-6)}-K${scheduleEntry.period}`,
+    expenseType: 'INTEREST',
+    isPO: false,
+    isBODOnly: false,
+    costCenterType: 'general',
+    costCenterId: 'general',
+    recipientName: '',
+    costCategory: 'Lãi vay',
+    amountNet: interest,
+    vatPercent: 0,
+    vatAmount: 0,
+    amountGross: interest,
+    amount: interest,
+    ccy: loan.ccy||'VND',
+    segment: 'Tài chính',
+    projectId: null,
+    vesselId: null,
+    departmentId: '',
+    issueDate: scheduleEntry.paidDate || todayISO(),
+    dueDate: scheduleEntry.dueDate || '',
+    dueMonth: '',
+    dueAmount: 0,
+    payments: [{date: scheduleEntry.paidDate || todayISO(), amount: interest, ccy: loan.ccy||'VND', note: 'Thanh toán đồng thời'}],
+    status: 'approved',  // A: auto approved, không cần L1/L2
+    submittedBy: me, submittedAt: nowISO_,
+    approvedL1By: me, approvedL1At: nowISO_,
+    approvedL2By: me, approvedL2At: nowISO_,
+    rejectedBy:'', rejectedAt:'', rejectReason:'', rejectedAtLevel:0,
+    createdBy: me, createdAt: nowISO_,
+    noteHeader: 'Auto từ Ngân hàng (lãi vay)',
+    // Link metadata
+    autoSource: 'loan_interest',
+    linkedLoanId: loan.id,
+    linkedSchedulePeriod: scheduleEntry.period
+  };
+  if(!S.payables) S.payables=[];
+  S.payables.push(apRecord);
+  try{ logAuditEvent('loan_interest_ap_create',{loanId:loan.id, period:scheduleEntry.period, interest}); }catch(e){}
+  return apRecord.id;
+}
+
+/* v1.34: Auto-create AP record for prepay fee */
+function _loanCreatePrepayFeeAP(loan, prepay){
+  if(!loan || !prepay) return null;
+  const fee = +prepay.fee||0;
+  if(fee <= 0) return null;
+  const partner = (loan.bankName||'').trim();
+  if(!partner) return null;
+  const vendor = (typeof getOrCreateVendor==='function') ? getOrCreateVendor(partner) : null;
+  const nowISO_ = new Date().toISOString();
+  const me = actorName();
+  const apRecord = {
+    id: uid(),
+    partner,
+    vendorId: vendor ? vendor.id : '',
+    desc: `Phí trả trước hạn ${esc(loan.contractNo||loan.id.slice(-6))} · ${(+prepay.amount||0).toLocaleString()} ${loan.ccy}`,
+    invoiceNo: `LOAN-${loan.id.slice(-6)}-PP-${prepay.id.slice(-4)}`,
+    expenseType: 'BANK_FEE',
+    isPO: false,
+    isBODOnly: false,
+    costCenterType: 'general',
+    costCenterId: 'general',
+    recipientName: '',
+    costCategory: 'Phí ngân hàng',
+    amountNet: fee,
+    vatPercent: 0,
+    vatAmount: 0,
+    amountGross: fee,
+    amount: fee,
+    ccy: loan.ccy||'VND',
+    segment: 'Tài chính',
+    projectId: null,
+    vesselId: null,
+    departmentId: '',
+    issueDate: prepay.date || todayISO(),
+    dueDate: prepay.date || '',
+    dueMonth: '',
+    dueAmount: 0,
+    payments: [{date: prepay.date || todayISO(), amount: fee, ccy: loan.ccy||'VND', note: 'Đã trả cùng prepay'}],
+    status: 'approved',
+    submittedBy: me, submittedAt: nowISO_,
+    approvedL1By: me, approvedL1At: nowISO_,
+    approvedL2By: me, approvedL2At: nowISO_,
+    rejectedBy:'', rejectedAt:'', rejectReason:'', rejectedAtLevel:0,
+    createdBy: me, createdAt: nowISO_,
+    noteHeader: 'Auto từ Ngân hàng (phí trả trước hạn)',
+    autoSource: 'loan_prepay_fee',
+    linkedLoanId: loan.id,
+    linkedPrepayId: prepay.id
+  };
+  if(!S.payables) S.payables=[];
+  S.payables.push(apRecord);
+  try{ logAuditEvent('loan_prepay_fee_ap_create',{loanId:loan.id, prepayId:prepay.id, fee}); }catch(e){}
+  return apRecord.id;
 }
 
 function renderAR(){
@@ -10514,6 +11061,11 @@ function removeArPayment(kind,id,idx){
 function deleteAr(kind,id){
   const list=kind==='ap'?'payables':'receivables';
   const r=S[list].find(x=>x.id===id);if(!r)return;
+  // v1.34: Block direct delete of AP auto-created from loan
+  if(r.autoSource==='loan_interest' || r.autoSource==='loan_prepay_fee'){
+    toast('🔒 Bút toán auto từ Ngân hàng — bỏ đánh dấu "đã trả" kỳ vay (hoặc xóa prepay) để xóa AP này.','bad');
+    return;
+  }
   if(!wfCanDelete(r)){
     if(!isAdmin() && r.createdBy && r.createdBy!==actorName()){
       toast('Chỉ admin/người tạo mới xóa được bản ghi','bad');
