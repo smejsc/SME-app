@@ -1672,7 +1672,7 @@ body{min-height:100vh;background-image:radial-gradient(circle at 20% 0%,rgba(184
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='1.29.0';            // bumped on each release
+const APP_VERSION='1.29.1';            // bumped on each release
 
 /* ============================================================
    PWA — Service Worker registration + Install prompt
@@ -3442,7 +3442,7 @@ async function cloudSync(mode){
       }
       S=filteredCloud;
       await saveStateEncrypted();
-      renderAll();
+      renderAll({fromSync:true});
       cfg.lastSync=new Date().toISOString();
       setAuthConfig(cfg);
       updateSyncStatus('synced','Đã pull '+timeAgo(cfg.lastSync));
@@ -12676,7 +12676,45 @@ function clearForbiddenPages(){
   });
 }
 
-function renderAll(){
+/* Track if user is interacting — skip re-render of input-heavy regions */
+let _userInteracting = false;
+let _userInteractTimer = null;
+['focusin','input','change','keydown'].forEach(ev=>{
+  document.addEventListener(ev, e=>{
+    // Don't count if interacting outside form fields
+    const tag = (e.target.tagName||'').toLowerCase();
+    if(!['input','textarea','select','button'].includes(tag)) return;
+    _userInteracting = true;
+    clearTimeout(_userInteractTimer);
+    _userInteractTimer = setTimeout(()=>{ _userInteracting = false; }, 2000);
+  }, true);
+});
+
+function renderAll(opts){
+  opts = opts || {};
+  // PRESERVE SCROLL: save current scroll position before rendering
+  // Prevents UX jump when cloud sync triggers renderAll mid-task
+  const scrollY = window.scrollY || window.pageYOffset || 0;
+  const scrollX = window.scrollX || window.pageXOffset || 0;
+  // Also save active element + cursor position (if input)
+  const ae = document.activeElement;
+  let activeInfo = null;
+  if(ae && ae !== document.body && ['input','textarea','select'].includes((ae.tagName||'').toLowerCase())){
+    activeInfo = {
+      id: ae.id,
+      tag: ae.tagName.toLowerCase(),
+      selStart: typeof ae.selectionStart==='number' ? ae.selectionStart : null,
+      selEnd: typeof ae.selectionEnd==='number' ? ae.selectionEnd : null,
+      value: ae.value
+    };
+  }
+
+  // If user is actively typing AND this is from background sync → SKIP entirely
+  if(opts.fromSync && _userInteracting){
+    console.log('[render] Skipped — user is interacting');
+    return;
+  }
+
   applyBranding();
   renderPresenceUI();
   fillYearPickers();
@@ -12704,6 +12742,29 @@ function renderAll(){
   // Clear forbidden tabs' content (defense in depth)
   clearForbiddenPages();
   upgradeNumericInputs();
+
+  // RESTORE SCROLL position after DOM rebuild
+  // Use requestAnimationFrame to wait for layout
+  requestAnimationFrame(()=>{
+    // Use instant behavior to avoid scroll animation
+    try{
+      window.scrollTo({left:scrollX, top:scrollY, behavior:'instant'});
+    }catch(e){
+      window.scrollTo(scrollX, scrollY);
+    }
+    // Restore focus + cursor if input still exists
+    if(activeInfo && activeInfo.id){
+      const el = document.getElementById(activeInfo.id);
+      if(el && (el.tagName||'').toLowerCase()===activeInfo.tag){
+        try{
+          el.focus({preventScroll:true});
+          if(activeInfo.selStart!==null && typeof el.setSelectionRange==='function'){
+            el.setSelectionRange(activeInfo.selStart, activeInfo.selEnd);
+          }
+        }catch(e){/* some input types reject setSelectionRange */}
+      }
+    }
+  });
 }
 
 /* ===== EVENT WIRING ===== */

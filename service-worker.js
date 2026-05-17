@@ -4,7 +4,7 @@
    Cache version bumps automatically when SW_VERSION changes below.
 */
 
-const SW_VERSION = 'v1.29.0';
+const SW_VERSION = 'v1.29.1';
 const CACHE_NAME = `seahorse-${SW_VERSION}`;
 
 // Pre-cache critical files on install
