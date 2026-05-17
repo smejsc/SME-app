@@ -1672,7 +1672,7 @@ body{min-height:100vh;background-image:radial-gradient(circle at 20% 0%,rgba(184
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='1.29.1';            // bumped on each release
+const APP_VERSION='1.29.2';            // bumped on each release
 
 /* ============================================================
    PWA — Service Worker registration + Install prompt
@@ -12679,24 +12679,76 @@ function clearForbiddenPages(){
 /* Track if user is interacting — skip re-render of input-heavy regions */
 let _userInteracting = false;
 let _userInteractTimer = null;
-['focusin','input','change','keydown'].forEach(ev=>{
+['focusin','input','change','keydown','mousedown'].forEach(ev=>{
   document.addEventListener(ev, e=>{
-    // Don't count if interacting outside form fields
+    // Don't count if interacting outside form fields/buttons
     const tag = (e.target.tagName||'').toLowerCase();
-    if(!['input','textarea','select','button'].includes(tag)) return;
+    if(!['input','textarea','select','button','a','td'].includes(tag)) return;
     _userInteracting = true;
     clearTimeout(_userInteractTimer);
-    _userInteractTimer = setTimeout(()=>{ _userInteracting = false; }, 2000);
+    // Extend "interacting" window to 3 seconds after last action
+    _userInteractTimer = setTimeout(()=>{ _userInteracting = false; }, 3000);
   }, true);
 });
 
+/* Track last render fingerprint to skip duplicate renders */
+let _lastRenderFingerprint = '';
+
+function _stateFingerprint(){
+  // Quick hash of key arrays — if same, no need to re-render
+  try{
+    const f = [
+      (S.receivables||[]).length,
+      (S.payables||[]).length,
+      (S.vessels||[]).length,
+      (S.projects||[]).length,
+      (S.opTransactions||[]).length,
+      (S.vendors||[]).length,
+      (S.fxRate||0),
+      Object.keys(S.presence||{}).length
+    ].join('|');
+    // Plus a sample of latest record IDs to detect content changes
+    const lastIds = [
+      (S.receivables||[]).slice(-3).map(r=>r.id+r.status).join(','),
+      (S.payables||[]).slice(-3).map(r=>r.id+r.status).join(',')
+    ].join('||');
+    return f + '#' + lastIds;
+  }catch(e){return Math.random().toString();}
+}
+
 function renderAll(opts){
   opts = opts || {};
+
+  // GUARD 1: If user is actively interacting AND this is background sync → SKIP entirely
+  if(opts.fromSync && _userInteracting){
+    console.log('[render] Skipped — user is interacting (fromSync)');
+    return;
+  }
+
+  // GUARD 2: If sync triggered but data hasn't changed → SKIP
+  if(opts.fromSync){
+    const fp = _stateFingerprint();
+    if(fp === _lastRenderFingerprint){
+      console.log('[render] Skipped — no data change (fromSync)');
+      return;
+    }
+    _lastRenderFingerprint = fp;
+  } else {
+    // Always update fingerprint on full render
+    _lastRenderFingerprint = _stateFingerprint();
+  }
+
   // PRESERVE SCROLL: save current scroll position before rendering
-  // Prevents UX jump when cloud sync triggers renderAll mid-task
   const scrollY = window.scrollY || window.pageYOffset || 0;
   const scrollX = window.scrollX || window.pageXOffset || 0;
-  // Also save active element + cursor position (if input)
+  // Also preserve scroll inside any visible scrollable containers
+  const scrollContainers = [];
+  document.querySelectorAll('.tbl-scroll, .modal-body, .page.active').forEach(el=>{
+    if(el.scrollTop>0 || el.scrollLeft>0){
+      scrollContainers.push({el, top:el.scrollTop, left:el.scrollLeft});
+    }
+  });
+  // Save active element + cursor position
   const ae = document.activeElement;
   let activeInfo = null;
   if(ae && ae !== document.body && ['input','textarea','select'].includes((ae.tagName||'').toLowerCase())){
@@ -12709,12 +12761,6 @@ function renderAll(opts){
     };
   }
 
-  // If user is actively typing AND this is from background sync → SKIP entirely
-  if(opts.fromSync && _userInteracting){
-    console.log('[render] Skipped — user is interacting');
-    return;
-  }
-
   applyBranding();
   renderPresenceUI();
   fillYearPickers();
@@ -12723,35 +12769,61 @@ function renderAll(opts){
   fillVesselPicker();
   fillOpVesselPicker();
   refreshTxCategory();
-  // Only render tabs the user can access — prevents data leak via DOM inspection
-  if(canAccessTab('dashboard')) renderDashboard();
-  if(canAccessTab('plan')) renderPlanList();
-  if(canAccessTab('projects')) renderProjects();
-  if(canAccessTab('vessels')){ renderVessels(); renderEvents(); renderOnhire(); }
-  if(canAccessTab('receivables') || canAccessTab('payables')) renderAR();
-  if(canAccessTab('vessel_expense')){ fillVesselExpensePickers(); renderVesselExpense(); }
-  if(canAccessTab('hr_expense')){ fillHrExpensePickers(); renderHrExpense(); }
-  if(canAccessTab('qn_expense')){ fillQnExpensePickers(); renderQnExpense(); }
-  if(canAccessTab('approval')) renderApprovalList();
-  if(canAccessTab('fixed_assets')) renderFixedAssets();
-  if(canAccessTab('tools')) renderTools();
-  if(canAccessTab('operations')){ renderBankAccounts(); renderOpVessels(); renderOpTxList(); }
-  if(canAccessTab('inventory')) renderInventory();
-  if(canAccessTab('reports')) renderReports();
-  if(canAccessTab('rates')) renderRates();
+
+  // OPTIMIZATION for fromSync: only render the currently-visible page
+  // (other tabs will re-render when user navigates to them)
+  const activePageEl = document.querySelector('.page.active');
+  const activePageId = activePageEl ? activePageEl.id.replace('page-','') : null;
+  const renderAllTabs = !opts.fromSync;  // full render only on explicit calls
+
+  function maybe(tab, fn){
+    if(!canAccessTab(tab)) return;
+    if(renderAllTabs || activePageId===tab) fn();
+  }
+
+  maybe('dashboard', renderDashboard);
+  maybe('plan', renderPlanList);
+  maybe('projects', renderProjects);
+  if(canAccessTab('vessels') && (renderAllTabs || activePageId==='vessels')){
+    renderVessels(); renderEvents(); renderOnhire();
+  }
+  if((canAccessTab('receivables')||canAccessTab('payables')) && (renderAllTabs || activePageId==='receivables' || activePageId==='payables')){
+    renderAR();
+  }
+  if(canAccessTab('vessel_expense') && (renderAllTabs || activePageId==='vessel_expense')){
+    fillVesselExpensePickers(); renderVesselExpense();
+  }
+  if(canAccessTab('hr_expense') && (renderAllTabs || activePageId==='hr_expense')){
+    fillHrExpensePickers(); renderHrExpense();
+  }
+  if(canAccessTab('qn_expense') && (renderAllTabs || activePageId==='qn_expense')){
+    fillQnExpensePickers(); renderQnExpense();
+  }
+  maybe('approval', renderApprovalList);
+  maybe('fixed_assets', renderFixedAssets);
+  maybe('tools', renderTools);
+  if(canAccessTab('operations') && (renderAllTabs || activePageId==='operations')){
+    renderBankAccounts(); renderOpVessels(); renderOpTxList();
+  }
+  maybe('inventory', renderInventory);
+  maybe('reports', renderReports);
+  maybe('rates', renderRates);
+
   // Clear forbidden tabs' content (defense in depth)
   clearForbiddenPages();
   upgradeNumericInputs();
 
   // RESTORE SCROLL position after DOM rebuild
-  // Use requestAnimationFrame to wait for layout
   requestAnimationFrame(()=>{
-    // Use instant behavior to avoid scroll animation
     try{
       window.scrollTo({left:scrollX, top:scrollY, behavior:'instant'});
     }catch(e){
       window.scrollTo(scrollX, scrollY);
     }
+    // Restore inner scrolls
+    scrollContainers.forEach(s=>{
+      try{ s.el.scrollTop = s.top; s.el.scrollLeft = s.left; }catch(e){}
+    });
     // Restore focus + cursor if input still exists
     if(activeInfo && activeInfo.id){
       const el = document.getElementById(activeInfo.id);
