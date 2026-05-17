@@ -808,6 +808,7 @@ body{min-height:100vh;background-image:radial-gradient(circle at 20% 0%,rgba(184
           <option value="rejected">Từ chối</option>
         </select>
         <button class="btn-primary" onclick="openReceivableModal(null)">+ Thêm phải thu</button>
+        <button class="btn-sec" onclick="openMultiRowModal('ar')" title="Nhập phiếu nhiều dòng — 1 KH có nhiều hóa đơn">📋 Nhập nhiều dòng</button>
       </div>
     </div>
     <div class="section-body"><div class="tbl-scroll"><table class="tbl" id="ar-table"></table></div></div>
@@ -848,6 +849,7 @@ body{min-height:100vh;background-image:radial-gradient(circle at 20% 0%,rgba(184
           <option value="rejected">Từ chối</option>
         </select>
         <button class="btn-primary" onclick="openPayableModal(null)">+ Thêm phải trả</button>
+        <button class="btn-sec" onclick="openMultiRowModal('ap')" title="Nhập phiếu nhiều dòng — 1 NCC có nhiều hóa đơn">📋 Nhập nhiều dòng</button>
       </div>
     </div>
     <div class="section-body"><div class="tbl-scroll"><table class="tbl" id="ap-table"></table></div></div>
@@ -1670,7 +1672,7 @@ body{min-height:100vh;background-image:radial-gradient(circle at 20% 0%,rgba(184
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='1.28.1';            // bumped on each release
+const APP_VERSION='1.29.0';            // bumped on each release
 
 /* ============================================================
    PWA — Service Worker registration + Install prompt
@@ -7611,6 +7613,396 @@ function openPayableModal(id){
   const foot=`<button class="btn-sec" onclick="closeModal()">Hủy</button>
               <button class="btn-primary" onclick="saveAr('ap','${id||''}')">${isEdit?'Cập nhật':'Lưu phải trả'}</button>`;
   openModal(isEdit?'Sửa khoản phải trả':'Thêm phải trả',body,foot);
+}
+
+/* ============================================================
+   MULTI-ROW EXPENSE FORM (v1.29)
+   1 phiếu (header) chứa N dòng (lines)
+   - Header: ngày, phòng, NCC/KH, ghi chú chung
+   - Lines: mỗi dòng = 1 hóa đơn (có thể chọn tàu/dự án riêng)
+   - Save: tạo N receivables/payables riêng, gắn batchId để gom lại
+   ============================================================ */
+
+// Holds current multi-row form state (in-memory only — not persisted)
+let _multiRowState = {
+  mode: 'ap',         // 'ar' or 'ap'
+  ccy: 'USD',
+  partner: '',
+  vendorId: '',
+  issueDate: '',
+  departmentId: '',
+  noteHeader: '',
+  segment: 'OTHER',   // default segment
+  lines: [],          // {tmpId, invoiceNo, desc, amountNet, vatPercent, vatAmount, amountGross, costCategory, dueDate, vesselId, projectId}
+  undoStack: []
+};
+
+function openMultiRowModal(kind){
+  _multiRowState = {
+    mode: kind,
+    ccy: 'USD',
+    partner: '',
+    vendorId: '',
+    issueDate: todayISO(),
+    departmentId: (CURRENT_USER && CURRENT_USER.departmentId) || '',
+    noteHeader: '',
+    segment: 'OTHER',
+    lines: [_newLine()],
+    undoStack: []
+  };
+  _renderMultiRowModal();
+}
+
+function _newLine(){
+  return {
+    tmpId: 'L'+Math.random().toString(36).slice(2,8),
+    invoiceNo: '',
+    desc: '',
+    amountNet: 0,
+    vatPercent: 10,
+    vatAmount: 0,
+    amountGross: 0,
+    costCategory: '',
+    dueDate: '',
+    vesselId: '',
+    projectId: ''
+  };
+}
+
+function _renderMultiRowModal(){
+  const s = _multiRowState;
+  const isPayable = s.mode === 'ap';
+  const title = isPayable ? '📋 Phiếu chi phí nhiều dòng (AP)' : '📋 Phiếu phải thu nhiều dòng (AR)';
+  const partnerLabel = isPayable ? 'Nhà cung cấp' : 'Khách hàng';
+
+  const segOpts = Object.entries(SEGMENTS).map(([k,seg])=>
+    `<option value="${k}" ${s.segment===k?'selected':''}>${esc(seg.name)}</option>`).join('');
+
+  const deptOpts = '<option value="">— Không gán —</option>' +
+    (S.departments||[]).map(d=>
+      `<option value="${esc(d.id)}" ${s.departmentId===d.id?'selected':''}>${esc(d.code)} · ${esc(d.name)}</option>`
+    ).join('');
+
+  // Total
+  const totalNet = s.lines.reduce((sum,l)=>sum+(+l.amountNet||0),0);
+  const totalVat = s.lines.reduce((sum,l)=>sum+(+l.vatAmount||0),0);
+  const totalGross = s.lines.reduce((sum,l)=>sum+(+l.amountGross||0),0);
+
+  const body = `
+    <style>
+      .mr-table { width:100%; border-collapse:collapse; font-size:11px; }
+      .mr-table th { background:var(--paper-2); padding:6px 4px; text-align:left; font-size:10px; letter-spacing:.05em; text-transform:uppercase; color:var(--muted); font-weight:600; border-bottom:1px solid var(--rule); white-space:nowrap; }
+      .mr-table td { padding:3px 2px; border-bottom:1px solid rgba(0,0,0,.04); vertical-align:top; }
+      .mr-table input, .mr-table select { width:100%; padding:5px 6px; border:1px solid var(--rule); background:var(--paper); font-size:11px; font-family:inherit; }
+      .mr-table input.num { font-family:var(--font-mono); text-align:right; }
+      .mr-table .row-idx { width:24px; text-align:center; color:var(--muted); font-family:var(--font-mono); padding-top:8px; }
+      .mr-del-btn { background:none; border:none; color:var(--bad); cursor:pointer; font-size:14px; padding:4px 8px; }
+      .mr-del-btn:hover { background:rgba(184,71,46,.1); }
+    </style>
+
+    <!-- HEADER -->
+    <div style="background:var(--paper-2);padding:12px 14px;border:1px solid var(--rule);margin-bottom:12px">
+      <div style="font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);font-weight:600;margin-bottom:8px">Header phiếu</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:10px">
+        <div class="field" style="margin:0">
+          <label style="font-size:10px">Ngày phiếu</label>
+          <input type="date" id="mr-issue" value="${esc(s.issueDate)}" onchange="_mrFieldChange('issueDate', this.value)">
+        </div>
+        <div class="field" style="margin:0">
+          <label style="font-size:10px">Phòng/Ban</label>
+          <select id="mr-dept" onchange="_mrFieldChange('departmentId', this.value)">${deptOpts}</select>
+        </div>
+        <div class="field" style="margin:0">
+          <label style="font-size:10px">Mảng kinh doanh</label>
+          <select id="mr-segment" onchange="_mrFieldChange('segment', this.value)">${segOpts}</select>
+        </div>
+        <div class="field" style="margin:0">
+          <label style="font-size:10px">Đơn vị tiền</label>
+          <select id="mr-ccy" onchange="_mrFieldChange('ccy', this.value)">
+            <option value="USD" ${s.ccy==='USD'?'selected':''}>USD</option>
+            <option value="VND" ${s.ccy==='VND'?'selected':''}>VND</option>
+          </select>
+        </div>
+      </div>
+      <div class="field" style="margin:8px 0 0 0">
+        <label style="font-size:10px">${partnerLabel} *</label>
+        <input type="text" id="mr-partner" list="mr-partner-suggestions" value="${esc(s.partner)}"
+          placeholder="${isPayable?'VD: Cảng PTSC Vũng Tàu':'VD: PVEP, JVPC...'}"
+          oninput="_mrPartnerInput(this.value)">
+        <datalist id="mr-partner-suggestions">${(S.vendors||[]).slice(0,200).map(v=>`<option value="${esc(v.name)}">${esc(v.normalized)}</option>`).join('')}</datalist>
+        <div id="mr-partner-hint" style="font-size:10px;color:var(--muted);margin-top:2px"></div>
+      </div>
+      <div class="field" style="margin:8px 0 0 0">
+        <label style="font-size:10px">Ghi chú chung (tùy chọn)</label>
+        <input type="text" id="mr-note" value="${esc(s.noteHeader)}" placeholder="VD: Chi phí Bunker T5/2026 cho đội tàu"
+          oninput="_mrFieldChange('noteHeader', this.value)">
+      </div>
+    </div>
+
+    <!-- LINES -->
+    <div style="border:1px solid var(--rule);background:var(--paper);overflow-x:auto;max-height:50vh;overflow-y:auto">
+      <table class="mr-table">
+        <thead>
+          <tr>
+            <th class="row-idx">#</th>
+            <th style="min-width:90px">Số HĐ</th>
+            <th style="min-width:180px">Diễn giải</th>
+            <th style="min-width:90px">Loại CP</th>
+            <th style="min-width:80px" class="num">Net</th>
+            <th style="min-width:55px" class="num">%VAT</th>
+            <th style="min-width:80px" class="num">Tổng</th>
+            <th style="min-width:110px">Hạn TT</th>
+            <th style="min-width:120px">Tàu</th>
+            <th style="min-width:130px">Dự án</th>
+            <th style="width:36px"></th>
+          </tr>
+        </thead>
+        <tbody id="mr-lines-body">
+          ${s.lines.map((l,i)=>_renderMrLine(l,i)).join('')}
+        </tbody>
+        <tfoot>
+          <tr style="background:rgba(184,71,46,.05);font-weight:700;border-top:2px solid var(--rule)">
+            <td colspan="4" style="padding:8px 6px">TỔNG (${s.lines.length} dòng)</td>
+            <td class="num" style="font-family:var(--font-mono);padding:8px 4px">${totalNet.toLocaleString()}</td>
+            <td></td>
+            <td class="num" style="font-family:var(--font-mono);padding:8px 4px"><b>${totalGross.toLocaleString()} ${s.ccy}</b></td>
+            <td colspan="4"></td>
+          </tr>
+        </tfoot>
+      </table>
+    </div>
+
+    <div style="display:flex;gap:8px;align-items:center;margin-top:10px;flex-wrap:wrap">
+      <button class="btn-sec" onclick="_mrAddLine()" style="font-size:11px">+ Thêm dòng</button>
+      <button class="btn-sec" onclick="_mrCloneLast()" style="font-size:11px" ${s.lines.length===0?'disabled':''}>⎘ Sao chép dòng cuối</button>
+      <button class="btn-sec" onclick="_mrUndo()" style="font-size:11px" ${s.undoStack.length===0?'disabled':''}>↶ Undo (${s.undoStack.length})</button>
+      <div style="flex:1"></div>
+      <div style="font-size:11px;color:var(--muted)">Tổng VAT: <b style="font-family:var(--font-mono);color:var(--ink)">${totalVat.toLocaleString()} ${s.ccy}</b></div>
+    </div>
+
+    <div id="mr-err" style="color:var(--bad);font-size:12px;margin-top:8px"></div>
+  `;
+
+  const foot = `
+    <button class="btn-sec" onclick="closeModal()">Hủy</button>
+    <button class="btn-sec" onclick="_mrSave('draft')">💾 Lưu Nháp</button>
+    <button class="btn-primary" onclick="_mrSave('pending_l1')">→ Gửi duyệt</button>
+  `;
+
+  openModal(title, body, foot);
+}
+
+function _renderMrLine(l, i){
+  const vesselOpts = '<option value="">— Không gán —</option>' +
+    S.vessels.map(v=>`<option value="${esc(v.id)}" ${l.vesselId===v.id?'selected':''}>${esc(v.name)}</option>`).join('');
+  const projectOpts = '<option value="">— Không gán —</option>' +
+    S.projects.map(p=>`<option value="${esc(p.id)}" ${l.projectId===p.id?'selected':''}>${esc(p.code)} · ${esc(p.name)}</option>`).join('');
+  return `
+    <tr data-tmpid="${l.tmpId}">
+      <td class="row-idx">${i+1}</td>
+      <td><input type="text" value="${esc(l.invoiceNo||'')}" placeholder="INV-001" oninput="_mrLineChange('${l.tmpId}','invoiceNo',this.value)"></td>
+      <td><input type="text" value="${esc(l.desc||'')}" placeholder="Diễn giải..." oninput="_mrLineChange('${l.tmpId}','desc',this.value)"></td>
+      <td><input type="text" value="${esc(l.costCategory||'')}" placeholder="Bunker..." list="mr-cost-cats" oninput="_mrLineChange('${l.tmpId}','costCategory',this.value)"></td>
+      <td><input type="number" class="num" value="${l.amountNet||0}" step="any" oninput="_mrLineAmount('${l.tmpId}','amountNet',this.value)"></td>
+      <td><input type="number" class="num" value="${l.vatPercent}" step="any" oninput="_mrLineAmount('${l.tmpId}','vatPercent',this.value)"></td>
+      <td><input type="number" class="num" value="${l.amountGross||0}" step="any" readonly style="background:var(--paper-2)"></td>
+      <td><input type="date" value="${esc(l.dueDate||'')}" oninput="_mrLineChange('${l.tmpId}','dueDate',this.value)"></td>
+      <td><select onchange="_mrLineChange('${l.tmpId}','vesselId',this.value)">${vesselOpts}</select></td>
+      <td><select onchange="_mrLineChange('${l.tmpId}','projectId',this.value)">${projectOpts}</select></td>
+      <td><button class="mr-del-btn" onclick="_mrDeleteLine('${l.tmpId}')" title="Xóa dòng">✕</button></td>
+    </tr>`;
+}
+
+function _mrFieldChange(field, value){
+  _multiRowState[field] = value;
+}
+
+function _mrPartnerInput(value){
+  _multiRowState.partner = value;
+  const hint = document.getElementById('mr-partner-hint');
+  if(!hint) return;
+  const raw = value.trim();
+  if(!raw){hint.innerHTML='';return;}
+  const norm = normalizeVendorName(raw);
+  const matches = (S.vendors||[]).filter(v=>v.normalized===norm);
+  if(matches.length>0){
+    _multiRowState.vendorId = matches[0].id;
+    hint.innerHTML = `<span style="color:var(--good)">✓ Đã có trong hệ thống</span> · mã: <code>${esc(matches[0].code)}</code>`;
+  } else {
+    _multiRowState.vendorId = '';
+    hint.innerHTML = `<span style="color:var(--muted)">+ NCC mới (sẽ tự tạo khi lưu): <b>${esc(norm)}</b></span>`;
+  }
+}
+
+function _mrLineChange(tmpId, field, value){
+  const line = _multiRowState.lines.find(l=>l.tmpId===tmpId);
+  if(!line) return;
+  // Save snapshot for undo (only for material changes)
+  _pushUndo();
+  line[field] = value;
+}
+
+function _mrLineAmount(tmpId, field, value){
+  const line = _multiRowState.lines.find(l=>l.tmpId===tmpId);
+  if(!line) return;
+  _pushUndo();
+  line[field] = +value || 0;
+  // Recalc VAT + Gross
+  const net = +line.amountNet || 0;
+  const pct = +line.vatPercent || 0;
+  line.vatAmount = Math.round(net * pct / 100 * 100) / 100;
+  line.amountGross = net + line.vatAmount;
+  // Update row in DOM
+  const tr = document.querySelector(`tr[data-tmpid="${tmpId}"]`);
+  if(tr){
+    const inputs = tr.querySelectorAll('input.num');
+    // input order: amountNet, vatPercent, amountGross
+    if(inputs[2]) inputs[2].value = line.amountGross;
+  }
+  // Update footer total
+  _mrUpdateFooter();
+}
+
+function _mrUpdateFooter(){
+  const s = _multiRowState;
+  const totalNet = s.lines.reduce((sum,l)=>sum+(+l.amountNet||0),0);
+  const totalVat = s.lines.reduce((sum,l)=>sum+(+l.vatAmount||0),0);
+  const totalGross = s.lines.reduce((sum,l)=>sum+(+l.amountGross||0),0);
+  const tfoot = document.querySelector('.mr-table tfoot');
+  if(tfoot){
+    tfoot.innerHTML = `
+      <tr style="background:rgba(184,71,46,.05);font-weight:700;border-top:2px solid var(--rule)">
+        <td colspan="4" style="padding:8px 6px">TỔNG (${s.lines.length} dòng)</td>
+        <td class="num" style="font-family:var(--font-mono);padding:8px 4px">${totalNet.toLocaleString()}</td>
+        <td></td>
+        <td class="num" style="font-family:var(--font-mono);padding:8px 4px"><b>${totalGross.toLocaleString()} ${s.ccy}</b></td>
+        <td colspan="4"></td>
+      </tr>`;
+  }
+}
+
+function _mrAddLine(){
+  _pushUndo();
+  _multiRowState.lines.push(_newLine());
+  _renderMultiRowModal();
+}
+
+function _mrCloneLast(){
+  const last = _multiRowState.lines[_multiRowState.lines.length-1];
+  if(!last) return;
+  _pushUndo();
+  const clone = JSON.parse(JSON.stringify(last));
+  clone.tmpId = 'L'+Math.random().toString(36).slice(2,8);
+  clone.invoiceNo = '';  // clear invoice
+  _multiRowState.lines.push(clone);
+  _renderMultiRowModal();
+}
+
+function _mrDeleteLine(tmpId){
+  if(_multiRowState.lines.length<=1){
+    toast('Phải có ít nhất 1 dòng','bad');return;
+  }
+  _pushUndo();
+  _multiRowState.lines = _multiRowState.lines.filter(l=>l.tmpId!==tmpId);
+  _renderMultiRowModal();
+}
+
+function _pushUndo(){
+  // Deep clone state
+  const snap = JSON.parse(JSON.stringify(_multiRowState));
+  delete snap.undoStack;  // don't save undo in undo
+  _multiRowState.undoStack.push(snap);
+  // Cap at 20
+  if(_multiRowState.undoStack.length>20) _multiRowState.undoStack.shift();
+}
+
+function _mrUndo(){
+  const snap = _multiRowState.undoStack.pop();
+  if(!snap) return;
+  Object.assign(_multiRowState, snap);
+  _renderMultiRowModal();
+  toast('↶ Đã hoàn tác');
+}
+
+async function _mrSave(targetStatus){
+  const s = _multiRowState;
+  const err = document.getElementById('mr-err');
+  err.textContent = '';
+  // Validate
+  if(!s.partner || !s.partner.trim()){err.textContent='Nhập tên đối tác (NCC/KH)';return;}
+  if(s.lines.length===0){err.textContent='Phải có ít nhất 1 dòng';return;}
+  const validLines = s.lines.filter(l=>(+l.amountNet||0)>0);
+  if(validLines.length===0){err.textContent='Phải có ít nhất 1 dòng có số tiền > 0';return;}
+  if(!s.issueDate){err.textContent='Nhập ngày phiếu';return;}
+
+  // Permission check
+  if(!guardAction('edit_record', {record:{status:'draft'}})){
+    return;  // guardAction already showed alert
+  }
+
+  try{
+    // Get-or-create vendor
+    const vendor = getOrCreateVendor(s.partner);
+    const vendorId = vendor ? vendor.id : '';
+
+    // Generate batch ID to group all lines from this phiếu
+    const batchId = 'B'+Date.now().toString(36)+Math.random().toString(36).slice(2,6);
+    const list = s.mode === 'ap' ? 'payables' : 'receivables';
+    const me = actorName();
+    const nowISO = new Date().toISOString();
+
+    // Create N records, one per line
+    let created = 0;
+    validLines.forEach(l=>{
+      const amountNet = +l.amountNet || 0;
+      const vatPercent = +l.vatPercent || 0;
+      const vatAmount = +l.vatAmount || 0;
+      const amountGross = +l.amountGross || (amountNet + vatAmount);
+
+      const record = {
+        id: uid(),
+        batchId,             // NEW: link records from same phiếu
+        partner: s.partner.trim(),
+        vendorId,
+        desc: (l.desc||'').trim(),
+        invoiceNo: (l.invoiceNo||'').trim(),
+        costCategory: (l.costCategory||'').trim(),
+        amountNet, vatPercent, vatAmount, amountGross,
+        amount: amountGross,  // backward-compat
+        ccy: s.ccy,
+        segment: s.segment,
+        projectId: l.projectId || null,
+        vesselId: l.vesselId || null,
+        departmentId: s.departmentId || '',
+        issueDate: s.issueDate,
+        dueDate: l.dueDate || '',
+        dueMonth: '',
+        dueAmount: 0,
+        payments: [],
+        status: targetStatus,
+        submittedBy: targetStatus !== 'draft' ? me : '',
+        submittedAt: targetStatus !== 'draft' ? nowISO : '',
+        approvedL1By:'', approvedL1At:'',
+        approvedL2By:'', approvedL2At:'',
+        rejectedBy:'', rejectedAt:'', rejectReason:'', rejectedAtLevel:0,
+        createdBy: me,
+        createdAt: nowISO,
+        noteHeader: (s.noteHeader||'').trim()
+      };
+      S[list].push(record);
+      created++;
+    });
+
+    saveState();
+    try{ logAuditEvent('multi_row_save', {kind:s.mode, batchId, lines:created, status:targetStatus}); }catch(e){}
+    closeModal();
+    const statusLabel = targetStatus==='draft'?'Nháp':'Chờ duyệt L1';
+    toast(`✓ Đã lưu ${created} dòng (${statusLabel}) · batchId: ${batchId.slice(-6)}`);
+    renderAll();
+  }catch(e){
+    err.textContent = 'Lỗi: '+e.message;
+    console.error('[mr save] failed:', e);
+  }
 }
 
 function saveAr(kind,id){
