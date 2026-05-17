@@ -1775,7 +1775,7 @@ body{min-height:100vh;background-image:radial-gradient(circle at 20% 0%,rgba(184
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='1.34.0';            // bumped on each release
+const APP_VERSION='1.34.1';            // bumped on each release
 
 /* ============================================================
    PWA — Service Worker registration + Install prompt
@@ -5400,11 +5400,28 @@ function txAmt(t){return toDisplay(t.amount,t.ccy||'USD');}
 /* Returns approved transactions for BI reporting.
    Sources: APPROVED receivables (as REV) + APPROVED payables (as COST).
    Each record is normalized to tx-shape: {date, type, projectId, segment, amount, ccy, vesselId}
-   so all existing BI aggregation code works without changes. */
+   so all existing BI aggregation code works without changes.
+   v1.34.1: Filter by viewer scope (segment + vessel + project) if user is Viewer.
+            Also filter BOD-only records if user is not BOD/admin. */
 function approvedTx(){
   const out=[];
+  const viewer = isViewer();
+  const canSeeBOD = canSeeBODRecords();
+
   (S.receivables||[]).forEach(r=>{
     if(wfStatus(r)!=='approved') return;
+    // BOD filter
+    if(!canSeeBOD){
+      if(r.isBODOnly) return;
+      if(isRevenueBODOnly(r.revenueType)) return;
+    }
+    // Viewer scope
+    if(viewer){
+      if(!viewerCanSeeSegment(r.segment)) return;
+      // If record has vesselId/projectId: must be in viewer scope (if any)
+      if(r.vesselId && !viewerCanSeeVessel(r.vesselId)) return;
+      if(r.projectId && !viewerCanSeeProject(r.projectId)) return;
+    }
     out.push({
       id:r.id, date:r.issueDate||r.createdAt||todayISO(),
       type:'REV',
@@ -5421,6 +5438,17 @@ function approvedTx(){
   });
   (S.payables||[]).forEach(r=>{
     if(wfStatus(r)!=='approved') return;
+    // BOD filter
+    if(!canSeeBOD){
+      if(r.isBODOnly) return;
+      if(isExpenseBODOnly(r.expenseType)) return;
+    }
+    // Viewer scope
+    if(viewer){
+      if(!viewerCanSeeSegment(r.segment)) return;
+      if(r.vesselId && !viewerCanSeeVessel(r.vesselId)) return;
+      if(r.projectId && !viewerCanSeeProject(r.projectId)) return;
+    }
     out.push({
       id:r.id, date:r.issueDate||r.createdAt||todayISO(),
       type:'COST',
