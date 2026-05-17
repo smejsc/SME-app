@@ -1917,7 +1917,7 @@ body{min-height:100vh;background-image:radial-gradient(circle at 20% 0%,rgba(184
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='1.37.1';            // bumped on each release
+const APP_VERSION='1.37.2';            // bumped on each release
 
 /* ============================================================
    PWA — Service Worker registration + Install prompt
@@ -11569,6 +11569,11 @@ function deleteAr(kind,id){
     toast('🔒 Bút toán auto từ Ngân hàng — bỏ đánh dấu "đã trả" kỳ vay (hoặc xóa prepay) để xóa AP này.','bad');
     return;
   }
+  // v1.37.2: Block direct delete of AP auto-created from NSNN tax
+  if(r.autoSource && typeof r.autoSource==='object' && r.autoSource.kind==='tax'){
+    toast('🔒 Bút toán auto từ NSNN — bỏ tích "Ghi vào CP" (hoặc xóa) ở tab 12 NSNN để xóa AP này.','bad');
+    return;
+  }
   if(!wfCanDelete(r)){
     if(!isAdmin() && r.createdBy && r.createdBy!==actorName()){
       toast('Chỉ admin/người tạo mới xóa được bản ghi','bad');
@@ -14706,14 +14711,33 @@ function _nsnnRenderRecords(yr){
     return;
   }
 
-  let html=`<thead><tr><th>Kỳ</th><th>Loại</th><th>Mô tả</th><th class="r">Phải nộp</th><th class="r">Đã nộp</th><th class="r">Còn lại</th><th>CCY</th><th class="mono">Hạn nộp</th><th class="mono">Ngày TT</th><th></th></tr></thead><tbody>`;
+  let html=`<thead><tr><th>Kỳ</th><th>Loại</th><th>Mô tả</th><th>Gắn tàu/DA</th><th class="r">Phải nộp</th><th class="r">Đã nộp</th><th class="r">Còn lại</th><th>CCY</th><th class="mono">Hạn nộp</th><th class="mono">Ngày TT</th><th></th></tr></thead><tbody>`;
   records.forEach(r=>{
     const m=nsnnTypeMeta(r.type);
     const remain=(+r.amount||0)-(+r.paidAmount||0);
+    // CP badge
+    const cpBadge = r.isExpense
+      ? `<span class="chip" style="font-size:9px;background:#a8362b;color:#fff;margin-left:4px" title="Đã ghi CP — có AP tự tạo (id ${esc(r.linkedApId||'?')})">CP</span>`
+      : '';
+    // Vessel/project info
+    let entityInfo='—';
+    if(r.vesselId){
+      if(r.isOpVessel){
+        const v=(S.opVessels||[]).find(x=>x.id===r.vesselId);
+        entityInfo=`<span style="color:#5a4a8c">🚢 ${esc(v?v.name:'(đã xóa)')}</span>`;
+      } else {
+        const v=(S.vessels||[]).find(x=>x.id===r.vesselId);
+        entityInfo=`<span style="color:#1c3a5c">⛵ ${esc(v?v.name:'(đã xóa)')}</span>`;
+      }
+    } else if(r.projectId){
+      const p=(S.projects||[]).find(x=>x.id===r.projectId);
+      entityInfo=`<span style="color:#4a6b2c">🛠 ${esc(p?p.code:'(đã xóa)')}</span>`;
+    }
     html+=`<tr>
       <td class="mono">${esc(r.period||'')}</td>
-      <td><span style="display:inline-flex;align-items:center;gap:6px"><span>${m.icon}</span><span>${esc(m.label)}</span></span></td>
+      <td><span style="display:inline-flex;align-items:center;gap:6px"><span>${m.icon}</span><span>${esc(m.label)}</span>${cpBadge}</span></td>
       <td>${esc(r.description||'—')}</td>
+      <td style="font-size:11px">${entityInfo}</td>
       <td class="r num">${fmt(r.amount,r.ccy)}</td>
       <td class="r num" style="color:var(--good)">${fmt(r.paidAmount||0,r.ccy)}</td>
       <td class="r num" style="color:${remain>0?'var(--bad)':'var(--good)'}">${fmt(remain,r.ccy)}</td>
@@ -14722,7 +14746,7 @@ function _nsnnRenderRecords(yr){
       <td class="mono" style="font-size:11px">${r.paidDate||'—'}</td>
       <td><div class="row-actions">
         <button class="icon-btn" title="Sửa" onclick="_nsnnEditRecord('${r.id}')">✎</button>
-        ${isAdmin()?`<button class="icon-btn danger" title="Xóa" onclick="_nsnnDelRecord('${r.id}')">✕</button>`:''}
+        ${isAdmin()?`<button class="icon-btn danger" title="Xóa${r.linkedApId?' (cả AP)':''}" onclick="_nsnnDelRecord('${r.id}')">✕</button>`:''}
       </div></td>
     </tr>`;
   });
@@ -14739,6 +14763,12 @@ function _nsnnAddRecord(){
   const typeOpts=Object.keys(NSNN_TAX_TYPES).filter(k=>NSNN_TAX_TYPES[k].source==='manual').map(k=>({
     v:k, t:`${NSNN_TAX_TYPES[k].icon} ${NSNN_TAX_TYPES[k].label}`
   }));
+  // Vessel + project options
+  const vesselOpts=[{v:'',t:'— Không gắn tàu —'}];
+  (S.vessels||[]).forEach(v=>vesselOpts.push({v:v.id, t:`⛵ ${v.name}`}));
+  (S.opVessels||[]).forEach(v=>vesselOpts.push({v:'op:'+v.id, t:`🚢 ${v.name}`}));
+  const projectOpts=[{v:'',t:'— Không gắn dự án —'}];
+  (S.projects||[]).forEach(p=>projectOpts.push({v:p.id, t:`🛠 ${p.code} · ${p.name}`}));
 
   openEditModal('Thêm bút toán thuế', [
     {key:'type',label:'Loại thuế *',type:'select',options:typeOpts},
@@ -14748,13 +14778,24 @@ function _nsnnAddRecord(){
     {key:'ccy',label:'CCY',type:'select',options:[{v:'VND',t:'VND'},{v:'USD',t:'USD'}]},
     {key:'dueDate',label:'Hạn nộp',type:'date'},
     {key:'paidAmount',label:'Số đã nộp',type:'number'},
-    {key:'paidDate',label:'Ngày TT',type:'date'}
-  ], {type:'IMPORT_DUTY', period:thisMonth, ccy:'VND', amount:0, paidAmount:0, description:'', dueDate:'', paidDate:''}, (d)=>{
+    {key:'paidDate',label:'Ngày TT',type:'date'},
+    {key:'isExpense',label:'✓ Ghi vào chi phí (tự tạo AP) — gắn tàu/dự án nếu có',type:'checkbox',span:2},
+    {key:'vesselId',label:'Tàu (nếu ghi CP)',type:'select',options:vesselOpts},
+    {key:'projectId',label:'Dự án (nếu ghi CP)',type:'select',options:projectOpts}
+  ], {type:'IMPORT_DUTY', period:thisMonth, ccy:'VND', amount:0, paidAmount:0, description:'', dueDate:'', paidDate:'', isExpense:false, vesselId:'', projectId:''}, (d)=>{
     if(!d.type){toast('Chọn loại thuế','bad');return false;}
     if(!d.period || !/^\d{4}-\d{2}$/.test(d.period)){toast('Kỳ tính phải dạng YYYY-MM','bad');return false;}
     if(!(+d.amount>0)){toast('Số phải nộp > 0','bad');return false;}
-    S.taxes.records.push({
-      id:uid(),
+    const taxId=uid();
+    // Normalize vesselId (strip 'op:' prefix if opVessel)
+    let vId=d.vesselId||'';
+    let isOpVessel=false;
+    if(vId.startsWith('op:')){
+      vId=vId.substring(3);
+      isOpVessel=true;
+    }
+    const taxRec={
+      id:taxId,
       type:d.type,
       period:d.period,
       description:d.description||'',
@@ -14763,11 +14804,22 @@ function _nsnnAddRecord(){
       dueDate:d.dueDate||'',
       paidAmount:+d.paidAmount||0,
       paidDate:d.paidDate||'',
+      isExpense:!!d.isExpense,
+      vesselId:vId||'',
+      isOpVessel,
+      projectId:d.projectId||'',
+      linkedApId:'',
       addedBy:actorName(),
       addedAt:new Date().toISOString()
-    });
+    };
+    S.taxes.records.push(taxRec);
+    // Auto-create AP if isExpense
+    if(taxRec.isExpense){
+      const apId=_nsnnSyncAp(taxRec);
+      taxRec.linkedApId=apId;
+    }
     saveState();
-    toast('Đã thêm bút toán thuế');
+    toast(taxRec.isExpense?'Đã thêm thuế + ghi vào CP (tạo AP)':'Đã thêm bút toán thuế');
     renderAll();
   });
 }
@@ -14779,6 +14831,16 @@ function _nsnnEditRecord(id){
   const typeOpts=Object.keys(NSNN_TAX_TYPES).filter(k=>NSNN_TAX_TYPES[k].source==='manual').map(k=>({
     v:k, t:`${NSNN_TAX_TYPES[k].icon} ${NSNN_TAX_TYPES[k].label}`
   }));
+  const vesselOpts=[{v:'',t:'— Không gắn tàu —'}];
+  (S.vessels||[]).forEach(v=>vesselOpts.push({v:v.id, t:`⛵ ${v.name}`}));
+  (S.opVessels||[]).forEach(v=>vesselOpts.push({v:'op:'+v.id, t:`🚢 ${v.name}`}));
+  const projectOpts=[{v:'',t:'— Không gắn dự án —'}];
+  (S.projects||[]).forEach(p=>projectOpts.push({v:p.id, t:`🛠 ${p.code} · ${p.name}`}));
+
+  // Build initial values, normalize vesselId display value
+  const init={...r};
+  if(r.isOpVessel && r.vesselId) init.vesselId='op:'+r.vesselId;
+
   openEditModal('Sửa bút toán thuế', [
     {key:'type',label:'Loại thuế',type:'select',options:typeOpts},
     {key:'period',label:'Kỳ tính (YYYY-MM)'},
@@ -14787,10 +14849,32 @@ function _nsnnEditRecord(id){
     {key:'ccy',label:'CCY',type:'select',options:[{v:'VND',t:'VND'},{v:'USD',t:'USD'}]},
     {key:'dueDate',label:'Hạn nộp',type:'date'},
     {key:'paidAmount',label:'Số đã nộp',type:'number'},
-    {key:'paidDate',label:'Ngày TT',type:'date'}
-  ], r, (d)=>{
+    {key:'paidDate',label:'Ngày TT',type:'date'},
+    {key:'isExpense',label:'✓ Ghi vào chi phí (tự tạo AP)',type:'checkbox',span:2},
+    {key:'vesselId',label:'Tàu (nếu ghi CP)',type:'select',options:vesselOpts},
+    {key:'projectId',label:'Dự án (nếu ghi CP)',type:'select',options:projectOpts}
+  ], init, (d)=>{
     if(!d.period || !/^\d{4}-\d{2}$/.test(d.period)){toast('Kỳ tính phải dạng YYYY-MM','bad');return false;}
-    Object.assign(r, d);
+    const wasExpense=!!r.isExpense;
+    const wasAp=r.linkedApId||'';
+    // Normalize vesselId
+    let vId=d.vesselId||'';
+    let isOpVessel=false;
+    if(vId.startsWith('op:')){
+      vId=vId.substring(3);
+      isOpVessel=true;
+    }
+    Object.assign(r, d, {vesselId:vId, isOpVessel});
+    // Sync AP based on isExpense toggle
+    if(r.isExpense){
+      // Create or update AP
+      const apId=_nsnnSyncAp(r);
+      r.linkedApId=apId;
+    } else if(wasExpense && wasAp){
+      // Bỏ tích → xóa AP cũ
+      S.payables=(S.payables||[]).filter(p=>p.id!==wasAp);
+      r.linkedApId='';
+    }
     saveState();
     toast('Đã cập nhật');
   });
@@ -14802,12 +14886,80 @@ function _nsnnDelRecord(id){
   const r=S.taxes.records.find(x=>x.id===id);
   if(!r) return;
   const m=nsnnTypeMeta(r.type);
+  const apNote = r.linkedApId ? '<br><span style="color:var(--bad);font-size:11px">⚠ Sẽ xóa cả AP liên kết</span>' : '';
   confirmDelete('bút toán thuế này',
-    `${m.icon} ${m.label} · Kỳ ${r.period}<br>Số tiền: ${fmt(r.amount,r.ccy)}`,
+    `${m.icon} ${m.label} · Kỳ ${r.period}<br>Số tiền: ${fmt(r.amount,r.ccy)}${apNote}`,
     ()=>{
+      // Xóa AP liên kết nếu có
+      if(r.linkedApId){
+        S.payables=(S.payables||[]).filter(p=>p.id!==r.linkedApId);
+      }
       S.taxes.records = S.taxes.records.filter(x=>x.id!==id);
       saveState(); toast('Đã xóa'); renderAll();
     });
+}
+
+/* v1.37.2: Sync tax record → AP. Create new or update existing. Returns AP id. */
+function _nsnnSyncAp(taxRec){
+  const m=nsnnTypeMeta(taxRec.type);
+  // Check if already linked
+  let ap=null;
+  if(taxRec.linkedApId){
+    ap=(S.payables||[]).find(p=>p.id===taxRec.linkedApId);
+  }
+  // Match segment: gán tuỳ vesselId/projectId
+  let segment='OTHER';
+  if(taxRec.vesselId){
+    if(taxRec.isOpVessel) segment='VESSEL_MGMT';
+    else {
+      // Need to lookup vessel's typical segment — default to VESSEL_SERVICE
+      segment='VESSEL_SERVICE';
+    }
+  } else if(taxRec.projectId){
+    const p=(S.projects||[]).find(x=>x.id===taxRec.projectId);
+    segment = (p && p.segment) || 'OM';
+  }
+  const apData={
+    partner:'Ngân sách Nhà nước',
+    desc:`${m.label} · Kỳ ${taxRec.period}${taxRec.description?' · '+taxRec.description:''}`,
+    costCategory:m.label,
+    expenseType:'ET-TAX_NSNN',
+    amountNet:+taxRec.amount||0,
+    vatPercent:0,
+    vatAmount:0,
+    amountGross:+taxRec.amount||0,
+    amount:+taxRec.amount||0,
+    ccy:taxRec.ccy||'VND',
+    segment,
+    vesselId:taxRec.vesselId||null,
+    projectId:taxRec.projectId||null,
+    issueDate:taxRec.period+'-01',
+    dueDate:taxRec.dueDate||'',
+    dueMonth:taxRec.period,
+    dueAmount:0,
+    payments:[],
+    pitAmount:0,
+    status:'approved',  // Thuế phải nộp → approved sẵn, không qua workflow
+    submittedBy:actorName(), submittedAt:new Date().toISOString(),
+    accCheckedBy:'(auto)', accCheckedAt:new Date().toISOString(),
+    approvedL1By:'(auto)', approvedL1At:new Date().toISOString(),
+    approvedL2By:'(auto)', approvedL2At:new Date().toISOString(),
+    rejectedBy:'', rejectedAt:'', rejectReason:'', rejectedAtLevel:null,
+    createdBy:taxRec.addedBy||actorName(),
+    createdAt:taxRec.addedAt||new Date().toISOString(),
+    _origin:'tax_nsnn',
+    autoSource:{kind:'tax', taxRecordId:taxRec.id}
+  };
+  if(ap){
+    // Update existing
+    Object.assign(ap, apData);
+    return ap.id;
+  }
+  // Create new
+  const newAp={id:uid(), ...apData};
+  S.payables.push(newAp);
+  try{ logAuditEvent('nsnn_create_ap',{taxRecordId:taxRec.id, apId:newAp.id, type:taxRec.type, amount:taxRec.amount, ccy:taxRec.ccy}); }catch(e){}
+  return newAp.id;
 }
 
 /* === VAT override (admin) === */
