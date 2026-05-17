@@ -1670,7 +1670,7 @@ body{min-height:100vh;background-image:radial-gradient(circle at 20% 0%,rgba(184
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='1.27.0';            // bumped on each release
+const APP_VERSION='1.28.0';            // bumped on each release
 
 /* ============================================================
    PWA — Service Worker registration + Install prompt
@@ -2042,6 +2042,11 @@ async function authAction(){
     }
     // Reminder backup if last export >7 days ago (admin only)
     if(CURRENT_ROLE==='admin'){
+      // Auto-migrate: vendors from AR/AP (one-time, safe to re-run)
+      try{
+        const n=migrateVendorsFromAR();
+        if(n>0) setTimeout(()=>toast(`📦 Đã tự động tạo ${n} NCC từ AR/AP cũ`,'good'),1500);
+      }catch(e){console.warn('[migrate] failed:',e);}
       const lastBak=cfg.lastBackup?new Date(cfg.lastBackup).getTime():0;
       const daysSinceBak=lastBak?Math.floor((Date.now()-lastBak)/86400000):999;
       if(daysSinceBak>=7){
@@ -2199,7 +2204,7 @@ const TAB_TO_FIELDS={
   rates:          ['vessels','onhires','events','receivables','payables']
 };
 /* Shared/config fields that everyone (incl. users) can load — non-sensitive. */
-const SHARED_FIELDS=['fxRate','displayCcy','companyInfo','meta','presence','auditLog','vesselExpenseCats','omProjectExpenseCats','hrExpenseCats','qnExpenseCats'];
+const SHARED_FIELDS=['fxRate','displayCcy','companyInfo','meta','presence','auditLog','vesselExpenseCats','omProjectExpenseCats','hrExpenseCats','qnExpenseCats','departments','vendors'];
 /* All possible data fields (used by admin or for save-merge) */
 const ALL_DATA_FIELDS=[
   'plans','projects','vessels','onhires','events',
@@ -2207,7 +2212,8 @@ const ALL_DATA_FIELDS=[
   'opVessels','opTransactions','invGroups','invMovements',
   'vesselExpenseCats','omProjectExpenseCats','hrExpenseCats','qnExpenseCats',
   'fixedAssets','tools',
-  'transactions'
+  'transactions',
+  'departments','vendors'
 ];
 
 /* Compute allowed fields for the current user (admin gets all). */
@@ -2245,7 +2251,12 @@ function openSettings(){
   if(!isAdmin()){toast('Chỉ admin truy cập được cài đặt','bad');return;}
   const userListHtml=(cfg.users||[]).map((u,i)=>`
     <tr>
-      <td><b>${esc(u.name) || '(không tên)'}</b>${u.isViewer?' <span class="chip" style="font-size:9px;margin-left:4px;background:#b8472e;color:#fff" title="Viewer — chỉ đọc báo cáo">👁 VIEWER</span>':''}${u.canConfirmPayment?' <span class="chip chip-warn" style="font-size:9px;margin-left:4px" title="Có quyền xác nhận TT (Vận hành tàu)">XÁC NHẬN TT</span>':''}${u.canApproveL1?' <span class="chip" style="font-size:9px;margin-left:4px;background:#c5876d;color:#fff" title="Phê duyệt cấp 1">DUYỆT L1</span>':''}${u.canApproveL2?' <span class="chip" style="font-size:9px;margin-left:4px;background:#8b3a2a;color:#fff" title="Phê duyệt cấp 2">DUYỆT L2</span>':''}${(u.assignedVesselIds||[]).length>0?` <span class="chip" style="font-size:9px;margin-left:4px;background:#1c3a5c;color:#fff" title="Tàu: ${esc((u.assignedVesselIds||[]).map(id=>{const v=S.vessels.find(x=>x.id===id);return v?v.name:'?';}).join(', '))}">⛵ ${(u.assignedVesselIds||[]).length}</span>`:''}${(u.assignedProjectIds||[]).length>0?` <span class="chip" style="font-size:9px;margin-left:4px;background:#4a6b2c;color:#fff" title="Dự án O&M: ${esc((u.assignedProjectIds||[]).map(id=>{const p=S.projects.find(x=>x.id===id);return p?p.code:'?';}).join(', '))}">⚙ ${(u.assignedProjectIds||[]).length}</span>`:''}${(u.assignedOpVesselIds||[]).length>0?` <span class="chip" style="font-size:9px;margin-left:4px;background:#5a4a8c;color:#fff" title="Tàu QL hộ: ${esc((u.assignedOpVesselIds||[]).map(id=>{const v=S.opVessels.find(x=>x.id===id);return v?v.name:'?';}).join(', '))}">🚢 ${(u.assignedOpVesselIds||[]).length}</span>`:''}</td>
+      <td><b>${esc(u.name) || '(không tên)'}</b>${(()=>{
+        if(!u.departmentId) return '';
+        const d=(S.departments||[]).find(x=>x.id===u.departmentId);
+        if(!d) return '';
+        return ` <span class="chip" style="font-size:9px;margin-left:4px;background:#2a5a8c;color:#fff" title="${esc(d.name)}">🏢 ${esc(d.code)}</span>`;
+      })()}${u.isViewer?' <span class="chip" style="font-size:9px;margin-left:4px;background:#b8472e;color:#fff" title="Viewer — chỉ đọc báo cáo">👁 VIEWER</span>':''}${u.canConfirmPayment?' <span class="chip chip-warn" style="font-size:9px;margin-left:4px" title="Có quyền xác nhận TT (Vận hành tàu)">XÁC NHẬN TT</span>':''}${u.canApproveL1?' <span class="chip" style="font-size:9px;margin-left:4px;background:#c5876d;color:#fff" title="Phê duyệt cấp 1">DUYỆT L1</span>':''}${u.canApproveL2?' <span class="chip" style="font-size:9px;margin-left:4px;background:#8b3a2a;color:#fff" title="Phê duyệt cấp 2">DUYỆT L2</span>':''}${(u.assignedVesselIds||[]).length>0?` <span class="chip" style="font-size:9px;margin-left:4px;background:#1c3a5c;color:#fff" title="Tàu: ${esc((u.assignedVesselIds||[]).map(id=>{const v=S.vessels.find(x=>x.id===id);return v?v.name:'?';}).join(', '))}">⛵ ${(u.assignedVesselIds||[]).length}</span>`:''}${(u.assignedProjectIds||[]).length>0?` <span class="chip" style="font-size:9px;margin-left:4px;background:#4a6b2c;color:#fff" title="Dự án O&M: ${esc((u.assignedProjectIds||[]).map(id=>{const p=S.projects.find(x=>x.id===id);return p?p.code:'?';}).join(', '))}">⚙ ${(u.assignedProjectIds||[]).length}</span>`:''}${(u.assignedOpVesselIds||[]).length>0?` <span class="chip" style="font-size:9px;margin-left:4px;background:#5a4a8c;color:#fff" title="Tàu QL hộ: ${esc((u.assignedOpVesselIds||[]).map(id=>{const v=S.opVessels.find(x=>x.id===id);return v?v.name:'?';}).join(', '))}">🚢 ${(u.assignedOpVesselIds||[]).length}</span>`:''}</td>
       <td style="font-family:var(--font-mono);font-size:11px;color:var(--muted)">${(u.tabs||[]).length} tab</td>
       <td>${(u.tabs||[]).map(t=>{const T=ALL_TABS.find(x=>x.id===t);return T?`<span class="chip chip-5" style="margin-right:3px">${T.label}</span>`:'';}).join(' ')}</td>
       <td style="white-space:nowrap"><div class="row-actions">
@@ -2504,6 +2515,13 @@ function userEditorModal(initial,idx){
           <label>Số điện thoại</label>
           <input type="tel" id="user-phone" value="${(initial.phone||'').replace(/"/g,'&quot;')}" placeholder="VD: 0912 345 678">
         </div>
+        <div class="field">
+          <label>Phòng/Ban <span style="font-weight:400;color:var(--muted)">(tùy chọn)</span></label>
+          <select id="user-department" style="padding:8px 10px;border:1px solid var(--rule);background:var(--paper);font-size:13px">
+            <option value="">— Không gán phòng ban —</option>
+            ${(S.departments||[]).map(d=>`<option value="${esc(d.id)}" ${initial.departmentId===d.id?'selected':''}>${esc(d.code)} · ${esc(d.name)}</option>`).join('')}
+          </select>
+        </div>
       </div>
       <div class="field">
         <label>${isEdit?'Mật khẩu mới (để trống = giữ nguyên)':'Mật khẩu'} (tối thiểu 8 ký tự)</label>
@@ -2668,6 +2686,7 @@ function editUser(idx){
     assignedProjectIds:u.assignedProjectIds||[],
     assignedOpVesselIds:u.assignedOpVesselIds||[],
     isViewer:!!u.isViewer,
+    departmentId:u.departmentId||'',
     viewerReports:u.viewerReports||[],
     viewerSegments:u.viewerSegments||[],
     viewerVesselIds:u.viewerVesselIds||[],
@@ -2688,6 +2707,7 @@ async function saveUser(idx){
   const canApproveL1=document.getElementById('user-can-approve-l1').checked;
   const canApproveL2=document.getElementById('user-can-approve-l2').checked;
   const isViewer=document.getElementById('user-is-viewer').checked;
+  const departmentId=document.getElementById('user-department')?.value||'';
   const assignedVesselIds=Array.from(document.querySelectorAll('input[data-vessel]:checked')).map(c=>c.dataset.vessel);
   const assignedProjectIds=Array.from(document.querySelectorAll('input[data-project]:checked')).map(c=>c.dataset.project);
   const assignedOpVesselIds=Array.from(document.querySelectorAll('input[data-opvessel]:checked')).map(c=>c.dataset.opvessel);
@@ -2722,6 +2742,7 @@ async function saveUser(idx){
       u.assignedOpVesselIds=isViewer?[]:assignedOpVesselIds;
       u.email=email;
       u.phone=phone;
+      u.departmentId=departmentId;
       u.isViewer=isViewer;
       u.viewerReports=isViewer?viewerReports:[];
       u.viewerSegments=isViewer?viewerSegments:[];
@@ -2742,6 +2763,7 @@ async function saveUser(idx){
       cfg.users.push({
         name, email, phone, salt, hash, wrap, iter:PBKDF2_ITER_NEW,
         mustChangePassword:true,  // Force change on first login
+        departmentId,
         tabs:finalTabs,
         canConfirmPayment:isViewer?false:canConfirmPayment,
         canApproveL1:isViewer?false:canApproveL1,
@@ -3636,6 +3658,14 @@ function defaultState(){
     },
     presence:{},  // online presence: {username: {lastSeen, role}}
     auditLog:[],  // {ts, actor, role, action, detail}
+    departments:[
+      {id:'D-HCNS', code:'HCNS', name:'Phòng Hành chính Nhân sự'},
+      {id:'D-QLT', code:'QLT', name:'Phòng Quản lý Tàu'},
+      {id:'D-TMHD', code:'TMHD', name:'Phòng Thương mại Hợp đồng'},
+      {id:'D-BDA', code:'BDA', name:'Ban Dự án'},
+      {id:'D-CN-QN', code:'CN-QN', name:'Chi nhánh Quảng Ngãi'}
+    ],
+    vendors:[],  // [{id, code, name (display), normalized (IN HOA, không dấu, không space), taxCode, address, contact, note, createdAt, createdBy}]
     meta:{created:new Date().toISOString()}
   };
 }
@@ -4203,6 +4233,94 @@ function esc(s){
     .replace(/>/g,'&gt;')
     .replace(/"/g,'&quot;')
     .replace(/'/g,'&#39;');
+}
+
+/* ============================================================
+   VENDOR NORMALIZATION
+   Quy ước: IN HOA, KHÔNG DẤU, KHÔNG KHOẢNG TRẮNG
+   Vd: "Công ty TNHH HẢI MÃ" → "CONGTYTNHHHAIMA"
+   "Petrolimex"               → "PETROLIMEX"
+   ============================================================ */
+function normalizeVendorName(name){
+  if(!name) return '';
+  return String(name)
+    .normalize('NFD')              // separate accents from letters
+    .replace(/[\u0300-\u036f]/g,'') // remove accents
+    .replace(/đ/g,'d').replace(/Đ/g,'D')  // Vietnamese đ/Đ
+    .toUpperCase()
+    .replace(/[^A-Z0-9]/g,'');     // remove all non-alphanumeric
+}
+
+/* Find existing vendor by normalized name, return null if not exists */
+function findVendor(rawName){
+  if(!rawName) return null;
+  const norm=normalizeVendorName(rawName);
+  if(!norm) return null;
+  return (S.vendors||[]).find(v=>v.normalized===norm) || null;
+}
+
+/* Get-or-create vendor record from a free-text partner name.
+   Returns the vendor object (existing or newly created). */
+function getOrCreateVendor(rawName){
+  if(!rawName) return null;
+  const norm=normalizeVendorName(rawName);
+  if(!norm) return null;
+  let v=findVendor(rawName);
+  if(v) return v;
+  // Create new
+  v={
+    id:'V-'+uid(),
+    code:norm.slice(0,20),  // short code
+    name:String(rawName).trim(),  // original display
+    normalized:norm,
+    taxCode:'',
+    address:'',
+    contact:'',
+    note:'',
+    createdAt:new Date().toISOString(),
+    createdBy:actorName()
+  };
+  if(!S.vendors) S.vendors=[];
+  S.vendors.push(v);
+  return v;
+}
+
+/* Auto-migrate: scan existing receivables/payables, create vendors for unique partner names.
+   Safe to run multiple times — skip if already migrated. */
+function migrateVendorsFromAR(){
+  if(!S.vendors) S.vendors=[];
+  const existingNorms=new Set(S.vendors.map(v=>v.normalized));
+  const seen=new Map();  // normalized → raw name (first encounter)
+  [...(S.receivables||[]),...(S.payables||[])].forEach(r=>{
+    if(!r.partner) return;
+    const norm=normalizeVendorName(r.partner);
+    if(!norm) return;
+    if(!seen.has(norm)){
+      seen.set(norm, r.partner);
+    }
+  });
+  let created=0;
+  seen.forEach((rawName, norm)=>{
+    if(existingNorms.has(norm)) return;
+    S.vendors.push({
+      id:'V-'+uid(),
+      code:norm.slice(0,20),
+      name:rawName.trim(),
+      normalized:norm,
+      taxCode:'',
+      address:'',
+      contact:'',
+      note:'(migrated từ AR/AP)',
+      createdAt:new Date().toISOString(),
+      createdBy:'migration'
+    });
+    created++;
+  });
+  if(created>0){
+    console.log('[migrate] Created',created,'vendors from existing AR/AP partners');
+    saveState();
+  }
+  return created;
 }
 
 function fmt(n,sourceCcy){
@@ -7282,7 +7400,11 @@ function _arEditorBody(r,isPayable){
   return `
     ${lockedNote}
     <div class="form-grid">
-      <div class="field"><label>${isPayable?'Nhà cung cấp':'Khách hàng'} *</label><input type="text" id="ar-partner" value="${(r.partner||'').replace(/"/g,'&quot;')}" placeholder="${isPayable?'VD: Cảng PTSC Vũng Tàu':'VD: PVEP, JVPC, Pertamina...'}" ${lockedAttr}></div>
+      <div class="field"><label>${isPayable?'Nhà cung cấp':'Khách hàng'} *</label>
+        <input type="text" id="ar-partner" list="ar-partner-suggestions" value="${(r.partner||'').replace(/"/g,'&quot;')}" placeholder="${isPayable?'VD: Cảng PTSC Vũng Tàu':'VD: PVEP, JVPC, Pertamina...'}" ${lockedAttr} oninput="arPartnerCheck(this)">
+        <datalist id="ar-partner-suggestions">${(S.vendors||[]).slice(0,200).map(v=>`<option value="${esc(v.name)}">${esc(v.normalized)}</option>`).join('')}</datalist>
+        <div id="ar-partner-hint" style="font-size:11px;color:var(--muted);margin-top:4px"></div>
+      </div>
       <div class="field" style="grid-column:span 2"><label>Diễn giải</label><input type="text" id="ar-desc" value="${(r.desc||'').replace(/"/g,'&quot;')}" placeholder="Nội dung — VD: Cước thuê tàu T5/2026" ${lockedAttr}></div>
       <div class="field"><label>Mảng *</label><select id="ar-segment" ${lockedAttr}>${segOpts}</select></div>
       <div class="field"><label>Dự án (tùy chọn)</label><select id="ar-project" ${lockedAttr}>${projOpts}</select></div>
@@ -7324,6 +7446,29 @@ function _arEditorBody(r,isPayable){
 }
 
 /* Live VAT recalculation in modal */
+/* Live check duplicate vendor name as user types */
+function arPartnerCheck(input){
+  const hint=document.getElementById('ar-partner-hint');
+  if(!hint) return;
+  const raw=input.value.trim();
+  if(!raw){hint.innerHTML='';return;}
+  const norm=normalizeVendorName(raw);
+  const matches=(S.vendors||[]).filter(v=>v.normalized===norm);
+  if(matches.length>0){
+    // Exact match
+    hint.innerHTML=`<span style="color:var(--good)">✓ NCC đã có trong hệ thống</span> · mã: <code>${esc(matches[0].code)}</code>`;
+  } else {
+    // Search similar (startsWith normalized)
+    const similar=(S.vendors||[]).filter(v=>v.normalized.startsWith(norm)||norm.startsWith(v.normalized)).slice(0,3);
+    if(similar.length>0){
+      const list=similar.map(v=>`<a href="#" onclick="document.getElementById('ar-partner').value='${esc(v.name)}';arPartnerCheck(document.getElementById('ar-partner'));return false" style="color:var(--accent)">${esc(v.name)}</a>`).join(', ');
+      hint.innerHTML=`<span style="color:var(--warn)">⚠ Có thể trùng với:</span> ${list}`;
+    } else {
+      hint.innerHTML=`<span style="color:var(--muted)">+ NCC mới (sẽ tự tạo khi lưu): <b>${esc(norm)}</b></span>`;
+    }
+  }
+}
+
 function arRecalcVat(){
   const net=+document.getElementById('ar-amount-net').value||0;
   const vp=document.getElementById('ar-vat-percent').value;
@@ -7389,15 +7534,18 @@ function saveAr(kind,id){
   const dueAmount=daEl?(+daEl.value||0):0;
   if(!partner){err.textContent='Nhập tên đối tác';return;}
   if(amountNet<=0){err.textContent='Số tiền chưa VAT > 0';return;}
+  // Auto-create or link vendor (NCC master)
+  const vendor=getOrCreateVendor(partner);
+  const vendorId=vendor?vendor.id:'';
   if(id){
     const r=S[list].find(x=>x.id===id);
     if(!r){err.textContent='Không tìm thấy';return;}
     if(!wfCanEdit(r)){err.textContent='Bản ghi đã khóa sửa do trạng thái phê duyệt';return;}
-    Object.assign(r,{partner,desc,amountNet,vatPercent,vatAmount,amountGross,amount,ccy,segment,projectId,vesselId,issueDate,dueDate,dueMonth,dueAmount});
+    Object.assign(r,{partner,vendorId,desc,amountNet,vatPercent,vatAmount,amountGross,amount,ccy,segment,projectId,vesselId,issueDate,dueDate,dueMonth,dueAmount});
   } else {
     S[list].push({
       id:uid(),
-      partner,desc,amountNet,vatPercent,vatAmount,amountGross,amount,ccy,segment,projectId,vesselId,issueDate,dueDate,dueMonth,dueAmount,
+      partner,vendorId,desc,amountNet,vatPercent,vatAmount,amountGross,amount,ccy,segment,projectId,vesselId,issueDate,dueDate,dueMonth,dueAmount,
       payments:[],
       status:'draft',
       submittedBy:'',submittedAt:'',
