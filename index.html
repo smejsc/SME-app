@@ -1670,7 +1670,7 @@ body{min-height:100vh;background-image:radial-gradient(circle at 20% 0%,rgba(184
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='1.28.0';            // bumped on each release
+const APP_VERSION='1.28.1';            // bumped on each release
 
 /* ============================================================
    PWA — Service Worker registration + Install prompt
@@ -2047,6 +2047,11 @@ async function authAction(){
         const n=migrateVendorsFromAR();
         if(n>0) setTimeout(()=>toast(`📦 Đã tự động tạo ${n} NCC từ AR/AP cũ`,'good'),1500);
       }catch(e){console.warn('[migrate] failed:',e);}
+      // Auto-migrate: add BOD + KT departments if missing
+      try{
+        const n=migrateDepartmentsAddBODKT();
+        if(n>0) setTimeout(()=>toast(`🏢 Đã thêm ${n} phòng ban mặc định (BOD / Kế toán)`,'good'),2000);
+      }catch(e){console.warn('[migrate dept] failed:',e);}
       const lastBak=cfg.lastBackup?new Date(cfg.lastBackup).getTime():0;
       const daysSinceBak=lastBak?Math.floor((Date.now()-lastBak)/86400000):999;
       if(daysSinceBak>=7){
@@ -2300,6 +2305,21 @@ function openSettings(){
           <button class="btn-sec" onclick="exportAuditLog()" style="font-size:11px">⬇ Export CSV</button>
         </div>
         <div style="font-size:11px;color:var(--muted);font-style:italic;margin-top:4px">Nhật ký login/logout/duyệt/từ chối/sync. Giữ 500 sự kiện gần nhất.</div>
+      </div>
+      <div class="field">
+        <label>Phòng/Ban <span style="text-transform:none;font-weight:400;color:var(--muted)">(${(S.departments||[]).length} phòng)</span></label>
+        <div style="border:1px solid var(--rule);padding:8px 12px;background:var(--paper);max-height:200px;overflow-y:auto" id="dept-list-settings">
+          ${(S.departments||[]).map((d,i)=>`
+            <div style="display:flex;align-items:center;gap:8px;padding:4px 0;border-bottom:1px solid rgba(0,0,0,.04);font-size:12px">
+              <span class="chip" style="font-size:9px;background:#2a5a8c;color:#fff;min-width:60px;text-align:center">🏢 ${esc(d.code)}</span>
+              <span style="flex:1">${esc(d.name)}</span>
+              <button class="icon-btn" style="font-size:11px" onclick="editDepartment('${d.id}')" title="Sửa">✎</button>
+              <button class="icon-btn danger" style="font-size:11px" onclick="deleteDepartment('${d.id}')" title="Xóa">✕</button>
+            </div>
+          `).join('')}
+        </div>
+        <button class="btn-sec" onclick="addDepartment()" style="font-size:11px;margin-top:6px">+ Thêm phòng/ban</button>
+        <div style="font-size:11px;color:var(--muted);font-style:italic;margin-top:4px">Phòng/ban dùng để gán NV. Có thể xóa nếu không còn NV nào thuộc phòng đó.</div>
       </div>
 
       <hr style="border:none;border-top:1px solid var(--rule);margin:8px 0">
@@ -3659,6 +3679,8 @@ function defaultState(){
     presence:{},  // online presence: {username: {lastSeen, role}}
     auditLog:[],  // {ts, actor, role, action, detail}
     departments:[
+      {id:'D-BOD', code:'BOD', name:'Ban Giám đốc'},
+      {id:'D-KT', code:'KT', name:'Phòng Kế toán'},
       {id:'D-HCNS', code:'HCNS', name:'Phòng Hành chính Nhân sự'},
       {id:'D-QLT', code:'QLT', name:'Phòng Quản lý Tàu'},
       {id:'D-TMHD', code:'TMHD', name:'Phòng Thương mại Hợp đồng'},
@@ -3891,6 +3913,66 @@ function showAuditLog(){
   openModal('📋 Audit Log · Nhật ký hoạt động', body,
     `<button class="btn-sec" onclick="exportAuditLog()">⬇ Export CSV</button>
      <button class="btn-sec" onclick="closeModal()">Đóng</button>`);
+}
+
+/* ============================================================
+   DEPARTMENT MANAGEMENT
+   ============================================================ */
+function addDepartment(){
+  if(!isAdmin()){toast('Chỉ admin','bad');return;}
+  const name=prompt('Tên phòng/ban đầy đủ (VD: "Phòng Kế toán"):','');
+  if(!name||!name.trim()) return;
+  const code=prompt('Mã viết tắt (VD: "KT", không dấu, không space):','');
+  if(!code||!code.trim()) return;
+  const codeClean=String(code).toUpperCase().replace(/[^A-Z0-9\-]/g,'').slice(0,10);
+  if(!codeClean){toast('Mã không hợp lệ','bad');return;}
+  if(!S.departments) S.departments=[];
+  // Check duplicate code
+  if(S.departments.some(d=>d.code===codeClean)){
+    toast('Mã "'+codeClean+'" đã tồn tại','bad');return;
+  }
+  S.departments.push({
+    id:'D-'+codeClean+'-'+uid().slice(-4),
+    code:codeClean,
+    name:name.trim()
+  });
+  saveState();
+  toast('Đã thêm phòng/ban: '+codeClean);
+  // Refresh settings modal
+  closeModal();
+  setTimeout(()=>showSettings(),100);
+}
+
+function editDepartment(id){
+  if(!isAdmin()){toast('Chỉ admin','bad');return;}
+  const d=(S.departments||[]).find(x=>x.id===id);
+  if(!d){toast('Không tìm thấy','bad');return;}
+  const newName=prompt('Đổi tên phòng/ban:',d.name);
+  if(!newName||!newName.trim()) return;
+  d.name=newName.trim();
+  saveState();
+  toast('Đã đổi tên phòng/ban');
+  closeModal();
+  setTimeout(()=>showSettings(),100);
+}
+
+function deleteDepartment(id){
+  if(!isAdmin()){toast('Chỉ admin','bad');return;}
+  const d=(S.departments||[]).find(x=>x.id===id);
+  if(!d){toast('Không tìm thấy','bad');return;}
+  // Check if any user in this department
+  const cfg=getAuthConfig();
+  const usersInDept=(cfg.users||[]).filter(u=>u.departmentId===id);
+  if(usersInDept.length>0){
+    toast(`Không xóa được: còn ${usersInDept.length} NV đang thuộc phòng "${d.code}". Chuyển NV sang phòng khác trước.`,'bad');
+    return;
+  }
+  if(!confirm(`Xóa phòng/ban "${d.code} · ${d.name}"?`)) return;
+  S.departments=S.departments.filter(x=>x.id!==id);
+  saveState();
+  toast('Đã xóa phòng/ban');
+  closeModal();
+  setTimeout(()=>showSettings(),100);
 }
 
 function exportAuditLog(){
@@ -4287,6 +4369,29 @@ function getOrCreateVendor(rawName){
 
 /* Auto-migrate: scan existing receivables/payables, create vendors for unique partner names.
    Safe to run multiple times — skip if already migrated. */
+/* Migrate departments: ensure BOD + KT exist in existing data.
+   Safe to run multiple times — only adds if missing. */
+function migrateDepartmentsAddBODKT(){
+  if(!S.departments) S.departments=[];
+  const existing=new Set(S.departments.map(d=>d.id));
+  const needed=[
+    {id:'D-BOD', code:'BOD', name:'Ban Giám đốc'},
+    {id:'D-KT', code:'KT', name:'Phòng Kế toán'}
+  ];
+  let added=0;
+  needed.forEach(d=>{
+    if(!existing.has(d.id)){
+      S.departments.unshift(d);  // add to top (BOD before KT before existing)
+      added++;
+    }
+  });
+  if(added>0){
+    console.log('[migrate] Added',added,'departments (BOD/KT)');
+    saveState();
+  }
+  return added;
+}
+
 function migrateVendorsFromAR(){
   if(!S.vendors) S.vendors=[];
   const existingNorms=new Set(S.vendors.map(v=>v.normalized));
