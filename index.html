@@ -1670,7 +1670,7 @@ body{min-height:100vh;background-image:radial-gradient(circle at 20% 0%,rgba(184
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='1.25.0';            // bumped on each release
+const APP_VERSION='1.27.0';            // bumped on each release
 
 /* ============================================================
    PWA — Service Worker registration + Install prompt
@@ -1856,6 +1856,109 @@ function getAuthConfig(){
 }
 function setAuthConfig(cfg){localStorage.setItem(AUTH_KEY,JSON.stringify(cfg));}
 
+/* ============================================================
+   RATE LIMIT LOGIN — chống brute force
+   3 lần sai trong 5 phút → khóa 5 phút theo tên user
+   Lưu trong localStorage để giữ qua reload
+   ============================================================ */
+const LOGIN_FAIL_KEY='seahorse_login_fails_v1';
+const MAX_FAIL_ATTEMPTS=3;
+const FAIL_WINDOW_MS=5*60*1000;  // 5 phút
+const LOCK_DURATION_MS=5*60*1000;  // khóa 5 phút
+
+function getLoginFails(){
+  try{return JSON.parse(localStorage.getItem(LOGIN_FAIL_KEY)||'{}');}catch(e){return {};}
+}
+function setLoginFails(d){localStorage.setItem(LOGIN_FAIL_KEY,JSON.stringify(d));}
+
+function recordFailedLogin(name){
+  const key=name.toLowerCase();
+  const d=getLoginFails();
+  const now=Date.now();
+  if(!d[key]) d[key]={attempts:[],lockedUntil:0};
+  // Drop old attempts (>FAIL_WINDOW_MS ago)
+  d[key].attempts=d[key].attempts.filter(t=>(now-t)<FAIL_WINDOW_MS);
+  d[key].attempts.push(now);
+  if(d[key].attempts.length>=MAX_FAIL_ATTEMPTS){
+    d[key].lockedUntil=now+LOCK_DURATION_MS;
+    d[key].attempts=[];  // reset counter after lock
+    try{ logAuditEvent('login_locked',{name,lockedUntilMs:LOCK_DURATION_MS}); saveState(); }catch(e){}
+  }
+  setLoginFails(d);
+}
+
+function checkLoginLock(name){
+  const key=name.toLowerCase();
+  const d=getLoginFails();
+  const now=Date.now();
+  if(!d[key]||!d[key].lockedUntil) return {locked:false};
+  if(now>=d[key].lockedUntil){
+    // Lock expired
+    d[key].lockedUntil=0;
+    setLoginFails(d);
+    return {locked:false};
+  }
+  return {locked:true, minutesLeft:Math.ceil((d[key].lockedUntil-now)/60000)};
+}
+
+function getLoginAttemptsLeft(name){
+  const key=name.toLowerCase();
+  const d=getLoginFails();
+  const now=Date.now();
+  if(!d[key]) return MAX_FAIL_ATTEMPTS-1;
+  // Filter recent
+  const recent=d[key].attempts.filter(t=>(now-t)<FAIL_WINDOW_MS);
+  return Math.max(0, MAX_FAIL_ATTEMPTS-recent.length);
+}
+
+function clearLoginFails(name){
+  const key=name.toLowerCase();
+  const d=getLoginFails();
+  if(d[key]) delete d[key];
+  setLoginFails(d);
+}
+
+/* ============================================================
+   SESSION TIMEOUT — Max session 8 giờ
+   Khác idle: idle reset khi tương tác, max session đếm từ login
+   ============================================================ */
+let SESSION_START_TS=null;
+const MAX_SESSION_MS=8*60*60*1000;  // 8 giờ
+let _maxSessionTimer=null;
+
+function startMaxSessionTimer(){
+  clearTimeout(_maxSessionTimer);
+  if(!SESSION_START_TS){
+    const stored=+localStorage.getItem('seahorse_session_start')||0;
+    if(stored) SESSION_START_TS=stored;
+    else return;
+  }
+  const elapsed=Date.now()-SESSION_START_TS;
+  const remaining=MAX_SESSION_MS-elapsed;
+  if(remaining<=0){
+    // Session already expired
+    forceLogoutSession();
+    return;
+  }
+  _maxSessionTimer=setTimeout(forceLogoutSession, remaining);
+}
+
+async function forceLogoutSession(){
+  console.log('[session] Max session 8h reached — force logout');
+  try{ logAuditEvent('session_expired',{maxHours:8}); saveState(); }catch(e){}
+  try{ presenceCleanup(); }catch(e){}
+  if(CRYPTO_KEY){
+    try{ await cloudSync('push'); }catch(e){}
+  }
+  CRYPTO_KEY=null;
+  CURRENT_ROLE=null;
+  CURRENT_USER=null;
+  SESSION_START_TS=null;
+  localStorage.removeItem('seahorse_session_start');
+  alert('⏱ Phiên đăng nhập đã hết 8 giờ. Đăng nhập lại để tiếp tục.');
+  location.reload();
+}
+
 async function authAction(){
   const cfg=getAuthConfig();
   if(!cfg){
@@ -1869,12 +1972,23 @@ async function authAction(){
   err.textContent='';
   if(!name){err.textContent='Nhập tên đăng nhập';return;}
   if(!pw){err.textContent='Nhập mật khẩu';return;}
+
+  // RATE LIMIT: check if locked out
+  const lockState=checkLoginLock(name);
+  if(lockState.locked){
+    err.textContent=`🔒 Tạm khóa do nhập sai nhiều lần. Thử lại sau ${lockState.minutesLeft} phút.`;
+    document.getElementById('auth-pw').value='';
+    return;
+  }
+
   try{
     // Admin login: name must be "admin" (case-insensitive)
     if(name.toLowerCase()==='admin'){
       const hashAdmin=await sha256Hex(pw+cfg.admin.salt);
       if(hashAdmin!==cfg.admin.hash){
-        err.textContent='Mật khẩu admin sai';
+        recordFailedLogin(name);
+        const left=getLoginAttemptsLeft(name);
+        err.textContent=left>0?`Mật khẩu admin sai. Còn ${left} lần thử trước khi khóa.`:'Mật khẩu admin sai. Đã khóa 5 phút.';
         document.getElementById('auth-pw').value='';
         return;
       }
@@ -1886,12 +2000,15 @@ async function authAction(){
       // User login: match by name (case-insensitive), then verify password
       const matched=(cfg.users||[]).find(u=>u.name.toLowerCase()===name.toLowerCase());
       if(!matched){
+        recordFailedLogin(name);
         err.textContent='Không tìm thấy nhân viên có tên này';
         return;
       }
       const h=await sha256Hex(pw+matched.salt);
       if(h!==matched.hash){
-        err.textContent='Mật khẩu sai';
+        recordFailedLogin(name);
+        const left=getLoginAttemptsLeft(name);
+        err.textContent=left>0?`Mật khẩu sai. Còn ${left} lần thử trước khi khóa.`:'Mật khẩu sai. Đã khóa 5 phút.';
         document.getElementById('auth-pw').value='';
         return;
       }
@@ -1900,6 +2017,10 @@ async function authAction(){
       CURRENT_ROLE='user';
       CURRENT_USER=matched;
     }
+    // Success: clear failed attempts + record session start
+    clearLoginFails(name);
+    SESSION_START_TS=Date.now();
+    localStorage.setItem('seahorse_session_start',String(SESSION_START_TS));
     await loadEncryptedLocal();
     document.getElementById('auth-overlay').classList.add('hide');
     try{ applyRoleUI(); } catch(e){ console.error('[login] applyRoleUI error:',e); err.textContent='Lỗi UI: '+e.message; return; }
@@ -1911,9 +2032,14 @@ async function authAction(){
       document.getElementById('auth-overlay').classList.remove('hide');
       return;
     }
-    // Log + start idle timer
+    // Log + start idle timer + max session timer
     try{ logAuditEvent('login',{role:CURRENT_ROLE}); }catch(e){}
     resetIdleTimer();
+    startMaxSessionTimer();
+    // Force password change on first login (mustChangePassword flag)
+    if(CURRENT_ROLE==='user' && CURRENT_USER && CURRENT_USER.mustChangePassword){
+      setTimeout(()=>showChangePasswordModal(true),500);
+    }
     // Reminder backup if last export >7 days ago (admin only)
     if(CURRENT_ROLE==='admin'){
       const lastBak=cfg.lastBackup?new Date(cfg.lastBackup).getTime():0;
@@ -1923,6 +2049,30 @@ async function authAction(){
           toast(`📦 Lần backup gần nhất: ${lastBak?daysSinceBak+' ngày trước':'CHƯA BAO GIỜ'}. Khuyến nghị: ≡ Menu → Export backup (.json)`,'warn');
         },2500);
       }
+      // Alert admin về vi phạm bảo mật trong 24h qua
+      setTimeout(()=>{
+        try{
+          const log=S.auditLog||[];
+          const dayAgo=Date.now()-86400000;
+          const violations=log.filter(e=>e.action==='permission_denied' && new Date(e.ts).getTime()>dayAgo);
+          if(violations.length>0){
+            // Group by actor
+            const byActor={};
+            violations.forEach(v=>{byActor[v.actor]=(byActor[v.actor]||0)+1;});
+            const summary=Object.entries(byActor).map(([a,c])=>`${a}: ${c} lần`).join(', ');
+            setTimeout(()=>{
+              toast(`⚠ Bảo mật 24h qua: ${violations.length} vi phạm quyền (${summary}). Xem chi tiết tại Cài đặt → Audit Log`,'bad');
+            },3500);
+          }
+          // Alert về login bị khóa
+          const lockEvents=log.filter(e=>e.action==='login_locked' && new Date(e.ts).getTime()>dayAgo);
+          if(lockEvents.length>0){
+            setTimeout(()=>{
+              toast(`🔒 ${lockEvents.length} tài khoản bị khóa trong 24h qua do nhập sai mật khẩu nhiều lần`,'warn');
+            },4500);
+          }
+        }catch(e){console.warn('[alert] failed:',e);}
+      },2000);
     }
     updateSyncStatus(cfg.scriptUrl?'idle':'offline');
     if(cfg.scriptUrl){
@@ -2591,6 +2741,7 @@ async function saveUser(idx){
       cfg.users=cfg.users||[];
       cfg.users.push({
         name, email, phone, salt, hash, wrap, iter:PBKDF2_ITER_NEW,
+        mustChangePassword:true,  // Force change on first login
         tabs:finalTabs,
         canConfirmPayment:isViewer?false:canConfirmPayment,
         canApproveL1:isViewer?false:canApproveL1,
@@ -3082,6 +3233,20 @@ function applyRoleUI(){
       navigateToPage(allowedTabs[0]);
     }
   }
+  // Change password button (NV only — admin uses settings)
+  if(CURRENT_ROLE==='user' && !document.getElementById('cpw-btn')){
+    const cp=document.createElement('button');
+    cp.id='cpw-btn';
+    cp.className='btn btn-ghost';
+    cp.style.cssText='border:1px solid rgba(246,241,232,.3);padding:4px 10px;font-size:11px';
+    cp.innerHTML='🔑 Đổi MK';
+    cp.title='Đổi mật khẩu';
+    cp.onclick=()=>showChangePasswordModal(false);
+    document.querySelector('.topbar-actions').appendChild(cp);
+  } else if(CURRENT_ROLE==='admin'){
+    const cp=document.getElementById('cpw-btn');
+    if(cp) cp.remove();
+  }
   // Logout button
   if(!document.getElementById('logout-btn')){
     const lo=document.createElement('button');
@@ -3102,6 +3267,9 @@ async function logout(){
   clearInterval(_presenceTimer);
   clearTimeout(_idleTimer);
   clearTimeout(_idleWarnTimer);
+  clearTimeout(_maxSessionTimer);
+  SESSION_START_TS=null;
+  localStorage.removeItem('seahorse_session_start');
 
   // CRITICAL: Force sync any pending changes BEFORE logging out
   // Prevents race condition where new user/data is local-only but cloud has old state
@@ -3573,13 +3741,96 @@ function logAuditEvent(action, detail){
   }
 }
 
+/* ============================================================
+   USER SELF-SERVICE PASSWORD CHANGE
+   Force on first login (mustChangePassword=true)
+   Voluntary from menu
+   ============================================================ */
+function showChangePasswordModal(forced){
+  if(CURRENT_ROLE!=='user' || !CURRENT_USER){
+    toast('Chỉ NV mới đổi mật khẩu (admin đổi qua Cài đặt)','bad');return;
+  }
+  const body=`
+    <div style="font-size:13px;line-height:1.6">
+      ${forced?'<div style="background:rgba(184,71,46,.08);border-left:3px solid var(--accent);padding:10px 14px;margin-bottom:14px;font-size:12px"><b>🔒 Lần đầu đăng nhập:</b> Vui lòng đổi mật khẩu admin đã cấp sang mật khẩu của riêng bạn (admin không biết được).</div>':''}
+      <div class="field"><label>Mật khẩu hiện tại</label>
+        <input type="password" id="cpw-old" placeholder="Mật khẩu admin cấp / mật khẩu cũ" autocomplete="current-password"></div>
+      <div class="field"><label>Mật khẩu mới <span style="font-weight:400;color:var(--muted)">(tối thiểu 8 ký tự)</span></label>
+        <input type="password" id="cpw-new1" placeholder="Mật khẩu mới" autocomplete="new-password"></div>
+      <div class="field"><label>Nhập lại mật khẩu mới</label>
+        <input type="password" id="cpw-new2" placeholder="Nhập lại" autocomplete="new-password"></div>
+      <div id="cpw-err" style="color:var(--bad);font-size:12px;margin-top:8px"></div>
+    </div>`;
+  const foot=`
+    ${forced?'':'<button class="btn-sec" onclick="closeModal()">Hủy</button>'}
+    <button class="btn-pri" onclick="doChangePassword(${forced?'true':'false'})">Đổi mật khẩu</button>`;
+  openModal('🔑 Đổi mật khẩu', body, foot);
+  // Block close if forced
+  if(forced){
+    setTimeout(()=>{
+      const closeBtn=document.querySelector('.modal-close');
+      if(closeBtn) closeBtn.style.display='none';
+    },50);
+  }
+}
+
+async function doChangePassword(forced){
+  const err=document.getElementById('cpw-err');
+  err.textContent='';
+  const oldPw=document.getElementById('cpw-old').value;
+  const newPw1=document.getElementById('cpw-new1').value;
+  const newPw2=document.getElementById('cpw-new2').value;
+  if(!oldPw){err.textContent='Nhập mật khẩu hiện tại';return;}
+  if(newPw1.length<8){err.textContent='Mật khẩu mới tối thiểu 8 ký tự';return;}
+  if(newPw1!==newPw2){err.textContent='Hai mật khẩu mới không khớp';return;}
+  if(oldPw===newPw1){err.textContent='Mật khẩu mới phải khác mật khẩu cũ';return;}
+
+  try{
+    // Verify old password
+    const oldHash=await sha256Hex(oldPw+CURRENT_USER.salt);
+    if(oldHash!==CURRENT_USER.hash){
+      err.textContent='Mật khẩu hiện tại sai';
+      return;
+    }
+    // Generate new salt + hash + wrap
+    const newSalt=bytesToB64(rand(16));
+    const newHash=await sha256Hex(newPw1+newSalt);
+    const newWrap=await wrapMasterKey(CRYPTO_KEY, await deriveWrappingKey(newPw1,newSalt,PBKDF2_ITER_NEW));
+    // Update in cfg
+    const cfg=getAuthConfig();
+    const u=cfg.users.find(x=>x.name===CURRENT_USER.name);
+    if(!u){err.textContent='Lỗi: không tìm thấy NV trong cfg';return;}
+    u.salt=newSalt;
+    u.hash=newHash;
+    u.wrap=newWrap;
+    u.iter=PBKDF2_ITER_NEW;
+    u.mustChangePassword=false;
+    u.passwordChangedAt=new Date().toISOString();
+    setAuthConfig(cfg);
+    CURRENT_USER=u;  // update in-memory
+    try{ logAuditEvent('password_change',{by:'self'}); saveState(); }catch(e){}
+    closeModal();
+    toast('✓ Đã đổi mật khẩu thành công');
+  }catch(e){
+    if(/extractable|exportKey/i.test(e.message)){
+      err.innerHTML='Phiên hiện tại không cho phép đổi MK. Hãy <b>thoát</b> và <b>đăng nhập lại</b>.';
+    } else {
+      err.textContent='Lỗi: '+e.message;
+    }
+  }
+}
+
 function showAuditLog(){
-  if(!isAdmin()){toast('Chỉ admin xem được Audit Log','bad');return;}
+  if(!guardAction('view_audit', {})) return;
   const log=S.auditLog||[];
   const ACTION_LABELS={
     login:'🔓 Đăng nhập',
     logout:'🔒 Đăng xuất',
     auto_logout:'⏱ Tự đăng xuất (idle)',
+    session_expired:'⏱ Hết phiên 8h',
+    login_locked:'🔒 Khóa do nhập sai',
+    permission_denied:'⛔ Vi phạm quyền',
+    password_change:'🔑 Đổi mật khẩu',
     approve_l1:'✓ Duyệt L1',
     approve_l2:'✓✓ Duyệt L2',
     reject:'✗ Từ chối',
@@ -3680,12 +3931,36 @@ function presenceHeartbeat(){
   S.presence[me]={
     lastSeen: new Date().toISOString(),
     role: CURRENT_ROLE||'user',
-    displayName: (CURRENT_USER&&CURRENT_USER.name)|| (CURRENT_ROLE==='admin'?'Admin':me)
+    displayName: (CURRENT_USER&&CURRENT_USER.name)|| (CURRENT_ROLE==='admin'?'Admin':me),
+    device: getDeviceInfo(),
+    sessionStart: SESSION_START_TS?new Date(SESSION_START_TS).toISOString():null
   };
-  // Don't trigger full save — just push presence silently via lightweight sync
-  // (saveState would push entire state; we want minimal)
-  saveState();  // OK to use full save — debounce handles batching
+  saveState();
   renderPresenceUI();
+}
+
+/* Detect device/OS/browser info for active sessions display */
+function getDeviceInfo(){
+  const ua=navigator.userAgent;
+  let os='Unknown', browser='Unknown', device='Desktop';
+  // OS
+  if(/Windows NT 10/.test(ua)) os='Windows 10/11';
+  else if(/Windows NT/.test(ua)) os='Windows';
+  else if(/Mac OS X/.test(ua)) os='macOS';
+  else if(/Android/.test(ua)) os='Android';
+  else if(/iPhone|iPad|iPod/.test(ua)) os='iOS';
+  else if(/Linux/.test(ua)) os='Linux';
+  // Browser
+  if(/Edg\//.test(ua)) browser='Edge';
+  else if(/Chrome\//.test(ua)) browser='Chrome';
+  else if(/Firefox\//.test(ua)) browser='Firefox';
+  else if(/Safari\//.test(ua)) browser='Safari';
+  // Device
+  if(/Mobile|Android|iPhone|iPod/.test(ua)) device='Mobile';
+  else if(/iPad|Tablet/.test(ua)) device='Tablet';
+  // PWA detection
+  const isPWA=window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone;
+  return {os, browser, device, pwa:!!isPWA};
 }
 
 function presenceCleanup(){
@@ -3715,6 +3990,8 @@ function presenceList(){
       role: info.role||'user',
       ageMs,
       lastSeen: info.lastSeen,
+      device: info.device||null,
+      sessionStart: info.sessionStart||null,
       status,
       isMe: username===actorName()
     });
@@ -3756,11 +4033,26 @@ function renderPresenceUI(){
       const dot = u.status==='online' ? '🟢' : '🟡';
       const tag = u.role==='admin' ? '<span style="font-size:9px;background:var(--accent);color:#fff;padding:1px 6px;border-radius:2px;margin-left:6px;letter-spacing:.1em">ADMIN</span>' : '';
       const meTag = u.isMe ? '<span style="font-size:10px;color:var(--muted);margin-left:6px">(bạn)</span>' : '';
+      // Device info (only show for admin or self)
+      let deviceLine='';
+      if(u.device && (isAdmin() || u.isMe)){
+        const deviceIcon=u.device.device==='Mobile'?'📱':u.device.device==='Tablet'?'📱':'💻';
+        const pwaIcon=u.device.pwa?' ⊕':'';
+        deviceLine=`<div style="font-size:9px;color:var(--muted);font-family:var(--font-mono);margin-top:2px">${deviceIcon} ${esc(u.device.os)} · ${esc(u.device.browser)}${pwaIcon}</div>`;
+      }
+      // Session age
+      let sessionLine='';
+      if(u.sessionStart && (isAdmin() || u.isMe)){
+        const sessAge=Date.now()-new Date(u.sessionStart).getTime();
+        sessionLine=`<div style="font-size:9px;color:var(--muted);font-family:var(--font-mono)">Phiên: ${_fmtAge(sessAge)}</div>`;
+      }
       return `<div style="padding:8px 14px;font-size:12px;display:flex;align-items:center;gap:8px;border-bottom:1px solid rgba(0,0,0,.04)">
         <span style="font-size:10px">${dot}</span>
         <div style="flex:1">
-          <div style="font-weight:600">${u.displayName}${tag}${meTag}</div>
+          <div style="font-weight:600">${esc(u.displayName)}${tag}${meTag}</div>
           <div style="font-size:10px;color:var(--muted);font-family:var(--font-mono)">${u.status==='online' ? 'hoạt động · '+_fmtAge(u.ageMs) : _fmtAge(u.ageMs)+' trước'}</div>
+          ${deviceLine}
+          ${sessionLine}
         </div>
       </div>`;
     }).join('');
@@ -4085,27 +4377,21 @@ function segmentChip(seg){
 
 /* ===== NAV ===== */
 function navigateToPage(pageId){
-  // SECURITY GUARD: enforce tab permission for non-admin users
-  // Prevents bypass via JS console, DevTools, or programmatic navigation
+  // SECURITY GUARD: use centralized permission system
   if(CURRENT_ROLE==='user' && CURRENT_USER){
     const allowed=CURRENT_USER.tabs||[];
-    // Dashboard always admin-only
-    if(pageId==='dashboard'){
-      console.warn('[security] User attempted to access admin-only Dashboard, blocked');
-      pageId=allowed[0]||'plan';
-    }
-    // Approval tab requires approve permission
-    else if(pageId==='approval'){
-      if(!canApproveL1() && !canApproveL2()){
-        console.warn('[security] User without approve permission attempted to access Approval tab, blocked');
-        try{ logAuditEvent('permission_denied',{tab:pageId}); }catch(e){}
-        pageId=allowed[0]||'plan';
+    // If user attempts disallowed tab → block + show alert + redirect
+    if(!canAccessTab(pageId)){
+      // Don't show modal if this is silent (initial render, etc) — only if real navigation
+      // Check if we're called from a real user click vs auto-redirect
+      const isUserClick=window.event && window.event.isTrusted;
+      if(isUserClick){
+        guardAction('access_tab', {tabId:pageId});
+      } else {
+        // Silent log only
+        try{ logAuditEvent('permission_denied',{tab:pageId,silent:true}); }catch(e){}
       }
-    }
-    // Regular tabs: check allowed list
-    else if(allowed.length && !allowed.includes(pageId)){
-      console.warn('[security] User attempted to access disallowed tab:',pageId,'allowed:',allowed);
-      try{ logAuditEvent('permission_denied',{tab:pageId,allowed:allowed.join(',')}); }catch(e){}
+      // Redirect to first allowed tab
       pageId=allowed[0]||'plan';
     }
   }
@@ -6926,18 +7212,21 @@ function arSubmit(kind,id){
   wfSubmit(r);saveState();renderAll();toast('Đã gửi duyệt — chờ L1 phê duyệt');
 }
 function arApproveL1(kind,id){
+  if(!guardAction('approve_l1', {})) return;
   const list=kind==='ap'?'payables':'receivables';
   const r=S[list].find(x=>x.id===id);if(!r)return;
   if(wfStatus(r)!=='pending_l1'){toast('Không ở trạng thái chờ L1','bad');return;}
   if(wfApproveL1(r)){saveState();renderAll();toast('Đã duyệt L1 — chuyển sang chờ duyệt L2');}
 }
 function arApproveL2(kind,id){
+  if(!guardAction('approve_l2', {})) return;
   const list=kind==='ap'?'payables':'receivables';
   const r=S[list].find(x=>x.id===id);if(!r)return;
   if(wfStatus(r)!=='pending_l2'){toast('Không ở trạng thái chờ L2','bad');return;}
   if(wfApproveL2(r)){saveState();renderAll();toast('Đã duyệt L2 — bản ghi vào báo cáo BI');}
 }
 function arReject(kind,id){
+  if(!guardAction('reject', {})) return;
   const list=kind==='ap'?'payables':'receivables';
   const r=S[list].find(x=>x.id===id);if(!r)return;
   const reason=prompt('Lý do từ chối:','');
@@ -10444,7 +10733,7 @@ function renderRates(){
 async function exportJSON(){
   const cfg=getAuthConfig();
   if(!cfg||!CRYPTO_KEY){toast('Chưa đăng nhập','bad');return;}
-  if(!isAdmin()){toast('Chỉ admin được export','bad');return;}
+  if(!guardAction('export_backup', {})) return;
   const payload=await encryptJSON(S);
   const backup={
     auth:{
@@ -11531,6 +11820,174 @@ function applyBranding(){
     const title=ci.nameEn||ci.name||'SEAHORSE';
     document.title=`${title} · Quản trị Vận hành`;
   }catch(e){}
+}
+
+/* ============================================================
+   PERMISSION GUARD SYSTEM — Lớp bảo vệ cuối cùng
+   Dùng cho MỌI hành động: tab/save/edit/delete/approve/...
+   Trả: {ok:true} nếu được phép, {ok:false, reason, severity} nếu không.
+   severity: 'low' (cảnh báo nhẹ), 'high' (modal đỏ + alert admin)
+   ============================================================ */
+
+// Track violations per session: nếu >=3 trong 1 giờ → escalate
+let _violationCount=0;
+let _violationsThisHour=[];
+
+function guardCheck(action, ctx){
+  ctx=ctx||{};
+  // Admin bypass everything (except admin's own logical mistakes)
+  if(isAdmin()) return {ok:true};
+  if(!CURRENT_USER) return {ok:false, reason:'Chưa đăng nhập', severity:'high'};
+
+  // Viewer: read-only, deny mọi hành động ghi
+  if(isViewer() && action!=='read'){
+    return {ok:false, reason:'Tài khoản Viewer chỉ được đọc báo cáo', severity:'high'};
+  }
+
+  switch(action){
+    case 'access_tab':
+      if(!canAccessTab(ctx.tabId)){
+        return {ok:false, reason:`Bạn không có quyền vào tab "${ctx.tabId}"`, severity:'high'};
+      }
+      return {ok:true};
+
+    case 'access_settings':
+      return {ok:false, reason:'Chỉ Admin được truy cập Cài đặt', severity:'high'};
+
+    case 'manage_users':
+      return {ok:false, reason:'Chỉ Admin được quản lý nhân viên', severity:'high'};
+
+    case 'export_backup':
+      return {ok:false, reason:'Chỉ Admin được export backup', severity:'high'};
+
+    case 'import_backup':
+      return {ok:false, reason:'Chỉ Admin được import backup', severity:'high'};
+
+    case 'view_audit':
+      return {ok:false, reason:'Chỉ Admin xem được Audit Log', severity:'high'};
+
+    case 'create_vessel_expense':
+    case 'edit_vessel_expense':
+      if(ctx.vesselId && !canEditVesselExpense(ctx.vesselId)){
+        const v=S.vessels.find(x=>x.id===ctx.vesselId);
+        return {ok:false, reason:`Bạn không phụ trách tàu "${v?v.name:'?'}"`, severity:'high'};
+      }
+      return {ok:true};
+
+    case 'create_project_expense':
+    case 'edit_project_expense':
+      if(ctx.projectId && !canEditProjectExpense(ctx.projectId)){
+        const p=S.projects.find(x=>x.id===ctx.projectId);
+        return {ok:false, reason:`Bạn không phụ trách dự án "${p?p.code:'?'}"`, severity:'high'};
+      }
+      return {ok:true};
+
+    case 'edit_record':
+      if(!wfCanEdit(ctx.record)){
+        const st=wfStatus(ctx.record);
+        const labels={draft:'Nháp',pending_l1:'Chờ duyệt L1',pending_l2:'Chờ duyệt L2',approved:'Đã duyệt',rejected:'Bị từ chối'};
+        return {ok:false, reason:`Không thể sửa bút toán trạng thái "${labels[st]||st}" do người khác tạo`, severity:'low'};
+      }
+      return {ok:true};
+
+    case 'delete_record':
+      if(!wfCanDelete(ctx.record)){
+        return {ok:false, reason:'Chỉ Admin hoặc người tạo (bút toán Nháp) mới xóa được', severity:'low'};
+      }
+      return {ok:true};
+
+    case 'approve_l1':
+      if(!canApproveL1()){
+        return {ok:false, reason:'Bạn không có quyền duyệt cấp 1', severity:'high'};
+      }
+      return {ok:true};
+
+    case 'approve_l2':
+      if(!canApproveL2()){
+        return {ok:false, reason:'Bạn không có quyền duyệt cấp 2', severity:'high'};
+      }
+      return {ok:true};
+
+    case 'reject':
+      if(!canApproveL1() && !canApproveL2()){
+        return {ok:false, reason:'Bạn không có quyền từ chối bút toán', severity:'high'};
+      }
+      return {ok:true};
+
+    case 'confirm_payment':
+      if(!CURRENT_USER.canConfirmPayment){
+        return {ok:false, reason:'Bạn không có quyền xác nhận thanh toán', severity:'high'};
+      }
+      return {ok:true};
+
+    case 'delete_master':
+      return {ok:false, reason:'Chỉ Admin được xóa Master Data (Tàu, Dự án, Bank...)', severity:'high'};
+
+    case 'manage_op_vessel':
+      if(ctx.opVesselId){
+        const allowed=CURRENT_USER.assignedOpVesselIds||[];
+        if(allowed.length && !allowed.includes(ctx.opVesselId)){
+          const v=S.opVessels.find(x=>x.id===ctx.opVesselId);
+          return {ok:false, reason:`Bạn không phụ trách tàu QL hộ "${v?v.name:'?'}"`, severity:'high'};
+        }
+      }
+      return {ok:true};
+
+    default:
+      return {ok:true};  // Unknown action: pass through (admin will catch)
+  }
+}
+
+/* Wrapper: thực thi 1 hành động có guard.
+   Tự log audit + cảnh báo UI nếu vi phạm.
+   Trả true nếu được phép tiếp tục, false nếu đã block. */
+function guardAction(action, ctx, opts){
+  opts=opts||{};
+  const result=guardCheck(action, ctx);
+  if(result.ok) return true;
+
+  // Block + log + alert
+  const detail={action, reason:result.reason, ctx:_safeStringify(ctx)};
+  try{ logAuditEvent('permission_denied', detail); saveState(); }catch(e){}
+
+  // Track for escalation
+  _violationsThisHour.push({ts:Date.now(),action,reason:result.reason});
+  // Drop old
+  const oneHourAgo=Date.now()-3600000;
+  _violationsThisHour=_violationsThisHour.filter(v=>v.ts>oneHourAgo);
+
+  // Show alert
+  if(result.severity==='high'){
+    showPermissionDenied(result.reason, _violationsThisHour.length);
+  } else {
+    toast('⛔ '+result.reason, 'bad');
+  }
+  return false;
+}
+
+function _safeStringify(o){
+  try{
+    return JSON.stringify(o, (k,v)=>{
+      if(k==='record') return v?(v.id||'?'):null;  // strip large objects
+      return v;
+    });
+  }catch(e){return '';}
+}
+
+function showPermissionDenied(reason, count){
+  // Modal đỏ cảnh báo
+  const repeatWarning=count>=3?
+    `<div style="margin-top:14px;padding:10px 14px;background:rgba(184,71,46,.15);border:1px solid var(--bad);font-size:11px;color:var(--bad)"><b>⚠ Cảnh báo:</b> Đây là lần vi phạm thứ <b>${count}</b> trong giờ qua. Admin sẽ được thông báo về hoạt động này.</div>`:'';
+  const body=`
+    <div style="text-align:center;padding:14px 8px">
+      <div style="font-size:48px;margin-bottom:14px">🚫</div>
+      <div style="font-family:var(--font-display);font-size:20px;font-weight:600;color:var(--bad);margin-bottom:10px">Truy cập bị từ chối</div>
+      <div style="font-size:14px;color:var(--ink);line-height:1.6;max-width:380px;margin:0 auto">${esc(reason)}</div>
+      ${repeatWarning}
+      <div style="margin-top:14px;font-size:11px;color:var(--muted);font-style:italic">Hành vi này đã được ghi vào nhật ký bảo mật.</div>
+    </div>`;
+  openModal('⛔ Vi phạm quyền truy cập', body,
+    '<button class="btn-pri" onclick="closeModal()" style="background:var(--bad)">Tôi hiểu</button>');
 }
 
 /* Helper: check if current user can access a given tab.
