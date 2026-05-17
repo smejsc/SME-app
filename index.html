@@ -1917,7 +1917,7 @@ body{min-height:100vh;background-image:radial-gradient(circle at 20% 0%,rgba(184
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='1.37.3';            // bumped on each release
+const APP_VERSION='1.37.4';            // bumped on each release
 
 /* ============================================================
    PWA — Service Worker registration + Install prompt
@@ -3536,13 +3536,26 @@ function wfCanDelete(r){
   return true;
 }
 
-/* Submit → KT viên (Hằng) kiểm hồ sơ */
-function wfSubmit(r){
-  r.status='pending_acc';
+/* Submit → KT viên (Hằng) kiểm hồ sơ
+   v1.37.4: AR fast-track — nếu kind='ar' VÀ user có canApproveL1 (hoặc admin):
+            skip pending_acc + pending_l1, gửi thẳng pending_l2.
+   kind: 'ar' | 'ap' | undefined (legacy → AP behavior, không fast-track) */
+function wfSubmit(r, kind){
   r.submittedBy=actorName();
   r.submittedAt=new Date().toISOString();
   // Clear any previous rejection
   r.rejectedBy=''; r.rejectedAt=''; r.rejectReason=''; r.rejectedAtLevel=null;
+  // Fast-track AR for KT trưởng (canApproveL1) or admin
+  if(kind==='ar' && (isAdmin() || canApproveL1())){
+    r.status='pending_l2';
+    r.accCheckedBy=actorName()+' (fast-track AR)';
+    r.accCheckedAt=new Date().toISOString();
+    r.approvedL1By=actorName()+' (fast-track AR)';
+    r.approvedL1At=new Date().toISOString();
+    try{ logAuditEvent('fast_track_ar',{recordId:r.id,partner:r.partner||'',amount:r.amount||0,ccy:r.ccy||'',actor:actorName()}); }catch(e){}
+  } else {
+    r.status='pending_acc';
+  }
 }
 /* v1.35: KT viên (HANG) kiểm hồ sơ → đẩy lên L1.
    SOD note: HANG ĐƯỢC tự kiểm bút toán mình tạo (theo confirm của Cường) */
@@ -10734,7 +10747,10 @@ function arSubmit(kind,id){
   const list=kind==='ap'?'payables':'receivables';
   const r=S[list].find(x=>x.id===id);if(!r)return;
   if(!wfCanEdit(r)){toast('Không thể gửi duyệt từ trạng thái này','bad');return;}
-  wfSubmit(r);saveState();renderAll();toast('Đã gửi trình ký — chờ L1 duyệt');
+  wfSubmit(r, kind);  // v1.37.4: pass kind to enable AR fast-track for L1 users
+  saveState();renderAll();
+  const fastTracked = (kind==='ar' && (isAdmin() || canApproveL1()));
+  toast(fastTracked ? '⚡ Fast-track AR — gửi thẳng L2 (admin/BOD duyệt)' : 'Đã gửi → Chờ KT viên kiểm');
 }
 function arApproveL1(kind,id){
   if(!guardAction('approve_l1', {})) return;
@@ -11101,10 +11117,15 @@ function _renderMultiRowModal(){
     <div id="mr-err" style="color:var(--bad);font-size:12px;margin-top:8px"></div>
   `;
 
+  // v1.37.4: AR fast-track for L1+ users — show different button label
+  const isArFastTrack = (s.mode==='ar' && (isAdmin() || canApproveL1()));
+  const submitBtnLabel = isArFastTrack ? '⚡ Gửi → L2 (fast-track AR)' : '→ Gửi duyệt';
+  const submitBtnHint = isArFastTrack ? 'AR + bạn có quyền L1 → bỏ qua KT viên + L1, gửi thẳng admin/BOD duyệt L2' : 'Gửi cho KT viên kiểm hồ sơ trước khi trình ký L1';
+
   const foot = `
     <button class="btn-sec" onclick="closeModal()">Hủy</button>
     <button class="btn-sec" onclick="_mrSave('draft')">💾 Lưu Nháp</button>
-    <button class="btn-primary" onclick="_mrSave('pending_l1')">→ Gửi duyệt</button>
+    <button class="btn-primary" onclick="_mrSave('submit')" title="${submitBtnHint}">${submitBtnLabel}</button>
   `;
 
   openModal(title, body, foot);
@@ -11345,6 +11366,19 @@ async function _mrSave(targetStatus){
   if(validLines.length===0){err.textContent='Phải có ít nhất 1 dòng có số tiền > 0';return;}
   if(!s.issueDate){err.textContent='Nhập ngày phiếu';return;}
 
+  // v1.37.4: targetStatus='submit' → resolve to pending_acc (default) OR pending_l2 (AR fast-track for L1+ users)
+  // Anything else passes through (draft etc.)
+  let resolvedStatus = targetStatus;
+  let isFastTrack = false;
+  if(targetStatus==='submit' || targetStatus==='pending_acc' || targetStatus==='pending_l1'){
+    if(s.mode==='ar' && (isAdmin() || canApproveL1())){
+      resolvedStatus = 'pending_l2';
+      isFastTrack = true;
+    } else {
+      resolvedStatus = 'pending_acc';
+    }
+  }
+
   // Permission check
   if(!guardAction('edit_record', {record:{status:'draft'}})){
     return;  // guardAction already showed alert
@@ -11422,10 +11456,14 @@ async function _mrSave(targetStatus){
         dueMonth: '',
         dueAmount: 0,
         payments: [],
-        status: targetStatus,
-        submittedBy: targetStatus !== 'draft' ? me : '',
-        submittedAt: targetStatus !== 'draft' ? nowISO : '',
-        approvedL1By:'', approvedL1At:'',
+        status: resolvedStatus,
+        submittedBy: resolvedStatus !== 'draft' ? me : '',
+        submittedAt: resolvedStatus !== 'draft' ? nowISO : '',
+        // v1.37.4: Fast-track AR fills accChecked + approvedL1 with marker
+        accCheckedBy: isFastTrack ? (me+' (fast-track AR)') : '',
+        accCheckedAt: isFastTrack ? nowISO : '',
+        approvedL1By: isFastTrack ? (me+' (fast-track AR)') : '',
+        approvedL1At: isFastTrack ? nowISO : '',
         approvedL2By:'', approvedL2At:'',
         rejectedBy:'', rejectedAt:'', rejectReason:'', rejectedAtLevel:0,
         createdBy: me,
@@ -11437,9 +11475,15 @@ async function _mrSave(targetStatus){
     });
 
     saveState();
-    try{ logAuditEvent('multi_row_save', {kind:s.mode, batchId, lines:created, status:targetStatus}); }catch(e){}
+    try{
+      logAuditEvent('multi_row_save', {kind:s.mode, batchId, lines:created, status:resolvedStatus, fastTrack:isFastTrack});
+      if(isFastTrack) logAuditEvent('fast_track_ar', {batchId, lines:created, actor:me, amount:validLines.reduce((sum,l)=>sum+(+l.amountGross||+l.amountNet||0),0), ccy:s.ccy});
+    }catch(e){}
     closeModal();
-    const statusLabel = targetStatus==='draft'?'Nháp':'Trình ký';
+    let statusLabel = 'Nháp';
+    if(isFastTrack) statusLabel = '⚡ Fast-track → L2 (admin/BOD duyệt)';
+    else if(resolvedStatus==='pending_acc') statusLabel = 'Chờ KT viên kiểm';
+    else if(resolvedStatus==='pending_l2') statusLabel = 'Chờ L2';
     toast(`✓ Đã lưu ${created} dòng (${statusLabel}) · batchId: ${batchId.slice(-6)}`);
     renderAll();
   }catch(e){
