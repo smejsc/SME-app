@@ -542,8 +542,10 @@ body{min-height:100vh;background-image:radial-gradient(circle at 20% 0%,rgba(184
       <button class="nav-sub-item" data-page="payables"><span class="sub-dot"></span>Phải trả (Tổng AP)</button>
     </div>
   </div>
-  <div class="nav-group">
-    <button class="nav-item nav-group-btn" data-group="expenses"><span class="num">05</span>Chi phí <span class="caret">▾</span></button>
+  <div class="nav-group" id="nav-group-expenses" style="display:none" data-legacy="true">
+    <!-- 05 Chi phí: ẨN từ v1.30 — chuyển hết vào Phải trả với expenseType.
+         Admin có thể bật lại qua console: document.getElementById('nav-group-expenses').style.display='' -->
+    <button class="nav-item nav-group-btn" data-group="expenses"><span class="num">05</span>Chi phí (legacy) <span class="caret">▾</span></button>
     <div class="nav-submenu" id="submenu-expenses">
       <button class="nav-sub-item" data-page="vessel_expense"><span class="sub-dot"></span>Tàu / Dự án O&M</button>
       <button class="nav-sub-item" data-page="hr_expense"><span class="sub-dot"></span>Nhân sự (bảo mật)</button>
@@ -1672,7 +1674,7 @@ body{min-height:100vh;background-image:radial-gradient(circle at 20% 0%,rgba(184
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='1.29.2';            // bumped on each release
+const APP_VERSION='1.30.1';            // bumped on each release
 
 /* ============================================================
    PWA — Service Worker registration + Install prompt
@@ -2054,6 +2056,11 @@ async function authAction(){
         const n=migrateDepartmentsAddBODKT();
         if(n>0) setTimeout(()=>toast(`🏢 Đã thêm ${n} phòng ban mặc định (BOD / Kế toán)`,'good'),2000);
       }catch(e){console.warn('[migrate dept] failed:',e);}
+      // Auto-migrate: add 16 default expense types if missing
+      try{
+        const n=migrateExpenseTypes();
+        if(n>0) setTimeout(()=>toast(`💰 Đã thêm ${n} loại chi phí mặc định. Vào Cài đặt để tùy chỉnh`,'good'),2200);
+      }catch(e){console.warn('[migrate expenseTypes] failed:',e);}
       const lastBak=cfg.lastBackup?new Date(cfg.lastBackup).getTime():0;
       const daysSinceBak=lastBak?Math.floor((Date.now()-lastBak)/86400000):999;
       if(daysSinceBak>=7){
@@ -2211,7 +2218,7 @@ const TAB_TO_FIELDS={
   rates:          ['vessels','onhires','events','receivables','payables']
 };
 /* Shared/config fields that everyone (incl. users) can load — non-sensitive. */
-const SHARED_FIELDS=['fxRate','displayCcy','companyInfo','meta','presence','auditLog','vesselExpenseCats','omProjectExpenseCats','hrExpenseCats','qnExpenseCats','departments','vendors'];
+const SHARED_FIELDS=['fxRate','displayCcy','companyInfo','meta','presence','auditLog','vesselExpenseCats','omProjectExpenseCats','hrExpenseCats','qnExpenseCats','departments','vendors','expenseTypes'];
 /* All possible data fields (used by admin or for save-merge) */
 const ALL_DATA_FIELDS=[
   'plans','projects','vessels','onhires','events',
@@ -2220,7 +2227,7 @@ const ALL_DATA_FIELDS=[
   'vesselExpenseCats','omProjectExpenseCats','hrExpenseCats','qnExpenseCats',
   'fixedAssets','tools',
   'transactions',
-  'departments','vendors'
+  'departments','vendors','expenseTypes'
 ];
 
 /* Compute allowed fields for the current user (admin gets all). */
@@ -2322,6 +2329,43 @@ function openSettings(){
         </div>
         <button class="btn-sec" onclick="addDepartment()" style="font-size:11px;margin-top:6px">+ Thêm phòng/ban</button>
         <div style="font-size:11px;color:var(--muted);font-style:italic;margin-top:4px">Phòng/ban dùng để gán NV. Có thể xóa nếu không còn NV nào thuộc phòng đó.</div>
+      </div>
+
+      <div class="field">
+        <label>Loại chi phí <span style="text-transform:none;font-weight:400;color:var(--muted)">(${activeExpenseTypes().length} đang dùng / ${archivedExpenseTypes().length} đã ẩn)</span></label>
+        <div style="border:1px solid var(--rule);padding:8px 12px;background:var(--paper);max-height:300px;overflow-y:auto" id="etype-list-settings">
+          ${(()=>{
+            const byGroup={};
+            activeExpenseTypes().forEach(t=>{
+              if(!byGroup[t.group]) byGroup[t.group]=[];
+              byGroup[t.group].push(t);
+            });
+            let html='';
+            Object.keys(EXPENSE_GROUPS).forEach(gk=>{
+              if(!byGroup[gk]) return;
+              const g=EXPENSE_GROUPS[gk];
+              html+=`<div style="font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:${g.color};font-weight:700;margin:8px 0 4px">${g.label}</div>`;
+              byGroup[gk].forEach(t=>{
+                const poChip = t.isPO ? '<span style="font-size:8px;background:#8b6f47;color:#fff;padding:1px 4px;margin-left:4px">PO</span>' : '';
+                html+=`<div style="display:flex;align-items:center;gap:8px;padding:3px 0;border-bottom:1px solid rgba(0,0,0,.04);font-size:12px">
+                  <span style="font-size:14px;min-width:20px">${t.icon||'📝'}</span>
+                  <span style="font-family:var(--font-mono);font-size:10px;color:var(--muted);min-width:100px">${esc(t.code)}</span>
+                  <span style="flex:1">${esc(t.label)}${poChip}</span>
+                  <button class="icon-btn" style="font-size:11px" onclick="editExpenseType('${esc(t.id)}')" title="Sửa">✎</button>
+                  <button class="icon-btn" style="font-size:11px;color:var(--warn)" onclick="archiveExpenseType('${esc(t.id)}')" title="Ẩn (archive)">📦</button>
+                </div>`;
+              });
+            });
+            return html;
+          })()}
+        </div>
+        <div style="display:flex;gap:6px;margin-top:6px;flex-wrap:wrap">
+          <button class="btn-sec" onclick="addExpenseType()" style="font-size:11px">+ Thêm loại CP</button>
+          ${archivedExpenseTypes().length>0?`<button class="btn-sec" onclick="showArchivedExpenseTypes()" style="font-size:11px">📦 Xem đã ẩn (${archivedExpenseTypes().length})</button>`:''}
+        </div>
+        <div style="font-size:11px;color:var(--muted);font-style:italic;margin-top:4px">
+          Loại chi phí dùng cho báo cáo BI. <b>PO</b> = mua tồn kho, không vào P&L. Không thể xóa loại đã có bút toán dùng — chỉ archive được.
+        </div>
       </div>
 
       <hr style="border:none;border-top:1px solid var(--rule);margin:8px 0">
@@ -3534,6 +3578,175 @@ function timeAgo(iso){
 
 
 
+/* ============================================================
+   EXPENSE TYPES (v1.30.1) — quản lý qua Cài đặt (admin sửa được)
+   - DEFAULT_EXPENSE_TYPES: 16 loại mặc định (dùng cho migrate)
+   - Live data: S.expenseTypes[] — admin thêm/sửa/archive
+   - PO group: Mua hàng → tồn kho, KHÔNG vào P&L (BUNKER_PO, PARTS_PO)
+   - CP thực: vào P&L / Báo cáo D, E, J
+   ============================================================ */
+const DEFAULT_EXPENSE_TYPES = [
+  // PO (Purchase Order — Tồn kho — KHÔNG là chi phí trực tiếp)
+  {id:'ET-BUNKER_PO',     code:'BUNKER_PO',     group:'PO',       label:'Mua nhiên liệu',          icon:'⛽', isPO:true, hint:'CP thực lấy từ tiêu thụ tàu (Tab 03)'},
+  {id:'ET-PARTS_PO',      code:'PARTS_PO',      group:'PO',       label:'Mua vật tư & phụ tùng',   icon:'🔩', isPO:true, hint:'Tồn kho → xuất kho mới là CP'},
+  // CHI PHÍ TÀU THỰC
+  {id:'ET-PORT',          code:'PORT',          group:'VESSEL',   label:'Cảng phí',                icon:'⚓', isPO:false},
+  {id:'ET-AGENCY',        code:'AGENCY',        group:'VESSEL',   label:'Đại lý tàu',              icon:'🚢', isPO:false},
+  {id:'ET-REPAIR',        code:'REPAIR',        group:'VESSEL',   label:'Sửa chữa & bảo dưỡng',    icon:'🔧', isPO:false},
+  {id:'ET-INSURANCE',     code:'INSURANCE',     group:'VESSEL',   label:'Bảo hiểm tàu (H&M, P&I)', icon:'🛡', isPO:false},
+  // NHÂN SỰ
+  {id:'ET-SALARY',        code:'SALARY',        group:'HR',       label:'Lương',                   icon:'💵', isPO:false, defaultVendor:'CBCNV'},
+  {id:'ET-BONUS',         code:'BONUS',         group:'HR',       label:'Thưởng',                  icon:'🎁', isPO:false, defaultVendor:'CBCNV'},
+  {id:'ET-ALLOWANCE',     code:'ALLOWANCE',     group:'HR',       label:'Phụ cấp/Trợ cấp',         icon:'➕', isPO:false, defaultVendor:'CBCNV'},
+  // DI CHUYỂN
+  {id:'ET-TRAVEL',        code:'TRAVEL',        group:'TRAVEL',   label:'Vé máy bay, visa',        icon:'✈', isPO:false},
+  {id:'ET-ACCOMMODATION', code:'ACCOMMODATION', group:'TRAVEL',   label:'Nhà ở chuyên gia, KS',    icon:'🏨', isPO:false},
+  // QUẢN LÝ CHUNG
+  {id:'ET-OFFICE',        code:'OFFICE',        group:'OVERHEAD', label:'VPP, văn phòng',          icon:'📎', isPO:false},
+  {id:'ET-UTIL',          code:'UTIL',          group:'OVERHEAD', label:'Điện nước, internet',     icon:'💡', isPO:false},
+  {id:'ET-RENT',          code:'RENT',          group:'OVERHEAD', label:'Thuê (VP, xe...)',        icon:'🏢', isPO:false},
+  {id:'ET-ENTERTAIN',     code:'ENTERTAIN',     group:'OVERHEAD', label:'Tiếp khách',              icon:'🍽', isPO:false},
+  // KHÁC
+  {id:'ET-OTHER',         code:'OTHER',         group:'OTHER',    label:'Chi phí khác',            icon:'📝', isPO:false}
+];
+
+/* Lookup helper: get expense type by code from live S.expenseTypes (fallback DEFAULT) */
+function getExpenseType(code){
+  if(!code) return null;
+  const list = (S && S.expenseTypes) ? S.expenseTypes : DEFAULT_EXPENSE_TYPES;
+  return list.find(t=>t.code===code) || DEFAULT_EXPENSE_TYPES.find(t=>t.code===code) || null;
+}
+
+/* Get all active (non-archived) expense types, sorted by group then label */
+function activeExpenseTypes(){
+  const list = (S && S.expenseTypes && S.expenseTypes.length) ? S.expenseTypes : DEFAULT_EXPENSE_TYPES;
+  return list.filter(t=>!t.archived);
+}
+
+/* Get archived expense types */
+function archivedExpenseTypes(){
+  const list = (S && S.expenseTypes) ? S.expenseTypes : [];
+  return list.filter(t=>t.archived);
+}
+
+/* Migration: copy DEFAULT_EXPENSE_TYPES to S.expenseTypes if not yet exists.
+   Safe to re-run — only adds missing codes. */
+function migrateExpenseTypes(){
+  if(!S.expenseTypes) S.expenseTypes=[];
+  const existing=new Set(S.expenseTypes.map(t=>t.code));
+  let added=0;
+  DEFAULT_EXPENSE_TYPES.forEach(def=>{
+    if(!existing.has(def.code)){
+      S.expenseTypes.push(Object.assign({}, def));
+      added++;
+    }
+  });
+  if(added>0){
+    console.log('[migrate] Added',added,'expense types (default)');
+    saveState();
+  }
+  return added;
+}
+
+/* Check if an expense type is HR (lương/thưởng/phụ cấp) */
+function isExpenseHR(typeCode){
+  if(!typeCode) return false;
+  const t=getExpenseType(typeCode);
+  return t ? (t.group==='HR' || !!t.defaultVendor) : false;
+}
+
+/* Get default vendor for an expense type (eg CBCNV for HR) */
+function getDefaultVendor(typeCode){
+  const t=getExpenseType(typeCode);
+  return t && t.defaultVendor ? t.defaultVendor : '';
+}
+
+const EXPENSE_GROUPS = {
+  PO:       {label:'📦 Tồn kho (PO)',       color:'#8b6f47'},
+  VESSEL:   {label:'🚢 Vận hành tàu',        color:'#1c3a5c'},
+  HR:       {label:'👥 Nhân sự',             color:'#4a6b2c'},
+  TRAVEL:   {label:'✈ Di chuyển',           color:'#5a4a8c'},
+  OVERHEAD: {label:'🏢 Quản lý chung',       color:'#c5876d'},
+  OTHER:    {label:'🔧 Khác',               color:'#6b6b6b'}
+};
+
+/* Build option HTML for expenseType dropdown — grouped */
+function expenseTypeOpts(selectedCode){
+  const types = activeExpenseTypes();
+  const groups={};
+  types.forEach(t=>{
+    if(!groups[t.group]) groups[t.group]=[];
+    groups[t.group].push(t);
+  });
+  let html='<option value="">— Chọn loại chi phí —</option>';
+  Object.keys(EXPENSE_GROUPS).forEach(gk=>{
+    if(!groups[gk]) return;
+    html+=`<optgroup label="${EXPENSE_GROUPS[gk].label}">`;
+    groups[gk].forEach(t=>{
+      const sel=(selectedCode===t.code)?'selected':'';
+      html+=`<option value="${esc(t.code)}" ${sel}>${t.icon} ${esc(t.label)}${t.isPO?' (PO)':''}</option>`;
+    });
+    html+='</optgroup>';
+  });
+  return html;
+}
+
+/* Check if an expense type is PO (tồn kho — không đi vào P&L) */
+function isExpensePO(typeCode){
+  const t=getExpenseType(typeCode);
+  return t ? !!t.isPO : false;
+}
+
+/* ============================================================
+   COST CENTER (v1.30) — Bộ phận gánh chi phí
+   1 field linh hoạt: type + id → có thể là P.Ban / Tàu / Dự án / Khác
+   ============================================================ */
+const COST_CENTER_TYPES = {
+  department: {label:'🏢 Phòng/Ban',  color:'#2a5a8c'},
+  vessel:     {label:'⛵ Tàu',         color:'#1c3a5c'},
+  project:    {label:'📋 Dự án',      color:'#4a6b2c'},
+  opVessel:   {label:'🚢 Tàu QL hộ',  color:'#5a4a8c'},
+  general:    {label:'🌐 Chung công ty', color:'#6b6b6b'}
+};
+
+/* Build options for cost center selection (2-step: type → entity) */
+function costCenterEntityOpts(type, selectedId){
+  let entities=[];
+  if(type==='department') entities=(S.departments||[]).map(d=>({id:d.id,label:d.code+' · '+d.name}));
+  else if(type==='vessel') entities=(S.vessels||[]).map(v=>({id:v.id,label:v.name}));
+  else if(type==='project') entities=(S.projects||[]).map(p=>({id:p.id,label:p.code+' · '+p.name}));
+  else if(type==='opVessel') entities=(S.opVessels||[]).map(v=>({id:v.id,label:v.name}));
+  else if(type==='general') return '<option value="general">— Chung công ty —</option>';
+  let html='<option value="">— Chọn —</option>';
+  entities.forEach(e=>{
+    html+=`<option value="${esc(e.id)}" ${selectedId===e.id?'selected':''}>${esc(e.label)}</option>`;
+  });
+  return html;
+}
+
+/* Display label for a costCenter combo */
+function costCenterLabel(type, id){
+  if(!type) return '';
+  if(type==='general') return '🌐 Chung công ty';
+  if(type==='department'){
+    const d=(S.departments||[]).find(x=>x.id===id);
+    return d?'🏢 '+d.code:'?';
+  }
+  if(type==='vessel'){
+    const v=(S.vessels||[]).find(x=>x.id===id);
+    return v?'⛵ '+v.name:'?';
+  }
+  if(type==='project'){
+    const p=(S.projects||[]).find(x=>x.id===id);
+    return p?'📋 '+p.code:'?';
+  }
+  if(type==='opVessel'){
+    const v=(S.opVessels||[]).find(x=>x.id===id);
+    return v?'🚢 '+v.name:'?';
+  }
+  return '?';
+}
+
 const SEGMENTS = {
   VESSEL_SERVICE: {name:'Tàu dịch vụ', short:'Dịch vụ', chip:'chip-1'},
   VESSEL_TECH:    {name:'Tàu kỹ thuật', short:'Kỹ thuật', chip:'chip-2'},
@@ -3690,6 +3903,7 @@ function defaultState(){
       {id:'D-CN-QN', code:'CN-QN', name:'Chi nhánh Quảng Ngãi'}
     ],
     vendors:[],  // [{id, code, name (display), normalized (IN HOA, không dấu, không space), taxCode, address, contact, note, createdAt, createdBy}]
+    expenseTypes:[],  // v1.30.1: admin-manageable. Auto-populated from DEFAULT_EXPENSE_TYPES on admin login.
     meta:{created:new Date().toISOString()}
   };
 }
@@ -3973,6 +4187,214 @@ function deleteDepartment(id){
   S.departments=S.departments.filter(x=>x.id!==id);
   saveState();
   toast('Đã xóa phòng/ban');
+  closeModal();
+  setTimeout(()=>showSettings(),100);
+}
+
+/* ============================================================
+   EXPENSE TYPE MANAGEMENT (v1.30.1)
+   ============================================================ */
+function addExpenseType(){
+  if(!isAdmin()){toast('Chỉ admin','bad');return;}
+  const body = `
+    <div style="font-size:13px">
+      <div class="field">
+        <label>Mã loại (uppercase, không dấu, không space) *</label>
+        <input type="text" id="etype-code" placeholder="VD: FUEL_ADD, COMMISSION..." maxlength="30">
+      </div>
+      <div class="field">
+        <label>Tên hiển thị *</label>
+        <input type="text" id="etype-label" placeholder="VD: Phụ thu nhiên liệu" maxlength="80">
+      </div>
+      <div class="field">
+        <label>Nhóm *</label>
+        <select id="etype-group">
+          ${Object.entries(EXPENSE_GROUPS).map(([k,v])=>`<option value="${k}">${v.label}</option>`).join('')}
+        </select>
+      </div>
+      <div class="field">
+        <label>Icon (1 emoji)</label>
+        <input type="text" id="etype-icon" placeholder="📝" maxlength="4" value="📝">
+      </div>
+      <div class="field">
+        <label><input type="checkbox" id="etype-isPO"> Đây là PO (mua tồn kho — không vào P&L)</label>
+      </div>
+      <div class="field">
+        <label>NCC mặc định (nếu có — VD: CBCNV cho lương)</label>
+        <input type="text" id="etype-default-vendor" placeholder="Để trống nếu không có">
+      </div>
+      <div class="field">
+        <label>Gợi ý/Mô tả (tùy chọn)</label>
+        <input type="text" id="etype-hint" placeholder="VD: Áp dụng cho..." maxlength="200">
+      </div>
+      <div id="etype-err" style="color:var(--bad);font-size:12px;margin-top:8px"></div>
+    </div>
+  `;
+  openModal('+ Thêm loại chi phí', body,
+    `<button class="btn-sec" onclick="closeModal()">Hủy</button>
+     <button class="btn-primary" onclick="_doAddExpenseType()">Thêm</button>`);
+}
+
+function _doAddExpenseType(){
+  const err=document.getElementById('etype-err');
+  err.textContent='';
+  const codeRaw=document.getElementById('etype-code').value.trim().toUpperCase().replace(/[^A-Z0-9_]/g,'');
+  const label=document.getElementById('etype-label').value.trim();
+  const group=document.getElementById('etype-group').value;
+  const icon=document.getElementById('etype-icon').value.trim()||'📝';
+  const isPO=document.getElementById('etype-isPO').checked;
+  const defaultVendor=document.getElementById('etype-default-vendor').value.trim();
+  const hint=document.getElementById('etype-hint').value.trim();
+  if(!codeRaw){err.textContent='Mã loại không hợp lệ';return;}
+  if(!label){err.textContent='Nhập tên hiển thị';return;}
+  if(!group){err.textContent='Chọn nhóm';return;}
+  // Check duplicate (including archived)
+  if((S.expenseTypes||[]).some(t=>t.code===codeRaw)){
+    err.textContent='Mã "'+codeRaw+'" đã tồn tại';return;
+  }
+  if(!S.expenseTypes) S.expenseTypes=[];
+  S.expenseTypes.push({
+    id:'ET-'+codeRaw+'-'+uid().slice(-4),
+    code:codeRaw, label, group, icon, isPO,
+    defaultVendor: defaultVendor||undefined,
+    hint: hint||undefined,
+    createdAt:new Date().toISOString(),
+    createdBy:actorName()
+  });
+  saveState();
+  toast('Đã thêm loại chi phí: '+codeRaw);
+  closeModal();
+  setTimeout(()=>showSettings(),100);
+}
+
+function editExpenseType(id){
+  if(!isAdmin()){toast('Chỉ admin','bad');return;}
+  const t=(S.expenseTypes||[]).find(x=>x.id===id);
+  if(!t){toast('Không tìm thấy','bad');return;}
+  const body=`
+    <div style="font-size:13px">
+      <div class="field">
+        <label>Mã loại <span style="color:var(--muted);font-weight:400">(không đổi được — chỉ sửa được tên/hint/icon)</span></label>
+        <input type="text" value="${esc(t.code)}" disabled style="background:var(--paper-2);color:var(--muted)">
+      </div>
+      <div class="field">
+        <label>Tên hiển thị *</label>
+        <input type="text" id="etype-edit-label" value="${esc(t.label||'')}" maxlength="80">
+      </div>
+      <div class="field">
+        <label>Icon</label>
+        <input type="text" id="etype-edit-icon" value="${esc(t.icon||'📝')}" maxlength="4">
+      </div>
+      <div class="field">
+        <label><input type="checkbox" id="etype-edit-isPO" ${t.isPO?'checked':''}> Đây là PO (mua tồn kho — không vào P&L)</label>
+      </div>
+      <div class="field">
+        <label>NCC mặc định</label>
+        <input type="text" id="etype-edit-default-vendor" value="${esc(t.defaultVendor||'')}">
+      </div>
+      <div class="field">
+        <label>Gợi ý/Mô tả</label>
+        <input type="text" id="etype-edit-hint" value="${esc(t.hint||'')}" maxlength="200">
+      </div>
+      <div id="etype-err" style="color:var(--bad);font-size:12px;margin-top:8px"></div>
+    </div>
+  `;
+  openModal('Sửa loại chi phí: '+t.code, body,
+    `<button class="btn-sec" onclick="closeModal()">Hủy</button>
+     <button class="btn-primary" onclick="_doEditExpenseType('${esc(t.id)}')">Cập nhật</button>`);
+}
+
+function _doEditExpenseType(id){
+  const t=(S.expenseTypes||[]).find(x=>x.id===id);
+  if(!t)return;
+  const err=document.getElementById('etype-err');
+  const label=document.getElementById('etype-edit-label').value.trim();
+  if(!label){err.textContent='Nhập tên hiển thị';return;}
+  t.label=label;
+  t.icon=document.getElementById('etype-edit-icon').value.trim()||'📝';
+  t.isPO=document.getElementById('etype-edit-isPO').checked;
+  const dv=document.getElementById('etype-edit-default-vendor').value.trim();
+  if(dv) t.defaultVendor=dv; else delete t.defaultVendor;
+  const hint=document.getElementById('etype-edit-hint').value.trim();
+  if(hint) t.hint=hint; else delete t.hint;
+  t.updatedAt=new Date().toISOString();
+  saveState();
+  toast('Đã cập nhật loại chi phí');
+  closeModal();
+  setTimeout(()=>showSettings(),100);
+}
+
+/* Count records using a given expense type code */
+function _countRecordsUsingExpenseType(code){
+  let n=0;
+  ['receivables','payables'].forEach(list=>{
+    (S[list]||[]).forEach(r=>{ if(r.expenseType===code) n++; });
+  });
+  return n;
+}
+
+function archiveExpenseType(id){
+  if(!isAdmin()){toast('Chỉ admin','bad');return;}
+  const t=(S.expenseTypes||[]).find(x=>x.id===id);
+  if(!t){toast('Không tìm thấy','bad');return;}
+  const using=_countRecordsUsingExpenseType(t.code);
+  const msg=using>0
+    ? `Ẩn loại "${t.label}" (${t.code})?\n\n${using} bút toán đang dùng loại này. Các bút toán cũ vẫn giữ nguyên, nhưng loại này sẽ KHÔNG hiện trong form nhập mới.\n\nCó thể khôi phục sau qua "📦 Xem đã ẩn".`
+    : `Ẩn loại "${t.label}" (${t.code})?\n\nLoại này sẽ KHÔNG hiện trong form nhập mới. Có thể khôi phục sau.`;
+  if(!confirm(msg)) return;
+  t.archived=true;
+  t.archivedAt=new Date().toISOString();
+  saveState();
+  toast('Đã ẩn loại: '+t.code);
+  closeModal();
+  setTimeout(()=>showSettings(),100);
+}
+
+function showArchivedExpenseTypes(){
+  if(!isAdmin()){toast('Chỉ admin','bad');return;}
+  const archived=archivedExpenseTypes();
+  const body=archived.length===0
+    ? '<div style="padding:20px;text-align:center;color:var(--muted)">Chưa có loại chi phí nào bị ẩn</div>'
+    : `<div style="font-size:13px">
+        <div style="font-size:11px;color:var(--muted);margin-bottom:12px">Các loại đã ẩn không hiện trong form nhập mới. Click "Khôi phục" để dùng lại.</div>
+        ${archived.map(t=>`
+          <div style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid var(--rule);font-size:12px">
+            <span style="font-size:14px">${t.icon||'📝'}</span>
+            <span style="font-family:var(--font-mono);font-size:10px;color:var(--muted);min-width:100px">${esc(t.code)}</span>
+            <span style="flex:1">${esc(t.label)}</span>
+            <button class="btn-sec" onclick="restoreExpenseType('${esc(t.id)}')" style="font-size:10px">↩ Khôi phục</button>
+            <button class="btn-sec" onclick="hardDeleteExpenseType('${esc(t.id)}')" style="font-size:10px;color:var(--bad)" title="Xóa hẳn (chỉ được nếu không có bút toán dùng)">🗑</button>
+          </div>
+        `).join('')}
+      </div>`;
+  openModal('📦 Loại chi phí đã ẩn ('+archived.length+')', body,
+    '<button class="btn-sec" onclick="closeModal()">Đóng</button>');
+}
+
+function restoreExpenseType(id){
+  const t=(S.expenseTypes||[]).find(x=>x.id===id);
+  if(!t)return;
+  delete t.archived;
+  delete t.archivedAt;
+  saveState();
+  toast('Đã khôi phục: '+t.code);
+  closeModal();
+  setTimeout(()=>showSettings(),100);
+}
+
+function hardDeleteExpenseType(id){
+  if(!isAdmin()){toast('Chỉ admin','bad');return;}
+  const t=(S.expenseTypes||[]).find(x=>x.id===id);
+  if(!t)return;
+  const using=_countRecordsUsingExpenseType(t.code);
+  if(using>0){
+    toast(`Không xóa được — còn ${using} bút toán đang dùng loại này. Chuyển bút toán sang loại khác trước.`,'bad');
+    return;
+  }
+  if(!confirm(`Xóa hẳn loại "${t.label}" (${t.code})? KHÔNG thể khôi phục.`)) return;
+  S.expenseTypes=S.expenseTypes.filter(x=>x.id!==id);
+  saveState();
+  toast('Đã xóa hẳn: '+t.code);
   closeModal();
   setTimeout(()=>showSettings(),100);
 }
@@ -7662,7 +8084,10 @@ function _newLine(){
     vatPercent: 10,
     vatAmount: 0,
     amountGross: 0,
-    costCategory: '',
+    expenseType: '',      // NEW v1.30: loại chi phí cho BI
+    costCenterType: '',   // NEW v1.30: department / vessel / project / opVessel / general
+    costCenterId: '',     // NEW v1.30: ID of the entity
+    recipientName: '',    // NEW v1.30: tên người nhận (chỉ HR: SALARY/BONUS/ALLOWANCE)
     dueDate: '',
     vesselId: '',
     projectId: ''
@@ -7746,14 +8171,14 @@ function _renderMultiRowModal(){
           <tr>
             <th class="row-idx">#</th>
             <th style="min-width:90px">Số HĐ</th>
+            ${isPayable?'<th style="min-width:160px">Loại chi phí</th>':''}
             <th style="min-width:180px">Diễn giải</th>
-            <th style="min-width:90px">Loại CP</th>
+            <th style="min-width:120px">Người nhận<span style="font-weight:400;color:var(--muted);font-size:9px"> (HR)</span></th>
+            ${isPayable?'<th style="min-width:180px">Bộ phận (Cost Center)</th>':''}
             <th style="min-width:80px" class="num">Net</th>
             <th style="min-width:55px" class="num">%VAT</th>
             <th style="min-width:80px" class="num">Tổng</th>
             <th style="min-width:110px">Hạn TT</th>
-            <th style="min-width:120px">Tàu</th>
-            <th style="min-width:130px">Dự án</th>
             <th style="width:36px"></th>
           </tr>
         </thead>
@@ -7762,11 +8187,11 @@ function _renderMultiRowModal(){
         </tbody>
         <tfoot>
           <tr style="background:rgba(184,71,46,.05);font-weight:700;border-top:2px solid var(--rule)">
-            <td colspan="4" style="padding:8px 6px">TỔNG (${s.lines.length} dòng)</td>
+            <td colspan="${isPayable?5:3}" style="padding:8px 6px">TỔNG (${s.lines.length} dòng)</td>
             <td class="num" style="font-family:var(--font-mono);padding:8px 4px">${totalNet.toLocaleString()}</td>
             <td></td>
             <td class="num" style="font-family:var(--font-mono);padding:8px 4px"><b>${totalGross.toLocaleString()} ${s.ccy}</b></td>
-            <td colspan="4"></td>
+            <td colspan="2"></td>
           </tr>
         </tfoot>
       </table>
@@ -7793,24 +8218,70 @@ function _renderMultiRowModal(){
 }
 
 function _renderMrLine(l, i){
-  const vesselOpts = '<option value="">— Không gán —</option>' +
-    S.vessels.map(v=>`<option value="${esc(v.id)}" ${l.vesselId===v.id?'selected':''}>${esc(v.name)}</option>`).join('');
-  const projectOpts = '<option value="">— Không gán —</option>' +
-    S.projects.map(p=>`<option value="${esc(p.id)}" ${l.projectId===p.id?'selected':''}>${esc(p.code)} · ${esc(p.name)}</option>`).join('');
+  const isPayable = _multiRowState.mode === 'ap';
+  // Cost center entity options based on selected type
+  const ccEntityOpts = l.costCenterType ? costCenterEntityOpts(l.costCenterType, l.costCenterId) : '<option value="">—</option>';
+  // Show recipient field only for HR types
+  const isHR = isExpenseHR(l.expenseType);
+  // Highlight PO rows
+  const isPO = isExpensePO(l.expenseType);
+  const rowBg = isPO ? 'background:rgba(139,111,71,.05)' : '';
+
   return `
-    <tr data-tmpid="${l.tmpId}">
+    <tr data-tmpid="${l.tmpId}" style="${rowBg}">
       <td class="row-idx">${i+1}</td>
       <td><input type="text" value="${esc(l.invoiceNo||'')}" placeholder="INV-001" oninput="_mrLineChange('${l.tmpId}','invoiceNo',this.value)"></td>
+      ${isPayable ? `<td><select onchange="_mrLineExpenseType('${l.tmpId}',this.value)">${expenseTypeOpts(l.expenseType)}</select></td>` : ''}
       <td><input type="text" value="${esc(l.desc||'')}" placeholder="Diễn giải..." oninput="_mrLineChange('${l.tmpId}','desc',this.value)"></td>
-      <td><input type="text" value="${esc(l.costCategory||'')}" placeholder="Bunker..." list="mr-cost-cats" oninput="_mrLineChange('${l.tmpId}','costCategory',this.value)"></td>
+      ${isHR ? `<td><input type="text" value="${esc(l.recipientName||'')}" placeholder="Tên NV nhận" oninput="_mrLineChange('${l.tmpId}','recipientName',this.value)"></td>` : '<td style="background:var(--paper-2)"></td>'}
+      ${isPayable ? `
+        <td>
+          <select onchange="_mrLineCCType('${l.tmpId}',this.value)" style="margin-bottom:2px">
+            <option value="">— Loại —</option>
+            ${Object.entries(COST_CENTER_TYPES).map(([k,v])=>`<option value="${k}" ${l.costCenterType===k?'selected':''}>${v.label}</option>`).join('')}
+          </select>
+          <select onchange="_mrLineChange('${l.tmpId}','costCenterId',this.value)">${ccEntityOpts}</select>
+        </td>
+      ` : ''}
       <td><input type="number" class="num" value="${l.amountNet||0}" step="any" oninput="_mrLineAmount('${l.tmpId}','amountNet',this.value)"></td>
       <td><input type="number" class="num" value="${l.vatPercent}" step="any" oninput="_mrLineAmount('${l.tmpId}','vatPercent',this.value)"></td>
       <td><input type="number" class="num" value="${l.amountGross||0}" step="any" readonly style="background:var(--paper-2)"></td>
       <td><input type="date" value="${esc(l.dueDate||'')}" oninput="_mrLineChange('${l.tmpId}','dueDate',this.value)"></td>
-      <td><select onchange="_mrLineChange('${l.tmpId}','vesselId',this.value)">${vesselOpts}</select></td>
-      <td><select onchange="_mrLineChange('${l.tmpId}','projectId',this.value)">${projectOpts}</select></td>
       <td><button class="mr-del-btn" onclick="_mrDeleteLine('${l.tmpId}')" title="Xóa dòng">✕</button></td>
     </tr>`;
+}
+
+/* When expenseType changes: auto-set partner if HR + show/hide recipient field */
+function _mrLineExpenseType(tmpId, value){
+  const line = _multiRowState.lines.find(l=>l.tmpId===tmpId);
+  if(!line) return;
+  _pushUndo();
+  line.expenseType = value;
+  // If type has a defaultVendor (e.g. CBCNV for HR) and partner empty → auto-fill
+  const defaultV = getDefaultVendor(value);
+  if(defaultV && !_multiRowState.partner){
+    _multiRowState.partner = defaultV;
+    const partnerInput = document.getElementById('mr-partner');
+    if(partnerInput) partnerInput.value = defaultV;
+    _mrPartnerInput(defaultV);
+  }
+  // Re-render to show/hide recipient column
+  _renderMultiRowModal();
+}
+
+/* When costCenter type changes: re-render line for new entity dropdown */
+function _mrLineCCType(tmpId, value){
+  const line = _multiRowState.lines.find(l=>l.tmpId===tmpId);
+  if(!line) return;
+  _pushUndo();
+  line.costCenterType = value;
+  line.costCenterId = '';  // reset entity on type change
+  // Re-render line only (not whole modal)
+  const tr = document.querySelector(`tr[data-tmpid="${tmpId}"]`);
+  if(tr){
+    const i = Array.from(tr.parentNode.children).indexOf(tr);
+    tr.outerHTML = _renderMrLine(line, i);
+  }
 }
 
 function _mrFieldChange(field, value){
@@ -7865,6 +8336,7 @@ function _mrLineAmount(tmpId, field, value){
 
 function _mrUpdateFooter(){
   const s = _multiRowState;
+  const isPayable = s.mode === 'ap';
   const totalNet = s.lines.reduce((sum,l)=>sum+(+l.amountNet||0),0);
   const totalVat = s.lines.reduce((sum,l)=>sum+(+l.vatAmount||0),0);
   const totalGross = s.lines.reduce((sum,l)=>sum+(+l.amountGross||0),0);
@@ -7872,11 +8344,11 @@ function _mrUpdateFooter(){
   if(tfoot){
     tfoot.innerHTML = `
       <tr style="background:rgba(184,71,46,.05);font-weight:700;border-top:2px solid var(--rule)">
-        <td colspan="4" style="padding:8px 6px">TỔNG (${s.lines.length} dòng)</td>
+        <td colspan="${isPayable?5:3}" style="padding:8px 6px">TỔNG (${s.lines.length} dòng)</td>
         <td class="num" style="font-family:var(--font-mono);padding:8px 4px">${totalNet.toLocaleString()}</td>
         <td></td>
         <td class="num" style="font-family:var(--font-mono);padding:8px 4px"><b>${totalGross.toLocaleString()} ${s.ccy}</b></td>
-        <td colspan="4"></td>
+        <td colspan="2"></td>
       </tr>`;
   }
 }
@@ -7966,14 +8438,20 @@ async function _mrSave(targetStatus){
         vendorId,
         desc: (l.desc||'').trim(),
         invoiceNo: (l.invoiceNo||'').trim(),
-        costCategory: (l.costCategory||'').trim(),
+        expenseType: (l.expenseType||'').trim(),           // NEW v1.30
+        isPO: isExpensePO(l.expenseType),                  // NEW v1.30: derived
+        costCenterType: (l.costCenterType||'').trim(),     // NEW v1.30
+        costCenterId: (l.costCenterId||'').trim(),         // NEW v1.30
+        recipientName: (l.recipientName||'').trim(),       // NEW v1.30 (HR only)
+        costCategory: (l.costCategory||'').trim(),         // legacy
         amountNet, vatPercent, vatAmount, amountGross,
         amount: amountGross,  // backward-compat
         ccy: s.ccy,
         segment: s.segment,
-        projectId: l.projectId || null,
-        vesselId: l.vesselId || null,
-        departmentId: s.departmentId || '',
+        // Auto-set legacy vesselId/projectId from costCenter for backward-compat:
+        projectId: (l.costCenterType==='project' ? l.costCenterId : (l.projectId||null)),
+        vesselId: (l.costCenterType==='vessel' ? l.costCenterId : (l.vesselId||null)),
+        departmentId: (l.costCenterType==='department' ? l.costCenterId : (s.departmentId || '')),
         issueDate: s.issueDate,
         dueDate: l.dueDate || '',
         dueMonth: '',
