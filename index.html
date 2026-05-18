@@ -529,6 +529,8 @@ body{min-height:100vh;background-image:radial-gradient(circle at 20% 0%,rgba(184
       </div>
     </div>
     <input type="file" id="importFile" accept=".json" style="display:none" onchange="importJSON(event)">
+    <!-- v1.41.0: Help button — always visible to all roles -->
+    <button class="btn btn-ghost" id="help-btn" onclick="openHelpModal()" title="Hướng dẫn sử dụng (Ctrl+/ hoặc F1)" style="border:1px solid rgba(246,241,232,.4);margin-right:6px">❓ Hướng dẫn</button>
     <!-- Admin actions consolidated in dropdown menu -->
     <div class="menu-wrap" id="admin-menu-wrap">
       <button class="btn btn-ghost" onclick="toggleAdminMenu(event)" id="admin-menu-btn" style="border:1px solid rgba(246,241,232,.4)">≡ Menu</button>
@@ -2065,7 +2067,7 @@ body{min-height:100vh;background-image:radial-gradient(circle at 20% 0%,rgba(184
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='1.40.1';            // bumped on each release
+const APP_VERSION='1.41.0';            // bumped on each release
 
 /* ============================================================
    PWA — Service Worker registration + Install prompt
@@ -2876,6 +2878,9 @@ async function authAction(){
     // Force password change on first login (mustChangePassword flag)
     if(CURRENT_ROLE==='user' && CURRENT_USER && CURRENT_USER.mustChangePassword){
       setTimeout(()=>showChangePasswordModal(true),500);
+    } else {
+      // v1.41.0: Welcome popup (only if NOT forced to change password — that takes priority)
+      try{ checkWelcomePopup(); }catch(e){console.warn('[welcome popup]',e);}
     }
     // Reminder backup if last export >7 days ago (admin only)
     if(CURRENT_ROLE==='admin'){
@@ -4293,8 +4298,586 @@ function wfReturnToDraft(r){
   return true;
 }
 
-/* Filter records that are "live" for BI reporting = only approved */
-function wfApprovedOnly(arr){return (arr||[]).filter(r=>wfStatus(r)==='approved');}
+/* ============================================================
+   HELP SYSTEM (v1.41.0)
+   Inline user guide + auto onboarding popup on first login.
+   ============================================================ */
+
+/* Determine the role for personalized help routing.
+   Returns: 'admin' | 'subadmin' | 'l2' | 'l1' | 'tckt' | 'input' | 'viewer'
+*/
+function helpDetectRole(){
+  if(CURRENT_ROLE==='admin') return 'admin';
+  if(!CURRENT_USER) return 'input';
+  if(CURRENT_USER.canManageUsers) return 'subadmin';
+  if(CURRENT_USER.canApproveL2) return 'l2';
+  if(CURRENT_USER.canApproveL1) return 'l1';
+  if((CURRENT_USER.tabs||[]).includes('banking')) return 'tckt';
+  if(CURRENT_USER.isViewer) return 'viewer';
+  return 'input';
+}
+
+/* Welcome onboarding — fires on first login per user.
+   localStorage key: seahorse_welcome_seen_<username> */
+function checkWelcomePopup(){
+  const userKey = isAdmin() ? 'admin' : (CURRENT_USER && CURRENT_USER.name) || 'unknown';
+  const flag = 'seahorse_welcome_seen_' + userKey;
+  try{
+    if(localStorage.getItem(flag)) return;  // already seen
+  }catch(e){return;}
+  // Show welcome modal after slight delay (let UI settle)
+  setTimeout(()=>{
+    showWelcomeModal(userKey, flag);
+  }, 800);
+}
+
+function showWelcomeModal(userKey, flag){
+  const role = helpDetectRole();
+  const roleInfo = {
+    admin: {icon:'⚡', title:'Admin', focus:'Toàn quyền hệ thống — quản lý NV, cấu hình, sync, audit'},
+    subadmin: {icon:'🛡', title:'Sub-admin', focus:'Quản lý nhân viên (tạo/sửa/xóa NV + đẩy auth cloud)'},
+    l2: {icon:'✓✓', title:'Duyệt L2', focus:'Phó GĐ — duyệt cuối, bút toán vào BI sau khi bạn duyệt'},
+    l1: {icon:'✓', title:'Duyệt L1', focus:'Trưởng BP — kiểm tra nghiệp vụ trước khi trình L2'},
+    tckt: {icon:'₫', title:'TCKT (Banking)', focus:'Quản lý TK ngân hàng, snapshot số dư, vay vốn'},
+    input: {icon:'✎', title:'NV Nhập liệu', focus:'Ghi nhận AR/AP/Kho/Vận hành tàu, trình ký lên duyệt'},
+    viewer: {icon:'👁', title:'Viewer', focus:'Chỉ đọc báo cáo BI — không nhập, không sửa'}
+  }[role];
+  const displayName = isAdmin() ? 'Admin' : (CURRENT_USER && CURRENT_USER.name) || 'NV';
+  const body = `
+    <div style="text-align:center;padding:14px 0 20px">
+      <div style="font-size:54px;line-height:1;margin-bottom:10px">${roleInfo.icon}</div>
+      <div style="font-family:var(--font-display);font-size:30px;font-weight:600;color:var(--ink);line-height:1.1;margin-bottom:6px">
+        Chào mừng <em style="color:var(--accent);font-style:italic">${esc(displayName)}</em>!
+      </div>
+      <div style="font-size:13px;color:var(--muted);letter-spacing:.05em">Lần đầu đăng nhập · Seahorse Manager v${APP_VERSION}</div>
+    </div>
+    <div style="padding:18px 22px;background:rgba(184,71,46,.05);border-left:3px solid var(--accent);margin-bottom:18px">
+      <div style="font-family:var(--font-mono);font-size:10px;letter-spacing:.2em;text-transform:uppercase;color:var(--accent);font-weight:600;margin-bottom:6px">Vai trò của bạn</div>
+      <div style="font-family:var(--font-display);font-size:20px;font-weight:600;color:var(--ink);margin-bottom:4px">${roleInfo.title}</div>
+      <div style="font-size:13px;color:var(--ink-soft);line-height:1.5">${roleInfo.focus}</div>
+    </div>
+    ${!isAdmin() && CURRENT_USER && CURRENT_USER.tabs ? `
+    <div style="margin-bottom:18px">
+      <div style="font-family:var(--font-mono);font-size:10px;letter-spacing:.2em;text-transform:uppercase;color:var(--muted);font-weight:600;margin-bottom:8px">Tab bạn được truy cập (${CURRENT_USER.tabs.length})</div>
+      <div style="display:flex;gap:6px;flex-wrap:wrap">
+        ${CURRENT_USER.tabs.map(t=>{
+          const T=ALL_TABS.find(x=>x.id===t);
+          return T?`<span style="padding:4px 10px;background:rgba(28,58,92,.08);border:1px solid var(--rule);border-radius:2px;font-size:12px;font-family:var(--font-mono)">${esc(T.label)}</span>`:'';
+        }).join('')}
+      </div>
+    </div>
+    ` : ''}
+    <div style="padding:14px 18px;background:rgba(45,106,106,.06);border-left:3px solid var(--good);font-size:13px;line-height:1.6;margin-bottom:18px">
+      <strong style="color:var(--good)">💡 3 mẹo bắt đầu:</strong><br>
+      1. Bấm <strong>❓ Hướng dẫn</strong> trên đầu trang bất cứ lúc nào để xem chi tiết<br>
+      2. App tự sync lên cloud sau mỗi 5 giây — không cần lo mất dữ liệu<br>
+      3. Phím tắt: <span class="kbd-help">F1</span> mở Hướng dẫn, <span class="kbd-help">Esc</span> đóng modal
+    </div>
+    <div style="font-size:11px;color:var(--muted);font-style:italic;text-align:center">Bạn có thể đọc lại hướng dẫn đầy đủ bất cứ lúc nào bằng nút ❓ trên thanh trên cùng.</div>`;
+  const foot = `
+    <button class="btn-sec" onclick="closeModal();openHelpModal()">📖 Đọc hướng dẫn đầy đủ</button>
+    <button class="btn-primary" onclick="_dismissWelcome('${flag}')">Tôi đã hiểu — Bắt đầu</button>`;
+  openModal('🎓 Chào mừng đến với Seahorse Manager', body, foot);
+}
+
+function _dismissWelcome(flag){
+  try{ localStorage.setItem(flag, '1'); }catch(e){}
+  closeModal();
+}
+
+/* HELP MODAL — full guide, with TOC + sections, optionally jumping to active role */
+function openHelpModal(targetSection){
+  const role = helpDetectRole();
+  const defaultSection = targetSection || ({
+    admin:'role-input', subadmin:'role-subadmin',
+    l2:'role-l2', l1:'role-l1', tckt:'role-tckt',
+    input:'role-input', viewer:'common'
+  }[role]) || 'common';
+  const body = _renderHelpContent(role, defaultSection);
+  const foot = `<button class="btn-sec" onclick="closeModal()">Đóng (Esc)</button>
+                <button class="btn-sec" onclick="_printHelp()">🖨 In thành PDF</button>`;
+  openModal('📖 Hướng dẫn Sử dụng · Seahorse Manager v' + APP_VERSION, body, foot);
+  // After open, scroll to default section
+  setTimeout(()=>{
+    const el = document.getElementById('help-' + defaultSection);
+    if(el && el.scrollIntoView) el.scrollIntoView({behavior:'auto', block:'start'});
+    _highlightHelpTOC(defaultSection);
+  }, 50);
+}
+
+function _renderHelpContent(activeRole, defaultSection){
+  return `
+  <style>
+    .help-grid{display:grid;grid-template-columns:200px 1fr;gap:24px;max-height:70vh}
+    @media (max-width:700px){.help-grid{grid-template-columns:1fr}}
+    .help-toc{border-right:1px solid var(--rule);padding-right:14px;overflow-y:auto;max-height:70vh}
+    .help-toc-title{font-family:var(--font-mono);font-size:9px;letter-spacing:.22em;text-transform:uppercase;color:var(--accent);font-weight:700;margin-bottom:10px}
+    .help-toc a{display:block;padding:7px 10px 7px 8px;font-size:12px;color:var(--ink-soft);text-decoration:none;border-left:2px solid transparent;margin-bottom:2px;cursor:pointer;font-weight:500}
+    .help-toc a:hover{background:rgba(184,71,46,.05);color:var(--accent)}
+    .help-toc a.active{color:var(--accent);border-left-color:var(--accent);background:rgba(184,71,46,.07);font-weight:600}
+    .help-toc .role-tag{font-family:var(--font-mono);font-size:8px;color:var(--muted);margin-right:5px;letter-spacing:.08em}
+    .help-toc a.active .role-tag{color:var(--accent)}
+    .help-content{overflow-y:auto;max-height:70vh;padding-right:8px;line-height:1.65;font-size:13.5px}
+    .help-content h3{font-family:var(--font-display);font-size:22px;color:var(--ink);margin:24px 0 12px;padding-bottom:6px;border-bottom:1px solid var(--rule)}
+    .help-content h3:first-child{margin-top:0}
+    .help-content h4{font-family:var(--font-display);font-size:16px;color:var(--ink);margin:18px 0 8px;font-weight:600}
+    .help-content h5{font-size:11px;color:var(--accent);font-weight:700;letter-spacing:.1em;text-transform:uppercase;margin:14px 0 6px}
+    .help-content p{margin-bottom:10px}
+    .help-content ul,.help-content ol{margin:8px 0 12px 22px}
+    .help-content li{margin-bottom:4px}
+    .help-content table{width:100%;border-collapse:collapse;margin:10px 0;font-size:12px;background:rgba(255,255,255,.4)}
+    .help-content th,.help-content td{text-align:left;padding:7px 10px;border-bottom:1px solid var(--rule-soft);vertical-align:top}
+    .help-content th{font-family:var(--font-mono);font-size:9px;letter-spacing:.1em;text-transform:uppercase;color:var(--accent);background:rgba(184,71,46,.04);font-weight:700}
+    .help-content code{font-family:var(--font-mono);font-size:.88em;background:var(--paper-2);padding:2px 6px;border-radius:2px;border:1px solid var(--rule-soft)}
+    .kbd-help{font-family:var(--font-mono);font-size:.8em;background:linear-gradient(180deg,#fff 0%,var(--paper-2) 100%);padding:1px 6px;border-radius:3px;border:1px solid var(--rule);border-bottom-width:2px;color:var(--ink);font-weight:500}
+    .help-callout{padding:12px 14px 12px 44px;border-left:3px solid;background:rgba(255,255,255,.5);position:relative;margin:12px 0;font-size:12.5px;line-height:1.55;border-radius:0 3px 3px 0}
+    .help-callout::before{position:absolute;left:13px;top:11px;font-size:18px}
+    .help-callout.tip{border-color:var(--good);background:rgba(45,106,106,.06)}
+    .help-callout.tip::before{content:"💡"}
+    .help-callout.warn{border-color:var(--warn);background:rgba(197,166,74,.08)}
+    .help-callout.warn::before{content:"⚠"}
+    .help-callout.danger{border-color:var(--bad);background:rgba(168,54,43,.07)}
+    .help-callout.danger::before{content:"🛑"}
+    .help-callout.info{border-color:var(--ink);background:rgba(28,58,92,.05)}
+    .help-callout.info::before{content:"ℹ"}
+    .help-step{display:grid;grid-template-columns:36px 1fr;gap:12px;margin-bottom:10px;padding:10px 12px;background:rgba(255,255,255,.4);border-left:3px solid var(--accent);border-radius:0 3px 3px 0;font-size:12.5px}
+    .help-step-num{font-family:var(--font-display);font-size:22px;font-weight:700;color:var(--accent);line-height:1;font-style:italic}
+    .help-step-content h5{margin-top:0}
+    .help-screenshot{margin:12px 0;padding:14px;background:var(--paper-2);border:1px dashed var(--rule);border-radius:3px;font-family:var(--font-mono);font-size:10.5px;line-height:1.7;color:var(--ink-soft);white-space:pre;overflow-x:auto}
+    .help-role-banner{display:flex;align-items:center;gap:14px;padding:18px 20px;background:linear-gradient(135deg,rgba(28,58,92,.04) 0%,rgba(184,71,46,.05) 100%);border-left:4px solid var(--accent);margin-bottom:20px}
+    .help-role-banner-icon{font-size:32px;line-height:1}
+    .help-role-banner-title{font-family:var(--font-display);font-size:24px;color:var(--ink);font-weight:600;line-height:1.1}
+    .help-role-banner-title em{color:var(--accent);font-style:italic}
+    .help-role-banner-sub{font-size:12px;color:var(--muted);margin-top:4px}
+    .help-section{padding-bottom:24px;margin-bottom:24px;border-bottom:1px dashed var(--rule)}
+    .help-section:last-child{border-bottom:none}
+  </style>
+  <div class="help-grid">
+    <div class="help-toc" id="help-toc">
+      <div class="help-toc-title">Mục lục</div>
+      <a onclick="_helpJump('common')"><span class="role-tag">00</span>Chung</a>
+      <a onclick="_helpJump('role-input')"><span class="role-tag">01</span>NV Nhập liệu</a>
+      <a onclick="_helpJump('role-l1')"><span class="role-tag">02</span>Duyệt L1</a>
+      <a onclick="_helpJump('role-l2')"><span class="role-tag">03</span>Duyệt L2</a>
+      <a onclick="_helpJump('role-tckt')"><span class="role-tag">04</span>TCKT</a>
+      <a onclick="_helpJump('role-subadmin')"><span class="role-tag">05</span>Sub-admin</a>
+      <a onclick="_helpJump('faq')"><span class="role-tag">F</span>FAQ</a>
+      <a onclick="_helpJump('contact')"><span class="role-tag">★</span>Liên hệ</a>
+    </div>
+    <div class="help-content" id="help-content-scroll">
+      ${_helpSection_common()}
+      ${_helpSection_input()}
+      ${_helpSection_l1()}
+      ${_helpSection_l2()}
+      ${_helpSection_tckt()}
+      ${_helpSection_subadmin()}
+      ${_helpSection_faq()}
+      ${_helpSection_contact()}
+    </div>
+  </div>`;
+}
+
+function _helpJump(id){
+  const el = document.getElementById('help-' + id);
+  if(el) el.scrollIntoView({behavior:'smooth', block:'start'});
+  _highlightHelpTOC(id);
+}
+
+function _highlightHelpTOC(id){
+  document.querySelectorAll('#help-toc a').forEach(a=>a.classList.remove('active'));
+  const links = document.querySelectorAll('#help-toc a');
+  links.forEach(a=>{
+    if(a.getAttribute('onclick') && a.getAttribute('onclick').includes("'"+id+"'")){
+      a.classList.add('active');
+    }
+  });
+}
+
+function _printHelp(){
+  // Open print dialog with just help content
+  const helpContent = document.getElementById('help-content-scroll');
+  if(!helpContent){toast('Không tìm thấy nội dung hướng dẫn','bad');return;}
+  const w = window.open('', '_blank', 'width=800,height=900');
+  if(!w){toast('Trình duyệt chặn popup — bật lại để in','bad');return;}
+  w.document.write(`<!DOCTYPE html><html><head><title>Hướng dẫn Seahorse Manager</title>
+    <style>
+      body{font-family:Georgia,serif;font-size:11pt;line-height:1.6;color:#1c3a5c;max-width:780px;margin:20px auto;padding:0 20px}
+      h3{font-size:18pt;border-bottom:1px solid #d4c5ab;padding-bottom:4px;margin-top:24pt}
+      h4{font-size:14pt;margin-top:18pt;color:#1c3a5c}
+      h5{font-size:9pt;color:#b8472e;text-transform:uppercase;letter-spacing:.1em;margin-top:14pt}
+      table{width:100%;border-collapse:collapse;margin:8pt 0;font-size:10pt}
+      th,td{text-align:left;padding:5pt 8pt;border-bottom:1px solid #d4c5ab}
+      th{background:#f5ede0;font-size:9pt;text-transform:uppercase;letter-spacing:.05em;color:#b8472e}
+      code,.kbd-help{font-family:'Courier New',monospace;background:#f0e8d8;padding:1pt 4pt;border:1px solid #d4c5ab}
+      .help-callout{padding:8pt 10pt 8pt 34pt;border-left:2pt solid #b8472e;background:#fdf6ec;margin:8pt 0;position:relative;font-size:10pt}
+      .help-callout::before{position:absolute;left:9pt;top:8pt;font-size:14pt}
+      .help-callout.tip{border-color:#2d6a6a;background:#eef6f1}
+      .help-callout.tip::before{content:"💡"}
+      .help-callout.warn{border-color:#c5a64a;background:#fdf6e0}
+      .help-callout.warn::before{content:"⚠"}
+      .help-callout.danger{border-color:#a8362b;background:#fdeee7}
+      .help-callout.danger::before{content:"🛑"}
+      .help-callout.info{border-color:#1c3a5c;background:#eef2f6}
+      .help-callout.info::before{content:"ℹ"}
+      .help-step{margin:6pt 0;padding:6pt 10pt;background:#f5ede0;border-left:2pt solid #b8472e;font-size:10pt}
+      .help-step-num{font-size:13pt;color:#b8472e;font-weight:bold;font-style:italic;margin-right:6pt}
+      .help-screenshot{font-family:'Courier New',monospace;background:#f0e8d8;padding:8pt;font-size:8.5pt;border:1px dashed #d4c5ab;white-space:pre;overflow-x:auto}
+      .help-role-banner{display:flex;gap:10pt;padding:10pt 12pt;background:#fdf6ec;border-left:3pt solid #b8472e;margin-bottom:10pt}
+      .help-role-banner-icon{font-size:24pt}
+      .help-role-banner-title{font-size:16pt;color:#1c3a5c;font-weight:bold}
+      .help-role-banner-title em{color:#b8472e;font-style:italic}
+      .help-section{page-break-after:always;padding-bottom:8pt}
+      .help-section:last-child{page-break-after:auto}
+      ul,ol{margin:4pt 0 8pt 18pt}
+      li{margin-bottom:2pt}
+    </style></head><body>
+    <h1 style="text-align:center;font-size:24pt;color:#1c3a5c;margin-bottom:4pt">Hướng dẫn Sử dụng</h1>
+    <h2 style="text-align:center;font-size:18pt;color:#b8472e;font-style:italic;margin-top:0;border:none">Seahorse Manager v${APP_VERSION}</h2>
+    <p style="text-align:center;font-size:9pt;color:#7a6c5c;margin-bottom:20pt">CTCP Hàng hải &amp; Năng lượng Hải Mã · Internal · ${new Date().toLocaleDateString('vi-VN')}</p>
+    ${helpContent.innerHTML}
+    </body></html>`);
+  w.document.close();
+  setTimeout(()=>w.print(), 300);
+}
+
+/* ============ Help content sections ============ */
+function _helpSection_common(){
+  return `<div class="help-section" id="help-common">
+    <div class="help-role-banner">
+      <div class="help-role-banner-icon">⌂</div>
+      <div>
+        <div class="help-role-banner-title">Phần 00 · Hướng dẫn <em>chung</em></div>
+        <div class="help-role-banner-sub">Áp dụng cho mọi NV — đọc trước phần riêng theo vai trò</div>
+      </div>
+    </div>
+
+    <h3>1. Đăng nhập lần đầu</h3>
+    <p>Bạn sẽ nhận từ admin <strong>3 thông tin</strong> qua kênh riêng (Zalo/email):</p>
+    <ul>
+      <li><strong>URL app:</strong> <code>https://app.seahorse.com.vn</code></li>
+      <li><strong>Tên đăng nhập</strong> (vd: <code>nv-thuy</code>)</li>
+      <li><strong>Mật khẩu tạm thời</strong> (bạn phải đổi ngay sau đăng nhập)</li>
+    </ul>
+    <p>Một số trường hợp admin gửi thêm <strong>Apps Script URL</strong> để pull cấu hình lần đầu.</p>
+
+    <div class="help-step"><span class="help-step-num">1</span><div class="help-step-content"><h5>Mở app trên trình duyệt</h5>Khuyến nghị Chrome (laptop) hoặc Safari (iPhone). Gõ địa chỉ + Enter.</div></div>
+    <div class="help-step"><span class="help-step-num">2</span><div class="help-step-content"><h5>Chọn tab "Pull từ cloud"</h5>Trừ khi admin đã setup máy cho bạn (thấy form đăng nhập trực tiếp).</div></div>
+    <div class="help-step"><span class="help-step-num">3</span><div class="help-step-content"><h5>Nhập 3 thông tin → Pull cfg</h5>App tự kéo cấu hình về và đăng nhập.</div></div>
+    <div class="help-step"><span class="help-step-num">4</span><div class="help-step-content"><h5>(Tùy chọn) Cài app như ứng dụng PWA</h5>Chrome: icon ⊕ trên thanh địa chỉ → "Cài đặt". iPhone Safari: Share → "Thêm vào màn hình chính".</div></div>
+
+    <h3>2. Đổi mật khẩu lần đầu</h3>
+    <p>Lần đầu đăng nhập, app <strong>BUỘC</strong> bạn đổi mật khẩu trước khi cho vào.</p>
+    <div class="help-callout warn"><strong>Quy tắc</strong><br>Tối thiểu 8 ký tự. Khuyến nghị chữ hoa + thường + số + ký tự đặc biệt. VD: <code>Thuy@2026!</code></div>
+    <div class="help-callout tip"><strong>Mẹo nhớ mật khẩu mạnh</strong><br>Viết tắt 1 câu quen thuộc + ngày. "Sáng đi làm 8 giờ" → <code>Sdl8g@2026</code></div>
+
+    <h3>3. Giao diện</h3>
+    <h4>3.1. Header (thanh trên)</h4>
+    <ul>
+      <li>Logo + tên công ty</li>
+      <li>Tên NV của bạn (có chip màu)</li>
+      <li>Trạng thái sync: 🟢 đã sync · 🟡 đang sync · 🔴 lỗi</li>
+      <li>Nút <strong>❓ Hướng dẫn</strong> (chính chỗ này)</li>
+      <li>Nút Đổi mật khẩu / Đăng xuất</li>
+    </ul>
+    <h4>3.2. Nav (thanh tab)</h4>
+    <p>Bạn chỉ thấy <strong>các tab admin cấp quyền</strong>. Mỗi NV thường có 3–5 tab.</p>
+    <h4>3.3. Toast (thông báo)</h4>
+    <ul>
+      <li><strong style="color:var(--good)">Xanh</strong> = thành công</li>
+      <li><strong style="color:var(--warn)">Vàng</strong> = cảnh báo</li>
+      <li><strong style="color:var(--bad)">Đỏ</strong> = lỗi</li>
+    </ul>
+
+    <h3>4. Sync &amp; Offline</h3>
+    <p>Mọi thay đổi lưu trên máy bạn trước. Sau đó <strong>auto-sync mỗi 5 giây</strong> lên Google Sheet (đã mã hóa AES-256).</p>
+    <h4>4.1. Offline mode</h4>
+    <ul>
+      <li>Đăng nhập, nhập bút toán: <strong>vẫn được</strong> khi mất mạng</li>
+      <li>Có mạng lại: app tự sync trong 5 giây</li>
+    </ul>
+    <h4>4.2. Khi 2 NV cùng nhập?</h4>
+    <p>App có cơ chế <strong>merge theo ID record</strong>. 2 NV thêm record khác nhau → cả 2 đều giữ. 2 NV sửa cùng 1 record → lấy bản mới hơn + toast cảnh báo.</p>
+
+    <h3>5. Phím tắt</h3>
+    <table>
+      <thead><tr><th>Phím</th><th>Tác dụng</th></tr></thead>
+      <tbody>
+        <tr><td><span class="kbd-help">F1</span> hoặc <span class="kbd-help">Ctrl</span>+<span class="kbd-help">/</span></td><td>Mở Hướng dẫn</td></tr>
+        <tr><td><span class="kbd-help">Esc</span></td><td>Đóng modal đang mở</td></tr>
+        <tr><td><span class="kbd-help">Ctrl</span>+<span class="kbd-help">Shift</span>+<span class="kbd-help">R</span></td><td>Hard refresh (xóa cache cũ)</td></tr>
+      </tbody>
+    </table>
+  </div>`;
+}
+
+function _helpSection_input(){
+  return `<div class="help-section" id="help-role-input">
+    <div class="help-role-banner">
+      <div class="help-role-banner-icon">✎</div>
+      <div>
+        <div class="help-role-banner-title">Phần 01 · NV <em>Nhập liệu</em></div>
+        <div class="help-role-banner-sub">Ghi nhận chứng từ — bút toán bạn nhập sẽ trình ký lên duyệt L1 → L2 trước khi vào BI</div>
+      </div>
+    </div>
+
+    <h3>1. Tab Phải thu (AR / Doanh thu)</h3>
+    <p>Dùng khi công ty <strong>xuất hóa đơn</strong> cho khách (charter, OM fee...).</p>
+    <div class="help-step"><span class="help-step-num">1</span><div class="help-step-content"><h5>Bấm "+ Thêm Phải thu"</h5></div></div>
+    <div class="help-step"><span class="help-step-num">2</span><div class="help-step-content"><h5>Điền thông tin bắt buộc (dấu *)</h5>Khách hàng *, Loại doanh thu *, Dự án/Tàu, Số tiền *, VAT %, CCY, Ngày HĐ, Ngày đáo hạn</div></div>
+    <div class="help-step"><span class="help-step-num">3</span><div class="help-step-content"><h5>Lưu → Trạng thái "Nháp"</h5></div></div>
+    <div class="help-step"><span class="help-step-num">4</span><div class="help-step-content"><h5>Trình ký → chờ L1 duyệt</h5></div></div>
+    <div class="help-callout tip"><strong>Nhập hàng loạt</strong><br>Dùng <strong>≡ Menu → 📥 Import Excel</strong> với template có sẵn nếu bạn có file Excel.</div>
+
+    <h3>2. Tab Phải trả (AP / Chi phí)</h3>
+    <p>Dùng khi công ty <strong>nhận hóa đơn</strong> từ NCC. Quy trình giống AR nhưng chọn <strong>loại chi phí</strong>:</p>
+    <ul>
+      <li><strong>VESSEL_DIRECT</strong>: nhiên liệu, vật tư tàu, phí cảng</li>
+      <li><strong>HR</strong>: lương, BHXH, phụ cấp</li>
+      <li><strong>QN</strong>: quản lý chung (văn phòng, điện, internet)</li>
+      <li><strong>OTHER</strong>: khác</li>
+    </ul>
+
+    <h3>3. Tab Vận hành tàu (Thu/Chi hộ)</h3>
+    <p>Dùng cho <strong>tàu công ty quản lý hộ chủ tàu</strong>.</p>
+
+    <h4>3.1. Thu hộ (IN) — đơn giản</h4>
+    <p>Ngày, Tàu QL, Loại = Thu hộ, Diễn giải, Số tiền → Lưu.</p>
+
+    <h4>3.2. Chi hộ (OUT) — có chứng từ</h4>
+    <div class="help-callout warn"><strong>Quan trọng v1.40.1+</strong><br>Khi chọn Loại = <strong>Chi hộ</strong>, app tự hiện thêm 3 ô <strong>NCC / Số HĐ / Số HD</strong> để chủ tàu kiểm tra.</div>
+    <div class="help-screenshot">┌────────────────────────────────────────────────┐
+│  📄 Thông tin chứng từ chi hộ                  │
+├────────────────────────────────────────────────┤
+│  Tên NCC: [ Cty CP Cảng Vũng Tàu          ]   │
+│  Số HĐ:   [ HD-2026-001 ]                      │
+│  Số HD:   [ HD-VAT-12345 ]                     │
+└────────────────────────────────────────────────┘</div>
+
+    <h4>3.3. Xuất báo cáo PDF cho chủ tàu</h4>
+    <p>Cuối tháng bấm <strong>📄 Xuất PDF</strong> ở tab Vận hành.</p>
+    <div class="help-callout info"><strong>Báo cáo 2 trang</strong><br><strong>Trang 1</strong>: Tổng hợp (Tồn đầu/Thu/Chi/Phí/Tồn cuối) — chủ tàu ký nhanh<br><strong>Trang 2</strong>: Chi tiết với cột NCC/HĐ/HD — chủ tàu kiểm tra</div>
+
+    <h3>4. Tab Kho vật tư</h3>
+    <p>Quản lý xuất nhập tồn theo <strong>kho</strong> (theo vị trí: kho tàu, kho VP).</p>
+    <ol>
+      <li>Tạo kho (mã, tên, loại VESSEL/OFFICE)</li>
+      <li>Chọn kho + tháng</li>
+      <li>+ Bút toán: tên vật tư, ĐVT, tồn đầu, nhập, xuất, giá trị</li>
+      <li>App tự tính: tồn cuối = đầu + nhập − xuất</li>
+    </ol>
+
+    <h3>5. Tab Danh mục</h3>
+    <p>6 sub-tab: 🏢 Phòng/Ban · ⛵ Tàu · 📐 Dự án · 💸 Loại CP · 💰 Loại DT · 🤝 NCC</p>
+    <p>NV <strong>thêm mới + import được</strong>. Chỉ admin sửa/xóa.</p>
+    <div class="help-callout warn"><strong>Cẩn trọng khi thêm</strong><br>App chuẩn hóa tên (uppercase, bỏ dấu) để check trùng. Tìm trong danh sách trước khi tạo mới.</div>
+  </div>`;
+}
+
+function _helpSection_l1(){
+  return `<div class="help-section" id="help-role-l1">
+    <div class="help-role-banner">
+      <div class="help-role-banner-icon">✓</div>
+      <div>
+        <div class="help-role-banner-title">Phần 02 · NV Duyệt <em>L1</em></div>
+        <div class="help-role-banner-sub">Trưởng bộ phận — duyệt cấp 1. Sau khi bạn duyệt, bút toán chuyển sang chờ L2</div>
+      </div>
+    </div>
+
+    <h3>1. Workflow phê duyệt 2 cấp</h3>
+    <div class="help-screenshot">  Nháp ──trình ký──> Trình ký (L1) ──duyệt──> Chờ TT (L2) ──duyệt──> Đã duyệt (vào BI)
+                              │                                                  
+                              └──── từ chối có lý do ───> Bị từ chối             </div>
+
+    <h3>2. Duyệt hàng loạt</h3>
+    <div class="help-step"><span class="help-step-num">1</span><div class="help-step-content"><h5>Vào tab "07 Phê duyệt"</h5></div></div>
+    <div class="help-step"><span class="help-step-num">2</span><div class="help-step-content"><h5>Chọn cấp = "Trình ký (chờ L1)"</h5>App liệt kê tất cả bút toán chờ bạn.</div></div>
+    <div class="help-step"><span class="help-step-num">3</span><div class="help-step-content"><h5>Lọc theo BP / loại / tháng</h5>Xem theo nhóm.</div></div>
+    <div class="help-step"><span class="help-step-num">4</span><div class="help-step-content"><h5>Review + Tick + Bấm "✓ Duyệt L1"</h5>Mặc định tick hết — bỏ tick những dòng chưa muốn duyệt.</div></div>
+    <div class="help-step"><span class="help-step-num">5</span><div class="help-step-content"><h5>Từ chối nếu sai → nhập lý do</h5>Bút toán quay về NV nhập để sửa.</div></div>
+
+    <div class="help-callout danger"><strong>Trách nhiệm L1</strong><br>Bạn là tuyến đầu: số tiền có khớp HĐ không, loại CP có đúng không, dự án/tàu có đúng không. Sai ở L1 → khó truy trách nhiệm ở L2.</div>
+
+    <h3>3. Xem ai đã duyệt gì</h3>
+    <p>Bấm vào dòng để xem lịch sử: ai trình, ai duyệt L1, lúc nào. Admin xem đầy đủ trong Audit Log.</p>
+  </div>`;
+}
+
+function _helpSection_l2(){
+  return `<div class="help-section" id="help-role-l2">
+    <div class="help-role-banner">
+      <div class="help-role-banner-icon">✓✓</div>
+      <div>
+        <div class="help-role-banner-title">Phần 03 · NV Duyệt <em>L2</em></div>
+        <div class="help-role-banner-sub">Phó GĐ / Phụ trách — tuyến cuối. Bút toán đã duyệt L2 mới vào BI</div>
+      </div>
+    </div>
+
+    <h3>1. L1 vs L2</h3>
+    <table>
+      <thead><tr><th>Khía cạnh</th><th>L1</th><th>L2</th></tr></thead>
+      <tbody>
+        <tr><td>Vai trò</td><td>Trưởng BP kiểm tra nghiệp vụ</td><td>Phó GĐ duyệt tài chính</td></tr>
+        <tr><td>Sau duyệt</td><td>Chờ TT (chờ L2)</td><td>Đã duyệt — vào BI</td></tr>
+        <tr><td>Vào BI?</td><td>Chưa</td><td>Có</td></tr>
+        <tr><td>Phạm vi</td><td>Theo BP</td><td>Toàn công ty</td></tr>
+      </tbody>
+    </table>
+
+    <h3>2. Cách duyệt L2</h3>
+    <p>Giống L1 nhưng chọn cấp = <strong>"Chờ TT (chờ L2)"</strong> + bấm nút <strong>"✓✓ Duyệt L2"</strong>.</p>
+
+    <h3>3. Trách nhiệm tài chính</h3>
+    <div class="help-callout danger"><strong>L2 là tuyến cuối</strong><br>Sau duyệt L2 → bút toán vào BI cho ban quản trị. Sửa/xóa sau đó rất khó (phải nhờ admin bỏ duyệt). Trước khi tick "Duyệt L2":<br>• Đọc kỹ tổng số tiền<br>• Đọc kỹ loại CP/DT (vào sai mục = sai báo cáo cả tháng)<br>• Check kỳ ghi nhận (đúng tháng không)</div>
+
+    <h3>4. AR Fast-track</h3>
+    <p>NV có cờ <code>canApproveL2</code> nhập AR có thể <strong>BYPASS L1</strong> (vào thẳng pending L2). Dành cho NV cấp cao trực tiếp ghi nhận DT.</p>
+  </div>`;
+}
+
+function _helpSection_tckt(){
+  return `<div class="help-section" id="help-role-tckt">
+    <div class="help-role-banner">
+      <div class="help-role-banner-icon">₫</div>
+      <div>
+        <div class="help-role-banner-title">Phần 04 · NV <em>TCKT</em> (Banking)</div>
+        <div class="help-role-banner-sub">Quản lý TK ngân hàng, snapshot số dư, vay vốn — bảo mật cao</div>
+      </div>
+    </div>
+
+    <div class="help-callout warn"><strong>Trách nhiệm bảo mật</strong><br>Không chia sẻ màn hình tab Banking trong họp công khai. Không để máy mở app khi rời chỗ — app tự logout sau 30 phút không hoạt động.</div>
+
+    <h3>1. Tab "05 Ngân hàng — Tài khoản"</h3>
+    <h4>1.1. Thêm TK mới</h4>
+    <ol>
+      <li>+ Thêm tài khoản</li>
+      <li>Tên TK, số TK, ngân hàng, CCY, ghi chú</li>
+      <li>Lưu</li>
+    </ol>
+
+    <h4>1.2. Snapshot số dư (định kỳ)</h4>
+    <div class="help-step"><span class="help-step-num">1</span><div class="help-step-content"><h5>Vào sub-tab "Snapshot số dư"</h5></div></div>
+    <div class="help-step"><span class="help-step-num">2</span><div class="help-step-content"><h5>Chọn TK + ngày + số dư hiện tại</h5>Lấy từ sao kê NH.</div></div>
+    <div class="help-step"><span class="help-step-num">3</span><div class="help-step-content"><h5>Lưu — app tự tính biến động</h5></div></div>
+
+    <h3>2. Quản lý Vay vốn</h3>
+    <ul>
+      <li>Thông tin khoản vay: NH, loại, HĐ, gốc, lãi suất, kỳ hạn</li>
+      <li>Lịch trả gốc lãi: app tự sinh schedule</li>
+      <li>Ghi nhận trả từng kỳ</li>
+    </ul>
+
+    <h3>3. Cashflow Forecast</h3>
+    <p>Dự báo dòng tiền dựa trên:</p>
+    <ul>
+      <li>Số dư NH hiện tại (snapshot mới nhất)</li>
+      <li>AR sắp đến hạn (+)</li>
+      <li>AP sắp đến hạn (−)</li>
+      <li>Lịch trả nợ vay</li>
+    </ul>
+    <div class="help-callout tip"><strong>Tần suất snapshot</strong><br>Mỗi tuần 1 lần là tốt nhất. Hàng ngày nếu giao dịch nhiều.</div>
+  </div>`;
+}
+
+function _helpSection_subadmin(){
+  return `<div class="help-section" id="help-role-subadmin">
+    <div class="help-role-banner">
+      <div class="help-role-banner-icon">🛡</div>
+      <div>
+        <div class="help-role-banner-title">Phần 05 · <em>Sub-admin</em> (Kế toán trưởng)</div>
+        <div class="help-role-banner-sub">Quản lý NV thay admin — không thấy Apps Script URL, mật khẩu admin, audit log</div>
+      </div>
+    </div>
+
+    <h3>1. Quyền của bạn</h3>
+    <table>
+      <thead><tr><th>Hành động</th><th>Được làm?</th></tr></thead>
+      <tbody>
+        <tr><td>Tạo NV mới</td><td>✅</td></tr>
+        <tr><td>Sửa quyền NV (tab, password, cờ L1)</td><td>✅</td></tr>
+        <tr><td>Xóa NV thường</td><td>✅</td></tr>
+        <tr><td>Đẩy auth cloud (bằng password CỦA BẠN)</td><td>✅</td></tr>
+        <tr><td>Cấp cờ L2/BOD/QL NV</td><td>❌ Chỉ admin</td></tr>
+        <tr><td>Sửa/xóa chính mình</td><td>❌ Nhờ admin</td></tr>
+        <tr><td>Sửa/xóa NV có quyền cao (L2/BOD/QL NV)</td><td>❌ Chỉ admin</td></tr>
+        <tr><td>Apps Script URL / mật khẩu admin / audit log</td><td>❌ Chỉ admin</td></tr>
+      </tbody>
+    </table>
+
+    <h3>2. Tạo NV mới</h3>
+    <div class="help-step"><span class="help-step-num">1</span><div class="help-step-content"><h5>≡ Menu → ⚙ Cài đặt &amp; Phân quyền</h5>Banner đỏ cam: "🛡 Chế độ phân quyền giới hạn"</div></div>
+    <div class="help-step"><span class="help-step-num">2</span><div class="help-step-content"><h5>+ Thêm nhân viên</h5></div></div>
+    <div class="help-step"><span class="help-step-num">3</span><div class="help-step-content"><h5>Điền form</h5>Tên đăng nhập (không dấu/space), Email/SĐT, Phòng/Ban, Mật khẩu tạm (≥8 ký tự)</div></div>
+    <div class="help-step"><span class="help-step-num">4</span><div class="help-step-content"><h5>Tick tab NV được truy cập</h5>VD: Phải thu, Phải trả, Danh mục. Không tick tab nhạy cảm.</div></div>
+    <div class="help-step"><span class="help-step-num">5</span><div class="help-step-content"><h5>(Tùy chọn) Cấp cờ DUYỆT L1</h5><strong>KHÔNG được</strong> tick L2 / BOD / Quản lý NV.</div></div>
+
+    <h3>3. Đẩy auth lên cloud</h3>
+    <div class="help-step"><span class="help-step-num">1</span><div class="help-step-content"><h5>🔐 Đẩy auth lên cloud</h5></div></div>
+    <div class="help-step"><span class="help-step-num">2</span><div class="help-step-content"><h5>Nhập mật khẩu CỦA BẠN (không phải admin)</h5>App dùng password của bạn để wrap. Wrap admin trên cloud không bị ảnh hưởng.</div></div>
+    <div class="help-step"><span class="help-step-num">3</span><div class="help-step-content"><h5>(Tùy chọn) Nhập password NV cụ thể</h5>Để NV pull cfg được ngay. Bỏ trống → NV phải đăng nhập 1 lần trên máy này trước.</div></div>
+    <div class="help-step"><span class="help-step-num">4</span><div class="help-step-content"><h5>🚀 Đẩy lên cloud</h5></div></div>
+
+    <div class="help-callout danger"><strong>Lỗi thường gặp</strong><br>"Sub-admin không thể khởi tạo master key mới" → nhờ admin push cfg lần đầu trước<br>"Mật khẩu của bạn đã thay đổi trên cloud" → nhờ admin re-push để sync wrap của bạn</div>
+  </div>`;
+}
+
+function _helpSection_faq(){
+  return `<div class="help-section" id="help-faq">
+    <div class="help-role-banner">
+      <div class="help-role-banner-icon">?</div>
+      <div>
+        <div class="help-role-banner-title">FAQ &amp; <em>Troubleshooting</em></div>
+        <div class="help-role-banner-sub">Câu hỏi thường gặp + cách xử lý sự cố nhanh</div>
+      </div>
+    </div>
+
+    <h3>Đăng nhập</h3>
+    <p><strong>Tôi quên mật khẩu, làm sao?</strong><br>Báo admin / sub-admin reset. App không có "Forgot password" do thiết kế bảo mật.</p>
+    <p><strong>Nhập đúng mật khẩu mà báo sai?</strong><br>Kiểm tra CapsLock, gõ thiếu/thừa space. Thử copy-paste vào notepad trước.</p>
+    <p><strong>"Khóa 5 phút sau 5 lần sai"?</strong><br>Chống brute-force. Đợi 5 phút.</p>
+
+    <h3>Sync / Dữ liệu</h3>
+    <p><strong>Status sync 🔴 đỏ?</strong><br>Có thể mất mạng, Apps Script URL sai, hoặc cloud full. F12 → Console xem chi tiết. Báo admin.</p>
+    <p><strong>Tôi nhập mà NV khác không thấy?</strong><br>Đợi 5–10s auto-sync. Hoặc bấm icon Sync thủ công.</p>
+    <p><strong>2 NV nhập trùng có sao không?</strong><br>App merge theo ID record. 2 NV thêm record khác nhau → cả 2 đều giữ. Nhưng nên phân công rõ.</p>
+
+    <h3>Phê duyệt</h3>
+    <p><strong>Bút toán "Trình ký" 3 ngày chưa duyệt?</strong><br>Nhắc tay trưởng BP. App không gửi email.</p>
+    <p><strong>Cần sửa bút toán đã duyệt L2?</strong><br>Nhờ admin "bỏ duyệt". Sau đó bút toán về Nháp, sửa và trình lại.</p>
+
+    <h3>Sự cố kỹ thuật</h3>
+    <p><strong>App load chậm / treo?</strong><br>Hard refresh: <span class="kbd-help">Ctrl</span>+<span class="kbd-help">Shift</span>+<span class="kbd-help">R</span>. Nếu vẫn lỗi: F12 → Application → Service Workers → Unregister → F5.</p>
+    <p><strong>Tôi up file mà thấy phiên bản cũ?</strong><br>Service Worker cache. Hard refresh hoặc đóng tab mở lại.</p>
+    <p><strong>Gỡ PWA?</strong><br>Chrome: chuột phải icon → Uninstall. iPhone: giữ icon → Remove App.</p>
+  </div>`;
+}
+
+function _helpSection_contact(){
+  return `<div class="help-section" id="help-contact">
+    <div class="help-role-banner">
+      <div class="help-role-banner-icon">☎</div>
+      <div>
+        <div class="help-role-banner-title">Liên hệ <em>admin</em></div>
+        <div class="help-role-banner-sub">Khi gặp vấn đề không tự xử lý được</div>
+      </div>
+    </div>
+
+    <div class="help-callout info"><strong>Admin của bạn</strong><br>Vui lòng liên hệ admin (thông tin được công ty cung cấp riêng qua kênh nội bộ).</div>
+
+    <h3>Khi báo lỗi, cung cấp đủ 4 thông tin</h3>
+    <ol>
+      <li><strong>Tên đăng nhập</strong> (vd: <code>nv-thuy</code>)</li>
+      <li><strong>Bạn đang làm gì khi gặp lỗi?</strong></li>
+      <li><strong>Lỗi cụ thể</strong> (chụp ảnh màn hình tốt nhất)</li>
+      <li><strong>Trình duyệt + thiết bị</strong> (vd: Chrome trên Windows 11)</li>
+    </ol>
+
+    <div class="help-callout tip"><strong>Bật F12 Console khi cần</strong><br>Nếu admin yêu cầu, mở F12 (Windows) hoặc Cmd+Option+I (Mac) → tab Console → chụp ảnh các dòng đỏ.</div>
+
+    <hr style="border:none;border-top:1px dashed var(--rule);margin:24px 0">
+    <p style="font-size:11px;color:var(--muted);font-style:italic;text-align:center">Seahorse Manager v${APP_VERSION} · Internal document · ${new Date().toLocaleDateString('vi-VN')}</p>
+  </div>`;
+}
+
 function applyRoleUI(){
   const user=CURRENT_ROLE==='user';
   // Dashboard is admin-only: strip from any user.tabs that might still have it (migration)
@@ -6962,6 +7545,15 @@ function openModal(title,bodyHtml,footHtml){
 function closeModal(){document.getElementById('modal').classList.remove('show');}
 document.getElementById('modal').addEventListener('click',e=>{if(e.target.id==='modal') closeModal();});
 document.addEventListener('keydown',e=>{if(e.key==='Escape') closeModal();});
+// v1.41.0: F1 or Ctrl+/ to open Help (only when logged in)
+document.addEventListener('keydown',e=>{
+  if(e.key==='F1' || (e.ctrlKey && e.key==='/')){
+    if(typeof CURRENT_ROLE !== 'undefined' && CURRENT_ROLE){
+      e.preventDefault();
+      try{ openHelpModal(); }catch(err){console.warn('[help shortcut]',err);}
+    }
+  }
+});
 
 function confirmDialog(title,message,detail,onYes,danger=true){
   const body=`<div class="confirm-msg">${message}</div>${detail?`<div class="confirm-detail">${detail}</div>`:''}`;
