@@ -1917,7 +1917,7 @@ body{min-height:100vh;background-image:radial-gradient(circle at 20% 0%,rgba(184
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='1.37.4';            // bumped on each release
+const APP_VERSION='1.37.7';            // bumped on each release
 
 /* ============================================================
    PWA — Service Worker registration + Install prompt
@@ -12482,6 +12482,37 @@ function renderDashboard(){
   const sfInThisYear = S.salaryFund.contributions.filter(c=>(c.contributedAt||'').startsWith(String(yr))).reduce((s,c)=>s+toDisplay(+c.amount||0,c.ccy||'VND'),0);
   const sfOutThisYear = S.salaryFund.withdrawals.filter(w=>(w.date||'').startsWith(String(yr))).reduce((s,w)=>s+toDisplay(+w.amount||0,w.ccy||'VND'),0);
 
+  // Inventory total closing value — get LATEST movement per (groupId × scope × vesselId × projectId)
+  // then sum closeValue = openValue + inValue - outValue
+  const invMovs=(S.invMovements||[]);
+  const invLatest={};  // key → latest movement
+  invMovs.forEach(m=>{
+    const key=`${m.groupId}|${m.scope}|${m.vesselId||''}|${m.projectId||''}`;
+    if(!invLatest[key] || (m.month||'')>(invLatest[key].month||'')){
+      invLatest[key]=m;
+    }
+  });
+  let invTotalValue=0;
+  let invLineCount=0;
+  Object.values(invLatest).forEach(m=>{
+    const closeVal=(+m.openValue||0)+(+m.inValue||0)-(+m.outValue||0);
+    if(closeVal>0){
+      invTotalValue+=toDisplay(closeVal, m.ccy||'VND');
+      invLineCount++;
+    }
+  });
+  // Breakdown by scope for sub text
+  const invByScope={vessel:0, project:0, general:0};
+  Object.values(invLatest).forEach(m=>{
+    const cv=(+m.openValue||0)+(+m.inValue||0)-(+m.outValue||0);
+    if(cv>0) invByScope[m.scope||'general']+=toDisplay(cv, m.ccy||'VND');
+  });
+  const invScopeParts=[];
+  if(invByScope.vessel>0) invScopeParts.push(`⛵ ${fmt(invByScope.vessel)}`);
+  if(invByScope.project>0) invScopeParts.push(`📐 ${fmt(invByScope.project)}`);
+  if(invByScope.general>0) invScopeParts.push(`🏢 ${fmt(invByScope.general)}`);
+  const invScopeStr=invScopeParts.join(' · ')||'Chưa có tồn kho';
+
   document.getElementById('kpi-grid').innerHTML=`
     <div class="kpi"><div class="kpi-label">Doanh thu ${yr}</div><div class="kpi-value">${fmt(rev)}</div><div class="kpi-sub">KH ${fmt(planRev)} · <span class="${planAch>=1?'up':planAch>=.7?'':'down'}">${pct(planAch)}</span></div></div>
     <div class="kpi"><div class="kpi-label">Chi phí ${yr}</div><div class="kpi-value" style="color:var(--accent)">${fmt(cost)}</div><div class="kpi-sub">${txs.filter(t=>t.type==='COST').length} bút toán</div></div>
@@ -12491,6 +12522,11 @@ function renderDashboard(){
       <div class="kpi-label">💰 Quỹ tiền lương</div>
       <div class="kpi-value" style="color:var(--good);font-size:18px">${sfBalanceDisplayStr}</div>
       <div class="kpi-sub">Trích ${yr}: <span style="color:var(--good)">${fmt(sfInThisYear)}</span> · Chi: <span style="color:var(--warn)">${fmt(sfOutThisYear)}</span></div>
+    </div>
+    <div class="kpi" style="background:rgba(28,58,92,.04);border-left:3px solid var(--ink);cursor:pointer" onclick="navTo('inventory')" title="Click để vào Kho vật tư">
+      <div class="kpi-label">📦 Tồn kho vật tư (cuối kỳ)</div>
+      <div class="kpi-value" style="color:var(--ink)">${fmt(invTotalValue)}</div>
+      <div class="kpi-sub">${invLineCount} dòng · ${invScopeStr}</div>
     </div>`;
 
   // v1.36: Segment performance moved to Plan page — section A removed from Dashboard
@@ -15948,6 +15984,76 @@ const EXCEL_TEMPLATES={
       {key:'workDays', label:'Số ngày làm việc (O&M)',                                          required:false, type:'number'},
       {key:'isOM',     label:'Là Dự án O&M độc lập (TRUE/FALSE)',                               required:false, type:'boolean'}
     ]
+  },
+  bankAccounts:{
+    name:'Tài khoản Ngân hàng (master)',
+    target:'bankAccounts',
+    columns:[
+      {key:'bankName',    label:'Tên Ngân hàng *',                  required:true,  type:'text'},
+      {key:'branch',      label:'Chi nhánh',                        required:false, type:'text'},
+      {key:'accountNo',   label:'Số tài khoản *',                   required:true,  type:'text'},
+      {key:'accountName', label:'Tên chủ TK (theo NH) *',           required:true,  type:'text'},
+      {key:'ccy',         label:'CCY (VND/USD) *',                  required:true,  type:'ccy'},
+      {key:'isActive',    label:'Còn hoạt động (TRUE/FALSE)',       required:false, type:'boolean'},
+      {key:'note',        label:'Ghi chú',                          required:false, type:'text'}
+    ]
+  },
+  bankSnapshots:{
+    name:'Snapshot số dư NH (cuối tuần/tháng)',
+    target:'bankSnapshots',
+    columns:[
+      {key:'accountNo', label:'Số TK (phải khớp TK đã tạo) *',  required:true,  type:'bankAccountLookup'},
+      {key:'date',      label:'Ngày chốt số dư (YYYY-MM-DD) *', required:true,  type:'date'},
+      {key:'balance',   label:'Số dư cuối kỳ *',                required:true,  type:'number'},
+      {key:'note',      label:'Ghi chú (sao kê, nguồn)',        required:false, type:'text'}
+    ]
+  },
+  loans:{
+    name:'Khoản vay Ngân hàng',
+    target:'loans',
+    columns:[
+      {key:'bankName',          label:'Tên Ngân hàng *',                                       required:true,  type:'text'},
+      {key:'contractNo',        label:'Số HĐ vay *',                                           required:true,  type:'text'},
+      {key:'loanType',          label:'Loại vay (SHORT_TERM/LONG_TERM/REVOLVING/OTHER) *',    required:true,  type:'loanType'},
+      {key:'principal',         label:'Gốc vay *',                                             required:true,  type:'number'},
+      {key:'ccy',               label:'CCY (VND/USD) *',                                       required:true,  type:'ccy'},
+      {key:'interestRate',      label:'Lãi suất %/năm *',                                      required:true,  type:'number'},
+      {key:'termMonths',        label:'Số kỳ trả (tháng) *',                                   required:true,  type:'number'},
+      {key:'startDate',         label:'Ngày giải ngân *',                                      required:true,  type:'date'},
+      {key:'endDate',           label:'Ngày đáo hạn (để trống = tự tính)',                     required:false, type:'date'},
+      {key:'repayMethod',       label:'PP trả nợ (EQUAL_PRINCIPAL/EQUAL_INSTALLMENT/BULLET) *', required:true,  type:'repayMethod'},
+      {key:'paymentFrequency',  label:'Tần suất trả (MONTHLY/QUARTERLY)',                      required:false, type:'paymentFrequency'},
+      {key:'gracePeriodMonths', label:'Ân hạn gốc (tháng)',                                    required:false, type:'number'},
+      {key:'note',              label:'Ghi chú',                                               required:false, type:'text'}
+    ]
+  },
+  invGroups:{
+    name:'Nhóm vật tư (master)',
+    target:'invGroups',
+    columns:[
+      {key:'name', label:'Tên nhóm vật tư *',          required:true,  type:'text'},
+      {key:'unit', label:'Đơn vị tính (cái/m/kg/L...)', required:false, type:'text'},
+      {key:'note', label:'Ghi chú',                    required:false, type:'text'}
+    ]
+  },
+  invMovements:{
+    name:'Sổ kho theo tháng (tồn đầu / nhập / xuất)',
+    target:'invMovements',
+    columns:[
+      {key:'groupName',  label:'Tên nhóm vật tư (phải khớp file master) *',      required:true,  type:'invGroupLookup'},
+      {key:'month',      label:'Tháng (YYYY-MM) *',                              required:true,  type:'month'},
+      {key:'scope',      label:'Phạm vi (vessel/project/general) *',             required:true,  type:'invScope'},
+      {key:'vesselName', label:'Tên tàu (nếu phạm vi=vessel)',                   required:false, type:'vesselLookup'},
+      {key:'projectCode',label:'Mã dự án (nếu phạm vi=project)',                 required:false, type:'projectLookup'},
+      {key:'openQty',    label:'Tồn đầu kỳ (số lượng)',                          required:false, type:'number'},
+      {key:'inQty',      label:'Nhập trong kỳ (SL)',                             required:false, type:'number'},
+      {key:'outQty',     label:'Xuất trong kỳ (SL)',                             required:false, type:'number'},
+      {key:'openValue',  label:'Tồn đầu kỳ (giá trị)',                           required:false, type:'number'},
+      {key:'inValue',    label:'Nhập (giá trị)',                                 required:false, type:'number'},
+      {key:'outValue',   label:'Xuất (giá trị)',                                 required:false, type:'number'},
+      {key:'ccy',        label:'CCY (VND/USD)',                                  required:false, type:'ccy'},
+      {key:'note',       label:'Ghi chú (VD: VP HCM, CN QN, Kho dự phòng)',     required:false, type:'text'}
+    ]
   }
 };
 
@@ -16207,6 +16313,37 @@ function _excelRowToRecord(row, colMap, tpl){
         else if(p){ rec.data._vesselId=null; rec.data._projectId=p.id; }
         else { rec.errors.push(`Không tìm thấy tàu hoặc dự án O&M "${val}"`); }
       } else rec.errors.push(`Phải có Mã/Tên Tàu hoặc Mã DA`);
+    } else if(c.type==='bankAccountLookup'){
+      // Match by accountNo
+      if(val){
+        const acc=(S.bankAccounts||[]).find(a=>String(a.accountNo).trim()===String(val).trim());
+        if(!acc) rec.errors.push(`Số TK "${val}" không tìm thấy — phải tạo TK trước`);
+        rec.data._bankAccountId=acc?acc.id:null;
+      } else rec.errors.push('Số TK bắt buộc');
+    } else if(c.type==='loanType'){
+      const valid=['SHORT_TERM','LONG_TERM','REVOLVING','OTHER'];
+      val=(val||'SHORT_TERM').toUpperCase().replace(/[\s-]/g,'_');
+      if(!valid.includes(val)){rec.warnings.push(`${c.key}: loại vay không hợp lệ, dùng SHORT_TERM`); val='SHORT_TERM';}
+    } else if(c.type==='repayMethod'){
+      const valid=['EQUAL_PRINCIPAL','EQUAL_INSTALLMENT','BULLET'];
+      val=(val||'EQUAL_PRINCIPAL').toUpperCase().replace(/[\s-]/g,'_');
+      if(!valid.includes(val)){rec.warnings.push(`${c.key}: PP trả nợ không hợp lệ, dùng EQUAL_PRINCIPAL`); val='EQUAL_PRINCIPAL';}
+    } else if(c.type==='paymentFrequency'){
+      const valid=['MONTHLY','QUARTERLY'];
+      val=(val||'MONTHLY').toUpperCase();
+      if(!valid.includes(val)){rec.warnings.push(`${c.key}: tần suất không hợp lệ, dùng MONTHLY`); val='MONTHLY';}
+    } else if(c.type==='invGroupLookup'){
+      // Match by group name (case-insensitive, trim)
+      if(val){
+        const norm=String(val).trim().toLowerCase();
+        const g=(S.invGroups||[]).find(x=>String(x.name||'').trim().toLowerCase()===norm);
+        if(!g) rec.errors.push(`Nhóm vật tư "${val}" không tìm thấy — tạo nhóm trước`);
+        rec.data._groupId=g?g.id:null;
+      } else rec.errors.push('Tên nhóm vật tư bắt buộc');
+    } else if(c.type==='invScope'){
+      const valid=['vessel','project','general'];
+      val=(val||'general').toLowerCase();
+      if(!valid.includes(val)){rec.warnings.push(`${c.key}: scope không hợp lệ, dùng general`); val='general';}
     }
 
     if(c.required && (val===''||val===0) && c.type!=='number'){
@@ -16369,6 +16506,164 @@ function excelConfirmImport(){
       created++;
       return;
     }
+    if(tpl.target==='bankAccounts'){
+      // Check duplicate accountNo
+      if((S.bankAccounts||[]).find(a=>String(a.accountNo).trim()===String(d.accountNo).trim())){
+        warnings.push(`Đã có TK số "${d.accountNo}" — bỏ qua`);
+        return;
+      }
+      if(!S.bankAccounts) S.bankAccounts=[];
+      S.bankAccounts.push({
+        id:'BANK-'+uid().slice(-6),
+        bankName:d.bankName,
+        branch:d.branch||'',
+        accountNo:String(d.accountNo).trim(),
+        accountName:d.accountName,
+        ccy:d.ccy||'VND',
+        isActive: d.isActive===false?false:true,
+        note:d.note||'',
+        createdBy:actorName(),
+        createdAt:new Date().toISOString(),
+        _importedFromExcel:true
+      });
+      created++;
+      return;
+    }
+    if(tpl.target==='bankSnapshots'){
+      if(!d._bankAccountId){
+        warnings.push(`Không tạo snapshot — không có _bankAccountId`);
+        return;
+      }
+      if(!S.bankSnapshots) S.bankSnapshots=[];
+      S.bankSnapshots.push({
+        id:'SNAP-'+uid().slice(-6),
+        bankAccountId:d._bankAccountId,
+        date:d.date||todayISO(),
+        balance:+d.balance||0,
+        note:d.note||'',
+        createdBy:actorName(),
+        createdAt:new Date().toISOString(),
+        _importedFromExcel:true
+      });
+      created++;
+      return;
+    }
+    if(tpl.target==='loans'){
+      // Check duplicate contractNo
+      if((S.loans||[]).find(l=>String(l.contractNo).trim()===String(d.contractNo).trim())){
+        warnings.push(`Đã có HĐ vay số "${d.contractNo}" — bỏ qua`);
+        return;
+      }
+      const principal=+d.principal||0;
+      const term=+d.termMonths||12;
+      const rate=+d.interestRate||0;
+      if(principal<=0){warnings.push(`Gốc vay phải >0 — HĐ ${d.contractNo} bỏ qua`); return;}
+      if(term<=0){warnings.push(`Số kỳ trả phải >0 — HĐ ${d.contractNo} bỏ qua`); return;}
+      const start=d.startDate||todayISO();
+      const finalEnd = d.endDate || (()=>{
+        const dt=new Date(start);dt.setMonth(dt.getMonth()+term);
+        return dt.toISOString().slice(0,10);
+      })();
+      if(!S.loans) S.loans=[];
+      const loan={
+        id:'LOAN-'+uid().slice(-6),
+        bankName:d.bankName,
+        loanType:d.loanType||'SHORT_TERM',
+        contractNo:String(d.contractNo).trim(),
+        principal,
+        ccy:d.ccy||'VND',
+        interestRate:rate,
+        termMonths:term,
+        startDate:start,
+        endDate:finalEnd,
+        repayMethod:d.repayMethod||'EQUAL_PRINCIPAL',
+        paymentFrequency:d.paymentFrequency||'MONTHLY',
+        gracePeriodMonths:+d.gracePeriodMonths||0,
+        prepayments:[],
+        note:d.note||'',
+        status:'active',
+        createdBy:actorName(),
+        createdAt:new Date().toISOString(),
+        _importedFromExcel:true
+      };
+      // Generate payment schedule if function exists
+      if(typeof generateLoanSchedule==='function'){
+        loan.paymentSchedule=generateLoanSchedule(loan);
+      } else {
+        loan.paymentSchedule=[];
+      }
+      S.loans.push(loan);
+      created++;
+      return;
+    }
+    if(tpl.target==='invGroups'){
+      // Check duplicate name (case-insensitive)
+      const nameNorm=String(d.name).trim().toLowerCase();
+      if((S.invGroups||[]).find(g=>String(g.name||'').trim().toLowerCase()===nameNorm)){
+        warnings.push(`Đã có nhóm "${d.name}" — bỏ qua`);
+        return;
+      }
+      if(!S.invGroups) S.invGroups=[];
+      S.invGroups.push({
+        id:uid(),
+        name:String(d.name).trim(),
+        unit:d.unit||'',
+        note:d.note||'',
+        _importedFromExcel:true
+      });
+      created++;
+      return;
+    }
+    if(tpl.target==='invMovements'){
+      if(!d._groupId){
+        warnings.push(`Không tạo bản ghi — không tìm thấy nhóm vật tư`);
+        return;
+      }
+      // Validate scope-specific fields
+      const scope=d.scope||'general';
+      if(scope==='vessel' && !d._vesselId){
+        warnings.push(`Phạm vi=vessel nhưng tàu "${d.vesselName||''}" không tìm thấy — bỏ qua`);
+        return;
+      }
+      if(scope==='project' && !d._projectId){
+        warnings.push(`Phạm vi=project nhưng dự án "${d.projectCode||''}" không tìm thấy — bỏ qua`);
+        return;
+      }
+      // Check duplicate: same group + month + scope + scopeId
+      const dup=(S.invMovements||[]).find(m=>
+        m.groupId===d._groupId &&
+        m.month===d.month &&
+        m.scope===scope &&
+        (m.vesselId||'')===(d._vesselId||'') &&
+        (m.projectId||'')===(d._projectId||'')
+      );
+      if(dup){
+        warnings.push(`Đã có bản ghi cùng (nhóm + tháng + phạm vi) — bỏ qua dòng "${d.groupName}" ${d.month}`);
+        return;
+      }
+      if(!S.invMovements) S.invMovements=[];
+      S.invMovements.push({
+        id:uid(),
+        groupId:d._groupId,
+        scope,
+        vesselId:scope==='vessel'?d._vesselId:'',
+        projectId:scope==='project'?d._projectId:'',
+        month:d.month,
+        openQty:+d.openQty||0,
+        inQty:+d.inQty||0,
+        outQty:+d.outQty||0,
+        openValue:+d.openValue||0,
+        inValue:+d.inValue||0,
+        outValue:+d.outValue||0,
+        ccy:d.ccy||'VND',
+        note:d.note||'',
+        createdBy:actorName(),
+        createdAt:new Date().toISOString(),
+        _importedFromExcel:true
+      });
+      created++;
+      return;
+    }
     // Default: receivables / payables (with workflow)
     const net=+d.amountNet||0;
     const vatPercent=+d.vatPercent||0;
@@ -16411,7 +16706,8 @@ function excelConfirmImport(){
   closeModal();
   EXCEL_PARSED_DATA=null;
   renderAll();
-  const msg=`Đã import ${created} bản ghi${tpl.target==='fixedAssets'||tpl.target==='tools'||tpl.target==='vessels'||tpl.target==='projects'?'':' (Nháp · Cần Gửi → Duyệt L1/L2)'}`;
+  const masterTargets=['fixedAssets','tools','vessels','projects','bankAccounts','bankSnapshots','loans','invGroups','invMovements'];
+  const msg=`Đã import ${created} bản ghi${masterTargets.includes(tpl.target)?'':' (Nháp · Cần Gửi → Duyệt L1/L2)'}`;
   if(warnings.length){
     toast(msg+` · ${warnings.length} bỏ qua (trùng)`,'warn');
   } else {
