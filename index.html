@@ -1938,7 +1938,7 @@ body{min-height:100vh;background-image:radial-gradient(circle at 20% 0%,rgba(184
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='1.38.3';            // bumped on each release
+const APP_VERSION='1.38.4';            // bumped on each release
 
 /* ============================================================
    PWA — Service Worker registration + Install prompt
@@ -4334,10 +4334,8 @@ async function cloudSync(mode){
       // PUSH
       let toEncrypt;
       if(CURRENT_ROLE==='admin'){
-        // Admin pushes entire S
-        toEncrypt=S;
-      } else {
-        // User: must merge with cloud to avoid overwriting fields they don't have permission for
+        // v1.38.4: Admin also merges by ID to preserve NV work pushed since admin last pulled
+        // This prevents admin from accidentally overwriting NV's records they didn't know about
         try{
           const res0=await fetch(cfg.scriptUrl+'?action=load&key=data',{method:'GET'});
           const data0=await res0.json();
@@ -4345,27 +4343,76 @@ async function cloudSync(mode){
           if(data0.ok && data0.payload){
             cloudFull=await decryptJSON(data0.payload);
           }
-          // Build merged state: start from cloud (full), then overlay only allowed fields from local S
-          const merged=Object.assign(defaultState(),cloudFull);
-          const allowed=new Set(allowedFieldsForUser());
-          allowed.forEach(f=>{
-            if(S[f]!==undefined) merged[f]=S[f];
-          });
+          // For admin: merge ALL record-array fields (admin owns everything)
+          const adminMergeFields=ALL_DATA_FIELDS;
+          const {merged, conflictReport}=mergeStateByFields(
+            Object.assign(defaultState(), cloudFull),
+            S,
+            adminMergeFields
+          );
           toEncrypt=merged;
+          // Update local S to reflect merged state
+          adminMergeFields.forEach(f=>{
+            if(merged[f]!==undefined) S[f]=merged[f];
+          });
+          const conflictFields=Object.keys(conflictReport);
+          if(conflictFields.length>0){
+            const total=conflictFields.reduce((s,f)=>s+conflictReport[f].length,0);
+            console.warn('[sync admin merge] conflicts:', conflictReport);
+            toast(`⚠ ${total} bản ghi đã được NV khác cập nhật — đã merge theo bản mới nhất`, 'warn');
+          }
+        }catch(mergeErr){
+          // Admin merge fails → fall back to direct push (preserve old behavior)
+          const detail=mergeErr.message||String(mergeErr);
+          console.warn('[sync admin merge] failed, falling back to direct push:', detail);
+          if(/network|fetch|connection|failed to fetch/i.test(detail) || !navigator.onLine){
+            updateSyncStatus('error','Không kết nối được cloud');
+            toast('Mạng yếu — thử lại sau','bad');
+            return;
+          }
+          // Cloud empty or other error → push direct
+          toEncrypt=S;
+        }
+      } else {
+        // User: must merge with cloud to avoid overwriting fields they don't have permission for
+        // v1.38.4: Use record-level mergeByID to preserve changes from other NVs working in parallel
+        try{
+          const res0=await fetch(cfg.scriptUrl+'?action=load&key=data',{method:'GET'});
+          const data0=await res0.json();
+          let cloudFull={};
+          if(data0.ok && data0.payload){
+            cloudFull=await decryptJSON(data0.payload);
+          }
+          // Build merged state: start from cloud (full state)
+          // Then for each allowed field: merge by ID (not replace)
+          const allowedFields=allowedFieldsForUser();
+          const {merged, conflictReport}=mergeStateByFields(
+            Object.assign(defaultState(), cloudFull),
+            S,
+            allowedFields
+          );
+          toEncrypt=merged;
+          // Update local S to reflect merged state (so user sees their changes preserved correctly)
+          // Only update fields that were merged
+          allowedFields.forEach(f=>{
+            if(merged[f]!==undefined) S[f]=merged[f];
+          });
+          // Report conflicts to user (warning toast)
+          const conflictFields=Object.keys(conflictReport);
+          if(conflictFields.length>0){
+            const total=conflictFields.reduce((s,f)=>s+conflictReport[f].length,0);
+            console.warn('[sync merge] conflicts detected:', conflictReport);
+            toast(`⚠ ${total} bản ghi có thay đổi đồng thời từ NV khác — đã merge theo bản mới nhất`, 'warn');
+          }
         }catch(mergeErr){
           const detail=mergeErr.message||String(mergeErr);
           console.error('[sync push merge] failed:', mergeErr);
-          // Common causes:
-          // - Cloud trống (Apps Script chưa setup data): allow push direct without merge
-          // - Network error: keep error and retry later
-          // - Decrypt error: master key mismatch (rare)
           if(/network|fetch|connection|failed to fetch/i.test(detail) || !navigator.onLine){
             updateSyncStatus('error','Không kết nối được cloud');
             toast('Mạng yếu — thử lại sau','bad');
             return;
           }
           if(/cloud trống|empty|payload|undefined.*iv|cannot read.*payload/i.test(detail)){
-            // Cloud chưa có data → push trực tiếp state hiện tại của NV (lần đầu)
             console.log('[sync push] cloud empty, pushing direct');
             toEncrypt=S;
           } else {
@@ -4947,6 +4994,98 @@ function loadState(){
   try{const j=localStorage.getItem(STORE_KEY);if(j) return Object.assign(defaultState(),JSON.parse(j));}catch(e){}
   return defaultState();
 }
+
+/* ============================================================
+   CONCURRENCY HELPERS v1.38.4
+   - touchRecord: gắn updatedAt + updatedBy (mỗi khi sửa record)
+   - mergeByID: merge 2 mảng theo id field, lấy bản mới nhất theo updatedAt
+   - Mục đích: tránh ghi đè data khi 2 NV cùng push lên cloud
+   ============================================================ */
+
+// Gắn timestamp + người sửa vào record. Gọi mỗi khi update.
+function touchRecord(rec){
+  if(!rec || typeof rec!=='object') return rec;
+  rec.updatedAt=new Date().toISOString();
+  try{ rec.updatedBy=actorName(); }catch(e){}
+  return rec;
+}
+
+// Trả về timestamp record được "chạm" cuối cùng (fallback createdAt nếu chưa có updatedAt)
+function _recordTimestamp(r){
+  if(!r) return 0;
+  const t = r.updatedAt || r.createdAt || r.modifiedAt || 0;
+  return t ? new Date(t).getTime() : 0;
+}
+
+// Merge 2 arrays of records by `id` field.
+// - Cloud records absent in local → keep cloud
+// - Local records absent in cloud → keep local (mới thêm bởi NV này)
+// - Cả 2 cùng có → lấy bản có updatedAt mới nhất (last-write-wins ở mức RECORD, không phải array)
+// Returns: {merged, conflicts: [{id, cloudUpdatedAt, localUpdatedAt}]}
+function mergeByID(cloudArr, localArr, idField){
+  cloudArr=Array.isArray(cloudArr)?cloudArr:[];
+  localArr=Array.isArray(localArr)?localArr:[];
+  idField=idField||'id';
+  const conflicts=[];
+  const byId={};
+  // First: put cloud records into byId
+  cloudArr.forEach(r=>{
+    if(!r||r[idField]==null) return;
+    byId[r[idField]]={src:'cloud', rec:r};
+  });
+  // Then: overlay local records
+  localArr.forEach(r=>{
+    if(!r||r[idField]==null) return;
+    const k=r[idField];
+    const existing=byId[k];
+    if(!existing){
+      byId[k]={src:'local', rec:r};
+    } else {
+      const cloudT=_recordTimestamp(existing.rec);
+      const localT=_recordTimestamp(r);
+      // If both have timestamps and they differ, record as conflict for warning
+      if(cloudT && localT && Math.abs(cloudT-localT)>1000){
+        conflicts.push({
+          id:k,
+          cloudUpdatedAt:existing.rec.updatedAt||existing.rec.createdAt,
+          localUpdatedAt:r.updatedAt||r.createdAt,
+          winner: localT>cloudT?'local':'cloud'
+        });
+      }
+      // Pick newer: local wins if strictly newer; tie-breaker: cloud (to preserve their work)
+      if(localT>cloudT){
+        byId[k]={src:'local', rec:r};
+      }
+      // else: keep cloud (already there)
+    }
+  });
+  // Build merged array preserving local order for local-origin, cloud order for cloud-origin
+  // Simpler: just use Object.values
+  const merged=Object.values(byId).map(x=>x.rec);
+  return {merged, conflicts};
+}
+
+// Smart merge an entire state object (for cloud sync push)
+// fields: array of state keys to merge (allowed for this user)
+// Returns: {merged: full state, conflictReport: {field: [conflicts]}}
+function mergeStateByFields(cloudFull, localFull, fields){
+  const merged=Object.assign({},cloudFull);  // start from cloud
+  const conflictReport={};
+  fields.forEach(f=>{
+    if(localFull[f]===undefined) return;
+    // Only merge arrays of objects (records). For other types, last-write-wins (local).
+    if(Array.isArray(localFull[f]) && localFull[f].length>0 && typeof localFull[f][0]==='object' && localFull[f][0]!==null && 'id' in localFull[f][0]){
+      const {merged:mArr, conflicts}=mergeByID(cloudFull[f], localFull[f], 'id');
+      merged[f]=mArr;
+      if(conflicts.length>0) conflictReport[f]=conflicts;
+    } else {
+      // Non-record-array field (scalar, config, etc) → local overrides
+      merged[f]=localFull[f];
+    }
+  });
+  return {merged, conflictReport};
+}
+
 function saveState(){
   // If crypto key available, save encrypted; else fall back to plain (during setup before login)
   if(CRYPTO_KEY){
@@ -5669,7 +5808,7 @@ function scheduleAutoSync(){
   if(!cfg||!cfg.scriptUrl) return;
   if(_suppressAutoSync) return;  // Skip auto-push during login/pull
   clearTimeout(_autoSyncTimer);
-  _autoSyncTimer=setTimeout(()=>cloudSync('push'),3000); // 3s debounce
+  _autoSyncTimer=setTimeout(()=>cloudSync('push'),5000); // v1.38.4: 5s debounce (đủ để gõ tiếp mà không spam)
 }
 function uid(){return Date.now().toString(36)+Math.random().toString(36).slice(2,7);}
 
@@ -11972,6 +12111,7 @@ function saveAr(kind,id){
     if(!r){err.textContent='Không tìm thấy';return;}
     if(!wfCanEdit(r)){err.textContent='Bản ghi đã khóa sửa do trạng thái phê duyệt';return;}
     Object.assign(r,{partner,vendorId,desc,amountNet,vatPercent,vatAmount,amountGross,amount,ccy,segment,projectId,vesselId,issueDate,dueDate,dueMonth,dueAmount});
+    touchRecord(r);  // v1.38.4: track for concurrency merge
   } else {
     S[list].push({
       id:uid(),
@@ -11983,7 +12123,8 @@ function saveAr(kind,id){
       approvedL2By:'',approvedL2At:'',
       rejectedBy:'',rejectedAt:'',rejectReason:'',rejectedAtLevel:null,
       createdBy:actorName(),
-      createdAt:new Date().toISOString()
+      createdAt:new Date().toISOString(),
+      updatedAt:new Date().toISOString()  // v1.38.4
     });
   }
   saveState();closeModal();renderAll();
@@ -12471,6 +12612,7 @@ function saveOpEditFull(id){
   if(!paidDate){err.textContent='Nhập ngày thanh toán';return;}
   if(bankFee<0||otherFee<0){err.textContent='Phí không được âm';return;}
   Object.assign(t,{date,vesselId,type,amount,desc,paidDate,bankFee,otherFee,feeNote});
+  touchRecord(t);  // v1.38.4
   saveState();closeModal();renderAll();toast('Đã cập nhật');
 }
 
@@ -13414,6 +13556,7 @@ function saveInvMovement(id){
   } else {
     rec.createdBy=actorName();
     rec.createdAt=new Date().toISOString();
+    rec.updatedAt=new Date().toISOString();  // v1.38.4
     S.invMovements.push(rec);
   }
   saveState();closeModal();renderAll();toast('Đã lưu');
