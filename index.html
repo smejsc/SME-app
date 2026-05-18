@@ -469,15 +469,19 @@ body{min-height:100vh;background-image:radial-gradient(circle at 20% 0%,rgba(184
 
         <div id="setup-cloud-block" style="display:none">
           <div style="font-size:11px;color:rgba(246,241,232,0.7);font-style:italic;margin-bottom:10px;padding:8px;background:rgba(255,255,255,0.04);border-left:3px solid var(--accent)">
-            Pull cấu hình auth từ Google Sheet — yêu cầu admin đã <b>đẩy auth lên cloud</b> từ máy gốc trước.
+            Pull cfg từ Google Sheet — admin HOẶC nhân viên đều dùng được (nếu admin đã push cfg + đã có wrap cho NV của bạn).
           </div>
           <div class="field">
             <label>Apps Script URL *</label>
             <input type="text" id="cloud-script-url" placeholder="https://script.google.com/macros/s/.../exec" autocomplete="off">
           </div>
           <div class="field">
-            <label>Mật khẩu admin (giải mã cfg) *</label>
-            <input type="password" id="cloud-admin-pw" placeholder="Mật khẩu admin từ máy gốc" autocomplete="current-password">
+            <label>Tên đăng nhập * <span style="text-transform:none;font-weight:400;color:rgba(246,241,232,0.6)">("admin" hoặc tên NV)</span></label>
+            <input type="text" id="cloud-user-name" placeholder="admin / nv-thuy / ..." autocomplete="username">
+          </div>
+          <div class="field">
+            <label>Mật khẩu *</label>
+            <input type="password" id="cloud-admin-pw" placeholder="Password của tài khoản trên" autocomplete="current-password">
           </div>
         </div>
 
@@ -1934,7 +1938,7 @@ body{min-height:100vh;background-image:radial-gradient(circle at 20% 0%,rgba(184
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='1.38.2';            // bumped on each release
+const APP_VERSION='1.38.3';            // bumped on each release
 
 /* ============================================================
    PWA — Service Worker registration + Install prompt
@@ -2116,14 +2120,17 @@ async function decryptJSON(payload){
 }
 
 /* ============================================================
-   AUTH CFG CLOUD SYNC (v1.38.1+)
-   Encrypt auth cfg (separate from data) using a key derived from admin password.
-   This allows new device to recover full auth by entering ScriptUrl + admin pw.
+   AUTH CFG CLOUD SYNC (v1.38.3+) — WRAP PATTERN (v2 schema)
+   Cfg cloud payload:
+     {v:2, iv, ct,  wraps:[{name, salt, iter, iv, ct}, ...]}
+   - cfg JSON encrypted ONCE with a random master key (iv, ct).
+   - Master key wrapped per-user (admin + each NV) using password-derived key.
+   - User pulls: app GET cfg → find wrap by name → unwrap master key → decrypt cfg.
+   - Multi-password access (admin OR any NV) → đăng nhập tự do từ máy mới.
    ============================================================ */
 
 // Salt for cfg encryption — derived from URL so 2 different deployments can't cross-read
 async function cfgSyncSalt(scriptUrl){
-  // SHA-256 of scriptUrl → first 16 bytes as salt
   const buf=await crypto.subtle.digest('SHA-256', new TextEncoder().encode(scriptUrl||'seahorse-cfg-default-salt'));
   return new Uint8Array(buf).slice(0,16);
 }
@@ -2139,104 +2146,305 @@ async function deriveCfgKey(password, scriptUrl){
   );
 }
 
-async function encryptCfgWithPassword(cfg, password, scriptUrl){
-  const cfgKey=await deriveCfgKey(password, scriptUrl);
-  const iv=rand(12);
-  const data=new TextEncoder().encode(JSON.stringify(cfg));
-  const ct=await crypto.subtle.encrypt({name:'AES-GCM', iv}, cfgKey, data);
-  return {iv:bytesToB64(iv), ct:bytesToB64(new Uint8Array(ct)), v:1};
+// Generate a fresh AES-GCM master key (extractable for wrapping)
+async function generateCfgMasterKey(){
+  return crypto.subtle.generateKey({name:'AES-GCM', length:256}, true, ['encrypt','decrypt']);
 }
 
-async function decryptCfgWithPassword(payload, password, scriptUrl){
-  if(!payload||!payload.iv||!payload.ct) throw new Error('Payload cfg không hợp lệ');
-  const cfgKey=await deriveCfgKey(password, scriptUrl);
-  const iv=b64ToBytes(payload.iv);
-  const ct=b64ToBytes(payload.ct);
-  const data=await crypto.subtle.decrypt({name:'AES-GCM', iv}, cfgKey, ct);
+// Wrap master key with a password-derived key, with random salt
+async function wrapCfgMasterKey(masterKey, password){
+  const salt=rand(16);
+  const baseKey=await crypto.subtle.importKey('raw', new TextEncoder().encode(password), 'PBKDF2', false, ['deriveKey']);
+  const wrappingKey=await crypto.subtle.deriveKey(
+    {name:'PBKDF2', salt, iterations:PBKDF2_ITER_NEW, hash:'SHA-256'},
+    baseKey,
+    {name:'AES-GCM', length:256},
+    false, ['encrypt','decrypt']
+  );
+  const rawMaster=await crypto.subtle.exportKey('raw', masterKey);
+  const iv=rand(12);
+  const ct=await crypto.subtle.encrypt({name:'AES-GCM', iv}, wrappingKey, rawMaster);
+  return {
+    salt: bytesToB64(salt),
+    iter: PBKDF2_ITER_NEW,
+    iv: bytesToB64(iv),
+    ct: bytesToB64(new Uint8Array(ct))
+  };
+}
+
+// Unwrap master key using one user's wrap and their password
+async function unwrapCfgMasterKey(wrap, password){
+  const salt=b64ToBytes(wrap.salt);
+  const baseKey=await crypto.subtle.importKey('raw', new TextEncoder().encode(password), 'PBKDF2', false, ['deriveKey']);
+  const wrappingKey=await crypto.subtle.deriveKey(
+    {name:'PBKDF2', salt, iterations:wrap.iter||PBKDF2_ITER_NEW, hash:'SHA-256'},
+    baseKey,
+    {name:'AES-GCM', length:256},
+    false, ['encrypt','decrypt']
+  );
+  const iv=b64ToBytes(wrap.iv);
+  const ct=b64ToBytes(wrap.ct);
+  const raw=await crypto.subtle.decrypt({name:'AES-GCM', iv}, wrappingKey, ct);
+  return crypto.subtle.importKey('raw', raw, {name:'AES-GCM', length:256}, true, ['encrypt','decrypt']);
+}
+
+// Encrypt cfg using master key
+async function encryptCfgWithMasterKey(cfgObj, masterKey){
+  const iv=rand(12);
+  const data=new TextEncoder().encode(JSON.stringify(cfgObj));
+  const ct=await crypto.subtle.encrypt({name:'AES-GCM', iv}, masterKey, data);
+  return {iv: bytesToB64(iv), ct: bytesToB64(new Uint8Array(ct))};
+}
+
+// Decrypt cfg using master key
+async function decryptCfgWithMasterKey(envelope, masterKey){
+  const iv=b64ToBytes(envelope.iv);
+  const ct=b64ToBytes(envelope.ct);
+  const data=await crypto.subtle.decrypt({name:'AES-GCM', iv}, masterKey, ct);
   return JSON.parse(new TextDecoder().decode(data));
 }
 
-/* Push cfg to cloud — only admin can do this */
-async function pushCfgToCloud(plainPasswordForKey){
-  const cfg=getAuthConfig();
-  if(!cfg||!cfg.scriptUrl) throw new Error('Chưa cấu hình Apps Script URL');
-  if(!plainPasswordForKey) throw new Error('Cần mật khẩu admin để mã hóa cfg trước khi đẩy lên cloud');
-  // Build sanitized cfg: include everything except potentially sensitive runtime fields
-  const cfgToSync={
-    admin: cfg.admin,
-    users: cfg.users || [],
-    scriptUrl: cfg.scriptUrl,
-    companyInfo: cfg.companyInfo,
+// Build cfgToSync object — sanitized version of local cfg
+function buildCfgToSync(localCfg){
+  return {
+    admin: localCfg.admin,
+    users: localCfg.users || [],
+    scriptUrl: localCfg.scriptUrl,
+    companyInfo: localCfg.companyInfo,
     lastCfgSync: new Date().toISOString()
   };
-  const encrypted=await encryptCfgWithPassword(cfgToSync, plainPasswordForKey, cfg.scriptUrl);
+}
+
+/* Push cfg to cloud (admin only).
+   Optionally pass userWraps={name → plaintextPw} to wrap additional users.
+   If admin push first time → only admin gets wrap. NV will self-wrap on next login. */
+async function pushCfgToCloud(adminPassword, extraUserPasswords){
+  const cfg=getAuthConfig();
+  if(!cfg||!cfg.scriptUrl) throw new Error('Chưa cấu hình Apps Script URL');
+  if(!adminPassword) throw new Error('Cần mật khẩu admin');
+  // Verify admin password
+  const hashTest=await sha256Hex(adminPassword + cfg.admin.salt);
+  if(hashTest !== cfg.admin.hash) throw new Error('Mật khẩu admin không đúng');
+
+  // Try to preserve existing wraps from cloud (for NV who self-wrapped)
+  let existingWraps=[];
+  let existingMasterKey=null;
+  try{
+    const res0=await fetch(cfg.scriptUrl+'?action=load&key=auth', {method:'GET'});
+    const data0=await res0.json();
+    if(data0.ok && data0.payload && data0.payload.v===2 && Array.isArray(data0.payload.wraps)){
+      // Try to unwrap with admin password to recover master key
+      const adminWrap=data0.payload.wraps.find(w=>w.name==='admin');
+      if(adminWrap){
+        try{
+          existingMasterKey=await unwrapCfgMasterKey(adminWrap, adminPassword);
+          existingWraps=data0.payload.wraps;
+        }catch(e){
+          // Admin password changed → generate fresh master key
+          existingMasterKey=null;
+          existingWraps=[];
+        }
+      }
+    }
+  }catch(e){
+    // No existing cfg → fresh
+  }
+
+  // Use existing master key if available (to preserve NV wraps), else generate new
+  const masterKey = existingMasterKey || await generateCfgMasterKey();
+
+  // Re-encrypt cfg with master key (cfg may have changed)
+  const cfgToSync=buildCfgToSync(cfg);
+  const envelope=await encryptCfgWithMasterKey(cfgToSync, masterKey);
+
+  // Rebuild wraps
+  let wraps=[];
+  if(existingMasterKey){
+    // Keep existing wraps (NV wraps preserved)
+    wraps=[...existingWraps];
+    // Update/add admin wrap
+    wraps=wraps.filter(w=>w.name!=='admin');
+  }
+  // Admin wrap always (re-wrap fresh in case anything changed)
+  const adminWrap=await wrapCfgMasterKey(masterKey, adminPassword);
+  adminWrap.name='admin';
+  wraps.push(adminWrap);
+
+  // Additional user wraps from extraUserPasswords {name → pw}
+  if(extraUserPasswords){
+    for(const [name, pw] of Object.entries(extraUserPasswords)){
+      if(!pw) continue;
+      wraps=wraps.filter(w=>w.name.toLowerCase()!==name.toLowerCase());
+      const wrap=await wrapCfgMasterKey(masterKey, pw);
+      wrap.name=name;
+      wraps.push(wrap);
+    }
+  }
+
+  // Remove wraps for users no longer in cfg.users (and not admin)
+  const validNames=new Set(['admin', ...(cfg.users||[]).map(u=>u.name.toLowerCase())]);
+  wraps=wraps.filter(w=>validNames.has(w.name.toLowerCase()));
+
+  const payload={v:2, iv:envelope.iv, ct:envelope.ct, wraps};
   const res=await fetch(cfg.scriptUrl, {
     method:'POST',
     headers:{'Content-Type':'text/plain'},
-    body:JSON.stringify({action:'save', key:'auth', payload:encrypted})
+    body:JSON.stringify({action:'save', key:'auth', payload})
   });
   const data=await res.json();
   if(!data.ok) throw new Error(data.error||'Lỗi push cfg');
   cfg.lastCfgSync=new Date().toISOString();
   setAuthConfig(cfg);
-  return true;
+  return {wrapCount: wraps.length, wrappedNames: wraps.map(w=>w.name)};
 }
 
-/* Pull cfg from cloud — used when setting up on new device */
-async function pullCfgFromCloud(scriptUrl, adminPassword){
+/* Pull cfg from cloud — works for admin OR any NV.
+   userName: 'admin' or NV name. password: their plaintext password. */
+async function pullCfgFromCloud(scriptUrl, userName, password){
   if(!scriptUrl) throw new Error('Cần Apps Script URL');
-  if(!adminPassword) throw new Error('Cần mật khẩu admin');
+  if(!userName) throw new Error('Cần tên đăng nhập');
+  if(!password) throw new Error('Cần mật khẩu');
   const res=await fetch(scriptUrl+'?action=load&key=auth', {method:'GET'});
   const data=await res.json();
   if(!data.ok) throw new Error(data.error||'Lỗi pull cfg');
-  if(!data.payload) throw new Error('Cloud chưa có cfg auth — phải push từ máy gốc trước');
-  // Try decrypt
-  let cfg;
+  if(!data.payload) throw new Error('Cloud chưa có cfg auth — admin phải push từ máy gốc trước');
+  const payload=data.payload;
+  if(payload.v!==2 || !Array.isArray(payload.wraps)){
+    throw new Error('Cfg cloud schema cũ — admin phải re-push để upgrade lên schema v2');
+  }
+  // Find user's wrap (case-insensitive)
+  const wrap=payload.wraps.find(w=>w.name.toLowerCase()===userName.toLowerCase());
+  if(!wrap){
+    throw new Error(`Không tìm thấy wrap cho "${userName}". ${userName.toLowerCase()==='admin'?'':'NV cần đăng nhập 1 lần trên máy gốc trước (để tạo wrap), HOẶC admin re-push cfg với password NV.'}`);
+  }
+  // Try unwrap
+  let masterKey;
   try{
-    cfg=await decryptCfgWithPassword(data.payload, adminPassword, scriptUrl);
+    masterKey=await unwrapCfgMasterKey(wrap, password);
   } catch(e){
-    throw new Error('Mật khẩu admin không khớp — không thể giải mã cfg');
+    throw new Error('Mật khẩu không đúng — không thể giải mã cfg');
   }
-  // Verify cfg has required structure
-  if(!cfg.admin || !cfg.admin.hash || !cfg.admin.salt){
-    throw new Error('Cfg auth từ cloud bị lỗi cấu trúc');
+  // Decrypt cfg
+  const cfg=await decryptCfgWithMasterKey({iv:payload.iv, ct:payload.ct}, masterKey);
+  // Verify cfg structure
+  if(!cfg.admin || !cfg.admin.hash || !cfg.admin.salt) throw new Error('Cfg auth từ cloud bị lỗi cấu trúc');
+  // Verify user actually exists in cfg
+  if(userName.toLowerCase()==='admin'){
+    // Verify password matches admin hash
+    const hashTest=await sha256Hex(password + cfg.admin.salt);
+    if(hashTest !== cfg.admin.hash) throw new Error('Mật khẩu admin không khớp với hash trong cfg');
+  } else {
+    const u=(cfg.users||[]).find(x=>(x.name||'').toLowerCase()===userName.toLowerCase());
+    if(!u) throw new Error(`User "${userName}" không tồn tại trong cfg`);
+    // Verify password matches user hash
+    const hashTest=await sha256Hex(password + u.salt);
+    if(hashTest !== u.hash) throw new Error('Mật khẩu không khớp với hash NV trong cfg');
   }
-  // Verify password matches stored hash (sanity check)
-  const hashTest=await sha256Hex(adminPassword + cfg.admin.salt);
-  if(hashTest !== cfg.admin.hash){
-    throw new Error('Mật khẩu admin không khớp với hash trong cfg');
-  }
-  // Save scriptUrl into cfg if not present
   cfg.scriptUrl=cfg.scriptUrl||scriptUrl;
   cfg.lastCfgSync=new Date().toISOString();
   setAuthConfig(cfg);
   return cfg;
 }
 
-/* UI: Dialog to push cfg auth to cloud (admin enters password to confirm) */
+/* Self-wrap: called when a user logs in successfully on the original device.
+   Silently adds/updates wrap for this user in cloud cfg.
+   Non-blocking — fires in background. */
+async function selfWrapInCloudCfg(userName, password){
+  const cfg=getAuthConfig();
+  if(!cfg||!cfg.scriptUrl) return;  // No cloud configured
+  try{
+    // Pull existing cloud cfg
+    const res=await fetch(cfg.scriptUrl+'?action=load&key=auth', {method:'GET'});
+    const data=await res.json();
+    if(!data.ok || !data.payload) return;  // No cfg on cloud yet
+    const payload=data.payload;
+    if(payload.v!==2 || !Array.isArray(payload.wraps)) return;  // Wrong schema
+    // Check if wrap already exists with valid unwrap
+    const existing=payload.wraps.find(w=>w.name.toLowerCase()===userName.toLowerCase());
+    if(existing){
+      try{
+        await unwrapCfgMasterKey(existing, password);
+        return;  // Wrap is valid, no need to update
+      }catch(e){
+        // Existing wrap can't unwrap (password changed) → re-wrap
+      }
+    }
+    // Get master key by checking admin wrap (we don't have admin pw here)
+    // OR if userName is admin and we have admin pw, use that wrap
+    let masterKey=null;
+    if(userName.toLowerCase()==='admin'){
+      const adminWrap=payload.wraps.find(w=>w.name==='admin');
+      if(adminWrap){
+        try{ masterKey=await unwrapCfgMasterKey(adminWrap, password); }catch(e){}
+      }
+    } else {
+      // For NV: try unwrap their own existing wrap (if password didn't change, it would have returned above)
+      // Without master key, can't create new wrap → silently fail
+      // Admin will need to manually re-push cfg with NV password
+      return;
+    }
+    if(!masterKey) return;
+
+    // Create new wrap for this user
+    const newWrap=await wrapCfgMasterKey(masterKey, password);
+    newWrap.name=userName;
+    // Update wraps array
+    let wraps=payload.wraps.filter(w=>w.name.toLowerCase()!==userName.toLowerCase());
+    wraps.push(newWrap);
+    // Push back
+    await fetch(cfg.scriptUrl, {
+      method:'POST',
+      headers:{'Content-Type':'text/plain'},
+      body:JSON.stringify({action:'save', key:'auth', payload:{...payload, wraps}})
+    });
+    console.log('[cfg-sync] Self-wrap updated for', userName);
+  }catch(e){
+    console.warn('[cfg-sync] Self-wrap failed:', e.message);
+  }
+}
+
+/* UI: Dialog to push cfg auth to cloud (admin enters password to confirm).
+   Optionally provide bulk NV passwords. */
 function openCfgSyncDialog(){
   if(!isAdmin()){toast('Chỉ admin được sync auth','bad');return;}
   const cfg=getAuthConfig();
   if(!cfg||!cfg.scriptUrl){toast('Cấu hình Apps Script URL trước (ở mục bên trên)','bad');return;}
+  const userCount=(cfg.users||[]).length;
+  const userListHtml=(cfg.users||[]).map(u=>`
+    <div style="display:flex;gap:8px;align-items:center;padding:6px 0;border-bottom:1px solid var(--rule)">
+      <span style="flex:1;font-weight:600;font-size:12px">${esc(u.name)}</span>
+      <input type="password" id="cfg-nv-pw-${esc(u.name)}" placeholder="(để trống nếu chưa biết)"
+             style="flex:2;padding:4px 8px;border:1px solid var(--rule);font-size:11px;font-family:var(--font-mono)">
+    </div>
+  `).join('');
   const body=`
     <div style="font-size:13px;line-height:1.5;margin-bottom:14px">
-      <p>Đẩy <b>cấu hình auth</b> (admin + nhân viên + scriptUrl) lên Google Sheet.</p>
+      <p>Đẩy <b>cấu hình auth</b> (admin + ${userCount} nhân viên) lên Google Sheet.</p>
       <p style="color:var(--muted);font-size:11px">
-        <b>An toàn:</b> cfg auth sẽ được mã hóa bằng <b>mật khẩu admin</b> (AES-GCM + PBKDF2 600K iterations) trước khi đẩy lên.
-        Google Sheet chỉ thấy <code>{iv, ct}</code>, không thể đọc nội dung.
+        <b>An toàn:</b> dùng mô hình <b>wrap key</b> — master key ngẫu nhiên được mã hóa riêng cho TỪNG password (admin + mỗi NV).
+        NV có thể tự pull cfg về với <b>password của chính họ</b>, không cần biết password admin.
       </p>
       <p style="color:var(--muted);font-size:11px">
-        <b>Sau khi sync:</b> tại máy mới, vào màn hình setup → tab "Pull từ cloud" → nhập URL + mật khẩu admin → app tự khôi phục toàn bộ auth.
+        <b>Khuyến nghị:</b> nhập password NV ngay đây (nếu admin biết) để NV pull cfg được ngay.
+        Hoặc bỏ trống → NV phải đăng nhập 1 lần trên máy này trước (app tự tạo wrap).
       </p>
     </div>
     <div class="form-grid" style="grid-template-columns:1fr">
       <div class="field">
-        <label>Mật khẩu admin (để xác nhận + làm khóa mã hóa) *</label>
+        <label>Mật khẩu admin (bắt buộc) *</label>
         <input type="password" id="cfg-sync-pw" placeholder="Nhập mật khẩu admin của bạn">
       </div>
+      ${userCount>0?`
+        <div class="field">
+          <label>Password NV (tùy chọn — để tạo wrap ngay) <span style="text-transform:none;font-weight:400;color:var(--muted)">${userCount} NV</span></label>
+          <div style="max-height:200px;overflow-y:auto;padding:6px;background:rgba(184,71,46,.03);border:1px solid var(--rule);border-radius:3px">
+            ${userListHtml}
+          </div>
+        </div>
+      `:''}
       <div id="cfg-sync-err" style="color:var(--bad);font-size:12px"></div>
     </div>`;
-  openModal('🔐 Đẩy auth lên cloud', body,
+  openModal('🔐 Đẩy auth lên cloud (wrap pattern)', body,
     `<button class="btn-sec" onclick="closeModal()">Hủy</button>
      <button class="btn-primary" onclick="_doCfgSyncPush()">🚀 Đẩy lên cloud</button>`);
   setTimeout(()=>{const el=document.getElementById('cfg-sync-pw');if(el)el.focus();},100);
@@ -2247,18 +2455,41 @@ async function _doCfgSyncPush(){
   err.textContent='';
   const pw=document.getElementById('cfg-sync-pw').value;
   if(!pw){err.textContent='Nhập mật khẩu admin';return;}
-  // Verify password matches stored hash
   const cfg=getAuthConfig();
   const hashTest=await sha256Hex(pw + cfg.admin.salt);
-  if(hashTest !== cfg.admin.hash){
-    err.textContent='Mật khẩu admin không đúng';
-    return;
+  if(hashTest !== cfg.admin.hash){err.textContent='Mật khẩu admin không đúng';return;}
+
+  // Collect NV passwords
+  const extraUserPasswords={};
+  let nvProvidedCount=0;
+  (cfg.users||[]).forEach(u=>{
+    const el=document.getElementById('cfg-nv-pw-'+u.name);
+    if(el && el.value){
+      // Verify NV password against their hash
+      // We do verify in async loop below
+      extraUserPasswords[u.name]=el.value;
+    }
+  });
+
+  // Verify each NV password against their stored hash
+  for(const u of (cfg.users||[])){
+    const npw=extraUserPasswords[u.name];
+    if(!npw) continue;
+    const nHash=await sha256Hex(npw + u.salt);
+    if(nHash !== u.hash){
+      err.textContent=`Password NV "${u.name}" không đúng`;
+      return;
+    }
+    nvProvidedCount++;
   }
+
   try{
-    await pushCfgToCloud(pw);
+    const result=await pushCfgToCloud(pw, extraUserPasswords);
     closeModal();
-    toast('Đã đẩy auth lên cloud — máy khác có thể pull về');
-    // Refresh settings if open
+    const msg=nvProvidedCount>0
+      ? `Đã đẩy auth lên cloud — admin + ${nvProvidedCount} NV có thể pull về ngay`
+      : 'Đã đẩy auth lên cloud — chỉ admin pull được lúc này (NV cần đăng nhập 1 lần trên máy này trước)';
+    toast(msg);
     if(typeof openSettings==='function') openSettings();
   }catch(e){
     err.textContent='Lỗi: '+e.message;
@@ -2436,6 +2667,11 @@ async function authAction(){
     clearLoginFails(name);
     SESSION_START_TS=Date.now();
     localStorage.setItem('seahorse_session_start',String(SESSION_START_TS));
+    // Self-wrap in cloud cfg if cloud is configured (fire-and-forget)
+    // This silently creates/updates wrap for this user on cloud cfg, so they can pull from new device next time
+    if(cfg.scriptUrl){
+      selfWrapInCloudCfg(name, pw).catch(e=>console.warn('[self-wrap]', e.message));
+    }
     await loadEncryptedLocal();
     document.getElementById('auth-overlay').classList.add('hide');
     try{ applyRoleUI(); } catch(e){ console.error('[login] applyRoleUI error:',e); err.textContent='Lỗi UI: '+e.message; return; }
@@ -2589,29 +2825,27 @@ async function authRestore(){
   }catch(e){err.textContent='Lỗi khôi phục: '+e.message;}
 }
 
-/* Pull cfg auth from cloud (setup mode) — for setting up new device */
+/* Pull cfg auth from cloud (setup mode) — supports admin OR NV */
 async function authCloudPull(){
   const err=document.getElementById('setup-err');
   err.textContent='';
   const scriptUrl=(document.getElementById('cloud-script-url').value||'').trim();
-  const adminPw=document.getElementById('cloud-admin-pw').value;
+  const userName=(document.getElementById('cloud-user-name').value||'').trim();
+  const userPw=document.getElementById('cloud-admin-pw').value;
   if(!scriptUrl){err.textContent='Nhập Apps Script URL';return;}
   if(!/^https:\/\/script\.google\.com\/macros\/s\/[^/]+\/exec/.test(scriptUrl)){
     err.textContent='URL không hợp lệ — phải là Apps Script URL (https://script.google.com/macros/s/.../exec)';
     return;
   }
-  if(!adminPw){err.textContent='Nhập mật khẩu admin';return;}
+  if(!userName){err.textContent='Nhập tên đăng nhập (admin hoặc NV)';return;}
+  if(!userPw){err.textContent='Nhập mật khẩu';return;}
   try{
-    // Pull cfg
-    const cfg=await pullCfgFromCloud(scriptUrl, adminPw);
-    // cfg now stored in localStorage via setAuthConfig
-    // Auto-fill login form with admin to ease next step
-    document.getElementById('auth-name').value='admin';
-    document.getElementById('auth-pw').value=adminPw;
-    // Switch to login form
+    const cfg=await pullCfgFromCloud(scriptUrl, userName, userPw);
+    // Auto-fill login form
+    document.getElementById('auth-name').value=userName;
+    document.getElementById('auth-pw').value=userPw;
     showAuthOverlay();
     toast('Đã pull cfg — đăng nhập tự động...');
-    // Auto login after small delay
     setTimeout(()=>authAction(), 300);
   }catch(e){
     err.textContent='Lỗi: '+e.message;
