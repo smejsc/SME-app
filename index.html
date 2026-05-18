@@ -437,7 +437,8 @@ body{min-height:100vh;background-image:radial-gradient(circle at 20% 0%,rgba(184
       <div id="auth-setup-form" style="display:none">
         <div class="auth-tabs">
           <button class="auth-tab active" data-mode="new" onclick="setupSwitchMode('new')">Tạo mới</button>
-          <button class="auth-tab" data-mode="restore" onclick="setupSwitchMode('restore')">Khôi phục</button>
+          <button class="auth-tab" data-mode="restore" onclick="setupSwitchMode('restore')">Khôi phục file</button>
+          <button class="auth-tab" data-mode="cloud" onclick="setupSwitchMode('cloud')">Pull từ cloud</button>
         </div>
 
         <div id="setup-new-block">
@@ -463,6 +464,20 @@ body{min-height:100vh;background-image:radial-gradient(circle at 20% 0%,rgba(184
           <div class="field">
             <label>File backup (.json)</label>
             <input type="file" id="restore-file" accept=".json">
+          </div>
+        </div>
+
+        <div id="setup-cloud-block" style="display:none">
+          <div style="font-size:11px;color:rgba(246,241,232,0.7);font-style:italic;margin-bottom:10px;padding:8px;background:rgba(255,255,255,0.04);border-left:3px solid var(--accent)">
+            Pull cấu hình auth từ Google Sheet — yêu cầu admin đã <b>đẩy auth lên cloud</b> từ máy gốc trước.
+          </div>
+          <div class="field">
+            <label>Apps Script URL *</label>
+            <input type="text" id="cloud-script-url" placeholder="https://script.google.com/macros/s/.../exec" autocomplete="off">
+          </div>
+          <div class="field">
+            <label>Mật khẩu admin (giải mã cfg) *</label>
+            <input type="password" id="cloud-admin-pw" placeholder="Mật khẩu admin từ máy gốc" autocomplete="current-password">
           </div>
         </div>
 
@@ -1919,7 +1934,7 @@ body{min-height:100vh;background-image:radial-gradient(circle at 20% 0%,rgba(184
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='1.38.0';            // bumped on each release
+const APP_VERSION='1.38.2';            // bumped on each release
 
 /* ============================================================
    PWA — Service Worker registration + Install prompt
@@ -2100,6 +2115,156 @@ async function decryptJSON(payload){
   return JSON.parse(new TextDecoder().decode(data));
 }
 
+/* ============================================================
+   AUTH CFG CLOUD SYNC (v1.38.1+)
+   Encrypt auth cfg (separate from data) using a key derived from admin password.
+   This allows new device to recover full auth by entering ScriptUrl + admin pw.
+   ============================================================ */
+
+// Salt for cfg encryption — derived from URL so 2 different deployments can't cross-read
+async function cfgSyncSalt(scriptUrl){
+  // SHA-256 of scriptUrl → first 16 bytes as salt
+  const buf=await crypto.subtle.digest('SHA-256', new TextEncoder().encode(scriptUrl||'seahorse-cfg-default-salt'));
+  return new Uint8Array(buf).slice(0,16);
+}
+
+async function deriveCfgKey(password, scriptUrl){
+  const salt=await cfgSyncSalt(scriptUrl);
+  const baseKey=await crypto.subtle.importKey('raw', new TextEncoder().encode(password), 'PBKDF2', false, ['deriveKey']);
+  return crypto.subtle.deriveKey(
+    {name:'PBKDF2', salt, iterations:PBKDF2_ITER_NEW, hash:'SHA-256'},
+    baseKey,
+    {name:'AES-GCM', length:256},
+    false, ['encrypt','decrypt']
+  );
+}
+
+async function encryptCfgWithPassword(cfg, password, scriptUrl){
+  const cfgKey=await deriveCfgKey(password, scriptUrl);
+  const iv=rand(12);
+  const data=new TextEncoder().encode(JSON.stringify(cfg));
+  const ct=await crypto.subtle.encrypt({name:'AES-GCM', iv}, cfgKey, data);
+  return {iv:bytesToB64(iv), ct:bytesToB64(new Uint8Array(ct)), v:1};
+}
+
+async function decryptCfgWithPassword(payload, password, scriptUrl){
+  if(!payload||!payload.iv||!payload.ct) throw new Error('Payload cfg không hợp lệ');
+  const cfgKey=await deriveCfgKey(password, scriptUrl);
+  const iv=b64ToBytes(payload.iv);
+  const ct=b64ToBytes(payload.ct);
+  const data=await crypto.subtle.decrypt({name:'AES-GCM', iv}, cfgKey, ct);
+  return JSON.parse(new TextDecoder().decode(data));
+}
+
+/* Push cfg to cloud — only admin can do this */
+async function pushCfgToCloud(plainPasswordForKey){
+  const cfg=getAuthConfig();
+  if(!cfg||!cfg.scriptUrl) throw new Error('Chưa cấu hình Apps Script URL');
+  if(!plainPasswordForKey) throw new Error('Cần mật khẩu admin để mã hóa cfg trước khi đẩy lên cloud');
+  // Build sanitized cfg: include everything except potentially sensitive runtime fields
+  const cfgToSync={
+    admin: cfg.admin,
+    users: cfg.users || [],
+    scriptUrl: cfg.scriptUrl,
+    companyInfo: cfg.companyInfo,
+    lastCfgSync: new Date().toISOString()
+  };
+  const encrypted=await encryptCfgWithPassword(cfgToSync, plainPasswordForKey, cfg.scriptUrl);
+  const res=await fetch(cfg.scriptUrl, {
+    method:'POST',
+    headers:{'Content-Type':'text/plain'},
+    body:JSON.stringify({action:'save', key:'auth', payload:encrypted})
+  });
+  const data=await res.json();
+  if(!data.ok) throw new Error(data.error||'Lỗi push cfg');
+  cfg.lastCfgSync=new Date().toISOString();
+  setAuthConfig(cfg);
+  return true;
+}
+
+/* Pull cfg from cloud — used when setting up on new device */
+async function pullCfgFromCloud(scriptUrl, adminPassword){
+  if(!scriptUrl) throw new Error('Cần Apps Script URL');
+  if(!adminPassword) throw new Error('Cần mật khẩu admin');
+  const res=await fetch(scriptUrl+'?action=load&key=auth', {method:'GET'});
+  const data=await res.json();
+  if(!data.ok) throw new Error(data.error||'Lỗi pull cfg');
+  if(!data.payload) throw new Error('Cloud chưa có cfg auth — phải push từ máy gốc trước');
+  // Try decrypt
+  let cfg;
+  try{
+    cfg=await decryptCfgWithPassword(data.payload, adminPassword, scriptUrl);
+  } catch(e){
+    throw new Error('Mật khẩu admin không khớp — không thể giải mã cfg');
+  }
+  // Verify cfg has required structure
+  if(!cfg.admin || !cfg.admin.hash || !cfg.admin.salt){
+    throw new Error('Cfg auth từ cloud bị lỗi cấu trúc');
+  }
+  // Verify password matches stored hash (sanity check)
+  const hashTest=await sha256Hex(adminPassword + cfg.admin.salt);
+  if(hashTest !== cfg.admin.hash){
+    throw new Error('Mật khẩu admin không khớp với hash trong cfg');
+  }
+  // Save scriptUrl into cfg if not present
+  cfg.scriptUrl=cfg.scriptUrl||scriptUrl;
+  cfg.lastCfgSync=new Date().toISOString();
+  setAuthConfig(cfg);
+  return cfg;
+}
+
+/* UI: Dialog to push cfg auth to cloud (admin enters password to confirm) */
+function openCfgSyncDialog(){
+  if(!isAdmin()){toast('Chỉ admin được sync auth','bad');return;}
+  const cfg=getAuthConfig();
+  if(!cfg||!cfg.scriptUrl){toast('Cấu hình Apps Script URL trước (ở mục bên trên)','bad');return;}
+  const body=`
+    <div style="font-size:13px;line-height:1.5;margin-bottom:14px">
+      <p>Đẩy <b>cấu hình auth</b> (admin + nhân viên + scriptUrl) lên Google Sheet.</p>
+      <p style="color:var(--muted);font-size:11px">
+        <b>An toàn:</b> cfg auth sẽ được mã hóa bằng <b>mật khẩu admin</b> (AES-GCM + PBKDF2 600K iterations) trước khi đẩy lên.
+        Google Sheet chỉ thấy <code>{iv, ct}</code>, không thể đọc nội dung.
+      </p>
+      <p style="color:var(--muted);font-size:11px">
+        <b>Sau khi sync:</b> tại máy mới, vào màn hình setup → tab "Pull từ cloud" → nhập URL + mật khẩu admin → app tự khôi phục toàn bộ auth.
+      </p>
+    </div>
+    <div class="form-grid" style="grid-template-columns:1fr">
+      <div class="field">
+        <label>Mật khẩu admin (để xác nhận + làm khóa mã hóa) *</label>
+        <input type="password" id="cfg-sync-pw" placeholder="Nhập mật khẩu admin của bạn">
+      </div>
+      <div id="cfg-sync-err" style="color:var(--bad);font-size:12px"></div>
+    </div>`;
+  openModal('🔐 Đẩy auth lên cloud', body,
+    `<button class="btn-sec" onclick="closeModal()">Hủy</button>
+     <button class="btn-primary" onclick="_doCfgSyncPush()">🚀 Đẩy lên cloud</button>`);
+  setTimeout(()=>{const el=document.getElementById('cfg-sync-pw');if(el)el.focus();},100);
+}
+
+async function _doCfgSyncPush(){
+  const err=document.getElementById('cfg-sync-err');
+  err.textContent='';
+  const pw=document.getElementById('cfg-sync-pw').value;
+  if(!pw){err.textContent='Nhập mật khẩu admin';return;}
+  // Verify password matches stored hash
+  const cfg=getAuthConfig();
+  const hashTest=await sha256Hex(pw + cfg.admin.salt);
+  if(hashTest !== cfg.admin.hash){
+    err.textContent='Mật khẩu admin không đúng';
+    return;
+  }
+  try{
+    await pushCfgToCloud(pw);
+    closeModal();
+    toast('Đã đẩy auth lên cloud — máy khác có thể pull về');
+    // Refresh settings if open
+    if(typeof openSettings==='function') openSettings();
+  }catch(e){
+    err.textContent='Lỗi: '+e.message;
+  }
+}
+
 function getAuthConfig(){
   try{return JSON.parse(localStorage.getItem(AUTH_KEY)||'null');}catch(e){return null;}
 }
@@ -2211,8 +2376,9 @@ async function forceLogoutSession(){
 async function authAction(){
   const cfg=getAuthConfig();
   if(!cfg){
-    const isRestore=document.querySelector('.auth-tab.active').dataset.mode==='restore';
-    if(isRestore) return authRestore();
+    const mode=document.querySelector('.auth-tab.active').dataset.mode;
+    if(mode==='restore') return authRestore();
+    if(mode==='cloud') return authCloudPull();
     return authSetup();
   }
   const name=document.getElementById('auth-name').value.trim();
@@ -2423,6 +2589,35 @@ async function authRestore(){
   }catch(e){err.textContent='Lỗi khôi phục: '+e.message;}
 }
 
+/* Pull cfg auth from cloud (setup mode) — for setting up new device */
+async function authCloudPull(){
+  const err=document.getElementById('setup-err');
+  err.textContent='';
+  const scriptUrl=(document.getElementById('cloud-script-url').value||'').trim();
+  const adminPw=document.getElementById('cloud-admin-pw').value;
+  if(!scriptUrl){err.textContent='Nhập Apps Script URL';return;}
+  if(!/^https:\/\/script\.google\.com\/macros\/s\/[^/]+\/exec/.test(scriptUrl)){
+    err.textContent='URL không hợp lệ — phải là Apps Script URL (https://script.google.com/macros/s/.../exec)';
+    return;
+  }
+  if(!adminPw){err.textContent='Nhập mật khẩu admin';return;}
+  try{
+    // Pull cfg
+    const cfg=await pullCfgFromCloud(scriptUrl, adminPw);
+    // cfg now stored in localStorage via setAuthConfig
+    // Auto-fill login form with admin to ease next step
+    document.getElementById('auth-name').value='admin';
+    document.getElementById('auth-pw').value=adminPw;
+    // Switch to login form
+    showAuthOverlay();
+    toast('Đã pull cfg — đăng nhập tự động...');
+    // Auto login after small delay
+    setTimeout(()=>authAction(), 300);
+  }catch(e){
+    err.textContent='Lỗi: '+e.message;
+  }
+}
+
 function authResetPrompt(){
   if(!confirm('Reset toàn bộ — xóa cả 2 mật khẩu (admin + nhân viên) và TẤT CẢ dữ liệu trong localStorage? Cần file backup + đúng mật khẩu admin để khôi phục.')) return;
   localStorage.removeItem(AUTH_KEY);
@@ -2550,7 +2745,16 @@ function openSettings(){
         <input type="text" id="set-script-url" value="${(cfg.scriptUrl||'').replace(/"/g,'&quot;')}" placeholder="https://script.google.com/macros/s/.../exec">
       </div>
       <div class="field">
-        <label>Lần sync gần nhất</label>
+        <label>Đồng bộ auth lên cloud <span style="text-transform:none;font-weight:400;color:var(--muted)">(để đăng nhập từ máy khác)</span></label>
+        <div style="font-size:11px;color:var(--muted);font-style:italic;margin-bottom:6px">
+          Khi sync, cfg auth (admin + nhân viên + URL) sẽ được <b>mã hóa bằng mật khẩu admin</b> rồi đẩy lên Google Sheet.
+          Máy mới muốn truy cập: nhập URL + mật khẩu admin để pull về.
+          ${cfg.lastCfgSync?'<br><br><b>Lần đồng bộ auth gần nhất:</b> '+new Date(cfg.lastCfgSync).toLocaleString('vi-VN')+' ('+timeAgo(cfg.lastCfgSync)+')':'<br><br><span style="color:var(--warn)">⚠ Chưa từng sync auth — máy khác chưa truy cập được</span>'}
+        </div>
+        <button class="btn-sec" onclick="openCfgSyncDialog()" style="font-size:11px">🔐 Đẩy auth lên cloud</button>
+      </div>
+      <div class="field">
+        <label>Lần sync data gần nhất</label>
         <div style="font-family:var(--font-mono);font-size:12px;color:var(--muted);padding:6px 0">${cfg.lastSync?new Date(cfg.lastSync).toLocaleString('vi-VN')+' ('+timeAgo(cfg.lastSync)+')':'Chưa sync lần nào'}</div>
       </div>
       <div class="field">
@@ -3302,7 +3506,12 @@ function setupSwitchMode(mode){
   document.querySelectorAll('.auth-tab').forEach(t=>t.classList.toggle('active',t.dataset.mode===mode));
   document.getElementById('setup-new-block').style.display=mode==='new'?'block':'none';
   document.getElementById('setup-restore-block').style.display=mode==='restore'?'block':'none';
-  document.getElementById('auth-action-btn').textContent=mode==='new'?'Tạo tài khoản admin':'Khôi phục';
+  const cloudBlock=document.getElementById('setup-cloud-block');
+  if(cloudBlock) cloudBlock.style.display=mode==='cloud'?'block':'none';
+  const btn=document.getElementById('auth-action-btn');
+  if(mode==='new') btn.textContent='Tạo tài khoản admin';
+  else if(mode==='restore') btn.textContent='Khôi phục từ file';
+  else if(mode==='cloud') btn.textContent='Pull cfg từ cloud';
 }
 
 function showAuthOverlay(){
@@ -3863,7 +4072,7 @@ async function cloudSync(mode){
   updateSyncStatus('syncing');
   try{
     if(mode==='pull'){
-      const res=await fetch(cfg.scriptUrl+'?action=load',{method:'GET'});
+      const res=await fetch(cfg.scriptUrl+'?action=load&key=data',{method:'GET'});
       const data=await res.json();
       if(!data.ok){updateSyncStatus('error',data.error||'Lỗi');return;}
       if(!data.payload){
@@ -3896,7 +4105,7 @@ async function cloudSync(mode){
       } else {
         // User: must merge with cloud to avoid overwriting fields they don't have permission for
         try{
-          const res0=await fetch(cfg.scriptUrl+'?action=load',{method:'GET'});
+          const res0=await fetch(cfg.scriptUrl+'?action=load&key=data',{method:'GET'});
           const data0=await res0.json();
           let cloudFull={};
           if(data0.ok && data0.payload){
@@ -3946,7 +4155,7 @@ async function cloudSync(mode){
       const res=await fetch(cfg.scriptUrl,{
         method:'POST',
         headers:{'Content-Type':'text/plain'},
-        body:JSON.stringify({action:'save',payload})
+        body:JSON.stringify({action:'save',key:'data',payload})
       });
       const data=await res.json();
       if(!data.ok){updateSyncStatus('error',data.error||'Lỗi');toast('Sync thất bại','bad');return;}
@@ -16191,6 +16400,34 @@ const EXCEL_TEMPLATES={
       {key:'ccy',          label:'CCY (VND/USD)',                             required:false, type:'ccy'},
       {key:'note',         label:'Ghi chú',                                   required:false, type:'text'}
     ]
+  },
+  events:{
+    name:'Tàu Onhire - Khai thác theo đoạn',
+    target:'events',
+    columns:[
+      // 11 cột cơ bản
+      {key:'vesselName',     label:'Tên tàu *',                                                  required:true,  type:'vesselLookup'},
+      {key:'type',           label:'Loại đoạn (onhire/transit/standby/dock/offjob/mob/demob) *', required:true,  type:'eventType'},
+      {key:'startAt',        label:'Bắt đầu (YYYY-MM-DD HH:MM) *',                               required:true,  type:'datetime'},
+      {key:'endAt',          label:'Kết thúc (YYYY-MM-DD HH:MM) *',                              required:true,  type:'datetime'},
+      {key:'projectCode',    label:'Mã dự án (PRJ-...) — nếu onhire/transit',                    required:false, type:'projectLookup'},
+      {key:'portFrom',       label:'Cảng đi',                                                    required:false, type:'text'},
+      {key:'portTo',         label:'Cảng đến',                                                   required:false, type:'text'},
+      {key:'notes',          label:'Ghi chú',                                                    required:false, type:'text'},
+      // 12 cột nhiên liệu (4 cho mỗi loại DO/LO/FW × 3)
+      {key:'fuelStartDO',    label:'DO đầu (liter)',                                             required:false, type:'number'},
+      {key:'fuelEndDO',      label:'DO cuối (liter)',                                            required:false, type:'number'},
+      {key:'fuelPumpedDO',   label:'DO bơm vào (liter)',                                         required:false, type:'number'},
+      {key:'fuelPumpedDOPrice',label:'Đơn giá DO bơm (USD/liter)',                              required:false, type:'number'},
+      {key:'fuelStartLO',    label:'LO đầu (liter)',                                             required:false, type:'number'},
+      {key:'fuelEndLO',      label:'LO cuối (liter)',                                            required:false, type:'number'},
+      {key:'fuelPumpedLO',   label:'LO bơm vào (liter)',                                         required:false, type:'number'},
+      {key:'fuelPumpedLOPrice',label:'Đơn giá LO bơm (USD/liter)',                              required:false, type:'number'},
+      {key:'fuelStartFW',    label:'FW đầu (liter)',                                             required:false, type:'number'},
+      {key:'fuelEndFW',      label:'FW cuối (liter)',                                            required:false, type:'number'},
+      {key:'fuelPumpedFW',   label:'FW bơm vào (liter)',                                         required:false, type:'number'},
+      {key:'fuelPumpedFWPrice',label:'Đơn giá FW bơm (USD/liter)',                              required:false, type:'number'}
+    ]
   }
 };
 
@@ -16487,6 +16724,32 @@ function _excelRowToRecord(row, colMap, tpl){
         if(!w) rec.errors.push(`Mã kho "${val}" không tìm thấy — tạo kho trước`);
         rec.data._warehouseId=w?w.id:null;
       } else rec.errors.push('Mã kho bắt buộc');
+    } else if(c.type==='eventType'){
+      const valid=['onhire','transit','standby','dock','offjob','mob','demob'];
+      val=(val||'onhire').toString().toLowerCase().trim();
+      if(!valid.includes(val)){rec.warnings.push(`${c.key}: loại đoạn không hợp lệ, dùng onhire`); val='onhire';}
+    } else if(c.type==='datetime'){
+      // Accept: YYYY-MM-DD HH:MM, YYYY-MM-DDTHH:MM, YYYY-MM-DD (default 00:00)
+      if(val){
+        let s=String(val).trim();
+        // Excel may return Date object converted to string like "2026-05-10T08:00:00" or serial number
+        if(/^\d+(\.\d+)?$/.test(s) && typeof XLSX!=='undefined' && XLSX.SSF){
+          const d=XLSX.SSF.parse_date_code(Number(s));
+          if(d){
+            const yyyy=d.y, mm=String(d.m).padStart(2,'0'), dd=String(d.d).padStart(2,'0');
+            const HH=String(d.H||0).padStart(2,'0'), MM=String(d.M||0).padStart(2,'0');
+            s=`${yyyy}-${mm}-${dd}T${HH}:${MM}`;
+          }
+        }
+        // Replace space with T (Excel cell often shows "2026-05-10 08:00")
+        s=s.replace(/\s+/, 'T');
+        // If pure date, add T00:00
+        if(/^\d{4}-\d{2}-\d{2}$/.test(s)) s+='T00:00';
+        if(!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(s)){
+          rec.warnings.push(`${c.key}: datetime format sai (cần YYYY-MM-DD HH:MM)`);
+        }
+        val=s;
+      }
     }
 
     if(c.required && (val===''||val===0) && c.type!=='number'){
@@ -16806,6 +17069,54 @@ function excelConfirmImport(){
       created++;
       return;
     }
+    if(tpl.target==='events'){
+      if(!d._vesselId){
+        warnings.push(`Không tạo đoạn — không tìm thấy tàu "${d.vesselName||''}"`);
+        return;
+      }
+      if(!d.startAt || !d.endAt){
+        warnings.push('Thiếu thời gian bắt đầu hoặc kết thúc — bỏ qua');
+        return;
+      }
+      // Validate end > start
+      if(d.endAt<=d.startAt){
+        warnings.push(`Đoạn ${d.vesselName} ${d.startAt}: kết thúc <= bắt đầu — bỏ qua`);
+        return;
+      }
+      // Build event with fuel structure
+      if(!S.events) S.events=[];
+      S.events.push({
+        id:uid(),
+        vesselId:d._vesselId,
+        type:d.type||'onhire',
+        startAt:d.startAt,
+        endAt:d.endAt,
+        projectId:d._projectId||'',
+        portFrom:d.portFrom||'',
+        portTo:d.portTo||'',
+        notes:d.notes||'',
+        fuelStart:{
+          do:{qty:+d.fuelStartDO||0, unit:'liter', phuyLiters:200},
+          lo:{qty:+d.fuelStartLO||0, unit:'liter', phuyLiters:200},
+          fw:{qty:+d.fuelStartFW||0, unit:'liter', phuyLiters:200}
+        },
+        fuelEnd:{
+          do:{qty:+d.fuelEndDO||0, unit:'liter', phuyLiters:200},
+          lo:{qty:+d.fuelEndLO||0, unit:'liter', phuyLiters:200},
+          fw:{qty:+d.fuelEndFW||0, unit:'liter', phuyLiters:200}
+        },
+        fuelPumped:{
+          do:{qty:+d.fuelPumpedDO||0, unit:'liter', phuyLiters:200, price:+d.fuelPumpedDOPrice||0, priceCcy:'USD'},
+          lo:{qty:+d.fuelPumpedLO||0, unit:'liter', phuyLiters:200, price:+d.fuelPumpedLOPrice||0, priceCcy:'USD'},
+          fw:{qty:+d.fuelPumpedFW||0, unit:'liter', phuyLiters:200, price:+d.fuelPumpedFWPrice||0, priceCcy:'USD'}
+        },
+        createdBy:actorName(),
+        createdAt:new Date().toISOString(),
+        _importedFromExcel:true
+      });
+      created++;
+      return;
+    }
     // Default: receivables / payables (with workflow)
     const net=+d.amountNet||0;
     const vatPercent=+d.vatPercent||0;
@@ -16844,11 +17155,15 @@ function excelConfirmImport(){
     }
     created++;
   });
+  // Auto-sync events to onhires aggregate (for vessel utilization KPI/charts)
+  if(tpl.target==='events' && typeof syncEventsToOnhires==='function'){
+    try{ syncEventsToOnhires(); }catch(e){console.warn('syncEventsToOnhires failed',e);}
+  }
   saveState();
   closeModal();
   EXCEL_PARSED_DATA=null;
   renderAll();
-  const masterTargets=['fixedAssets','tools','vessels','projects','bankAccounts','bankSnapshots','loans','warehouses','invMovements'];
+  const masterTargets=['fixedAssets','tools','vessels','projects','bankAccounts','bankSnapshots','loans','warehouses','invMovements','events'];
   const msg=`Đã import ${created} bản ghi${masterTargets.includes(tpl.target)?'':' (Nháp · Cần Gửi → Duyệt L1/L2)'}`;
   if(warnings.length){
     toast(msg+` · ${warnings.length} bỏ qua (trùng)`,'warn');
