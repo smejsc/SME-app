@@ -2067,7 +2067,7 @@ body{min-height:100vh;background-image:radial-gradient(circle at 20% 0%,rgba(184
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='1.42.0';            // bumped on each release
+const APP_VERSION='1.43.0';            // bumped on each release
 
 /* ============================================================
    PWA — Service Worker registration + Install prompt
@@ -5309,7 +5309,7 @@ function timeAgo(iso){
    ============================================================ */
 const DEFAULT_EXPENSE_TYPES = [
   // PO (Purchase Order — Tồn kho — KHÔNG là chi phí trực tiếp)
-  {id:'ET-BUNKER_PO',     code:'BUNKER_PO',     group:'PO',       label:'Mua nhiên liệu',          icon:'⛽', isPO:true, hint:'CP thực lấy từ tiêu thụ tàu (Tab 03)'},
+  {id:'ET-BUNKER_PO',     code:'BUNKER_PO',     group:'PO',       label:'Mua nhiên liệu',          icon:'⛽', isPO:true, isFuel:true, hint:'CP thực lấy từ tiêu thụ tàu (Tab 03). Khi nhập AP, bắt buộc kê chi tiết loại nhiên liệu, số lượng và đơn giá.'},
   {id:'ET-PARTS_PO',      code:'PARTS_PO',      group:'PO',       label:'Mua vật tư & phụ tùng',   icon:'🔩', isPO:true, hint:'Tồn kho → xuất kho mới là CP'},
   // CHI PHÍ TÀU THỰC
   {id:'ET-PORT',          code:'PORT',          group:'VESSEL',   label:'Cảng phí',                icon:'⚓', isPO:false},
@@ -5385,11 +5385,33 @@ function migrateExpenseTypes(){
       added++;
     }
   });
-  if(added>0){
-    console.log('[migrate] Added',added,'expense types (default)');
+  // v1.43.0: Backfill isFuel flag for BUNKER_PO (existing installs)
+  let fuelBackfilled=0;
+  S.expenseTypes.forEach(t=>{
+    if(t.code==='BUNKER_PO' && t.isFuel===undefined){
+      t.isFuel = true;
+      fuelBackfilled++;
+    }
+  });
+  if(added>0 || fuelBackfilled>0){
+    if(added>0) console.log('[migrate] Added',added,'expense types (default)');
+    if(fuelBackfilled>0) console.log('[migrate] Backfilled isFuel on',fuelBackfilled,'types');
     saveState();
   }
   return added;
+}
+
+/* v1.43.0: Check if an expense type is marked as Fuel (needs qty + unitPrice + fuelKind) */
+function isExpenseFuel(typeCode){
+  if(!typeCode) return false;
+  const t=getExpenseType(typeCode);
+  return t ? !!t.isFuel : false;
+}
+
+/* v1.43.0: Get list of fuel-type expense codes */
+function fuelExpenseCodes(){
+  const list = (S && S.expenseTypes && S.expenseTypes.length) ? S.expenseTypes : DEFAULT_EXPENSE_TYPES;
+  return list.filter(t=>t.isFuel && !t.archived).map(t=>t.code);
 }
 
 /* Check if an expense type is HR (lương/thưởng/phụ cấp) */
@@ -6234,6 +6256,13 @@ function addExpenseType(){
       <div class="field">
         <label><input type="checkbox" id="etype-isPO"> Đây là PO (mua tồn kho — không vào P&L)</label>
       </div>
+      <div class="field" style="padding:10px 12px;background:rgba(184,71,46,.06);border-left:3px solid var(--accent);margin-top:4px">
+        <label style="display:flex;align-items:flex-start;gap:8px;cursor:pointer">
+          <input type="checkbox" id="etype-isFuel" style="margin-top:3px">
+          <span style="font-size:13px"><b style="color:var(--accent)">⛽ Đây là loại NHIÊN LIỆU</b><br>
+          <span style="font-size:11px;color:var(--muted);font-style:italic">Khi tick: NV nhập AP loại này sẽ BẮT BUỘC điền 3 trường: Loại nhiên liệu (DO/LO/FW), Số lượng, Đơn giá. App sẽ dùng các trường này để tự điền vào "Bơm trong kỳ" của event vận hành tàu.</span></span>
+        </label>
+      </div>
       <div class="field">
         <label>NCC mặc định (nếu có — VD: CBCNV cho lương)</label>
         <input type="text" id="etype-default-vendor" placeholder="Để trống nếu không có">
@@ -6258,6 +6287,7 @@ function _doAddExpenseType(){
   const group=document.getElementById('etype-group').value;
   const icon=document.getElementById('etype-icon').value.trim()||'📝';
   const isPO=document.getElementById('etype-isPO').checked;
+  const isFuel=document.getElementById('etype-isFuel').checked;  // v1.43.0
   const defaultVendor=document.getElementById('etype-default-vendor').value.trim();
   const hint=document.getElementById('etype-hint').value.trim();
   if(!codeRaw){err.textContent='Mã loại không hợp lệ';return;}
@@ -6273,6 +6303,7 @@ function _doAddExpenseType(){
   S.expenseTypes.push({
     id:'ET-'+codeRaw+'-'+uid().slice(-4),
     code:codeRaw, label, group, icon, isPO,
+    isFuel,                  // v1.43.0
     defaultVendor: defaultVendor||undefined,
     hint: hint||undefined,
     createdAt:new Date().toISOString(),
@@ -6305,6 +6336,13 @@ function editExpenseType(id){
       <div class="field">
         <label><input type="checkbox" id="etype-edit-isPO" ${t.isPO?'checked':''}> Đây là PO (mua tồn kho — không vào P&L)</label>
       </div>
+      <div class="field" style="padding:10px 12px;background:rgba(184,71,46,.06);border-left:3px solid var(--accent);margin-top:4px">
+        <label style="display:flex;align-items:flex-start;gap:8px;cursor:pointer">
+          <input type="checkbox" id="etype-edit-isFuel" ${t.isFuel?'checked':''} style="margin-top:3px">
+          <span style="font-size:13px"><b style="color:var(--accent)">⛽ Đây là loại NHIÊN LIỆU</b><br>
+          <span style="font-size:11px;color:var(--muted);font-style:italic">Khi tick: NV nhập AP loại này sẽ BẮT BUỘC điền 3 trường (Loại nhiên liệu, Số lượng, Đơn giá) để tích hợp với event vận hành tàu.</span></span>
+        </label>
+      </div>
       <div class="field">
         <label>NCC mặc định</label>
         <input type="text" id="etype-edit-default-vendor" value="${esc(t.defaultVendor||'')}">
@@ -6330,6 +6368,7 @@ function _doEditExpenseType(id){
   t.label=label;
   t.icon=document.getElementById('etype-edit-icon').value.trim()||'📝';
   t.isPO=document.getElementById('etype-edit-isPO').checked;
+  t.isFuel=document.getElementById('etype-edit-isFuel').checked;  // v1.43.0
   const dv=document.getElementById('etype-edit-default-vendor').value.trim();
   if(dv) t.defaultVendor=dv; else delete t.defaultVendor;
   const hint=document.getElementById('etype-edit-hint').value.trim();
@@ -6788,8 +6827,9 @@ function renderCatalog(){
       h += '</tr></thead><tbody>';
       list.forEach(t => {
         const grp = (typeof EXPENSE_GROUPS!=='undefined' && EXPENSE_GROUPS[t.group]) || {label:t.group||'?'};
+        const fuelChip = t.isFuel ? '<span class="chip" style="background:var(--accent);color:#fff;font-size:9px;margin-left:4px" title="Loại nhiên liệu — AP bắt buộc nhập SL/ĐG/Loại">⛽ FUEL</span>' : '';
         h += `<tr>
-          <td class="mono"><b>${esc(t.code)}</b></td>
+          <td class="mono"><b>${esc(t.code)}</b>${fuelChip}</td>
           <td>${esc(t.label)}</td>
           <td><span class="chip" style="font-size:10px">${esc(grp.label)}</span></td>
           ${adminMode?`<td><div class="row-actions">
@@ -8321,8 +8361,8 @@ const FUEL_TYPES=[
   {key:'fw',label:'Nước',short:'FW'}
 ];
 
-function fuelStockDefault(){return {qty:0,unit:'liter',phuyLiters:200};}
-function fuelPumpDefault(){return {qty:0,unit:'liter',phuyLiters:200,price:0,priceCcy:'USD'};}
+function fuelStockDefault(){return {qty:0,unit:'liter',phuyLiters:200,unitPrice:0,priceCcy:'USD'};}
+function fuelPumpDefault(){return {qty:0,unit:'liter',phuyLiters:200,price:0,unitPrice:0,priceCcy:'USD'};}
 function defaultEvent(){
   return {
     id:uid(),
@@ -8415,38 +8455,84 @@ function openEventModal(eventId){
   const typeOpts=EVENT_TYPES.map(t=>`<option value="${t.key}" ${t.key===e.type?'selected':''}>${t.label}</option>`).join('');
   const projectOpts=`<option value="">— Không liên kết —</option>`+S.projects.map(p=>`<option value="${p.id}" ${p.id===e.projectId?'selected':''}>${esc(p.code)} · ${esc(p.name)}</option>`).join('');
 
+  // v1.43.0: Auto-fill tồn đầu unitPrice from prior event's tồn cuối (same vessel)
+  if(!isEdit && e.vesselId){
+    try{
+      const priorEvents = (S.events||[]).filter(x=>x.vesselId===e.vesselId && x.endAt && (!e.startAt || x.endAt < e.startAt));
+      priorEvents.sort((a,b)=> (b.endAt||'').localeCompare(a.endAt||''));
+      const prior = priorEvents[0];
+      if(prior){
+        FUEL_TYPES.forEach(fk=>{
+          const priorEnd = prior.fuelEnd && prior.fuelEnd[fk.key];
+          if(priorEnd && priorEnd.unitPrice){
+            if(!e.fuelStart) e.fuelStart = {};
+            if(!e.fuelStart[fk.key]) e.fuelStart[fk.key] = fuelStockDefault();
+            // Carry over both qty and unitPrice from prior period
+            if(!e.fuelStart[fk.key].qty) e.fuelStart[fk.key].qty = priorEnd.qty || 0;
+            if(!e.fuelStart[fk.key].unitPrice) e.fuelStart[fk.key].unitPrice = priorEnd.unitPrice || 0;
+            if(!e.fuelStart[fk.key].unit) e.fuelStart[fk.key].unit = priorEnd.unit || 'liter';
+            if(!e.fuelStart[fk.key].priceCcy) e.fuelStart[fk.key].priceCcy = priorEnd.priceCcy || 'USD';
+          }
+        });
+      }
+    }catch(err){console.warn('[fuel auto-fill prior]', err);}
+  }
+
+  // v1.43.0: fuelRow now has unitPrice + computed value column
   const fuelRow=(group,fk)=>{
     const f=(e[group]&&e[group][fk.key])||(group==='fuelPumped'?fuelPumpDefault():fuelStockDefault());
     const isPump=group==='fuelPumped';
+    const isEnd=group==='fuelEnd';
+    const showPrice = isPump || group==='fuelStart' || isEnd;  // all 3 blocks now show price
+    const priceReadonly = isEnd ? 'readonly' : '';  // tồn cuối auto-computed (but allow override)
+    const priceCcyVal = f.priceCcy || 'USD';
+    const unitPriceVal = (f.unitPrice != null && f.unitPrice !== '') ? f.unitPrice : (f.price || 0);
     return `<tr>
       <td style="font-weight:600;padding:6px"><span class="chip">${fk.short}</span></td>
-      <td><select id="${group}-${fk.key}-unit" onchange="togglePhuyEv('${group}','${fk.key}')" style="padding:5px;border:1px solid var(--rule);font-family:var(--font-mono);font-size:11px;width:75px">
+      <td><select id="${group}-${fk.key}-unit" onchange="togglePhuyEv('${group}','${fk.key}');evFuelRowChanged('${group}','${fk.key}')" style="padding:5px;border:1px solid var(--rule);font-family:var(--font-mono);font-size:11px;width:75px">
         <option value="liter" ${f.unit==='liter'?'selected':''}>Lít</option>
         <option value="m3" ${f.unit==='m3'?'selected':''}>m³</option>
         <option value="phuy" ${f.unit==='phuy'?'selected':''}>Phuy</option>
       </select></td>
-      <td><input type="number" id="${group}-${fk.key}-phuy" value="${f.phuyLiters||200}" step="1" style="padding:5px;border:1px solid var(--rule);width:60px;font-family:var(--font-mono);font-size:11px;text-align:right;${f.unit==='phuy'?'':'opacity:.3;pointer-events:none'}"></td>
-      <td><input type="number" id="${group}-${fk.key}-qty" value="${f.qty||0}" step="any" style="padding:5px;border:1px solid var(--rule);width:90px;font-family:var(--font-mono);font-size:11px;text-align:right"></td>
-      ${isPump?`<td><div style="display:flex;gap:3px"><input type="number" id="${group}-${fk.key}-price" value="${f.price||0}" step="any" style="padding:5px;border:1px solid var(--rule);width:80px;font-family:var(--font-mono);font-size:11px;text-align:right" title="Đơn giá tại thời điểm bơm"><select id="${group}-${fk.key}-priceCcy" style="padding:5px;border:1px solid var(--rule);font-family:var(--font-mono);font-size:11px;width:55px">
-        <option value="USD" ${(f.priceCcy||'USD')==='USD'?'selected':''}>USD</option>
-        <option value="VND" ${(f.priceCcy||'USD')==='VND'?'selected':''}>VND</option>
-      </select></div></td>`:''}
+      <td><input type="number" id="${group}-${fk.key}-phuy" value="${f.phuyLiters||200}" step="1" onchange="evFuelRowChanged('${group}','${fk.key}')" style="padding:5px;border:1px solid var(--rule);width:60px;font-family:var(--font-mono);font-size:11px;text-align:right;${f.unit==='phuy'?'':'opacity:.3;pointer-events:none'}"></td>
+      <td><input type="number" id="${group}-${fk.key}-qty" value="${f.qty||0}" step="any" oninput="evFuelRowChanged('${group}','${fk.key}')" style="padding:5px;border:1px solid var(--rule);width:90px;font-family:var(--font-mono);font-size:11px;text-align:right"></td>
+      ${showPrice?`<td><div style="display:flex;gap:3px">
+        <input type="number" id="${group}-${fk.key}-price" value="${unitPriceVal}" step="any" ${priceReadonly} oninput="evFuelRowChanged('${group}','${fk.key}')" style="padding:5px;border:1px solid var(--rule);width:78px;font-family:var(--font-mono);font-size:11px;text-align:right;${priceReadonly?'background:var(--paper-2);color:var(--muted)':''}" title="${isEnd?'Tự tính từ đơn giá bơm mới nhất — có thể sửa tay':'Đơn giá / đơn vị'}">
+        <select id="${group}-${fk.key}-priceCcy" onchange="evFuelRowChanged('${group}','${fk.key}')" style="padding:5px;border:1px solid var(--rule);font-family:var(--font-mono);font-size:11px;width:50px">
+          <option value="USD" ${priceCcyVal==='USD'?'selected':''}>USD</option>
+          <option value="VND" ${priceCcyVal==='VND'?'selected':''}>VND</option>
+        </select>
+      </div></td>
+      <td class="r mono" id="${group}-${fk.key}-value" style="font-size:11px;color:var(--accent);font-weight:600;padding:5px 8px">—</td>`:''}
     </tr>`;
   };
 
-  const fuelBlock=(group,label,withPrice)=>`
+  // v1.43.0: fuelBlock now has Value column + Total row
+  const fuelBlock=(group,label,note)=>{
+    const isEnd = group==='fuelEnd';
+    const isStart = group==='fuelStart';
+    const noteHtml = note ? `<div style="font-size:10px;color:var(--muted);font-style:italic;margin-bottom:4px">${note}</div>` : '';
+    return `
     <div style="margin-top:10px">
       <div style="font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);font-weight:600;margin-bottom:4px">${label}</div>
+      ${noteHtml}
       <table style="width:100%;font-size:11px;border-collapse:collapse"><thead><tr style="border-bottom:1px solid var(--rule)">
         <th style="text-align:left;padding:4px">Loại</th>
         <th style="text-align:left">Đv</th>
         <th style="text-align:left">L/phuy</th>
         <th style="text-align:right">Số lượng</th>
-        ${withPrice?'<th style="text-align:right">Đơn giá / đơn vị</th>':''}
+        <th style="text-align:right">Đơn giá${isEnd?' (tự tính)':''}</th>
+        <th style="text-align:right" title="SL × Đơn giá">Giá trị</th>
       </tr></thead><tbody>
         ${FUEL_TYPES.map(fk=>fuelRow(group,fk)).join('')}
-      </tbody></table>
+      </tbody><tfoot>
+        <tr style="border-top:2px solid var(--rule);background:rgba(184,71,46,.04)">
+          <td colspan="5" style="text-align:right;padding:6px 8px;font-weight:600;letter-spacing:.05em;text-transform:uppercase;font-size:10px;color:var(--muted)">Tổng giá trị</td>
+          <td class="r mono" id="${group}-total-value" style="font-size:12px;color:var(--accent);font-weight:700;padding:6px 8px">—</td>
+        </tr>
+      </tfoot></table>
     </div>`;
+  };
 
   const body=`
     <div class="form-grid">
@@ -8468,11 +8554,11 @@ function openEventModal(eventId){
       </div>
     </div>
     <div style="margin-top:12px;padding-top:12px;border-top:1px solid var(--rule)">
-      <details>
-        <summary style="cursor:pointer;font-weight:600;font-size:13px;padding:4px 0">⛽ Nhiên liệu (tùy chọn — bấm để mở)</summary>
-        ${fuelBlock('fuelStart','Tồn đầu kỳ (tại lúc Bắt đầu)',false)}
-        ${fuelBlock('fuelPumped','Bơm trong kỳ',true)}
-        ${fuelBlock('fuelEnd','Tồn cuối kỳ (tại lúc Kết thúc)',false)}
+      <details open>
+        <summary style="cursor:pointer;font-weight:600;font-size:13px;padding:4px 0">⛽ Nhiên liệu (tùy chọn — bấm để mở/đóng)</summary>
+        ${fuelBlock('fuelStart','Tồn đầu kỳ (tại lúc Bắt đầu)','Đơn giá tự lấy từ tồn cuối kỳ trước của cùng tàu — có thể sửa tay nếu cần.')}
+        ${fuelBlock('fuelPumped','Bơm trong kỳ','Nếu đã nhập AP loại nhiên liệu (v1.43.1 sẽ tự link). Tạm thời nhập tay đơn giá theo hóa đơn.')}
+        ${fuelBlock('fuelEnd','Tồn cuối kỳ (tại lúc Kết thúc)','Đơn giá tự = đơn giá bơm mới nhất trong kỳ (FIFO). Có thể override.')}
         <div style="font-size:11px;color:var(--muted);font-style:italic;margin-top:6px">Tiêu thụ = Tồn đầu + Bơm − Tồn cuối. Tự quy đổi sang lít để tính giá trị.</div>
       </details>
     </div>
@@ -8489,6 +8575,101 @@ function openEventModal(eventId){
       document.getElementById('ev-start').value=ofVessel[0].endAt;
     }
   }
+
+  // v1.43.0: Initial compute of all values + totals
+  setTimeout(()=>{
+    try{ evFuelRecomputeAll(); }catch(err){console.warn('[evFuel init]',err);}
+  }, 50);
+}
+
+/* v1.43.0: When user changes a fuel row field — recompute that row's value + block total + auto-update fuelEnd unitPrice if pumped */
+function evFuelRowChanged(group, fuelKey){
+  // Toggle phuy field opacity when unit changes (already handled by togglePhuyEv)
+  // Recompute everything (cheap — 9 rows max)
+  evFuelRecomputeAll();
+}
+
+/* v1.43.0: Recompute all fuel row values + block totals + auto-fill fuelEnd unitPrice */
+function evFuelRecomputeAll(){
+  if(typeof FUEL_TYPES === 'undefined') return;
+  const groups = ['fuelStart','fuelPumped','fuelEnd'];
+  // Step 1: For each fuel type, find latest pumped unitPrice in event (used for fuelEnd auto-fill)
+  const latestPumpPrice = {};  // {fuelKey: {price, priceCcy, unit, phuyLiters}}
+  FUEL_TYPES.forEach(fk=>{
+    const pumpQty = +(document.getElementById(`fuelPumped-${fk.key}-qty`)?.value || 0);
+    const pumpPrice = +(document.getElementById(`fuelPumped-${fk.key}-price`)?.value || 0);
+    if(pumpQty > 0 && pumpPrice > 0){
+      latestPumpPrice[fk.key] = {
+        price: pumpPrice,
+        priceCcy: document.getElementById(`fuelPumped-${fk.key}-priceCcy`)?.value || 'USD',
+        unit: document.getElementById(`fuelPumped-${fk.key}-unit`)?.value || 'liter',
+        phuyLiters: +(document.getElementById(`fuelPumped-${fk.key}-phuy`)?.value || 200)
+      };
+    }
+  });
+
+  // Step 2: Auto-fill fuelEnd unitPrice if empty
+  FUEL_TYPES.forEach(fk=>{
+    const endPriceEl = document.getElementById(`fuelEnd-${fk.key}-price`);
+    if(endPriceEl && (!endPriceEl.value || +endPriceEl.value===0)){
+      const latest = latestPumpPrice[fk.key];
+      if(latest){
+        endPriceEl.value = latest.price;
+        const endCcyEl = document.getElementById(`fuelEnd-${fk.key}-priceCcy`);
+        if(endCcyEl) endCcyEl.value = latest.priceCcy;
+      } else {
+        // Fallback: use fuelStart unitPrice
+        const startPrice = +(document.getElementById(`fuelStart-${fk.key}-price`)?.value || 0);
+        if(startPrice > 0){
+          endPriceEl.value = startPrice;
+          const endCcyEl = document.getElementById(`fuelEnd-${fk.key}-priceCcy`);
+          const startCcyEl = document.getElementById(`fuelStart-${fk.key}-priceCcy`);
+          if(endCcyEl && startCcyEl) endCcyEl.value = startCcyEl.value;
+        }
+      }
+    }
+  });
+
+  // Step 3: Compute value for each row + accumulate block totals
+  // Total normalized to a primary CCY: pick first non-zero priceCcy encountered, default USD
+  const fx = +S.fxRate || 25000;
+  groups.forEach(group=>{
+    let blockTotalUsd = 0;
+    let primaryCcy = null;
+    FUEL_TYPES.forEach(fk=>{
+      const qty = +(document.getElementById(`${group}-${fk.key}-qty`)?.value || 0);
+      const unit = document.getElementById(`${group}-${fk.key}-unit`)?.value || 'liter';
+      const phuyL = +(document.getElementById(`${group}-${fk.key}-phuy`)?.value || 200);
+      const price = +(document.getElementById(`${group}-${fk.key}-price`)?.value || 0);
+      const priceCcy = document.getElementById(`${group}-${fk.key}-priceCcy`)?.value || 'USD';
+      const valueCell = document.getElementById(`${group}-${fk.key}-value`);
+      // Row value = qty × price (in priceCcy, in chosen unit)
+      const rowValue = qty * price;
+      if(valueCell){
+        valueCell.textContent = rowValue > 0 ? `${rowValue.toLocaleString('vi-VN', {maximumFractionDigits:0})} ${priceCcy}` : '—';
+      }
+      // For total: convert to USD for accumulation
+      if(rowValue > 0){
+        const rowUsd = (priceCcy === 'VND') ? (rowValue / fx) : rowValue;
+        blockTotalUsd += rowUsd;
+        if(!primaryCcy) primaryCcy = priceCcy;
+      }
+    });
+    // Display block total in primary CCY (default USD)
+    const totalCell = document.getElementById(`${group}-total-value`);
+    if(totalCell){
+      if(blockTotalUsd > 0){
+        if(primaryCcy === 'VND'){
+          const inVnd = blockTotalUsd * fx;
+          totalCell.textContent = `${inVnd.toLocaleString('vi-VN', {maximumFractionDigits:0})} VND`;
+        } else {
+          totalCell.textContent = `${blockTotalUsd.toLocaleString('vi-VN', {maximumFractionDigits:2})} USD`;
+        }
+      } else {
+        totalCell.textContent = '—';
+      }
+    }
+  });
 }
 
 function updateEventModalFields(){
@@ -8540,13 +8721,16 @@ function saveEvent(eid,isEdit){
     fuelStart:{},fuelEnd:{},fuelPumped:{}
   };
   FUEL_TYPES.forEach(fk=>{
+    // v1.43.0: fuelStart + fuelEnd now also have unitPrice + priceCcy
     ['fuelStart','fuelEnd'].forEach(g=>{
       const unitEl=document.getElementById(`${g}-${fk.key}-unit`);
       if(!unitEl){ev[g][fk.key]=fuelStockDefault();return;}
       ev[g][fk.key]={
         unit:unitEl.value,
         phuyLiters:+document.getElementById(`${g}-${fk.key}-phuy`).value||200,
-        qty:+document.getElementById(`${g}-${fk.key}-qty`).value||0
+        qty:+document.getElementById(`${g}-${fk.key}-qty`).value||0,
+        unitPrice:+document.getElementById(`${g}-${fk.key}-price`)?.value||0,
+        priceCcy:document.getElementById(`${g}-${fk.key}-priceCcy`)?.value||'USD'
       };
     });
     const pUnit=document.getElementById(`fuelPumped-${fk.key}-unit`);
@@ -8556,6 +8740,7 @@ function saveEvent(eid,isEdit){
         phuyLiters:+document.getElementById(`fuelPumped-${fk.key}-phuy`).value||200,
         qty:+document.getElementById(`fuelPumped-${fk.key}-qty`).value||0,
         price:+document.getElementById(`fuelPumped-${fk.key}-price`).value||0,
+        unitPrice:+document.getElementById(`fuelPumped-${fk.key}-price`).value||0,  // alias for consistency
         priceCcy:document.getElementById(`fuelPumped-${fk.key}-priceCcy`).value||'USD'
       };
     } else ev.fuelPumped[fk.key]=fuelPumpDefault();
@@ -12681,14 +12866,91 @@ function arReturn(kind,id){
 /* ===== Create / edit modals for receivable & payable ===== */
 function _arEditorBody(r,isPayable){
   const segOpts=Object.entries(SEGMENTS).map(([k,v])=>`<option value="${k}" ${k===(r.segment||'')?'selected':''}>${esc(v.name)}</option>`).join('');
-  const projOpts='<option value="">— Không gắn dự án —</option>'+S.projects.map(p=>`<option value="${p.id}" ${p.id===r.projectId?'selected':''}>${esc(p.code)} · ${esc(p.name)}</option>`).join('');
-  const vesselOpts='<option value="">— Không gắn tàu —</option>'+S.vessels.map(v=>`<option value="${v.id}" ${v.id===r.vesselId?'selected':''}>${esc(v.name)} (${v.type==='SERVICE'?'DV':'KT'})</option>`).join('');
+  const projOpts='<option value="">— Không gắn dự án —</option>'+activeOnly(S.projects).map(p=>`<option value="${p.id}" ${p.id===r.projectId?'selected':''}>${esc(p.code)} · ${esc(p.name)}</option>`).join('');
+  const vesselOpts='<option value="">— Không gắn tàu —</option>'+activeOnly(S.vessels).map(v=>`<option value="${v.id}" ${v.id===r.vesselId?'selected':''}>${esc(v.name)} (${v.type==='SERVICE'?'DV':'KT'})</option>`).join('');
+
+  // v1.43.0: Expense type dropdown (only for AP) — grouped, with isFuel marker
+  let expenseTypeBlock = '';
+  if(isPayable){
+    const etTypes = activeExpenseTypes ? activeExpenseTypes() : [];
+    const etGroups = {};
+    etTypes.forEach(t=>{
+      if(!etGroups[t.group]) etGroups[t.group]=[];
+      etGroups[t.group].push(t);
+    });
+    let etHtml = '<option value="">— Chọn loại chi phí —</option>';
+    if(typeof EXPENSE_GROUPS!=='undefined'){
+      Object.keys(EXPENSE_GROUPS).forEach(gk=>{
+        if(!etGroups[gk]) return;
+        etHtml += `<optgroup label="${esc(EXPENSE_GROUPS[gk].label)}">`;
+        etGroups[gk].forEach(t=>{
+          const fuelMark = t.isFuel ? ' ⛽FUEL' : '';
+          etHtml += `<option value="${esc(t.code)}" ${t.code===r.expenseType?'selected':''} data-isfuel="${t.isFuel?'1':'0'}">${t.icon} ${esc(t.label)}${fuelMark}</option>`;
+        });
+        etHtml += '</optgroup>';
+      });
+    }
+    expenseTypeBlock = `
+      <div class="field" style="grid-column:span 3">
+        <label>Loại chi phí <span style="color:var(--muted);text-transform:none;font-weight:400;font-size:10px">(chọn loại để tự kích hoạt trường nhiên liệu nếu có)</span></label>
+        <select id="ar-expense-type" onchange="arExpenseTypeChanged()">${etHtml}</select>
+      </div>
+    `;
+  }
+
   // Determine locked state from workflow
   const locked = !isAdmin() && !wfCanEdit(r) && (r.status==='approved' || r.status==='pending_l1' || r.status==='pending_l2');
   const lockedAttr = locked ? 'disabled' : '';
   const lockedNote = locked
     ? `<div style="font-size:12px;background:rgba(196,138,57,.1);border-left:3px solid var(--warn);padding:8px 10px;margin-bottom:10px"><b>⚠ Khóa sửa</b> · Bản ghi đang ở trạng thái <b>${wfState(r).label}</b>. ${r.status==='approved'?'Đã duyệt — cần "Trả về Nháp" mới sửa được.':'Đang chờ duyệt — cần được "Từ chối" để chuyển về Nháp.'}</div>`
     : '';
+
+  // v1.43.0: Fuel detail block (conditional — shown when expenseType is isFuel)
+  let fuelBlock = '';
+  if(isPayable){
+    const isFuelNow = r.expenseType && isExpenseFuel(r.expenseType);
+    const fuelKindCur = r.fuelKind || '';
+    const fuelQtyCur = r.fuelQty != null ? r.fuelQty : '';
+    const fuelUnitCur = r.fuelUnit || 'liter';
+    const fuelUnitPriceCur = r.fuelUnitPrice != null ? r.fuelUnitPrice : '';
+    fuelBlock = `
+      <div id="ar-fuel-block" style="margin-top:14px;padding:12px 14px;background:rgba(184,71,46,.06);border-left:3px solid var(--accent);${isFuelNow?'':'display:none'}">
+        <div style="font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--accent);font-weight:700;margin-bottom:8px">⛽ Thông tin nhiên liệu <span style="color:var(--bad);font-weight:400">(bắt buộc cho loại isFuel)</span></div>
+        <div style="font-size:11px;color:var(--muted);font-style:italic;margin-bottom:8px">Các trường này sẽ được tự điền vào "Bơm trong kỳ" của event vận hành tàu cùng kỳ.</div>
+        <div class="form-grid" style="grid-template-columns:1fr 1fr 1fr 1fr">
+          <div class="field">
+            <label>Loại nhiên liệu *</label>
+            <select id="ar-fuel-kind" ${lockedAttr}>
+              <option value="">— Chọn —</option>
+              <option value="do" ${fuelKindCur==='do'?'selected':''}>DO (Diesel)</option>
+              <option value="lo" ${fuelKindCur==='lo'?'selected':''}>LO (Lubricant)</option>
+              <option value="fw" ${fuelKindCur==='fw'?'selected':''}>FW (Fresh Water)</option>
+            </select>
+          </div>
+          <div class="field">
+            <label>Số lượng *</label>
+            <input type="number" id="ar-fuel-qty" value="${fuelQtyCur}" step="any" placeholder="VD: 5000" ${lockedAttr} oninput="arFuelRecalc()">
+          </div>
+          <div class="field">
+            <label>Đơn vị</label>
+            <select id="ar-fuel-unit" ${lockedAttr}>
+              <option value="liter" ${fuelUnitCur==='liter'?'selected':''}>Lít</option>
+              <option value="m3" ${fuelUnitCur==='m3'?'selected':''}>m³</option>
+              <option value="phuy" ${fuelUnitCur==='phuy'?'selected':''}>Phuy (200L)</option>
+            </select>
+          </div>
+          <div class="field">
+            <label>Đơn giá / đơn vị *</label>
+            <input type="number" id="ar-fuel-unit-price" value="${fuelUnitPriceCur}" step="any" placeholder="VD: 0.85" ${lockedAttr} oninput="arFuelRecalc()">
+          </div>
+        </div>
+        <div style="font-size:12px;color:var(--ink-soft);margin-top:8px;padding:8px 10px;background:rgba(255,255,255,.5);border:1px dashed var(--rule)">
+          <b>Giá trị tự tính:</b> <span id="ar-fuel-calc-value" style="font-family:var(--font-mono);color:var(--accent);font-weight:600">—</span>
+          <span style="color:var(--muted);font-size:11px;margin-left:8px">(SL × Đơn giá, theo CCY của AP)</span>
+        </div>
+      </div>
+    `;
+  }
 
   // Payment history with FX rate
   const paymentsHtml=(r.payments||[]).length
@@ -12725,16 +12987,19 @@ function _arEditorBody(r,isPayable){
         <div id="ar-partner-hint" style="font-size:11px;color:var(--muted);margin-top:4px"></div>
       </div>
       <div class="field" style="grid-column:span 2"><label>Diễn giải</label><input type="text" id="ar-desc" value="${(r.desc||'').replace(/"/g,'&quot;')}" placeholder="Nội dung — VD: Cước thuê tàu T5/2026" ${lockedAttr}></div>
+      ${expenseTypeBlock}
       <div class="field"><label>Mảng *</label><select id="ar-segment" ${lockedAttr}>${segOpts}</select></div>
       <div class="field"><label>Dự án (tùy chọn)</label><select id="ar-project" ${lockedAttr}>${projOpts}</select></div>
       <div class="field"><label>Tàu (tùy chọn)</label><select id="ar-vessel" ${lockedAttr}>${vesselOpts}</select></div>
     </div>
 
+    ${fuelBlock}
+
     <div style="margin-top:14px;padding-top:10px;border-top:1px solid var(--rule)">
       <div style="font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);font-weight:600;margin-bottom:6px">Giá trị & VAT</div>
       <div class="form-grid" style="grid-template-columns:1.2fr 0.8fr 1fr 1fr 1fr">
         <div class="field"><label>Số tiền chưa VAT *</label><input type="number" id="ar-amount-net" value="${r.amountNet!=null?r.amountNet:(r.amount||0)}" step="any" oninput="arRecalcVat()" ${lockedAttr}></div>
-        <div class="field"><label>CCY</label><select id="ar-ccy" ${lockedAttr}><option value="USD" ${r.ccy==='USD'?'selected':''}>USD</option><option value="VND" ${(!r.ccy||r.ccy==='VND')?'selected':''}>VND</option></select></div>
+        <div class="field"><label>CCY</label><select id="ar-ccy" onchange="arFuelRecalc()" ${lockedAttr}><option value="USD" ${r.ccy==='USD'?'selected':''}>USD</option><option value="VND" ${(!r.ccy||r.ccy==='VND')?'selected':''}>VND</option></select></div>
         <div class="field"><label>% VAT</label><select id="ar-vat-percent" onchange="arRecalcVat()" ${lockedAttr}>
           <option value="0" ${(r.vatPercent==0)?'selected':''}>0% (không VAT)</option>
           <option value="5" ${(r.vatPercent==5)?'selected':''}>5%</option>
@@ -12762,6 +13027,41 @@ function _arEditorBody(r,isPayable){
       ${paymentsHtml}
     </div>
     <div id="ar-err" style="font-size:12px;color:var(--bad);min-height:14px;font-family:var(--font-mono);margin-top:8px"></div>`;
+}
+
+/* v1.43.0: Show/hide fuel block when expense type changes */
+function arExpenseTypeChanged(){
+  const sel = document.getElementById('ar-expense-type');
+  const block = document.getElementById('ar-fuel-block');
+  if(!sel || !block) return;
+  const code = sel.value;
+  const isFuel = code && isExpenseFuel(code);
+  block.style.display = isFuel ? 'block' : 'none';
+  if(isFuel){
+    // Pre-fill fuelKind from expense type code if obvious (DO/LO/FW)
+    const kindSel = document.getElementById('ar-fuel-kind');
+    if(kindSel && !kindSel.value){
+      const cu = code.toUpperCase();
+      if(cu.includes('DO') || cu.includes('DIESEL')) kindSel.value='do';
+      else if(cu.includes('LO') || cu.includes('LUBE') || cu.includes('LUBRIC')) kindSel.value='lo';
+      else if(cu.includes('FW') || cu.includes('WATER')) kindSel.value='fw';
+    }
+  }
+  arFuelRecalc();
+}
+
+/* v1.43.0: Live calc value = qty × unitPrice (display only) */
+function arFuelRecalc(){
+  const qtyEl = document.getElementById('ar-fuel-qty');
+  const priceEl = document.getElementById('ar-fuel-unit-price');
+  const out = document.getElementById('ar-fuel-calc-value');
+  const ccyEl = document.getElementById('ar-ccy');
+  if(!qtyEl || !priceEl || !out) return;
+  const q = +qtyEl.value || 0;
+  const p = +priceEl.value || 0;
+  const val = q * p;
+  const ccy = ccyEl ? ccyEl.value : 'USD';
+  out.textContent = val > 0 ? (val.toLocaleString('vi-VN') + ' ' + ccy) : '—';
 }
 
 /* Live VAT recalculation in modal */
@@ -13412,6 +13712,29 @@ function saveAr(kind,id){
   const dueMonth=dmEl?dmEl.value:'';
   const daEl=document.getElementById('ar-due-amount');
   const dueAmount=daEl?(+daEl.value||0):0;
+
+  // v1.43.0: Expense type + fuel fields (only for AP)
+  let expenseType = '';
+  let fuelKind = null, fuelQty = null, fuelUnit = null, fuelUnitPrice = null;
+  if(kind==='ap'){
+    const etEl = document.getElementById('ar-expense-type');
+    expenseType = etEl ? etEl.value : '';
+    if(expenseType && isExpenseFuel(expenseType)){
+      // STRICT validation: 3 fuel fields required
+      const kEl = document.getElementById('ar-fuel-kind');
+      const qEl = document.getElementById('ar-fuel-qty');
+      const uEl = document.getElementById('ar-fuel-unit');
+      const pEl = document.getElementById('ar-fuel-unit-price');
+      fuelKind = kEl ? kEl.value : '';
+      fuelQty = qEl ? (+qEl.value || 0) : 0;
+      fuelUnit = uEl ? uEl.value : 'liter';
+      fuelUnitPrice = pEl ? (+pEl.value || 0) : 0;
+      if(!fuelKind){err.textContent='⛽ Chọn loại nhiên liệu (DO/LO/FW)';return;}
+      if(fuelQty<=0){err.textContent='⛽ Số lượng nhiên liệu phải > 0';return;}
+      if(fuelUnitPrice<=0){err.textContent='⛽ Đơn giá nhiên liệu phải > 0';return;}
+    }
+  }
+
   if(!partner){err.textContent='Nhập tên đối tác';return;}
   if(amountNet<=0){err.textContent='Số tiền chưa VAT > 0';return;}
   // Auto-create or link vendor (NCC master)
@@ -13421,10 +13744,19 @@ function saveAr(kind,id){
     const r=S[list].find(x=>x.id===id);
     if(!r){err.textContent='Không tìm thấy';return;}
     if(!wfCanEdit(r)){err.textContent='Bản ghi đã khóa sửa do trạng thái phê duyệt';return;}
-    Object.assign(r,{partner,vendorId,desc,amountNet,vatPercent,vatAmount,amountGross,amount,ccy,segment,projectId,vesselId,issueDate,dueDate,dueMonth,dueAmount});
+    const updates = {partner,vendorId,desc,amountNet,vatPercent,vatAmount,amountGross,amount,ccy,segment,projectId,vesselId,issueDate,dueDate,dueMonth,dueAmount};
+    if(kind==='ap'){
+      updates.expenseType = expenseType;
+      // Always set fuel fields (null = not a fuel record)
+      updates.fuelKind = fuelKind;
+      updates.fuelQty = fuelQty;
+      updates.fuelUnit = fuelUnit;
+      updates.fuelUnitPrice = fuelUnitPrice;
+    }
+    Object.assign(r, updates);
     touchRecord(r);  // v1.38.4: track for concurrency merge
   } else {
-    S[list].push({
+    const newRec = {
       id:uid(),
       partner,vendorId,desc,amountNet,vatPercent,vatAmount,amountGross,amount,ccy,segment,projectId,vesselId,issueDate,dueDate,dueMonth,dueAmount,
       payments:[],
@@ -13436,7 +13768,15 @@ function saveAr(kind,id){
       createdBy:actorName(),
       createdAt:new Date().toISOString(),
       updatedAt:new Date().toISOString()  // v1.38.4
-    });
+    };
+    if(kind==='ap'){
+      newRec.expenseType = expenseType;
+      newRec.fuelKind = fuelKind;
+      newRec.fuelQty = fuelQty;
+      newRec.fuelUnit = fuelUnit;
+      newRec.fuelUnitPrice = fuelUnitPrice;
+    }
+    S[list].push(newRec);
   }
   saveState();closeModal();renderAll();
   toast(kind==='ap'?'Đã lưu phải trả':'Đã lưu phải thu');
