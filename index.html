@@ -2067,7 +2067,7 @@ body{min-height:100vh;background-image:radial-gradient(circle at 20% 0%,rgba(184
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='1.41.0';            // bumped on each release
+const APP_VERSION='1.42.0';            // bumped on each release
 
 /* ============================================================
    PWA — Service Worker registration + Install prompt
@@ -3996,6 +3996,37 @@ function isAdmin(){return CURRENT_ROLE==='admin';}
 function canManageUsers(){
   if(CURRENT_ROLE==='admin') return true;
   return !!(CURRENT_USER && CURRENT_USER.canManageUsers);
+}
+
+/* v1.42.0: Permission to archive/close master data items (projects/vessels/vendors/types).
+   Admin + BOD + sub-admin (canManageUsers) — pattern bao quát đối tượng quản trị. */
+function canArchiveItem(){
+  if(CURRENT_ROLE==='admin') return true;
+  if(!CURRENT_USER) return false;
+  return !!(CURRENT_USER.canManageUsers || CURRENT_USER.isBOD);
+}
+
+/* v1.42.0: Filter active items (not archived) — for dropdowns in new entry forms.
+   Backward compat: items without `archived` field treated as active. */
+function activeOnly(arr){
+  if(!Array.isArray(arr)) return [];
+  return arr.filter(x => !x || !x.archived);
+}
+
+/* v1.42.0: Set archive state on a master item.
+   Records who/when. NV without canArchiveItem cannot call this. */
+function toggleArchive(item, archived){
+  if(!item) return;
+  item.archived = !!archived;
+  if(archived){
+    item.archivedAt = new Date().toISOString();
+    item.archivedBy = actorName();
+  } else {
+    item.archivedAt = null;
+    item.archivedBy = null;
+  }
+  // Touch updatedAt for sync (v1.38.4 merge pattern)
+  if(typeof touchRecord === 'function') touchRecord(item);
 }
 
 /* True if current session is allowed to confirm payments / edit fees in Op tab.
@@ -6320,7 +6351,7 @@ function _countRecordsUsingExpenseType(code){
 }
 
 function archiveExpenseType(id){
-  if(!isAdmin()){toast('Chỉ admin','bad');return;}
+  if(!canArchiveItem()){toast('Chỉ admin / BOD / Kế toán trưởng','bad');return;}
   const t=(S.expenseTypes||[]).find(x=>x.id===id);
   if(!t){toast('Không tìm thấy','bad');return;}
   // BOD_ONLY is a system type — không cho archive
@@ -6523,7 +6554,7 @@ function _doEditRevenueType(id){
 }
 
 function archiveRevenueType(id){
-  if(!isAdmin()){toast('Chỉ admin','bad');return;}
+  if(!canArchiveItem()){toast('Chỉ admin / BOD / Kế toán trưởng','bad');return;}
   const t=(S.revenueTypes||[]).find(x=>x.id===id);
   if(!t){toast('Không tìm thấy','bad');return;}
   if(t.code==='BOD_ONLY'){
@@ -6662,22 +6693,39 @@ function renderCatalog(){
   const vCount = document.getElementById('cat-vessel-count');
   if(vTbl && vCount){
     const list = (S.vessels||[]).slice();
-    vCount.textContent = `(${list.length})`;
+    const activeCount = list.filter(v=>!v.archived).length;
+    const archivedCount = list.length - activeCount;
+    vCount.textContent = archivedCount>0 ? `(${activeCount} đang dùng · ${archivedCount} đã đóng)` : `(${list.length})`;
     if(!list.length){
       vTbl.innerHTML = '<tr><td class="empty">Chưa có tàu — bấm "+ Thêm tàu" hoặc vào tab 03</td></tr>';
     } else {
-      let h = '<thead><tr><th>Tên tàu</th><th>Loại</th><th>IMO</th><th>Cờ</th><th class="r">DWT</th><th class="r">GRT</th><th></th></tr></thead><tbody>';
+      // v1.42.0: sort active first, then archived
+      list.sort((a,b)=>{
+        const ax=a.archived?1:0, bx=b.archived?1:0;
+        return ax-bx || (a.name||'').localeCompare(b.name||'');
+      });
+      const canArchive = canArchiveItem();
+      let h = '<thead><tr><th>Tên tàu</th><th>Loại</th><th>IMO</th><th>Cờ</th><th class="r">DWT</th><th class="r">GRT</th><th>Trạng thái</th><th></th></tr></thead><tbody>';
       list.forEach(v => {
         const typeChip = v.type==='SERVICE' ? '<span class="chip chip-1">DV</span>' :
                          v.type==='TECH' ? '<span class="chip chip-2">KT</span>' : '<span class="chip">?</span>';
-        h += `<tr>
+        const statusChip = v.archived
+          ? `<span class="chip" style="background:#a8362b;color:#fff;font-size:10px" title="Đã đóng bởi ${esc(v.archivedBy||'?')} lúc ${v.archivedAt?new Date(v.archivedAt).toLocaleDateString('vi-VN'):'?'}">⊘ ĐÃ ĐÓNG</span>`
+          : `<span class="chip chip-good" style="font-size:10px">✓ ACTIVE</span>`;
+        const archiveBtn = canArchive
+          ? (v.archived
+              ? `<button class="icon-btn" title="Mở lại (unarchive)" onclick="toggleArchiveVessel('${v.id}')" style="color:var(--good)">↺</button>`
+              : `<button class="icon-btn" title="Đóng (archive) — ẩn khỏi dropdown nhập mới" onclick="toggleArchiveVessel('${v.id}')" style="color:var(--warn)">⊘</button>`)
+          : '';
+        h += `<tr style="${v.archived?'opacity:0.55;background:rgba(168,54,43,.04)':''}">
           <td><b>${esc(v.name)}</b></td>
           <td>${typeChip}</td>
           <td class="mono" style="font-size:11px">${esc(v.imoNumber||'—')}</td>
           <td style="font-size:11px">${esc(v.flagState||'—')}</td>
           <td class="r mono">${fmtQty(v.dwt||0)}</td>
           <td class="r mono">${fmtQty(v.grt||0)}</td>
-          <td><button class="btn-sec" style="font-size:10px;padding:2px 8px" onclick="navTo('vessels')">↗ Sửa</button></td>
+          <td>${statusChip}</td>
+          <td><div class="row-actions">${archiveBtn}<button class="btn-sec" style="font-size:10px;padding:2px 8px" onclick="navTo('vessels')">↗ Sửa</button></div></td>
         </tr>`;
       });
       h += '</tbody>';
@@ -6689,21 +6737,36 @@ function renderCatalog(){
   const pTbl = document.getElementById('cat-projects-table');
   const pCount = document.getElementById('cat-project-count');
   if(pTbl && pCount){
-    const list = (S.projects||[]).slice().sort((a,b)=>(a.code||'').localeCompare(b.code||''));
-    pCount.textContent = `(${list.length})`;
+    const list = (S.projects||[]).slice().sort((a,b)=>{
+      const ax=a.archived?1:0, bx=b.archived?1:0;
+      return ax-bx || (a.code||'').localeCompare(b.code||'');
+    });
+    const activeCount = list.filter(p=>!p.archived).length;
+    const archivedCount = list.length - activeCount;
+    pCount.textContent = archivedCount>0 ? `(${activeCount} đang dùng · ${archivedCount} đã đóng)` : `(${list.length})`;
     if(!list.length){
       pTbl.innerHTML = '<tr><td class="empty">Chưa có dự án — bấm "+ Thêm dự án" hoặc vào tab 02</td></tr>';
     } else {
-      let h = '<thead><tr><th>Mã</th><th>Tên</th><th>Khách hàng</th><th>Mảng</th><th>CCY</th><th></th></tr></thead><tbody>';
+      const canArchive = canArchiveItem();
+      let h = '<thead><tr><th>Mã</th><th>Tên</th><th>Khách hàng</th><th>Mảng</th><th>CCY</th><th>Trạng thái</th><th></th></tr></thead><tbody>';
       list.forEach(p => {
         const seg = SEGMENTS[p.segment] || {name: p.segment||'?', color:'#888'};
-        h += `<tr>
+        const statusChip = p.archived
+          ? `<span class="chip" style="background:#a8362b;color:#fff;font-size:10px" title="Đã hoàn thành bởi ${esc(p.archivedBy||'?')} lúc ${p.archivedAt?new Date(p.archivedAt).toLocaleDateString('vi-VN'):'?'}">⊘ HOÀN THÀNH</span>`
+          : `<span class="chip chip-good" style="font-size:10px">✓ ACTIVE</span>`;
+        const archiveBtn = canArchive
+          ? (p.archived
+              ? `<button class="icon-btn" title="Mở lại dự án" onclick="toggleArchiveProject('${p.id}')" style="color:var(--good)">↺</button>`
+              : `<button class="icon-btn" title="Đánh dấu hoàn thành — ẩn khỏi dropdown nhập mới" onclick="toggleArchiveProject('${p.id}')" style="color:var(--warn)">⊘</button>`)
+          : '';
+        h += `<tr style="${p.archived?'opacity:0.55;background:rgba(168,54,43,.04)':''}">
           <td class="mono"><b>${esc(p.code)}</b></td>
           <td>${esc(p.name)}</td>
           <td style="font-size:11px">${esc(p.client||'—')}</td>
           <td><span class="chip" style="font-size:10px;background:${seg.color};color:#fff">${esc(seg.name)}</span></td>
           <td class="mono" style="font-size:11px">${esc(p.ccy||'—')}</td>
-          <td><button class="btn-sec" style="font-size:10px;padding:2px 8px" onclick="navTo('projects')">↗ Sửa</button></td>
+          <td>${statusChip}</td>
+          <td><div class="row-actions">${archiveBtn}<button class="btn-sec" style="font-size:10px;padding:2px 8px" onclick="navTo('projects')">↗ Sửa</button></div></td>
         </tr>`;
       });
       h += '</tbody>';
@@ -6773,25 +6836,41 @@ function renderCatalog(){
   const venTbl = document.getElementById('cat-vendors-table');
   const venCount = document.getElementById('cat-vendor-count');
   if(venTbl && venCount){
-    const list = (S.vendors||[]).slice().sort((a,b)=>(a.name||'').localeCompare(b.name||''));
-    venCount.textContent = `(${list.length})`;
+    const list = (S.vendors||[]).slice().sort((a,b)=>{
+      const ax=a.archived?1:0, bx=b.archived?1:0;
+      return ax-bx || (a.name||'').localeCompare(b.name||'');
+    });
+    const activeCount = list.filter(v=>!v.archived).length;
+    const archivedCount = list.length - activeCount;
+    venCount.textContent = archivedCount>0 ? `(${activeCount} đang dùng · ${archivedCount} đã đóng)` : `(${list.length})`;
     if(!list.length){
       venTbl.innerHTML = '<tr><td class="empty">Chưa có NCC — tự tạo khi nhập AR/AP, hoặc bấm "+ Thêm"</td></tr>';
     } else {
-      let h = '<thead><tr><th>Tên</th><th>Mã số thuế</th><th>Liên hệ</th><th class="r">Số AR/AP</th>';
-      if(adminMode) h += '<th></th>';
+      const canArchive = canArchiveItem();
+      let h = '<thead><tr><th>Tên</th><th>Mã số thuế</th><th>Liên hệ</th><th class="r">Số AR/AP</th><th>Trạng thái</th>';
+      if(adminMode || canArchive) h += '<th></th>';
       h += '</tr></thead><tbody>';
       list.forEach(v => {
         const arCount = (S.receivables||[]).filter(r => r.vendorId===v.id).length;
         const apCount = (S.payables||[]).filter(r => r.vendorId===v.id).length;
-        h += `<tr>
+        const statusChip = v.archived
+          ? `<span class="chip" style="background:#a8362b;color:#fff;font-size:10px" title="Đã đóng">⊘ ĐÃ ĐÓNG</span>`
+          : `<span class="chip chip-good" style="font-size:10px">✓ ACTIVE</span>`;
+        const archiveBtn = canArchive
+          ? (v.archived
+              ? `<button class="icon-btn" title="Mở lại NCC" onclick="toggleArchiveVendor('${v.id}')" style="color:var(--good)">↺</button>`
+              : `<button class="icon-btn" title="Đóng NCC — ẩn khỏi gợi ý" onclick="toggleArchiveVendor('${v.id}')" style="color:var(--warn)">⊘</button>`)
+          : '';
+        h += `<tr style="${v.archived?'opacity:0.55;background:rgba(168,54,43,.04)':''}">
           <td><b>${esc(v.name)}</b>${v.code?` <span class="chip" style="font-size:9px">${esc(v.code)}</span>`:''}</td>
           <td class="mono" style="font-size:11px">${esc(v.taxCode||'—')}</td>
           <td style="font-size:11px">${esc(v.contact||'—')}</td>
           <td class="r mono" style="font-size:11px">${arCount}AR / ${apCount}AP</td>
-          ${adminMode?`<td><div class="row-actions">
-            <button class="icon-btn" title="Sửa" onclick="editVendor('${v.id}')">✎</button>
-            <button class="icon-btn danger" title="Xóa" onclick="deleteVendor('${v.id}')">✕</button>
+          <td>${statusChip}</td>
+          ${(adminMode || canArchive)?`<td><div class="row-actions">
+            ${archiveBtn}
+            ${adminMode?`<button class="icon-btn" title="Sửa" onclick="editVendor('${v.id}')">✎</button>
+            <button class="icon-btn danger" title="Xóa" onclick="deleteVendor('${v.id}')">✕</button>`:''}
           </div></td>`:''}
         </tr>`;
       });
@@ -6920,6 +6999,52 @@ function deleteVendor(id){
   S.vendors = S.vendors.filter(x=>x.id!==id);
   saveState();
   toast('Đã xóa NCC');
+  renderCatalog();
+}
+
+/* v1.42.0: Toggle archive for master data items.
+   Admin + BOD + sub-admin (canManageUsers) only. */
+function toggleArchiveProject(id){
+  if(!canArchiveItem()){toast('Chỉ admin / BOD / Kế toán trưởng được đóng dự án','bad');return;}
+  const p = (S.projects||[]).find(x=>x.id===id);
+  if(!p) return;
+  const newState = !p.archived;
+  const verb = newState ? 'đánh dấu HOÀN THÀNH (ẩn khỏi dropdown nhập mới)' : 'MỞ LẠI';
+  if(!confirm(`${verb} dự án "${p.name}"?\n\n${newState ? 'Dự án sẽ không hiện trong dropdown khi NV nhập bút toán mới (AR, AP, Plan...). Bút toán cũ đã gắn vẫn giữ.' : 'Dự án sẽ xuất hiện lại trong dropdown để NV nhập bút toán mới.'}`)) return;
+  toggleArchive(p, newState);
+  try{ logAuditEvent('archive_project', {projectId:id, projectName:p.name, archived:newState}); }catch(e){}
+  saveState();
+  toast(newState ? `✓ Đã đóng dự án "${p.name}"` : `✓ Đã mở lại dự án "${p.name}"`, 'good');
+  renderCatalog();
+  // Refresh dropdowns
+  try{ fillProjectPicker(); fillVesselExpensePickers(); }catch(e){}
+}
+
+function toggleArchiveVessel(id){
+  if(!canArchiveItem()){toast('Chỉ admin / BOD / Kế toán trưởng được đóng tàu','bad');return;}
+  const v = (S.vessels||[]).find(x=>x.id===id);
+  if(!v) return;
+  const newState = !v.archived;
+  const verb = newState ? 'đánh dấu ĐÃ ĐÓNG (tàu đã bán/ngừng — ẩn khỏi dropdown nhập mới)' : 'MỞ LẠI';
+  if(!confirm(`${verb} tàu "${v.name}"?\n\n${newState ? 'Tàu sẽ không hiện trong dropdown khi NV nhập bút toán mới. Lịch sử bút toán đã gắn vẫn giữ.' : 'Tàu sẽ xuất hiện lại trong dropdown.'}`)) return;
+  toggleArchive(v, newState);
+  try{ logAuditEvent('archive_vessel', {vesselId:id, vesselName:v.name, archived:newState}); }catch(e){}
+  saveState();
+  toast(newState ? `✓ Đã đóng tàu "${v.name}"` : `✓ Đã mở lại tàu "${v.name}"`, 'good');
+  renderCatalog();
+  try{ fillVesselPicker(); fillToolVesselPicker(); fillVesselExpensePickers(); }catch(e){}
+}
+
+function toggleArchiveVendor(id){
+  if(!canArchiveItem()){toast('Chỉ admin / BOD / Kế toán trưởng được đóng NCC','bad');return;}
+  const v = (S.vendors||[]).find(x=>x.id===id);
+  if(!v) return;
+  const newState = !v.archived;
+  if(!confirm(`${newState ? 'Đóng (archive)' : 'Mở lại'} NCC "${v.name}"?\n\n${newState ? 'NCC sẽ không xuất hiện trong gợi ý auto-complete khi nhập AR/AP mới.' : 'NCC sẽ xuất hiện lại trong gợi ý.'}`)) return;
+  toggleArchive(v, newState);
+  try{ logAuditEvent('archive_vendor', {vendorId:id, vendorName:v.name, archived:newState}); }catch(e){}
+  saveState();
+  toast(newState ? `✓ Đã đóng NCC "${v.name}"` : `✓ Đã mở lại NCC "${v.name}"`, 'good');
   renderCatalog();
 }
 
@@ -8082,16 +8207,18 @@ function fillProjectPicker(){
   const sel=document.getElementById('tx-project');
   if(!sel) return;
   const cur=sel.value;
+  // v1.42.0: active only for new entry
   sel.innerHTML='<option value="">— Không gắn dự án —</option>'+
-    S.projects.map(p=>`<option value="${p.id}">${esc(p.code)} · ${esc(p.name)} [${SEGMENTS[p.segment].short}]</option>`).join('');
+    activeOnly(S.projects).map(p=>`<option value="${p.id}">${esc(p.code)} · ${esc(p.name)} [${SEGMENTS[p.segment].short}]</option>`).join('');
   sel.value=cur;
 }
 function fillProjectVesselPicker(){
   const sel=document.getElementById('prj-vessel');
   if(!sel) return;
   const cur=sel.value;
+  // v1.42.0: active only
   sel.innerHTML='<option value="">— Không gắn —</option>'+
-    S.vessels.map(v=>`<option value="${v.id}">${esc(v.name)} (${v.type==='SERVICE'?'DV':'KT'})</option>`).join('');
+    activeOnly(S.vessels).map(v=>`<option value="${v.id}">${esc(v.name)} (${v.type==='SERVICE'?'DV':'KT'})</option>`).join('');
   sel.value=cur;
 }
 
@@ -8138,7 +8265,8 @@ function fillVesselPicker(){
   const sel=document.getElementById('oh-vessel');
   if(!sel)return;
   const cur=sel.value;
-  sel.innerHTML=S.vessels.map(v=>`<option value="${v.id}">${esc(v.name)} (${v.type==='SERVICE'?'DV':'KT'})</option>`).join('');
+  // v1.42.0: active only — onhire is new entry form
+  sel.innerHTML=activeOnly(S.vessels).map(v=>`<option value="${v.id}">${esc(v.name)} (${v.type==='SERVICE'?'DV':'KT'})</option>`).join('');
   sel.value=cur;
 }
 function renderVessels(){
@@ -9896,8 +10024,9 @@ function fillToolVesselPicker(){
   const sel=document.getElementById('tl-vessel');
   if(!sel) return;
   const cur=sel.value;
+  // v1.42.0: active only
   sel.innerHTML='<option value="">— Chưa gán tàu —</option>'+
-    S.vessels.map(v=>`<option value="${v.id}">${esc(v.name)} (${v.type==='SERVICE'?'DV':'KT'})</option>`).join('');
+    activeOnly(S.vessels).map(v=>`<option value="${v.id}">${esc(v.name)} (${v.type==='SERVICE'?'DV':'KT'})</option>`).join('');
   if(cur && S.vessels.find(v=>v.id===cur)) sel.value=cur;
   updateTlVesselVisibility();
 }
@@ -10149,8 +10278,9 @@ function updateVexCategoryByEntity(){
 function fillVesselExpensePickers(){
   const allowedVessels=userAssignedVesselIds();
   const allowedProjects=userAssignedProjectIds();
-  const myVessels=S.vessels.filter(v=>allowedVessels.includes(v.id));
-  const myProjects=S.projects.filter(p=>p.isOM && allowedProjects.includes(p.id));
+  // v1.42.0: active only (NOT archived) for new entry
+  const myVessels=S.vessels.filter(v=>allowedVessels.includes(v.id) && !v.archived);
+  const myProjects=S.projects.filter(p=>p.isOM && allowedProjects.includes(p.id) && !p.archived);
   // Entity dropdown: VESSEL:id or PROJECT:id encoded as option value
   const vexEntity=document.getElementById('vex-entity');
   if(vexEntity){
@@ -12591,7 +12721,7 @@ function _arEditorBody(r,isPayable){
     <div class="form-grid">
       <div class="field"><label>${isPayable?'Nhà cung cấp':'Khách hàng'} *</label>
         <input type="text" id="ar-partner" list="ar-partner-suggestions" value="${(r.partner||'').replace(/"/g,'&quot;')}" placeholder="${isPayable?'VD: Cảng PTSC Vũng Tàu':'VD: PVEP, JVPC, Pertamina...'}" ${lockedAttr} oninput="arPartnerCheck(this)">
-        <datalist id="ar-partner-suggestions">${(S.vendors||[]).slice(0,200).map(v=>`<option value="${esc(v.name)}">${esc(v.normalized)}</option>`).join('')}</datalist>
+        <datalist id="ar-partner-suggestions">${activeOnly(S.vendors||[]).slice(0,200).map(v=>`<option value="${esc(v.name)}">${esc(v.normalized)}</option>`).join('')}</datalist>
         <div id="ar-partner-hint" style="font-size:11px;color:var(--muted);margin-top:4px"></div>
       </div>
       <div class="field" style="grid-column:span 2"><label>Diễn giải</label><input type="text" id="ar-desc" value="${(r.desc||'').replace(/"/g,'&quot;')}" placeholder="Nội dung — VD: Cước thuê tàu T5/2026" ${lockedAttr}></div>
@@ -12829,7 +12959,7 @@ function _renderMultiRowModal(){
         <input type="text" id="mr-partner" list="mr-partner-suggestions" value="${esc(s.partner)}"
           placeholder="${isPayable?'VD: Cảng PTSC Vũng Tàu':'VD: PVEP, JVPC...'}"
           oninput="_mrPartnerInput(this.value)">
-        <datalist id="mr-partner-suggestions">${(S.vendors||[]).slice(0,200).map(v=>`<option value="${esc(v.name)}">${esc(v.normalized)}</option>`).join('')}</datalist>
+        <datalist id="mr-partner-suggestions">${activeOnly(S.vendors||[]).slice(0,200).map(v=>`<option value="${esc(v.name)}">${esc(v.normalized)}</option>`).join('')}</datalist></datalist>
         <div id="mr-partner-hint" style="font-size:10px;color:var(--muted);margin-top:2px"></div>
       </div>
       <div class="field" style="margin:8px 0 0 0">
@@ -13528,7 +13658,8 @@ function fillOpVesselPicker(){
   const cur=sel.value;
   // Only allow tàu QL hộ NV được gán
   const allowedIds=userAssignedOpVesselIds();
-  const visible=S.opVessels.filter(v=>allowedIds.includes(v.id));
+  // v1.42.0: active only (NOT archived) for new entry
+  const visible=S.opVessels.filter(v=>allowedIds.includes(v.id) && !v.archived);
   sel.innerHTML=visible.map(v=>`<option value="${v.id}">${esc(v.name)} · ${esc(v.owner) || ''}</option>`).join('');
   if(cur && visible.find(v=>v.id===cur)) sel.value=cur;
 }
