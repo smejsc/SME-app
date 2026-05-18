@@ -534,15 +534,15 @@ body{min-height:100vh;background-image:radial-gradient(circle at 20% 0%,rgba(184
       <button class="btn btn-ghost" onclick="toggleAdminMenu(event)" id="admin-menu-btn" style="border:1px solid rgba(246,241,232,.4)">≡ Menu</button>
       <div class="menu-pop" id="admin-menu-pop">
         <button onclick="closeAdminMenu();openSettings()"><span class="ico">⚙</span>Cài đặt &amp; Phân quyền</button>
-        <button onclick="closeAdminMenu();seedDemo()"><span class="ico">▤</span>Nạp Demo Data</button>
-        <div class="divider"></div>
-        <button onclick="closeAdminMenu();openExcelImport()"><span class="ico">📥</span>Import Excel hàng loạt</button>
-        <button onclick="closeAdminMenu();openExcelExport()"><span class="ico">📤</span>Export Excel để đối chiếu FAST</button>
-        <div class="divider"></div>
-        <button onclick="closeAdminMenu();exportJSON()"><span class="ico">⤓</span>Export backup (.json)</button>
-        <button onclick="closeAdminMenu();document.getElementById('importFile').click()"><span class="ico">⤒</span>Import backup (.json)</button>
-        <div class="divider"></div>
-        <button class="danger" onclick="closeAdminMenu();clearAllData()"><span class="ico">✕</span>Xóa toàn bộ dữ liệu</button>
+        <button class="admin-only-item" onclick="closeAdminMenu();seedDemo()"><span class="ico">▤</span>Nạp Demo Data</button>
+        <div class="divider admin-only-item"></div>
+        <button class="admin-only-item" onclick="closeAdminMenu();openExcelImport()"><span class="ico">📥</span>Import Excel hàng loạt</button>
+        <button class="admin-only-item" onclick="closeAdminMenu();openExcelExport()"><span class="ico">📤</span>Export Excel để đối chiếu FAST</button>
+        <div class="divider admin-only-item"></div>
+        <button class="admin-only-item" onclick="closeAdminMenu();exportJSON()"><span class="ico">⤓</span>Export backup (.json)</button>
+        <button class="admin-only-item" onclick="closeAdminMenu();document.getElementById('importFile').click()"><span class="ico">⤒</span>Import backup (.json)</button>
+        <div class="divider admin-only-item"></div>
+        <button class="danger admin-only-item" onclick="closeAdminMenu();clearAllData()"><span class="ico">✕</span>Xóa toàn bộ dữ liệu</button>
       </div>
     </div>
   </div>
@@ -2056,7 +2056,7 @@ body{min-height:100vh;background-image:radial-gradient(circle at 20% 0%,rgba(184
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='1.39.3';            // bumped on each release
+const APP_VERSION='1.40.0';            // bumped on each release
 
 /* ============================================================
    PWA — Service Worker registration + Install prompt
@@ -2336,13 +2336,32 @@ function buildCfgToSync(localCfg){
 /* Push cfg to cloud (admin only).
    Optionally pass userWraps={name → plaintextPw} to wrap additional users.
    If admin push first time → only admin gets wrap. NV will self-wrap on next login. */
+/* Push cfg to cloud — admin OR sub-admin (canManageUsers).
+   - Admin: verifies adminPassword against cfg.admin
+   - Sub-admin: verifies adminPassword against their own user record (used to unwrap master key)
+   Optionally pass userWraps={name → plaintextPw} to wrap additional users.
+*/
 async function pushCfgToCloud(adminPassword, extraUserPasswords){
   const cfg=getAuthConfig();
   if(!cfg||!cfg.scriptUrl) throw new Error('Chưa cấu hình Apps Script URL');
-  if(!adminPassword) throw new Error('Cần mật khẩu admin');
-  // Verify admin password
-  const hashTest=await sha256Hex(adminPassword + cfg.admin.salt);
-  if(hashTest !== cfg.admin.hash) throw new Error('Mật khẩu admin không đúng');
+  if(!adminPassword) throw new Error('Cần mật khẩu');
+  // v1.40.0: Verify password — admin uses cfg.admin, sub-admin uses their own user record
+  let isPushingAsAdmin = false;
+  let pusherName = 'admin';
+  if(isAdmin()){
+    const hashTest=await sha256Hex(adminPassword + cfg.admin.salt);
+    if(hashTest !== cfg.admin.hash) throw new Error('Mật khẩu admin không đúng');
+    isPushingAsAdmin = true;
+  } else if(CURRENT_USER && CURRENT_USER.canManageUsers){
+    // Sub-admin: verify own password against user record
+    const userRec = (cfg.users||[]).find(u => u.name === CURRENT_USER.name);
+    if(!userRec) throw new Error('Không tìm thấy user record của bạn');
+    const hashTest = await sha256Hex(adminPassword + userRec.salt);
+    if(hashTest !== userRec.hash) throw new Error('Mật khẩu của bạn không đúng');
+    pusherName = userRec.name;
+  } else {
+    throw new Error('Bạn không có quyền đẩy auth lên cloud');
+  }
 
   // Try to preserve existing wraps from cloud (for NV who self-wrapped)
   let existingWraps=[];
@@ -2351,24 +2370,39 @@ async function pushCfgToCloud(adminPassword, extraUserPasswords){
     const res0=await fetch(cfg.scriptUrl+'?action=load&key=auth', {method:'GET'});
     const data0=await res0.json();
     if(data0.ok && data0.payload && data0.payload.v===2 && Array.isArray(data0.payload.wraps)){
-      // Try to unwrap with admin password to recover master key
-      const adminWrap=data0.payload.wraps.find(w=>w.name==='admin');
-      if(adminWrap){
+      // Find wrap to use: admin if admin pushing, else current user's wrap
+      const myWrap = data0.payload.wraps.find(w => w.name === pusherName);
+      if(myWrap){
         try{
-          existingMasterKey=await unwrapCfgMasterKey(adminWrap, adminPassword);
+          existingMasterKey=await unwrapCfgMasterKey(myWrap, adminPassword);
           existingWraps=data0.payload.wraps;
         }catch(e){
-          // Admin password changed → generate fresh master key
+          // Password changed → can't unwrap existing master key
+          if(!isPushingAsAdmin){
+            // Sub-admin CANNOT generate new master key (would invalidate admin wrap)
+            throw new Error('Mật khẩu của bạn đã thay đổi trên cloud — nhờ admin push lại trước');
+          }
           existingMasterKey=null;
           existingWraps=[];
         }
+      } else if(!isPushingAsAdmin){
+        // Sub-admin has no wrap on cloud → can't push
+        throw new Error('Bạn chưa có wrap trên cloud — nhờ admin push cfg lần đầu trước');
       }
     }
   }catch(e){
-    // No existing cfg → fresh
+    // If sub-admin: propagate the error (they can't init from scratch)
+    if(!isPushingAsAdmin && e.message && (e.message.includes('chưa có wrap') || e.message.includes('mật khẩu của bạn đã'))){
+      throw e;
+    }
+    // Admin: no existing cfg → fresh
   }
 
   // Use existing master key if available (to preserve NV wraps), else generate new
+  // v1.40.0: Sub-admin CANNOT generate new master key (would orphan admin wrap)
+  if(!existingMasterKey && !isPushingAsAdmin){
+    throw new Error('Sub-admin không thể khởi tạo master key mới — nhờ admin push lần đầu trước');
+  }
   const masterKey = existingMasterKey || await generateCfgMasterKey();
 
   // Re-encrypt cfg with master key (cfg may have changed)
@@ -2378,20 +2412,27 @@ async function pushCfgToCloud(adminPassword, extraUserPasswords){
   // Rebuild wraps
   let wraps=[];
   if(existingMasterKey){
-    // Keep existing wraps (NV wraps preserved)
+    // Keep existing wraps (preserve everyone)
     wraps=[...existingWraps];
-    // Update/add admin wrap
-    wraps=wraps.filter(w=>w.name!=='admin');
   }
-  // Admin wrap always (re-wrap fresh in case anything changed)
-  const adminWrap=await wrapCfgMasterKey(masterKey, adminPassword);
-  adminWrap.name='admin';
-  wraps.push(adminWrap);
+  // v1.40.0: Only ADMIN can update admin wrap (sub-admin preserves it as-is)
+  if(isPushingAsAdmin){
+    wraps=wraps.filter(w=>w.name!=='admin');
+    const adminWrap=await wrapCfgMasterKey(masterKey, adminPassword);
+    adminWrap.name='admin';
+    wraps.push(adminWrap);
+  }
+  // else: sub-admin keeps the existing admin wrap untouched
 
   // Additional user wraps from extraUserPasswords {name → pw}
   if(extraUserPasswords){
     for(const [name, pw] of Object.entries(extraUserPasswords)){
       if(!pw) continue;
+      // v1.40.0: sub-admin CANNOT wrap admin even via extraUserPasswords
+      if(!isPushingAsAdmin && name.toLowerCase()==='admin'){
+        console.warn('[push] Sub-admin attempted to wrap admin password — blocked');
+        continue;
+      }
       wraps=wraps.filter(w=>w.name.toLowerCase()!==name.toLowerCase());
       const wrap=await wrapCfgMasterKey(masterKey, pw);
       wrap.name=name;
@@ -2524,10 +2565,12 @@ async function selfWrapInCloudCfg(userName, password){
 /* UI: Dialog to push cfg auth to cloud (admin enters password to confirm).
    Optionally provide bulk NV passwords. */
 function openCfgSyncDialog(){
-  if(!isAdmin()){toast('Chỉ admin được sync auth','bad');return;}
+  if(!isAdmin() && !canManageUsers()){toast('Bạn không có quyền sync auth','bad');return;}
   const cfg=getAuthConfig();
   if(!cfg||!cfg.scriptUrl){toast('Cấu hình Apps Script URL trước (ở mục bên trên)','bad');return;}
   const userCount=(cfg.users||[]).length;
+  const subAdminMode = !isAdmin();
+  const pusherLabel = subAdminMode ? (CURRENT_USER && CURRENT_USER.name) : 'admin';
   const userListHtml=(cfg.users||[]).map(u=>`
     <div style="display:flex;gap:8px;align-items:center;padding:6px 0;border-bottom:1px solid var(--rule)">
       <span style="flex:1;font-weight:600;font-size:12px">${esc(u.name)}</span>
@@ -2537,6 +2580,11 @@ function openCfgSyncDialog(){
   `).join('');
   const body=`
     <div style="font-size:13px;line-height:1.5;margin-bottom:14px">
+      ${subAdminMode ? `
+        <div style="padding:10px 12px;background:rgba(74,107,44,.08);border-left:3px solid #4a6b2c;margin-bottom:10px;font-size:12px">
+          <b>🛡 Chế độ Sub-admin</b> — Bạn (${esc(pusherLabel)}) sẽ dùng <b>mật khẩu của chính bạn</b> để wrap. Wrap admin trên cloud KHÔNG bị ảnh hưởng.
+        </div>
+      ` : ''}
       <p>Đẩy <b>cấu hình auth</b> (admin + ${userCount} nhân viên) lên Google Sheet.</p>
       <p style="color:var(--muted);font-size:11px">
         <b>An toàn:</b> dùng mô hình <b>wrap key</b> — master key ngẫu nhiên được mã hóa riêng cho TỪNG password (admin + mỗi NV).
@@ -2549,8 +2597,8 @@ function openCfgSyncDialog(){
     </div>
     <div class="form-grid" style="grid-template-columns:1fr">
       <div class="field">
-        <label>Mật khẩu admin (bắt buộc) *</label>
-        <input type="password" id="cfg-sync-pw" placeholder="Nhập mật khẩu admin của bạn">
+        <label>${subAdminMode ? 'Mật khẩu của bạn ('+esc(pusherLabel)+') *' : 'Mật khẩu admin (bắt buộc) *'}</label>
+        <input type="password" id="cfg-sync-pw" placeholder="${subAdminMode ? 'Nhập mật khẩu đăng nhập của bạn' : 'Nhập mật khẩu admin của bạn'}">
       </div>
       ${userCount>0?`
         <div class="field">
@@ -2572,10 +2620,21 @@ async function _doCfgSyncPush(){
   const err=document.getElementById('cfg-sync-err');
   err.textContent='';
   const pw=document.getElementById('cfg-sync-pw').value;
-  if(!pw){err.textContent='Nhập mật khẩu admin';return;}
+  if(!pw){err.textContent='Nhập mật khẩu';return;}
   const cfg=getAuthConfig();
-  const hashTest=await sha256Hex(pw + cfg.admin.salt);
-  if(hashTest !== cfg.admin.hash){err.textContent='Mật khẩu admin không đúng';return;}
+  // v1.40.0: Verify based on role
+  if(isAdmin()){
+    const hashTest=await sha256Hex(pw + cfg.admin.salt);
+    if(hashTest !== cfg.admin.hash){err.textContent='Mật khẩu admin không đúng';return;}
+  } else if(canManageUsers()){
+    // Sub-admin: verify own password
+    const userRec = (cfg.users||[]).find(u => u.name === CURRENT_USER.name);
+    if(!userRec){err.textContent='Không tìm thấy user record của bạn';return;}
+    const hashTest = await sha256Hex(pw + userRec.salt);
+    if(hashTest !== userRec.hash){err.textContent='Mật khẩu của bạn không đúng';return;}
+  } else {
+    err.textContent='Bạn không có quyền';return;
+  }
 
   // Collect NV passwords
   const extraUserPasswords={};
@@ -3070,7 +3129,12 @@ function filterStateForUser(rawState){
 function openSettings(){
   const cfg=getAuthConfig();
   if(!cfg){toast('Chưa đăng nhập','bad');return;}
-  if(!isAdmin()){toast('Chỉ admin truy cập được cài đặt','bad');return;}
+  // v1.40.0: Allow admin OR users with canManageUsers flag (restricted view)
+  if(!isAdmin() && !canManageUsers()){
+    toast('Bạn không có quyền truy cập cài đặt','bad');
+    return;
+  }
+  const restrictedMode = !isAdmin();  // true if NV with canManageUsers (NOT admin)
   // v1.32.2 defensive: ensure default types always present whenever Settings is opened
   try{ migrateExpenseTypes(); }catch(e){console.warn('migrate ET failed:',e);}
   try{ migrateRevenueTypes(); }catch(e){console.warn('migrate RT failed:',e);}
@@ -3083,7 +3147,7 @@ function openSettings(){
         const d=(S.departments||[]).find(x=>x.id===u.departmentId);
         if(!d) return '';
         return ` <span class="chip" style="font-size:9px;margin-left:4px;background:#2a5a8c;color:#fff" title="${esc(d.name)}">🏢 ${esc(d.code)}</span>`;
-      })()}${u.isBOD?' <span class="chip" style="font-size:9px;margin-left:4px;background:#8b3a2a;color:#fff" title="Là BOD — xem được bút toán nội bộ">🔒 BOD</span>':''}${u.isViewer?' <span class="chip" style="font-size:9px;margin-left:4px;background:#b8472e;color:#fff" title="Viewer — chỉ đọc báo cáo">👁 VIEWER</span>':''}${u.canConfirmPayment?' <span class="chip chip-warn" style="font-size:9px;margin-left:4px" title="Có quyền xác nhận TT (Vận hành tàu)">XÁC NHẬN TT</span>':''}${u.canCheckAcc?' <span class="chip" style="font-size:9px;margin-left:4px;background:#5a4a8c;color:#fff" title="KT viên kiểm hồ sơ (Gatekeeper)">📝 KT KIỂM</span>':''}${u.canApproveL1?' <span class="chip" style="font-size:9px;margin-left:4px;background:#c5876d;color:#fff" title="Phê duyệt cấp 1">DUYỆT L1</span>':''}${u.canApproveL2?' <span class="chip" style="font-size:9px;margin-left:4px;background:#8b3a2a;color:#fff" title="Phê duyệt cấp 2">DUYỆT L2</span>':''}${(u.assignedVesselIds||[]).length>0?` <span class="chip" style="font-size:9px;margin-left:4px;background:#1c3a5c;color:#fff" title="Tàu: ${esc((u.assignedVesselIds||[]).map(id=>{const v=S.vessels.find(x=>x.id===id);return v?v.name:'?';}).join(', '))}">⛵ ${(u.assignedVesselIds||[]).length}</span>`:''}${(u.assignedProjectIds||[]).length>0?` <span class="chip" style="font-size:9px;margin-left:4px;background:#4a6b2c;color:#fff" title="Dự án O&M: ${esc((u.assignedProjectIds||[]).map(id=>{const p=S.projects.find(x=>x.id===id);return p?p.code:'?';}).join(', '))}">⚙ ${(u.assignedProjectIds||[]).length}</span>`:''}${(u.assignedOpVesselIds||[]).length>0?` <span class="chip" style="font-size:9px;margin-left:4px;background:#5a4a8c;color:#fff" title="Tàu QL hộ: ${esc((u.assignedOpVesselIds||[]).map(id=>{const v=S.opVessels.find(x=>x.id===id);return v?v.name:'?';}).join(', '))}">🚢 ${(u.assignedOpVesselIds||[]).length}</span>`:''}</td>
+      })()}${u.isBOD?' <span class="chip" style="font-size:9px;margin-left:4px;background:#8b3a2a;color:#fff" title="Là BOD — xem được bút toán nội bộ">🔒 BOD</span>':''}${u.canManageUsers?' <span class="chip" style="font-size:9px;margin-left:4px;background:#4a6b2c;color:#fff" title="Có quyền quản lý NV (Sub-admin)">🛡 QL NV</span>':''}${u.isViewer?' <span class="chip" style="font-size:9px;margin-left:4px;background:#b8472e;color:#fff" title="Viewer — chỉ đọc báo cáo">👁 VIEWER</span>':''}${u.canConfirmPayment?' <span class="chip chip-warn" style="font-size:9px;margin-left:4px" title="Có quyền xác nhận TT (Vận hành tàu)">XÁC NHẬN TT</span>':''}${u.canCheckAcc?' <span class="chip" style="font-size:9px;margin-left:4px;background:#5a4a8c;color:#fff" title="KT viên kiểm hồ sơ (Gatekeeper)">📝 KT KIỂM</span>':''}${u.canApproveL1?' <span class="chip" style="font-size:9px;margin-left:4px;background:#c5876d;color:#fff" title="Phê duyệt cấp 1">DUYỆT L1</span>':''}${u.canApproveL2?' <span class="chip" style="font-size:9px;margin-left:4px;background:#8b3a2a;color:#fff" title="Phê duyệt cấp 2">DUYỆT L2</span>':''}${(u.assignedVesselIds||[]).length>0?` <span class="chip" style="font-size:9px;margin-left:4px;background:#1c3a5c;color:#fff" title="Tàu: ${esc((u.assignedVesselIds||[]).map(id=>{const v=S.vessels.find(x=>x.id===id);return v?v.name:'?';}).join(', '))}">⛵ ${(u.assignedVesselIds||[]).length}</span>`:''}${(u.assignedProjectIds||[]).length>0?` <span class="chip" style="font-size:9px;margin-left:4px;background:#4a6b2c;color:#fff" title="Dự án O&M: ${esc((u.assignedProjectIds||[]).map(id=>{const p=S.projects.find(x=>x.id===id);return p?p.code:'?';}).join(', '))}">⚙ ${(u.assignedProjectIds||[]).length}</span>`:''}${(u.assignedOpVesselIds||[]).length>0?` <span class="chip" style="font-size:9px;margin-left:4px;background:#5a4a8c;color:#fff" title="Tàu QL hộ: ${esc((u.assignedOpVesselIds||[]).map(id=>{const v=S.opVessels.find(x=>x.id===id);return v?v.name:'?';}).join(', '))}">🚢 ${(u.assignedOpVesselIds||[]).length}</span>`:''}</td>
       <td style="font-family:var(--font-mono);font-size:11px;color:var(--muted)">${(u.tabs||[]).length} tab</td>
       <td>${(u.tabs||[]).map(t=>{const T=ALL_TABS.find(x=>x.id===t);return T?`<span class="chip chip-5" style="margin-right:3px">${T.label}</span>`:'';}).join(' ')}</td>
       <td style="white-space:nowrap"><div class="row-actions">
@@ -3094,16 +3158,24 @@ function openSettings(){
     </tr>
   `).join('');
   const body=`
+    ${restrictedMode ? `
+      <div style="padding:10px 14px;background:rgba(184,71,46,.08);border-left:3px solid var(--accent);margin-bottom:12px;font-size:12px">
+        <b>🛡 Chế độ phân quyền giới hạn</b> — Bạn (${esc(CURRENT_USER&&CURRENT_USER.name||'NV')}) được cấp quyền <b>Quản lý nhân viên</b>. Các cài đặt kỹ thuật + thông tin nhạy cảm chỉ admin truy cập.
+      </div>
+    ` : ''}
     <div class="form-grid" style="grid-template-columns:1fr">
+      ${restrictedMode ? '' : `
       <div class="field">
         <label>Apps Script URL</label>
         <input type="text" id="set-script-url" value="${(cfg.scriptUrl||'').replace(/"/g,'&quot;')}" placeholder="https://script.google.com/macros/s/.../exec">
       </div>
+      `}
       <div class="field">
         <label>Đồng bộ auth lên cloud <span style="text-transform:none;font-weight:400;color:var(--muted)">(để đăng nhập từ máy khác)</span></label>
         <div style="font-size:11px;color:var(--muted);font-style:italic;margin-bottom:6px">
-          Khi sync, cfg auth (admin + nhân viên + URL) sẽ được <b>mã hóa bằng mật khẩu admin</b> rồi đẩy lên Google Sheet.
-          Máy mới muốn truy cập: nhập URL + mật khẩu admin để pull về.
+          ${restrictedMode
+            ? 'Đẩy auth lên cloud để các NV mới có thể pull cfg + đăng nhập từ máy khác. <br><br><b>Lưu ý:</b> với quyền hạn của bạn, hệ thống sẽ KHÔNG sửa wrap admin.'
+            : 'Khi sync, cfg auth (admin + nhân viên + URL) sẽ được <b>mã hóa bằng mật khẩu admin</b> rồi đẩy lên Google Sheet. Máy mới muốn truy cập: nhập URL + mật khẩu admin để pull về.'}
           ${cfg.lastCfgSync?'<br><br><b>Lần đồng bộ auth gần nhất:</b> '+new Date(cfg.lastCfgSync).toLocaleString('vi-VN')+' ('+timeAgo(cfg.lastCfgSync)+')':'<br><br><span style="color:var(--warn)">⚠ Chưa từng sync auth — máy khác chưa truy cập được</span>'}
         </div>
         <button class="btn-sec" onclick="openCfgSyncDialog()" style="font-size:11px">🔐 Đẩy auth lên cloud</button>
@@ -3112,6 +3184,7 @@ function openSettings(){
         <label>Lần sync data gần nhất</label>
         <div style="font-family:var(--font-mono);font-size:12px;color:var(--muted);padding:6px 0">${cfg.lastSync?new Date(cfg.lastSync).toLocaleString('vi-VN')+' ('+timeAgo(cfg.lastSync)+')':'Chưa sync lần nào'}</div>
       </div>
+      ${restrictedMode ? '' : `
       <div class="field">
         <label>Tự động đăng xuất khi không hoạt động</label>
         <select id="set-idle-logout" style="padding:6px 10px;border:1px solid var(--rule);background:var(--paper);font-size:12px">
@@ -3202,13 +3275,14 @@ function openSettings(){
         <label>Nhập lại</label>
         <input type="password" id="set-pw-new2" placeholder="">
       </div>
+      `}
 
       <hr style="border:none;border-top:1px solid var(--rule);margin:8px 0">
       <div style="display:flex;justify-content:space-between;align-items:center">
         <div style="font-family:var(--font-display);font-size:15px;font-weight:600">Quản lý nhân viên</div>
         <button class="btn-sec" onclick="addUser()">+ Thêm nhân viên</button>
       </div>
-      <div style="font-size:11px;color:var(--muted);font-style:italic;margin-bottom:8px">Mỗi nhân viên có mật khẩu riêng và danh sách tab được phép. Họ chỉ thấy các tab Cường tick.</div>
+      <div style="font-size:11px;color:var(--muted);font-style:italic;margin-bottom:8px">Mỗi nhân viên có mật khẩu riêng và danh sách tab được phép. Họ chỉ thấy các tab được tick.${restrictedMode?'<br><br><b>⚠ Lưu ý:</b> Bạn KHÔNG thể tạo/sửa NV với các cờ quyền cao (canApproveL2, canManageUsers, isBOD) — chỉ admin được làm.':''}</div>
       <table class="tbl" style="font-size:12px">
         <thead><tr><th>Tên</th><th>Số tab</th><th>Tab được phép</th><th></th></tr></thead>
         <tbody>${userListHtml||'<tr><td colspan="4" class="empty">Chưa có nhân viên — bấm "+ Thêm nhân viên"</td></tr>'}</tbody>
@@ -3217,9 +3291,9 @@ function openSettings(){
       <div id="set-err" style="font-size:12px;color:var(--bad);min-height:14px;font-family:var(--font-mono);margin-top:8px"></div>
     </div>`;
   const foot=`<button class="btn-sec" onclick="closeModal()">Đóng</button>
-              <button class="btn-primary" onclick="saveSettings()">Lưu cài đặt</button>
-              <button class="btn-primary" style="background:var(--bad)" onclick="closeModal();authResetPrompt()">Reset toàn bộ</button>`;
-  openModal('Cài đặt · Quản lý truy cập',body,foot);
+              ${restrictedMode?'':'<button class="btn-primary" onclick="saveSettings()">Lưu cài đặt</button>'}
+              ${restrictedMode?'':'<button class="btn-primary" style="background:var(--bad)" onclick="closeModal();authResetPrompt()">Reset toàn bộ</button>'}`;
+  openModal(restrictedMode ? 'Quản lý nhân viên (NV được phân quyền)' : 'Cài đặt · Quản lý truy cập',body,foot);
 }
 
 async function saveSettings(){
@@ -3473,6 +3547,15 @@ function userEditorModal(initial,idx){
               <div style="font-size:11px;color:var(--muted);font-style:italic;margin-top:2px">NV có cờ này XEM được các bút toán loại "🔒 BOD_ONLY". KHÔNG nhập/sửa/xóa được — chỉ admin (Cường) mới tạo và sửa. Tick cho thành viên Ban Giám đốc / Kế toán trưởng / Cổ đông.</div>
             </div>
           </label>
+          ${isAdmin() ? `
+          <label style="display:flex;align-items:flex-start;gap:8px;padding:6px 0;cursor:pointer;border-top:1px solid var(--rule);background:rgba(74,107,44,.08)">
+            <input type="checkbox" id="user-can-manage-users" ${initial.canManageUsers?'checked':''} style="margin-top:3px">
+            <div>
+              <div><b style="color:#4a6b2c">🛡 Quản lý nhân viên (Sub-admin / HR)</b></div>
+              <div style="font-size:11px;color:var(--muted);font-style:italic;margin-top:2px">NV có cờ này được vào <b>Cài đặt → Quản lý nhân viên</b> để tạo/sửa/xóa NV + đẩy auth lên cloud. <b>KHÔNG thấy</b>: Apps Script URL, mật khẩu admin, công ty info, audit log. <b>KHÔNG tạo được</b>: NV duyệt L2, NV là BOD, NV sub-admin khác. Phù hợp với Kế toán trưởng / HR.</div>
+            </div>
+          </label>
+          ` : ''}
         </div>
       </div>
 
@@ -3545,6 +3628,15 @@ function editUser(idx){
   const cfg=getAuthConfig();
   const u=cfg.users[idx];
   if(!u){toast('Không tìm thấy','bad');return;}
+  // v1.40.0: NV with canManageUsers cannot edit themselves nor edit high-power users
+  if(!isAdmin()){
+    if(CURRENT_USER && u.name===CURRENT_USER.name){
+      toast('Bạn không thể tự sửa chính mình — nhờ admin','bad');return;
+    }
+    if(u.canApproveL2 || u.isBOD || u.canManageUsers){
+      toast('NV này có quyền cao (L2/BOD/QL NV) — chỉ admin sửa được','bad');return;
+    }
+  }
   userEditorModal({
     name:u.name,
     email:u.email||'',
@@ -3560,6 +3652,7 @@ function editUser(idx){
     isViewer:!!u.isViewer,
     departmentId:u.departmentId||'',
     isBOD:!!u.isBOD,
+    canManageUsers:!!u.canManageUsers,  // v1.40.0
     viewerReports:u.viewerReports||[],
     viewerSegments:u.viewerSegments||[],
     viewerVesselIds:u.viewerVesselIds||[],
@@ -3582,6 +3675,40 @@ async function saveUser(idx){
   const canApproveL2=document.getElementById('user-can-approve-l2').checked;
   const isViewer=document.getElementById('user-is-viewer').checked;
   const isBOD=document.getElementById('user-is-bod')?.checked||false;
+  // v1.40.0: canManageUsers — only visible+settable when admin is editing
+  // Preserve existing flag if NV (canManageUsers) editing — they can't change it
+  let canManageUsersFlag;
+  if(isAdmin()){
+    canManageUsersFlag = document.getElementById('user-can-manage-users')?.checked || false;
+  } else {
+    // NV with canManageUsers editing another NV → preserve existing flag, never grant
+    const existing = (idx!==null && cfg.users[idx]) ? cfg.users[idx] : null;
+    canManageUsersFlag = existing ? !!existing.canManageUsers : false;
+  }
+  // v1.40.0: Security constraints — NV with canManageUsers CANNOT create/edit dangerous flags
+  if(!isAdmin()){
+    // Block creating/editing user with high-power flags (only admin can)
+    if(canApproveL2){
+      err.textContent='Bạn không có quyền cấp cờ "Duyệt L2" — chỉ admin';return;
+    }
+    if(isBOD){
+      err.textContent='Bạn không có quyền cấp cờ "BOD" — chỉ admin';return;
+    }
+    if(canManageUsersFlag){
+      err.textContent='Bạn không có quyền cấp cờ "Quản lý NV" — chỉ admin';return;
+    }
+    // Block editing self (avoid privilege escalation/de-escalation)
+    if(idx!==null && cfg.users[idx] && CURRENT_USER && cfg.users[idx].name===CURRENT_USER.name){
+      err.textContent='Bạn không thể tự sửa thông tin/quyền của chính mình — nhờ admin';return;
+    }
+    // Block editing other admin-flag users (BOD, L2, sub-admin)
+    if(idx!==null && cfg.users[idx]){
+      const target=cfg.users[idx];
+      if(target.canApproveL2 || target.isBOD || target.canManageUsers){
+        err.textContent='NV này có quyền cao (L2/BOD/QL NV) — chỉ admin sửa được';return;
+      }
+    }
+  }
   const departmentId=document.getElementById('user-department')?.value||'';
   const assignedVesselIds=Array.from(document.querySelectorAll('input[data-vessel]:checked')).map(c=>c.dataset.vessel);
   const assignedProjectIds=Array.from(document.querySelectorAll('input[data-project]:checked')).map(c=>c.dataset.project);
@@ -3620,6 +3747,7 @@ async function saveUser(idx){
       u.phone=phone;
       u.departmentId=departmentId;
       u.isBOD=isBOD;
+      u.canManageUsers=canManageUsersFlag;  // v1.40.0
       u.isViewer=isViewer;
       u.viewerReports=isViewer?viewerReports:[];
       u.viewerSegments=isViewer?viewerSegments:[];
@@ -3641,6 +3769,7 @@ async function saveUser(idx){
         name, email, phone, salt, hash, wrap, iter:PBKDF2_ITER_NEW,
         mustChangePassword:true,  // Force change on first login
         isBOD,                    // NEW v1.30.2: BOD flag — xem bút toán BOD_ONLY
+        canManageUsers:canManageUsersFlag,  // v1.40.0: sub-admin (HR) flag
         departmentId,
         tabs:finalTabs,
         canConfirmPayment:isViewer?false:canConfirmPayment,
@@ -3778,6 +3907,15 @@ function _showEmailFallback(toEmail, subject, body){
 function deleteUser(idx){
   const cfg=getAuthConfig();
   const u=cfg.users[idx];if(!u)return;
+  // v1.40.0: Constraints for NV with canManageUsers
+  if(!isAdmin()){
+    if(CURRENT_USER && u.name===CURRENT_USER.name){
+      toast('Bạn không thể tự xóa chính mình','bad');return;
+    }
+    if(u.canApproveL2 || u.isBOD || u.canManageUsers){
+      toast('NV này có quyền cao (L2/BOD/QL NV) — chỉ admin xóa được','bad');return;
+    }
+  }
   confirmDelete('nhân viên "'+u.name+'"',
     `Sau khi xóa, mật khẩu của ${esc(u.name)} sẽ không đăng nhập được nữa.`,
     ()=>{
@@ -3837,6 +3975,14 @@ function showAuthOverlay(){
    ROLE-BASED UI ENFORCEMENT
    ============================================================ */
 function isAdmin(){return CURRENT_ROLE==='admin';}
+
+/* True if current session is allowed to manage users (CRUD users + push auth to cloud).
+   Admin: always yes. User: must have canManageUsers flag.
+   v1.40.0: NEW — delegated user management (HR-admin pattern). */
+function canManageUsers(){
+  if(CURRENT_ROLE==='admin') return true;
+  return !!(CURRENT_USER && CURRENT_USER.canManageUsers);
+}
 
 /* True if current session is allowed to confirm payments / edit fees in Op tab.
    Admin: always yes. User: must have canConfirmPayment flag. */
@@ -4184,9 +4330,23 @@ function applyRoleUI(){
     subItems.forEach(s=>{ if(s.style.display!=='none') anyVisible=true; });
     if(parentBtn) parentBtn.style.display = (user && !anyVisible) ? 'none' : '';
   });
-  // Admin menu (hosts all admin-only actions) — hide for users entirely
+  // Admin menu — show only Settings entry to canManageUsers users; full menu to admin.
+  // v1.40.0: NV with canManageUsers gets restricted Settings access
   const adminMenu=document.getElementById('admin-menu-wrap');
-  if(adminMenu) adminMenu.style.display = user ? 'none' : '';
+  if(adminMenu){
+    if(!user){
+      // Admin: show full menu
+      adminMenu.style.display='';
+      adminMenu.querySelectorAll('.admin-only-item').forEach(el=>el.style.display='');
+    } else if(CURRENT_USER && CURRENT_USER.canManageUsers){
+      // NV with canManageUsers: show menu but hide admin-only items
+      adminMenu.style.display='';
+      adminMenu.querySelectorAll('.admin-only-item').forEach(el=>el.style.display='none');
+    } else {
+      // Regular user: hide menu entirely
+      adminMenu.style.display='none';
+    }
+  }
   // Role badge in brand
   let badge=document.getElementById('role-badge');
   if(!badge){
