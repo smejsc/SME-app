@@ -2,9 +2,11 @@
    Strategy: Network-first for index.html (so updates load fast),
              Cache-first for static assets (icons, manifest).
    Cache version bumps automatically when SW_VERSION changes below.
+   ⚠ IMPORTANT: Bump SW_VERSION mỗi khi release version mới của index.html
+   để force trình duyệt invalidate cache cũ.
 */
 
-const SW_VERSION = 'v1.37.4';
+const SW_VERSION = 'v1.39.3';
 const CACHE_NAME = `seahorse-${SW_VERSION}`;
 
 // Pre-cache critical files on install
