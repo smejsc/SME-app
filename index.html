@@ -2142,7 +2142,7 @@ body{min-height:100vh;background-image:radial-gradient(circle at 20% 0%,rgba(184
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='1.46.0';            // bumped on each release
+const APP_VERSION='1.47.0';            // bumped on each release
 
 /* ============================================================
    PWA — Service Worker registration + Install prompt
@@ -7040,7 +7040,7 @@ function renderCatalog(){
       venTbl.innerHTML = '<tr><td class="empty">Chưa có NCC — tự tạo khi nhập AR/AP, hoặc bấm "+ Thêm"</td></tr>';
     } else {
       const canArchive = canArchiveItem();
-      let h = '<thead><tr><th>Tên</th><th>Mã số thuế</th><th>Liên hệ</th><th class="r">Số AR/AP</th><th>Trạng thái</th>';
+      let h = '<thead><tr><th style="width:90px">Mã NCC</th><th>Tên</th><th>Mã số thuế</th><th>Địa chỉ</th><th class="r">Số AR/AP</th><th>Trạng thái</th>';
       if(adminMode || canArchive) h += '<th></th>';
       h += '</tr></thead><tbody>';
       list.forEach(v => {
@@ -7054,10 +7054,12 @@ function renderCatalog(){
               ? `<button class="icon-btn" title="Mở lại NCC" onclick="toggleArchiveVendor('${v.id}')" style="color:var(--good)">↺</button>`
               : `<button class="icon-btn" title="Đóng NCC — ẩn khỏi gợi ý" onclick="toggleArchiveVendor('${v.id}')" style="color:var(--warn)">⊘</button>`)
           : '';
+        const addressShort = v.address ? (v.address.length>40 ? v.address.slice(0,40)+'…' : v.address) : '—';
         h += `<tr style="${v.archived?'opacity:0.55;background:rgba(168,54,43,.04)':''}">
-          <td><b>${esc(v.name)}</b>${v.code?` <span class="chip" style="font-size:9px">${esc(v.code)}</span>`:''}</td>
+          <td class="mono" style="font-size:11px">${v.code?'<b>'+esc(v.code)+'</b>':'<span style="color:var(--muted)">—</span>'}</td>
+          <td><b>${esc(v.name)}</b></td>
           <td class="mono" style="font-size:11px">${esc(v.taxCode||'—')}</td>
-          <td style="font-size:11px">${esc(v.contact||'—')}</td>
+          <td style="font-size:11px;color:var(--ink-soft)" title="${esc(v.address||'')}">${esc(addressShort)}</td>
           <td class="r mono" style="font-size:11px">${arCount}AR / ${apCount}AP</td>
           <td>${statusChip}</td>
           ${(adminMode || canArchive)?`<td><div class="row-actions">
@@ -7138,16 +7140,38 @@ function _doCatalogAddVendor(){
   err.textContent = '';
   const name = document.getElementById('cat-vendor-name').value.trim();
   const code = document.getElementById('cat-vendor-code').value.trim();
-  const taxCode = document.getElementById('cat-vendor-tax').value.trim();
+  const taxCode = document.getElementById('cat-vendor-tax').value.trim().replace(/\s/g,'');
   const addr = document.getElementById('cat-vendor-addr').value.trim();
   const contact = document.getElementById('cat-vendor-contact').value.trim();
   const note = document.getElementById('cat-vendor-note').value.trim();
   if(!name){err.textContent='Tên NCC bắt buộc';return;}
   if(!S.vendors) S.vendors = [];
+  // v1.47.0: Hard block — MST trùng
+  if(taxCode){
+    const dupTax = findVendorByTaxCode(taxCode);
+    if(dupTax){
+      err.innerHTML = `❌ <b>MST "${esc(taxCode)}" đã có ở NCC khác:</b><br><b>${esc(dupTax.name)}</b>${dupTax.code?' (mã: '+esc(dupTax.code)+')':''} — không cho lưu trùng MST. Vui lòng dùng NCC đã có hoặc kiểm tra lại MST.`;
+      return;
+    }
+  }
   // Normalized for duplicate check
-  const normalized = name.toUpperCase().replace(/[^A-Z0-9]/g,'');
+  const normalized = normalizeVendorName(name);
   const dup = S.vendors.find(v=>(v.normalized||'')===normalized);
-  if(dup){err.textContent=`NCC "${dup.name}" đã tồn tại (trùng tên chuẩn hóa)`;return;}
+  if(dup){
+    err.innerHTML = `❌ NCC <b>"${esc(dup.name)}"</b> đã tồn tại (trùng tên chuẩn hóa). Nếu là NCC khác, hãy thêm dấu phẩy hoặc thông tin phân biệt.`;
+    return;
+  }
+  // v1.47.0: Soft warning — similar names (only on first submit click)
+  const similar = findSimilarVendors(name);
+  const skipSimilarBtn = document.getElementById('cat-vendor-skip-similar');
+  if(similar.length && !skipSimilarBtn){
+    const list = similar.map(s => `<li><b>${esc(s.vendor.name)}</b>${s.vendor.taxCode?' · MST '+esc(s.vendor.taxCode):''}${s.vendor.code?' · '+esc(s.vendor.code):''} <span style="color:var(--muted)">(tương đồng ${Math.round(s.score*100)}%)</span></li>`).join('');
+    err.innerHTML = `⚠ Phát hiện <b>${similar.length} NCC tương tự</b> — vui lòng kiểm tra trước khi tạo mới:
+      <ul style="margin:6px 0 6px 18px;padding:0;font-size:11px">${list}</ul>
+      <button id="cat-vendor-skip-similar" class="btn-primary" style="margin-top:6px;font-size:11px;padding:4px 10px" onclick="_doCatalogAddVendor()">Vẫn tạo mới (đã kiểm tra)</button>
+      <button class="btn-sec" style="margin-top:6px;font-size:11px;padding:4px 10px;margin-left:6px" onclick="closeModal()">Hủy</button>`;
+    return;
+  }
   S.vendors.push({
     id: 'V-'+uid(),
     code, name, normalized,
@@ -7157,7 +7181,7 @@ function _doCatalogAddVendor(){
     updatedAt: new Date().toISOString()
   });
   saveState();
-  toast('Đã thêm NCC: '+name);
+  toast('✓ Đã thêm NCC: '+name);
   closeModal();
   renderCatalog();
 }
@@ -7167,14 +7191,104 @@ function editVendor(id){
   if(!isAdmin()){toast('Chỉ admin được sửa NCC','bad');return;}
   const v = (S.vendors||[]).find(x=>x.id===id);
   if(!v){toast('Không tìm thấy','bad');return;}
-  const newName = prompt('Đổi tên NCC:', v.name);
-  if(!newName||!newName.trim()) return;
-  v.name = newName.trim();
-  v.normalized = v.name.toUpperCase().replace(/[^A-Z0-9]/g,'');
+  // v1.47.0: Full modal with code/taxCode/address
+  const body = `
+    <div style="font-size:12px;color:var(--muted);margin-bottom:12px;padding:8px 10px;background:rgba(28,58,92,.04);border-left:3px solid var(--ink)">
+      <b>Sửa thông tin NCC</b> · ID: ${esc(v.id)}<br>
+      <span style="font-size:11px">Mã số thuế là định danh duy nhất — không được trùng với NCC khác.</span>
+    </div>
+    <div class="form-grid">
+      <div class="field"><label>Mã NCC (theo quy ước của công ty)</label><input type="text" id="vendor-edit-code" value="${esc(v.code||'')}" placeholder="VD: PTSC-VT, PETRO-001, hoặc để trống"></div>
+      <div class="field" style="grid-column:span 2"><label>Tên NCC *</label><input type="text" id="vendor-edit-name" value="${esc(v.name||'')}"></div>
+      <div class="field"><label>Mã số thuế (10 hoặc 13 ký tự)</label><input type="text" id="vendor-edit-tax" value="${esc(v.taxCode||'')}" placeholder="VD: 0301234567"></div>
+      <div class="field" style="grid-column:span 2"><label>Địa chỉ</label><input type="text" id="vendor-edit-address" value="${esc(v.address||'')}" placeholder="VD: 123 Nguyễn Văn Linh, P.Bình Thuận, Q.7, TP.HCM"></div>
+    </div>
+    <div id="vendor-edit-err" style="font-size:12px;color:var(--bad);min-height:14px;font-family:var(--font-mono);margin-top:8px"></div>`;
+  const foot = `<button class="btn-sec" onclick="closeModal()">Hủy</button>
+    <button class="btn-primary" onclick="_doEditVendor('${v.id}')">Lưu</button>`;
+  openModal('Sửa NCC: '+v.name, body, foot);
+}
+
+function _doEditVendor(id){
+  const v = (S.vendors||[]).find(x=>x.id===id);
+  if(!v) return;
+  const err = document.getElementById('vendor-edit-err');
+  err.textContent = '';
+  const newName = document.getElementById('vendor-edit-name').value.trim();
+  const newCode = document.getElementById('vendor-edit-code').value.trim();
+  const newTax = document.getElementById('vendor-edit-tax').value.trim().replace(/\s/g,'');
+  const newAddress = document.getElementById('vendor-edit-address').value.trim();
+  if(!newName){err.textContent='Tên NCC bắt buộc';return;}
+  // v1.47.0: MST trùng → CHẶN
+  if(newTax){
+    const dup = (S.vendors||[]).find(x=>x.id!==id && x.taxCode && normalizeTaxCode(x.taxCode)===normalizeTaxCode(newTax));
+    if(dup){
+      err.textContent=`MST "${newTax}" đã có ở NCC "${dup.name}" — không cho lưu trùng`;
+      return;
+    }
+  }
+  v.name = newName;
+  v.code = newCode;
+  v.taxCode = newTax;
+  v.address = newAddress;
+  v.normalized = normalizeVendorName(newName);
   v.updatedAt = new Date().toISOString();
   saveState();
-  toast('Đã đổi tên NCC');
+  closeModal();
+  toast('✓ Đã cập nhật NCC');
   renderCatalog();
+}
+
+/* v1.47.0: Normalize tax code for comparison — strip spaces, hyphens, uppercase */
+function normalizeTaxCode(tc){
+  if(!tc) return '';
+  return String(tc).replace(/[\s\-\.]/g,'').toUpperCase();
+}
+
+/* v1.47.0: Find vendor by exact MST match (after normalize) */
+function findVendorByTaxCode(taxCode){
+  if(!taxCode) return null;
+  const norm = normalizeTaxCode(taxCode);
+  if(!norm) return null;
+  return (S.vendors||[]).find(v => normalizeTaxCode(v.taxCode) === norm);
+}
+
+/* v1.47.0: Simple fuzzy-like similarity score for vendor names — for "did you mean?" suggestions */
+function vendorNameSimilarity(a, b){
+  if(!a || !b) return 0;
+  const na = String(a).toUpperCase().replace(/[^A-ZÀ-Ỹ0-9 ]/g,'').trim();
+  const nb = String(b).toUpperCase().replace(/[^A-ZÀ-Ỹ0-9 ]/g,'').trim();
+  if(na === nb) return 1.0;
+  // Containment check (one contains the other)
+  if(na.length > 3 && nb.length > 3){
+    if(na.includes(nb) || nb.includes(na)) return 0.85;
+  }
+  // Token overlap (count shared significant tokens >2 chars)
+  const stopWords = new Set(['CTY','CONG','TY','CP','TNHH','MTV','VIETNAM','VN','THE','AND','VA','VÀ','CỦA']);
+  const ta = na.split(/\s+/).filter(t => t.length > 2 && !stopWords.has(t));
+  const tb = nb.split(/\s+/).filter(t => t.length > 2 && !stopWords.has(t));
+  if(!ta.length || !tb.length) return 0;
+  const setA = new Set(ta), setB = new Set(tb);
+  let shared = 0;
+  setA.forEach(t => { if(setB.has(t)) shared++; });
+  const score = shared / Math.min(setA.size, setB.size);
+  return score;
+}
+
+/* v1.47.0: Find vendors with similar names — returns top 5 with score >= 0.4 */
+function findSimilarVendors(name, excludeId){
+  if(!name) return [];
+  const matches = [];
+  (S.vendors||[]).forEach(v => {
+    if(v.id === excludeId) return;
+    if(v.archived) return;
+    const score = vendorNameSimilarity(name, v.name);
+    if(score >= 0.4){
+      matches.push({vendor:v, score});
+    }
+  });
+  matches.sort((a,b) => b.score - a.score);
+  return matches.slice(0, 5);
 }
 
 /* Delete vendor (admin only) */
@@ -18924,6 +19038,21 @@ const EXCEL_TEMPLATES={
       {key:'fuelPumpedFWPrice',label:'Đơn giá FW bơm (USD/liter)',                              required:false, type:'number'}
     ]
   },
+  vendors:{
+    // v1.47.0: Master data NCC import
+    name:'Nhà cung cấp (NCC) — Master data',
+    target:'vendors',
+    columns:[
+      {key:'code',     label:'Mã NCC (tùy chọn — VD: PTSC-VT, để trống nếu chưa có)', required:false, type:'text',
+        aliases:['Vendor code','Mã','Code','Mã NV','Mã NCC']},
+      {key:'name',     label:'Tên NCC *', required:true, type:'text',
+        aliases:['Tên','Vendor name','Tên doanh nghiệp','Company name','Vendor']},
+      {key:'taxCode',  label:'Mã số thuế (10 hoặc 13 ký tự)', required:false, type:'text',
+        aliases:['MST','Tax code','Mã số thuế','VAT code','Tax']},
+      {key:'address',  label:'Địa chỉ', required:false, type:'text',
+        aliases:['Address','Địa chỉ ĐKKD','Trụ sở']}
+    ]
+  },
   op_transactions:{
     // v1.46.0: Thu/Chi hộ tàu QL — import history
     name:'Thu/Chi hộ tàu QL (Vận hành)',
@@ -19426,6 +19555,45 @@ function excelConfirmImport(){
   validRows.forEach(r=>{
     const d=r.data;
     // Branch by target type
+    if(tpl.target==='vendors'){
+      // v1.47.0: NCC import — MST trùng → bỏ qua + warn; tên trùng → bỏ qua + warn
+      if(!S.vendors) S.vendors = [];
+      const name = (d.name||'').trim();
+      if(!name){ warnings.push('Bỏ qua dòng không có Tên NCC'); return; }
+      const taxCode = String(d.taxCode||'').replace(/\s/g,'').trim();
+      // MST check
+      if(taxCode){
+        const dupTax = findVendorByTaxCode(taxCode);
+        if(dupTax){
+          warnings.push(`Bỏ qua: MST "${taxCode}" đã có ở NCC "${dupTax.name}"`);
+          return;
+        }
+      }
+      // Name normalized check
+      const normalized = normalizeVendorName(name);
+      const dupName = S.vendors.find(v => (v.normalized||'') === normalized);
+      if(dupName){
+        warnings.push(`Bỏ qua: tên "${name}" đã có (chuẩn hóa trùng "${dupName.name}")`);
+        return;
+      }
+      S.vendors.push({
+        id: 'V-'+uid(),
+        code: (d.code||'').trim(),
+        name,
+        normalized,
+        taxCode,
+        address: (d.address||'').trim(),
+        contact: '',
+        note: '',
+        createdBy: actorName(),
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        _importedFromExcel: true,
+        _importBatch: 'IMP-' + new Date().toISOString().slice(0,10)
+      });
+      created++;
+      return;
+    }
     if(tpl.target==='vessels'){
       // Check duplicate name
       if(S.vessels.find(v=>v.name===d.name)){
@@ -19846,7 +20014,7 @@ function excelConfirmImport(){
   closeModal();
   EXCEL_PARSED_DATA=null;
   renderAll();
-  const masterTargets=['fixedAssets','tools','vessels','projects','bankAccounts','bankSnapshots','loans','warehouses','invMovements','events','opTransactions'];
+  const masterTargets=['fixedAssets','tools','vessels','projects','bankAccounts','bankSnapshots','loans','warehouses','invMovements','events','opTransactions','vendors'];
   let msg;
   if(masterTargets.includes(tpl.target)){
     msg = `Đã import ${created} bản ghi`;
