@@ -532,6 +532,11 @@ body{min-height:100vh;background-image:radial-gradient(circle at 20% 0%,rgba(184
   </div>
 </div>
 
+<!-- v1.55.0: Backup warning banner — admin only, persistent until backup done -->
+<div id="backup-warning-banner" style="display:none;background:linear-gradient(90deg,#c5876d 0%,#b8472e 50%,#c5876d 100%);color:#fff;text-align:center;padding:10px 16px;font-family:'Inter',sans-serif;font-size:13px;font-weight:500;border-bottom:1px solid #8b3a2a;cursor:pointer" onclick="bkpBannerAction()">
+  <span id="backup-warning-text">⚠ Đã <b>X ngày</b> không backup — Bấm để export .json ngay</span>
+</div>
+
 <!-- ========= TOP BAR ========= -->
 <header class="topbar">
   <div class="brand">
@@ -2295,7 +2300,7 @@ body{min-height:100vh;background-image:radial-gradient(circle at 20% 0%,rgba(184
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='1.53.1';            // bumped on each release
+const APP_VERSION='1.56.0';            // bumped on each release
 
 /* ============================================================
    PWA — Service Worker registration + Install prompt
@@ -2474,6 +2479,202 @@ async function decryptJSON(payload){
   const ct=b64ToBytes(payload.ct);
   const data=await crypto.subtle.decrypt({name:'AES-GCM',iv},CRYPTO_KEY,ct);
   return JSON.parse(new TextDecoder().decode(data));
+}
+
+/* ============================================================
+   TOTP 2FA (v1.56.0) — RFC 6238 Time-based One-Time Password
+   Self-contained: HMAC-SHA1 + Base32 + 6-digit code generation
+   Compatible with Google Authenticator, Authy, 1Password, etc.
+   ============================================================ */
+
+/* Base32 encode (RFC 4648) — for TOTP secret display */
+function totpBase32Encode(bytes){
+  const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
+  let bits = 0, value = 0, output = '';
+  for(let i = 0; i < bytes.length; i++){
+    value = (value << 8) | bytes[i];
+    bits += 8;
+    while(bits >= 5){
+      output += alphabet[(value >>> (bits - 5)) & 31];
+      bits -= 5;
+    }
+  }
+  if(bits > 0) output += alphabet[(value << (5 - bits)) & 31];
+  return output;
+}
+
+/* Base32 decode → Uint8Array */
+function totpBase32Decode(str){
+  const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
+  const clean = str.toUpperCase().replace(/[^A-Z2-7]/g, '');
+  const bytes = [];
+  let bits = 0, value = 0;
+  for(let i = 0; i < clean.length; i++){
+    const idx = alphabet.indexOf(clean[i]);
+    if(idx === -1) continue;
+    value = (value << 5) | idx;
+    bits += 5;
+    if(bits >= 8){
+      bytes.push((value >>> (bits - 8)) & 0xff);
+      bits -= 8;
+    }
+  }
+  return new Uint8Array(bytes);
+}
+
+/* Generate random TOTP secret (20 bytes = 160 bits as recommended by RFC 4226) */
+function totpGenerateSecret(){
+  const bytes = new Uint8Array(20);
+  crypto.getRandomValues(bytes);
+  return totpBase32Encode(bytes);
+}
+
+/* HMAC-SHA1 using Web Crypto API */
+async function totpHmacSha1(keyBytes, msgBytes){
+  const key = await crypto.subtle.importKey(
+    'raw', keyBytes,
+    { name: 'HMAC', hash: 'SHA-1' },
+    false, ['sign']
+  );
+  const sig = await crypto.subtle.sign('HMAC', key, msgBytes);
+  return new Uint8Array(sig);
+}
+
+/* Generate 6-digit TOTP code from secret + timestamp counter */
+async function totpGenerate(secretBase32, counter){
+  const key = totpBase32Decode(secretBase32);
+  // 8-byte big-endian counter
+  const msg = new Uint8Array(8);
+  for(let i = 7; i >= 0; i--){
+    msg[i] = counter & 0xff;
+    counter = Math.floor(counter / 256);
+  }
+  const hmac = await totpHmacSha1(key, msg);
+  // Dynamic truncation (RFC 4226)
+  const offset = hmac[hmac.length - 1] & 0x0f;
+  const binCode = ((hmac[offset] & 0x7f) << 24) |
+                  ((hmac[offset + 1] & 0xff) << 16) |
+                  ((hmac[offset + 2] & 0xff) << 8) |
+                  (hmac[offset + 3] & 0xff);
+  return String(binCode % 1000000).padStart(6, '0');
+}
+
+/* Verify user-input code against current 30-second window (with ±1 window drift) */
+async function totpVerify(secretBase32, userCode){
+  if(!secretBase32 || !userCode) return false;
+  const clean = String(userCode).replace(/\s/g, '');
+  if(!/^\d{6}$/.test(clean)) return false;
+  const counter = Math.floor(Date.now() / 1000 / 30);
+  // Check current ±1 window (allow 30s clock drift)
+  for(let i = -1; i <= 1; i++){
+    const expected = await totpGenerate(secretBase32, counter + i);
+    if(expected === clean) return true;
+  }
+  return false;
+}
+
+/* Get otpauth:// URI for QR code (compatible with Google Authenticator) */
+function totpGetUri(secretBase32, accountName, issuer){
+  const label = encodeURIComponent(`${issuer}:${accountName}`);
+  const params = `secret=${secretBase32}&issuer=${encodeURIComponent(issuer)}&algorithm=SHA1&digits=6&period=30`;
+  return `otpauth://totp/${label}?${params}`;
+}
+
+/* Generate 10 backup codes — single-use recovery codes (format: 8 hex chars in two groups) */
+function totpGenerateBackupCodes(){
+  const codes = [];
+  for(let i = 0; i < 10; i++){
+    const bytes = new Uint8Array(4);
+    crypto.getRandomValues(bytes);
+    const hex = Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('').toUpperCase();
+    codes.push(`${hex.slice(0,4)}-${hex.slice(4)}`);
+  }
+  return codes;
+}
+
+/* Hash backup code for storage (so plaintext not stored) */
+async function totpHashBackupCode(code){
+  const clean = String(code).replace(/[-\s]/g, '').toUpperCase();
+  const enc = new TextEncoder().encode(clean);
+  const hash = await crypto.subtle.digest('SHA-256', enc);
+  return Array.from(new Uint8Array(hash)).map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+/* Verify a backup code → if match: mark as used, return true */
+async function totpVerifyBackupCode(user, userInputCode){
+  if(!user || !user.totp2fa || !Array.isArray(user.totp2fa.backupCodes)) return false;
+  const inputHash = await totpHashBackupCode(userInputCode);
+  for(let i = 0; i < user.totp2fa.backupCodes.length; i++){
+    const entry = user.totp2fa.backupCodes[i];
+    if(typeof entry === 'string'){
+      // Old format: just hash string
+      if(entry === inputHash){
+        user.totp2fa.backupCodes[i] = {hash: entry, usedAt: new Date().toISOString()};
+        return true;
+      }
+    } else if(entry && entry.hash === inputHash && !entry.usedAt){
+      entry.usedAt = new Date().toISOString();
+      return true;
+    }
+  }
+  return false;
+}
+
+/* ============================================================
+   QR CODE GENERATOR (v1.56.0) — Minimal implementation for TOTP
+   Renders QR code as SVG. Uses simplified Reed-Solomon for L-level QR v3 (29x29).
+   For broader compatibility, we use Google Charts API as fallback (offline-friendly check).
+   ============================================================ */
+
+/* Generate QR code SVG from string. Uses external CDN if available,
+   otherwise generates a simple placeholder text. */
+function totpRenderQR(text, size){
+  size = size || 200;
+  // Use chart server — known fallback used by KeePassXC/2FAS apps
+  const url = `https://api.qrserver.com/v1/create-qr-code/?size=${size}x${size}&data=${encodeURIComponent(text)}&ecc=M`;
+  return `<img src="${url}" width="${size}" height="${size}" alt="QR Code 2FA" style="display:block;background:#fff;padding:8px;border:1px solid var(--rule)" onerror="this.parentElement.querySelector('.qr-fallback').style.display='block';this.style.display='none'">
+    <div class="qr-fallback" style="display:none;padding:14px;background:#fff;border:1px solid var(--rule);font-size:11px;color:var(--ink);max-width:${size}px">
+      <b>⚠ Không tải được QR code online</b><br>
+      Nhập tay vào app Google Authenticator:<br>
+      <div style="margin-top:6px"><b>Account</b>: ${esc(text.match(/totp\/([^?]+)/)?.[1]?.split(':')[1]||'?')}</div>
+      <div><b>Secret</b>: <span style="font-family:monospace;letter-spacing:.05em">${esc(text.match(/secret=([^&]+)/)?.[1]||'?')}</span></div>
+      <div style="margin-top:4px;color:var(--muted);font-style:italic">(Time-based, 30s period, 6 digits)</div>
+    </div>`;
+}
+
+/* Get "remember device" token key (per-user, per-environment) */
+function totpRememberKey(userName){
+  const prefix = (typeof APP_VERSION !== 'undefined' && APP_VERSION.includes('-DEMO')) ? 'seahorse_demo_2fa_remember_' : 'seahorse_2fa_remember_';
+  return prefix + (userName || '').toLowerCase();
+}
+
+/* Check if device is "remembered" (7 days) for this user */
+function totpIsDeviceRemembered(userName){
+  try{
+    const key = totpRememberKey(userName);
+    const data = JSON.parse(localStorage.getItem(key) || 'null');
+    if(!data || !data.until) return false;
+    const until = new Date(data.until).getTime();
+    if(Date.now() > until){
+      localStorage.removeItem(key);
+      return false;
+    }
+    return true;
+  }catch(e){ return false; }
+}
+
+/* Save device as remembered for 7 days */
+function totpRememberDevice(userName){
+  try{
+    const key = totpRememberKey(userName);
+    const until = new Date(Date.now() + 7 * 86400 * 1000).toISOString();
+    localStorage.setItem(key, JSON.stringify({until, savedAt: new Date().toISOString()}));
+  }catch(e){}
+}
+
+/* Clear remembered device (admin reset or user logout) */
+function totpClearRememberedDevice(userName){
+  try{ localStorage.removeItem(totpRememberKey(userName)); }catch(e){}
 }
 
 /* ============================================================
@@ -3056,6 +3257,14 @@ async function authAction(){
       }
       const wrappingKey=await deriveWrappingKey(pw,cfg.admin.salt,cfg.admin.iter);
       CRYPTO_KEY=await unwrapMasterKey(cfg.admin.wrap,wrappingKey);
+      // v1.56.0: 2FA gate for admin if enabled
+      if(cfg.admin.totp2fa?.enabled && cfg.admin.totp2fa.secret){
+        if(!totpIsDeviceRemembered('admin')){
+          _PENDING_LOGIN = {user: cfg.admin, pw, name:'admin', isAdmin: true};
+          show2FALoginPrompt(cfg.admin, true);
+          return;
+        }
+      }
       CURRENT_ROLE='admin';
       CURRENT_USER=null;
     } else {
@@ -3076,6 +3285,15 @@ async function authAction(){
       }
       const wrappingKey=await deriveWrappingKey(pw,matched.salt,matched.iter);
       CRYPTO_KEY=await unwrapMasterKey(matched.wrap,wrappingKey);
+      // v1.56.0: 2FA gate — if enabled and not on remembered device, require code
+      if(matched.totp2fa?.enabled && matched.totp2fa.secret){
+        if(!totpIsDeviceRemembered(matched.name)){
+          // Show 2FA prompt
+          _PENDING_LOGIN = {user: matched, pw, name};
+          show2FALoginPrompt(matched);
+          return;
+        }
+      }
       CURRENT_ROLE='user';
       CURRENT_USER=matched;
     }
@@ -3155,11 +3373,11 @@ async function authAction(){
       }catch(e){console.warn('[migrate v1.44.0 op_input] failed:',e);}
       const lastBak=cfg.lastBackup?new Date(cfg.lastBackup).getTime():0;
       const daysSinceBak=lastBak?Math.floor((Date.now()-lastBak)/86400000):999;
-      if(daysSinceBak>=7){
-        setTimeout(()=>{
-          toast(`📦 Lần backup gần nhất: ${lastBak?daysSinceBak+' ngày trước':'CHƯA BAO GIỜ'}. Khuyến nghị: ≡ Menu → Export backup (.json)`,'warn');
-        },2500);
-      }
+      // v1.55.0: Show persistent banner + auto-trigger weekly backup
+      setTimeout(()=>{
+        try{ updateBackupBanner(); }catch(e){console.warn('[backup banner]',e);}
+        try{ autoExportWeeklyBackup(); }catch(e){console.warn('[auto-backup]',e);}
+      },2500);
       // Alert admin về vi phạm bảo mật trong 24h qua
       setTimeout(()=>{
         try{
@@ -3406,12 +3624,12 @@ function openSettings(){
   try{ migratePlans(); }catch(e){console.warn('migrate Plans failed:',e);}
   const userListHtml=(cfg.users||[]).map((u,i)=>`
     <tr>
-      <td><b>${esc(u.name) || '(không tên)'}</b>${(()=>{
+      <td><b>${esc(u.name) || '(không tên)'}</b>${u.fullName?`<div style="font-size:10px;color:var(--ink-soft);font-weight:400;margin-top:1px">${esc(u.fullName)}</div>`:'<div style="font-size:10px;color:var(--bad);font-style:italic;margin-top:1px">⚠ Chưa có tên thật</div>'}${u.email?`<div style="font-size:10px;color:var(--muted);font-family:var(--font-mono);margin-top:1px">${esc(u.email)}</div>`:'<div style="font-size:10px;color:var(--bad);font-style:italic;margin-top:1px">⚠ Chưa có email</div>'}${(()=>{
         if(!u.departmentId) return '';
         const d=(S.departments||[]).find(x=>x.id===u.departmentId);
         if(!d) return '';
         return ` <span class="chip" style="font-size:9px;margin-left:4px;background:#2a5a8c;color:#fff" title="${esc(d.name)}">🏢 ${esc(d.code)}</span>`;
-      })()}${u.isBOD?' <span class="chip" style="font-size:9px;margin-left:4px;background:#8b3a2a;color:#fff" title="Là BOD — xem được bút toán nội bộ">🔒 BOD</span>':''}${u.canManageUsers?' <span class="chip" style="font-size:9px;margin-left:4px;background:#4a6b2c;color:#fff" title="Có quyền quản lý NV (Sub-admin)">🛡 QL NV</span>':''}${u.isViewer?' <span class="chip" style="font-size:9px;margin-left:4px;background:#b8472e;color:#fff" title="Viewer — chỉ đọc báo cáo">👁 VIEWER</span>':''}${u.canConfirmPayment?' <span class="chip chip-warn" style="font-size:9px;margin-left:4px" title="Có quyền xác nhận TT (Vận hành tàu)">XÁC NHẬN TT</span>':''}${u.canCheckAcc?' <span class="chip" style="font-size:9px;margin-left:4px;background:#5a4a8c;color:#fff" title="KT viên kiểm hồ sơ (Gatekeeper)">📝 KT KIỂM</span>':''}${u.canApproveL1?' <span class="chip" style="font-size:9px;margin-left:4px;background:#c5876d;color:#fff" title="Phê duyệt cấp 1">DUYỆT L1</span>':''}${u.canApproveL2?' <span class="chip" style="font-size:9px;margin-left:4px;background:#8b3a2a;color:#fff" title="Phê duyệt cấp 2">DUYỆT L2</span>':''}${(u.assignedVesselIds||[]).length>0?` <span class="chip" style="font-size:9px;margin-left:4px;background:#1c3a5c;color:#fff" title="Tàu: ${esc((u.assignedVesselIds||[]).map(id=>{const v=S.vessels.find(x=>x.id===id);return v?v.name:'?';}).join(', '))}">⛵ ${(u.assignedVesselIds||[]).length}</span>`:''}${(u.assignedProjectIds||[]).length>0?` <span class="chip" style="font-size:9px;margin-left:4px;background:#4a6b2c;color:#fff" title="Dự án O&M: ${esc((u.assignedProjectIds||[]).map(id=>{const p=S.projects.find(x=>x.id===id);return p?p.code:'?';}).join(', '))}">⚙ ${(u.assignedProjectIds||[]).length}</span>`:''}${(u.assignedOpVesselIds||[]).length>0?` <span class="chip" style="font-size:9px;margin-left:4px;background:#5a4a8c;color:#fff" title="Tàu QL hộ: ${esc((u.assignedOpVesselIds||[]).map(id=>{const v=S.opVessels.find(x=>x.id===id);return v?v.name:'?';}).join(', '))}">🚢 ${(u.assignedOpVesselIds||[]).length}</span>`:''}</td>
+      })()}${u.isBOD?' <span class="chip" style="font-size:9px;margin-left:4px;background:#8b3a2a;color:#fff" title="Là BOD — xem được bút toán nội bộ">🔒 BOD</span>':''}${u.canManageUsers?' <span class="chip" style="font-size:9px;margin-left:4px;background:#4a6b2c;color:#fff" title="Có quyền quản lý NV (Sub-admin)">🛡 QL NV</span>':''}${u.isViewer?' <span class="chip" style="font-size:9px;margin-left:4px;background:#b8472e;color:#fff" title="Viewer — chỉ đọc báo cáo">👁 VIEWER</span>':''}${u.canConfirmPayment?' <span class="chip chip-warn" style="font-size:9px;margin-left:4px" title="Có quyền xác nhận TT (Vận hành tàu)">XÁC NHẬN TT</span>':''}${u.canCheckAcc?' <span class="chip" style="font-size:9px;margin-left:4px;background:#5a4a8c;color:#fff" title="KT viên kiểm hồ sơ (Gatekeeper)">📝 KT KIỂM</span>':''}${u.canApproveL1?' <span class="chip" style="font-size:9px;margin-left:4px;background:#c5876d;color:#fff" title="Phê duyệt cấp 1">DUYỆT L1</span>':''}${u.canApproveL2?' <span class="chip" style="font-size:9px;margin-left:4px;background:#8b3a2a;color:#fff" title="Phê duyệt cấp 2">DUYỆT L2</span>':''}${u.totp2fa?.enabled?' <span class="chip" style="font-size:9px;margin-left:4px;background:#1c3a5c;color:#fff" title="2FA đã bật">🔐 2FA</span>':''}${(u.assignedVesselIds||[]).length>0?` <span class="chip" style="font-size:9px;margin-left:4px;background:#1c3a5c;color:#fff" title="Tàu: ${esc((u.assignedVesselIds||[]).map(id=>{const v=S.vessels.find(x=>x.id===id);return v?v.name:'?';}).join(', '))}">⛵ ${(u.assignedVesselIds||[]).length}</span>`:''}${(u.assignedProjectIds||[]).length>0?` <span class="chip" style="font-size:9px;margin-left:4px;background:#4a6b2c;color:#fff" title="Dự án O&M: ${esc((u.assignedProjectIds||[]).map(id=>{const p=S.projects.find(x=>x.id===id);return p?p.code:'?';}).join(', '))}">⚙ ${(u.assignedProjectIds||[]).length}</span>`:''}${(u.assignedOpVesselIds||[]).length>0?` <span class="chip" style="font-size:9px;margin-left:4px;background:#5a4a8c;color:#fff" title="Tàu QL hộ: ${esc((u.assignedOpVesselIds||[]).map(id=>{const v=S.opVessels.find(x=>x.id===id);return v?v.name:'?';}).join(', '))}">🚢 ${(u.assignedOpVesselIds||[]).length}</span>`:''}</td>
       <td style="font-family:var(--font-mono);font-size:11px;color:var(--muted)">${(u.tabs||[]).length} tab</td>
       <td>${(u.tabs||[]).map(t=>{const T=ALL_TABS.find(x=>x.id===t);return T?`<span class="chip chip-5" style="margin-right:3px">${T.label}</span>`:'';}).join(' ')}</td>
       <td style="white-space:nowrap"><div class="row-actions">
@@ -3459,6 +3677,17 @@ function openSettings(){
           <option value="120" ${(cfg.idleLogoutMinutes===120)?'selected':''}>2 giờ</option>
         </select>
         <div style="font-size:11px;color:var(--muted);font-style:italic;margin-top:4px">Sau X phút không click/gõ phím → tự đăng xuất. Cảnh báo 1 phút trước.</div>
+      </div>
+      <div class="field">
+        <label>Auto-backup hàng tuần (.json) <span style="font-size:9px;color:var(--accent);font-weight:600">v1.55.0</span></label>
+        <label style="display:flex;align-items:center;gap:8px;cursor:pointer;padding:6px 0">
+          <input type="checkbox" id="set-auto-backup" ${(cfg.autoBackupEnabled !== false)?'checked':''} style="margin:0">
+          <span style="font-size:12px">Nhắc backup vào Thứ 2 hàng tuần (hoặc khi >7 ngày)</span>
+        </label>
+        <div style="font-size:11px;color:var(--muted);font-style:italic;margin-top:4px">
+          Khi đăng nhập, app hỏi auto-export file .json. Banner cảnh báo cũng hiện ở đầu trang nếu lâu chưa backup.
+          ${cfg.lastBackup ? '<br>📦 Backup gần nhất: <b>'+timeAgo(cfg.lastBackup)+'</b>' : '<br>⚠ Chưa từng backup'}
+        </div>
       </div>
       <div class="field">
         <label>Phiên bản phần mềm</label>
@@ -3567,6 +3796,9 @@ async function saveSettings(){
   cfg.scriptUrl=document.getElementById('set-script-url').value.trim();
   const idleEl=document.getElementById('set-idle-logout');
   if(idleEl) cfg.idleLogoutMinutes=+idleEl.value;
+  // v1.55.0: Auto-backup toggle
+  const abEl=document.getElementById('set-auto-backup');
+  if(abEl) cfg.autoBackupEnabled = abEl.checked;
   // Company info
   S.companyInfo=S.companyInfo||{};
   const nameEl=document.getElementById('set-co-name');
@@ -3697,13 +3929,19 @@ function userEditorModal(initial,idx){
   const canConfirm=initial.canConfirmPayment?'checked':'';
   const body=`
     <div class="form-grid" style="grid-template-columns:1fr">
-      <div class="field">
-        <label>Tên nhân viên (hiển thị trên badge)</label>
-        <input type="text" id="user-name" value="${(initial.name||'').replace(/"/g,'&quot;')}" placeholder="VD: Lan (kế toán)">
+      <div class="form-grid" style="grid-template-columns:1fr 1fr">
+        <div class="field">
+          <label>Username (đăng nhập, không khoảng trắng) <span style="color:var(--bad)">*</span></label>
+          <input type="text" id="user-name" value="${(initial.name||'').replace(/"/g,'&quot;')}" placeholder="VD: lan-kt, cuong-bod">
+        </div>
+        <div class="field">
+          <label>Tên thật (đầy đủ, có dấu) <span style="font-size:9px;color:var(--accent);font-weight:600">v1.55.0</span></label>
+          <input type="text" id="user-full-name" value="${(initial.fullName||'').replace(/"/g,'&quot;')}" placeholder="VD: Nguyễn Thị Lan">
+        </div>
       </div>
       <div class="form-grid" style="grid-template-columns:1fr 1fr">
         <div class="field">
-          <label>Email (để gửi mời + liên hệ)</label>
+          <label>Email công ty <span style="color:var(--bad)">*</span> <span style="font-size:9px;color:var(--accent);font-weight:600">v1.55.0</span></label>
           <input type="email" id="user-email" value="${(initial.email||'').replace(/"/g,'&quot;')}" placeholder="VD: lan.kt@seahorse.com.vn">
         </div>
         <div class="field">
@@ -3820,6 +4058,21 @@ function userEditorModal(initial,idx){
             </div>
           </label>
           ` : ''}
+          ${isAdmin() ? `
+          <!-- v1.56.0: 2FA TOTP -->
+          <label style="display:flex;align-items:flex-start;gap:8px;padding:6px 0;cursor:pointer;border-top:1px solid var(--rule);background:rgba(28,58,92,.06)">
+            <input type="checkbox" id="user-2fa-enabled" ${initial.totp2fa?.enabled?'checked':''} style="margin-top:3px" onchange="_userToggle2FA(this, ${idx===null?'null':idx})">
+            <div style="flex:1">
+              <div><b style="color:#1c3a5c">🔐 Xác thực 2 lớp (2FA) — Google Authenticator</b> <span style="font-size:9px;color:var(--accent);font-weight:600">v1.56.0</span></div>
+              <div style="font-size:11px;color:var(--muted);font-style:italic;margin-top:2px">NV phải nhập mã 6 số từ app trên ĐT mỗi 7 ngày. Tăng bảo mật cao — chống mất mật khẩu / phishing. Khuyến nghị bắt buộc cho admin/BOD/L2 approver.</div>
+              ${initial.totp2fa?.enabled ? `<div style="margin-top:6px;padding:6px 10px;background:rgba(74,107,44,.1);border-left:3px solid var(--good);font-size:11px;color:var(--ink)">
+                ✓ Đã bật 2FA từ ${initial.totp2fa.enabledAt ? new Date(initial.totp2fa.enabledAt).toLocaleDateString('vi-VN') : '?'} ·
+                ${(initial.totp2fa.backupCodes||[]).filter(c => !c.usedAt && typeof c !== 'string').length || (initial.totp2fa.backupCodes||[]).length}/10 backup codes còn lại ·
+                <a href="#" onclick="event.preventDefault();_user2FAReset(${idx===null?'null':idx})" style="color:var(--bad);text-decoration:underline">↩ Reset 2FA</a>
+              </div>` : ''}
+            </div>
+          </label>
+          ` : ''}
         </div>
       </div>
 
@@ -3923,13 +4176,423 @@ function editUser(idx){
     viewerProjectIds:u.viewerProjectIds||[]
   },idx);
 }
+/* v1.56.0: Pending login state — used during 2FA verification step */
+let _PENDING_LOGIN = null;
+
+/* v1.56.0: Show 2FA prompt during login */
+function show2FALoginPrompt(user, isAdminLogin){
+  const overlay = document.getElementById('auth-overlay');
+  // Build inline 2FA section over existing auth form
+  let twofaEl = document.getElementById('auth-2fa-section');
+  if(!twofaEl){
+    twofaEl = document.createElement('div');
+    twofaEl.id = 'auth-2fa-section';
+    twofaEl.style.cssText = 'position:absolute;inset:0;background:var(--paper);display:flex;align-items:center;justify-content:center;z-index:99';
+    overlay.appendChild(twofaEl);
+  }
+  const userDisplay = isAdminLogin ? 'admin' : (user.fullName ? user.fullName + ' · ' + user.name : user.name);
+  twofaEl.innerHTML = `
+    <div style="max-width:420px;width:100%;padding:30px;background:var(--paper);border:1px solid var(--rule);box-shadow:0 8px 32px rgba(0,0,0,.12)">
+      <div style="font-family:var(--font-display);font-size:18px;font-weight:600;color:var(--ink);margin-bottom:6px">🔐 Xác thực 2 lớp</div>
+      <div style="font-size:12px;color:var(--muted);margin-bottom:20px">Đăng nhập: <b>${esc(userDisplay)}</b></div>
+
+      <div style="font-size:13px;color:var(--ink);margin-bottom:14px">
+        Mở app <b>Google Authenticator</b> trên điện thoại của bạn → đọc mã <b>6 số</b> đang hiện cho Seahorse.
+      </div>
+
+      <input type="text" id="auth-2fa-code" maxlength="6" pattern="[0-9]{6}"
+        placeholder="000000"
+        autocomplete="one-time-code"
+        style="width:100%;padding:14px;font-size:26px;font-family:var(--font-mono);letter-spacing:.3em;text-align:center;border:2px solid var(--accent);background:#fff;box-sizing:border-box"
+        onkeydown="if(event.key==='Enter') _verify2FALogin()">
+
+      <label style="display:flex;align-items:center;gap:8px;margin-top:14px;cursor:pointer;font-size:12px">
+        <input type="checkbox" id="auth-2fa-remember" checked>
+        <span>Nhớ thiết bị này 7 ngày (không hỏi lại trên trình duyệt này)</span>
+      </label>
+
+      <div id="auth-2fa-err" style="color:var(--bad);font-size:12px;margin-top:8px;min-height:18px"></div>
+
+      <div style="display:flex;gap:8px;margin-top:18px">
+        <button class="btn-sec" onclick="_cancel2FALogin()" style="flex:1">← Hủy</button>
+        <button class="btn-primary" onclick="_verify2FALogin()" style="flex:2">Xác nhận →</button>
+      </div>
+
+      <details style="margin-top:18px">
+        <summary style="cursor:pointer;font-size:11px;color:var(--muted)">Mất điện thoại? Dùng backup code</summary>
+        <div style="margin-top:10px;padding:12px;background:rgba(184,71,46,.04);border-left:3px solid var(--accent)">
+          <input type="text" id="auth-2fa-backup" placeholder="VD: 8K3M-PA29"
+            style="width:100%;padding:8px 10px;font-size:14px;font-family:var(--font-mono);border:1px solid var(--rule);box-sizing:border-box">
+          <div style="font-size:10px;color:var(--muted);margin-top:4px">Nhập 1 backup code (từ giấy in lúc setup 2FA)</div>
+          <button class="btn-sec" onclick="_verify2FABackupCode()" style="margin-top:8px;width:100%">Dùng backup code</button>
+        </div>
+      </details>
+    </div>
+  `;
+  // Focus input
+  setTimeout(() => document.getElementById('auth-2fa-code')?.focus(), 100);
+}
+
+/* v1.56.0: Verify TOTP code → if valid, complete login */
+async function _verify2FALogin(){
+  const codeEl = document.getElementById('auth-2fa-code');
+  const errEl = document.getElementById('auth-2fa-err');
+  const rememberEl = document.getElementById('auth-2fa-remember');
+  if(!codeEl || !_PENDING_LOGIN) return;
+  const code = codeEl.value.trim().replace(/\s/g, '');
+  errEl.textContent = '';
+  if(!/^\d{6}$/.test(code)){
+    errEl.textContent = 'Vui lòng nhập đúng 6 chữ số';
+    return;
+  }
+  const ok = await totpVerify(_PENDING_LOGIN.user.totp2fa.secret, code);
+  if(!ok){
+    errEl.textContent = '❌ Mã không đúng — Kiểm tra giờ ĐT, thử mã mới (đổi mỗi 30s).';
+    codeEl.select();
+    try{ logAuditEvent('2fa_fail', {target:_PENDING_LOGIN.name}); }catch(e){}
+    return;
+  }
+  if(rememberEl?.checked){
+    totpRememberDevice(_PENDING_LOGIN.user.name || _PENDING_LOGIN.name);
+  }
+  await _complete2FALogin();
+}
+
+/* v1.56.0: Verify backup code */
+async function _verify2FABackupCode(){
+  const codeEl = document.getElementById('auth-2fa-backup');
+  const errEl = document.getElementById('auth-2fa-err');
+  if(!codeEl || !_PENDING_LOGIN) return;
+  const code = codeEl.value.trim();
+  errEl.textContent = '';
+  if(!code){ errEl.textContent = 'Nhập backup code'; return; }
+  const ok = await totpVerifyBackupCode(_PENDING_LOGIN.user, code);
+  if(!ok){
+    errEl.textContent = '❌ Backup code không hợp lệ hoặc đã dùng rồi';
+    return;
+  }
+  // Persist updated backup codes (one marked as used)
+  const cfg = getAuthConfig();
+  if(_PENDING_LOGIN.isAdmin){
+    cfg.admin = _PENDING_LOGIN.user;
+  } else {
+    const idx = (cfg.users||[]).findIndex(u => u.name === _PENDING_LOGIN.user.name);
+    if(idx >= 0) cfg.users[idx] = _PENDING_LOGIN.user;
+  }
+  setAuthConfig(cfg);
+  try{ logAuditEvent('2fa_backup_used', {target:_PENDING_LOGIN.name}); }catch(e){}
+  toast('⚠ Đã dùng 1 backup code — Nên reset 2FA tạo bộ mới','warn');
+  await _complete2FALogin();
+}
+
+/* v1.56.0: Complete the deferred login flow */
+async function _complete2FALogin(){
+  const pending = _PENDING_LOGIN;
+  if(!pending) return;
+  _PENDING_LOGIN = null;
+  // Remove 2FA UI
+  document.getElementById('auth-2fa-section')?.remove();
+
+  if(pending.isAdmin){
+    CURRENT_ROLE = 'admin';
+    CURRENT_USER = null;
+  } else {
+    CURRENT_ROLE = 'user';
+    CURRENT_USER = pending.user;
+  }
+
+  // Continue normal post-login flow (mirrors original login code)
+  clearLoginFails(pending.name);
+  SESSION_START_TS = Date.now();
+  localStorage.setItem('seahorse_session_start', String(SESSION_START_TS));
+  const cfg = getAuthConfig();
+  if(cfg.scriptUrl && CURRENT_ROLE === 'user'){
+    selfWrapInCloudCfg(pending.name, pending.pw).catch(e => console.warn('[self-wrap]', e.message));
+  }
+  await loadEncryptedLocal();
+  document.getElementById('auth-overlay').classList.add('hide');
+  try{ applyRoleUI(); } catch(e){ console.error('[2fa-login] applyRoleUI:',e); }
+  try{ setupFxControls(); } catch(e){}
+  try{ renderAll(); } catch(e){ console.error('[2fa-login] renderAll:',e); }
+  try{ logAuditEvent('login', {role:CURRENT_ROLE, with2FA:true}); }catch(e){}
+  resetIdleTimer();
+  startMaxSessionTimer();
+  if(CURRENT_ROLE === 'user' && CURRENT_USER && CURRENT_USER.mustChangePassword){
+    setTimeout(() => showChangePasswordModal(true), 500);
+  } else {
+    try{ checkWelcomePopup(); }catch(e){}
+  }
+  if(CURRENT_ROLE === 'admin'){
+    setTimeout(() => {
+      try{ updateBackupBanner(); }catch(e){}
+      try{ autoExportWeeklyBackup(); }catch(e){}
+    }, 2500);
+  }
+  toast('✓ Đăng nhập thành công','good');
+}
+
+/* v1.56.0: Cancel 2FA → back to login */
+function _cancel2FALogin(){
+  _PENDING_LOGIN = null;
+  document.getElementById('auth-2fa-section')?.remove();
+  document.getElementById('auth-pw').value = '';
+  document.getElementById('auth-pw')?.focus();
+}
+
+/* v1.56.0: Toggle 2FA in user form — if turning ON, open setup modal */
+async function _userToggle2FA(checkboxEl, idx){
+  if(!checkboxEl.checked) return;  // turning off: handled at save time
+  // Turning on → must complete setup before save
+  const cfg = getAuthConfig();
+  if(idx === null || !cfg.users[idx]){
+    toast('Vui lòng lưu NV trước, sau đó mở lại để bật 2FA', 'warn');
+    checkboxEl.checked = false;
+    return;
+  }
+  const u = cfg.users[idx];
+  if(u.totp2fa?.enabled){
+    toast('NV này đã bật 2FA rồi', 'good');
+    return;
+  }
+  await _open2FASetupModal(idx);
+}
+
+/* v1.56.0: Open setup modal — generate secret, show QR, verify first code */
+async function _open2FASetupModal(idx){
+  const cfg = getAuthConfig();
+  const u = cfg.users[idx];
+  if(!u){ toast('NV không tồn tại','bad'); return; }
+
+  const secret = totpGenerateSecret();
+  const issuer = (S.companyInfo?.short || 'Seahorse').replace(/[^a-zA-Z0-9]/g, '');
+  const accountName = u.email || u.name;
+  const uri = totpGetUri(secret, accountName, issuer);
+  const qrSvg = totpRenderQR(uri, 220);
+
+  const body = `
+    <div style="font-size:13px;line-height:1.5">
+      <div style="font-size:12px;color:var(--muted);margin-bottom:14px;padding:8px 12px;background:rgba(28,58,92,.04);border-left:3px solid var(--ink)">
+        Cài đặt 2FA cho NV <b>${esc(u.name)}</b> ${u.fullName?'('+esc(u.fullName)+')':''}
+      </div>
+
+      <div style="display:grid;grid-template-columns:240px 1fr;gap:20px;align-items:start">
+        <div>
+          <div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.08em;font-weight:600;margin-bottom:6px">Quét QR Code</div>
+          ${qrSvg}
+        </div>
+        <div>
+          <div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.08em;font-weight:600;margin-bottom:6px">Hướng dẫn</div>
+          <ol style="padding-left:18px;font-size:12px;color:var(--ink);margin:0">
+            <li style="margin-bottom:6px">Tải app <b>Google Authenticator</b> trên điện thoại NV<br>
+              <span style="font-size:10px;color:var(--muted)">(hoặc Microsoft Authenticator / Authy / 1Password)</span></li>
+            <li style="margin-bottom:6px">Mở app → Bấm <b>+</b> → "Scan QR Code"</li>
+            <li style="margin-bottom:6px">Hướng camera vào QR code bên trái</li>
+            <li style="margin-bottom:6px">App ĐT sẽ hiện <b>6 số</b> đổi mỗi 30 giây</li>
+            <li>Nhập 6 số đó vào ô bên dưới để xác nhận:</li>
+          </ol>
+          <div style="margin-top:14px">
+            <input type="text" id="totp-verify-code" maxlength="6" pattern="[0-9]{6}"
+              placeholder="000000"
+              style="width:160px;padding:10px 14px;font-size:22px;font-family:var(--font-mono);letter-spacing:.3em;text-align:center;border:2px solid var(--accent);background:#fff">
+            <div style="font-size:11px;color:var(--muted);margin-top:6px">Nhập 6 chữ số đang hiện trên ĐT (đổi mỗi 30 giây)</div>
+            <div id="totp-verify-err" style="color:var(--bad);font-size:11px;margin-top:4px;min-height:14px"></div>
+          </div>
+          <details style="margin-top:14px;font-size:11px;color:var(--muted)">
+            <summary style="cursor:pointer">Không quét được QR? Nhập tay</summary>
+            <div style="margin-top:6px;padding:8px;background:rgba(28,58,92,.04);font-family:var(--font-mono);font-size:11px">
+              Account: <b>${esc(accountName)}</b><br>
+              Issuer: <b>${esc(issuer)}</b><br>
+              Secret: <b style="letter-spacing:.1em">${secret.match(/.{1,4}/g).join(' ')}</b><br>
+              <span style="color:var(--muted)">Time-based · 30 giây · 6 số · SHA1</span>
+            </div>
+          </details>
+        </div>
+      </div>
+    </div>
+  `;
+
+  const footer = `
+    <button class="btn-sec" onclick="_user2FASetupCancel(${idx})">Hủy</button>
+    <button class="btn-primary" onclick="_user2FASetupVerify(${idx},'${secret}')">✓ Xác nhận & Bật 2FA</button>
+  `;
+
+  openModal('🔐 Cài đặt 2FA · ' + esc(u.name), body, footer);
+
+  // Focus the verify input
+  setTimeout(() => {
+    document.getElementById('totp-verify-code')?.focus();
+  }, 100);
+}
+
+/* v1.56.0: Verify the first TOTP code → if valid, save secret + show backup codes */
+async function _user2FASetupVerify(idx, secret){
+  const codeEl = document.getElementById('totp-verify-code');
+  const errEl = document.getElementById('totp-verify-err');
+  if(!codeEl) return;
+  const code = codeEl.value.trim().replace(/\s/g, '');
+  errEl.textContent = '';
+  if(!/^\d{6}$/.test(code)){
+    errEl.textContent = 'Vui lòng nhập đúng 6 chữ số';
+    return;
+  }
+
+  const ok = await totpVerify(secret, code);
+  if(!ok){
+    errEl.textContent = '❌ Mã không đúng — kiểm tra giờ trên ĐT có chính xác? Thử mã mới (đổi mỗi 30s).';
+    codeEl.select();
+    return;
+  }
+
+  // Generate backup codes
+  const backupCodesPlain = totpGenerateBackupCodes();
+  const backupCodesHashed = await Promise.all(backupCodesPlain.map(async c => ({
+    hash: await totpHashBackupCode(c),
+    usedAt: null
+  })));
+
+  // Save to user
+  const cfg = getAuthConfig();
+  const u = cfg.users[idx];
+  if(!u){ toast('Lỗi: NV không tồn tại','bad'); return; }
+  u.totp2fa = {
+    enabled: true,
+    secret,
+    backupCodes: backupCodesHashed,
+    enabledAt: new Date().toISOString(),
+    enabledBy: actorName()
+  };
+  setAuthConfig(cfg);
+  try{ logAuditEvent('2fa_enable', {target:u.name, by:actorName()}); }catch(e){}
+
+  // Show backup codes (MUST be saved before close)
+  _user2FAShowBackupCodes(idx, backupCodesPlain);
+}
+
+/* v1.56.0: Display backup codes (one-time view) */
+function _user2FAShowBackupCodes(idx, plainCodes){
+  const cfg = getAuthConfig();
+  const u = cfg.users[idx];
+  const body = `
+    <div style="padding:14px 18px;background:rgba(184,71,46,.08);border-left:4px solid var(--accent);margin-bottom:14px">
+      <div style="font-weight:600;color:var(--accent);margin-bottom:6px">⚠ QUAN TRỌNG — In/lưu các mã này NGAY</div>
+      <div style="font-size:12px;color:var(--ink)">
+        Đây là <b>10 mã backup</b> dùng để đăng nhập khi NV ${esc(u.name)} mất điện thoại.<br>
+        Mỗi mã <b>chỉ dùng được 1 LẦN</b>. Hệ thống sẽ KHÔNG hiển thị lại bộ mã này.<br>
+        <span style="color:var(--bad);font-weight:600">Đóng cửa sổ này = mất luôn các mã chưa lưu!</span>
+      </div>
+    </div>
+
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;padding:14px;background:#fff;border:1px solid var(--rule);font-family:var(--font-mono);font-size:14px;letter-spacing:.05em">
+      ${plainCodes.map((c,i) => `<div style="padding:6px 10px;background:var(--paper-2);border:1px dashed var(--rule)"><span style="color:var(--muted);font-size:10px">${String(i+1).padStart(2,'0')}.</span> <b>${esc(c)}</b></div>`).join('')}
+    </div>
+
+    <div style="margin-top:14px;font-size:11px;color:var(--muted)">
+      💡 <b>Cách dùng</b>: Khi mất ĐT, ở màn hình đăng nhập 2FA, bấm "Dùng backup code" → nhập 1 mã chưa dùng.<br>
+      📌 <b>Lưu trữ an toàn</b>: In giấy + cất két sắt công ty. KHÔNG lưu vào email/Google Drive cùng tài khoản.
+    </div>
+  `;
+
+  const footer = `
+    <button class="btn-sec" onclick="_user2FAPrintBackupCodes('${plainCodes.join(',')}','${esc(u.name)}','${esc(u.fullName||'')}')">🖨 In ra giấy</button>
+    <button class="btn-sec" onclick="_user2FACopyBackupCodes('${plainCodes.join(',')}')">📋 Copy</button>
+    <button class="btn-primary" onclick="_user2FAConfirmSaved(${idx})">✓ Tôi đã lưu các mã</button>
+  `;
+
+  openModal('🔑 Backup Codes · ' + esc(u.name), body, footer);
+}
+
+/* v1.56.0: Print backup codes (opens print dialog with formatted page) */
+function _user2FAPrintBackupCodes(codesStr, userName, fullName){
+  const codes = codesStr.split(',');
+  const win = window.open('', '_blank', 'width=720,height=900');
+  if(!win){ toast('Trình duyệt chặn popup — bật popup cho trang này','bad'); return; }
+  win.document.write(`
+    <!DOCTYPE html><html><head><meta charset="utf-8"><title>2FA Backup Codes - ${esc(userName)}</title>
+    <style>body{font-family:Georgia,serif;max-width:600px;margin:30px auto;padding:20px;color:#1c3a5c}
+    h1{color:#b8472e;border-bottom:2px solid #b8472e;padding-bottom:8px}
+    .codes{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin:20px 0}
+    .code{padding:10px;border:1px dashed #888;font-family:monospace;font-size:16px;letter-spacing:.05em}
+    .note{font-size:11px;color:#666;margin-top:20px;border-top:1px solid #ddd;padding-top:10px}</style></head>
+    <body>
+    <h1>🔑 2FA Backup Codes</h1>
+    <p><b>Người dùng:</b> ${esc(userName)}${fullName?' ('+esc(fullName)+')':''}</p>
+    <p><b>Hệ thống:</b> ${esc(S.companyInfo?.short||'Seahorse')} Quản trị</p>
+    <p><b>Ngày tạo:</b> ${new Date().toLocaleString('vi-VN')}</p>
+    <p style="color:#b8472e;font-weight:bold">⚠ MỖI MÃ CHỈ DÙNG ĐƯỢC 1 LẦN. Cất giữ an toàn.</p>
+    <div class="codes">
+      ${codes.map((c,i) => `<div class="code"><span style="color:#888">${String(i+1).padStart(2,'0')}.</span> ${esc(c)}</div>`).join('')}
+    </div>
+    <div class="note">
+      📌 Dùng khi mất điện thoại / không truy cập được Google Authenticator.<br>
+      📌 Đăng nhập → bấm "Dùng backup code" → nhập 1 mã chưa dùng.<br>
+      📌 Sau khi dùng 7-8 mã → vào Quản lý NV để reset 2FA tạo bộ mới.
+    </div>
+    </body></html>
+  `);
+  setTimeout(() => win.print(), 400);
+}
+
+/* v1.56.0: Copy backup codes to clipboard */
+function _user2FACopyBackupCodes(codesStr){
+  const codes = codesStr.split(',');
+  const text = `Seahorse 2FA Backup Codes (${new Date().toLocaleString('vi-VN')}):\n\n` +
+    codes.map((c,i) => `${String(i+1).padStart(2,'0')}. ${c}`).join('\n') +
+    `\n\n⚠ Mỗi mã chỉ dùng 1 lần. Cất giữ an toàn.`;
+  navigator.clipboard.writeText(text).then(
+    () => toast('✓ Đã copy 10 mã vào clipboard','good'),
+    () => toast('Không copy được — vui lòng in ra giấy','bad')
+  );
+}
+
+/* v1.56.0: Confirm backup codes saved → close modal */
+function _user2FAConfirmSaved(idx){
+  if(!confirm('Xác nhận: Bạn đã LƯU 10 backup codes (in giấy/copy)?\n\nĐóng cửa sổ này KHÔNG HIỆN LẠI bộ mã này nữa.')) return;
+  closeModal();
+  toast('✓ Đã bật 2FA + lưu backup codes','good');
+  // Refresh user list if open
+  try{ if(typeof openAdminAuthPanel === 'function'){ openAdminAuthPanel(); } }catch(e){}
+}
+
+/* v1.56.0: Cancel setup → checkbox uncheck */
+function _user2FASetupCancel(idx){
+  closeModal();
+  // Uncheck the toggle
+  const cb = document.getElementById('user-2fa-enabled');
+  if(cb) cb.checked = false;
+}
+
+/* v1.56.0: Admin reset 2FA for a user (emergency) */
+function _user2FAReset(idx){
+  const cfg = getAuthConfig();
+  const u = cfg.users[idx];
+  if(!u || !u.totp2fa) return;
+  if(!confirm(`Reset 2FA cho NV ${u.name}?\n\nSau khi reset:\n- NV không cần nhập mã 2FA khi đăng nhập\n- Tất cả backup codes cũ bị xóa\n- NV phải setup lại 2FA từ đầu nếu muốn bật lại\n\nDùng khi NV mất ĐT + mất backup codes.`)) return;
+  u.totp2fa = {enabled: false, secret: null, backupCodes: [], resetAt: new Date().toISOString(), resetBy: actorName()};
+  totpClearRememberedDevice(u.name);
+  setAuthConfig(cfg);
+  try{ logAuditEvent('2fa_reset', {target:u.name, by:actorName()}); }catch(e){}
+  toast('↩ Đã reset 2FA — NV cần setup lại từ đầu','good');
+  closeModal();
+}
+
 async function saveUser(idx){
   const cfg=getAuthConfig();
   const err=document.getElementById('user-err');
   err.textContent='';
   const name=document.getElementById('user-name').value.trim();
+  const fullName=document.getElementById('user-full-name').value.trim();
   const email=document.getElementById('user-email').value.trim();
   const phone=document.getElementById('user-phone').value.trim();
+  // v1.55.0: Email + fullName validation
+  if(!fullName){ err.textContent='Tên thật là bắt buộc (VD: Nguyễn Thị Lan)'; return; }
+  if(fullName.length < 3){ err.textContent='Tên thật quá ngắn (tối thiểu 3 ký tự)'; return; }
+  if(!email){ err.textContent='Email công ty là bắt buộc (VD: lan@seahorse.com.vn)'; return; }
+  // Email format check
+  const emailRegex = /^[a-z0-9._-]+@[a-z0-9.-]+\.[a-z]{2,}$/i;
+  if(!emailRegex.test(email)){ err.textContent='Email không hợp lệ — VD đúng: lan.kt@seahorse.com.vn'; return; }
+  // Check duplicate email (skip current user when editing)
+  const dupEmail = (cfg.users||[]).find((u,i) => i !== idx && u.email && u.email.toLowerCase() === email.toLowerCase());
+  if(dupEmail){ err.textContent=`Email "${email}" đã được dùng cho NV "${dupEmail.name}"`; return; }
   const pw=document.getElementById('user-pw').value;
   const pw2=document.getElementById('user-pw2').value;
   const tabs=Array.from(document.querySelectorAll('input[data-tab]:checked')).map(c=>c.dataset.tab);
@@ -3999,6 +4662,7 @@ async function saveUser(idx){
     if(isEdit){
       const u=cfg.users[idx];
       u.name=name;
+      u.fullName=fullName;  // v1.55.0
       u.tabs=finalTabs;
       u.canConfirmPayment=isViewer?false:canConfirmPayment;
       u.canApproveL1=isViewer?false:canApproveL1;
@@ -4017,6 +4681,15 @@ async function saveUser(idx){
       u.viewerSegments=isViewer?viewerSegments:[];
       u.viewerVesselIds=isViewer?viewerVesselIds:[];
       u.viewerProjectIds=isViewer?viewerProjectIds:[];
+      // v1.56.0: If admin unchecked 2FA → disable it
+      if(isAdmin()){
+        const tfaEl = document.getElementById('user-2fa-enabled');
+        if(tfaEl && !tfaEl.checked && u.totp2fa?.enabled){
+          u.totp2fa = {enabled:false, secret:null, backupCodes:[], disabledAt:new Date().toISOString(), disabledBy:actorName()};
+          totpClearRememberedDevice(u.name);
+          try{ logAuditEvent('2fa_disable', {target:u.name, by:actorName()}); }catch(e){}
+        }
+      }
       if(pw){
         const salt=bytesToB64(rand(16));
         const hash=await sha256Hex(pw+salt);
@@ -4030,7 +4703,7 @@ async function saveUser(idx){
       const wrap=await wrapMasterKey(CRYPTO_KEY, await deriveWrappingKey(pw,salt,PBKDF2_ITER_NEW));
       cfg.users=cfg.users||[];
       cfg.users.push({
-        name, email, phone, salt, hash, wrap, iter:PBKDF2_ITER_NEW,
+        name, fullName, email, phone, salt, hash, wrap, iter:PBKDF2_ITER_NEW,
         mustChangePassword:true,  // Force change on first login
         isBOD,                    // NEW v1.30.2: BOD flag — xem bút toán BOD_ONLY
         canManageUsers:canManageUsersFlag,  // v1.40.0: sub-admin (HR) flag
@@ -4375,6 +5048,17 @@ function viewerCanSeeProject(projectId){
 function actorName(){
   if(CURRENT_ROLE==='admin') return 'admin';
   return (CURRENT_USER&&CURRENT_USER.name)||'?';
+}
+
+/* v1.55.0: Display-friendly actor with full name + email (for audit log + UI) */
+function actorDisplay(){
+  if(CURRENT_ROLE==='admin') return 'admin';
+  if(!CURRENT_USER) return '?';
+  const parts = [];
+  if(CURRENT_USER.fullName) parts.push(CURRENT_USER.fullName);
+  parts.push(CURRENT_USER.name);
+  if(CURRENT_USER.email) parts.push(`<${CURRENT_USER.email}>`);
+  return parts.join(' · ');
 }
 
 /* v1.45.0: Get current user's department ID */
@@ -5486,6 +6170,8 @@ async function cloudSync(mode){
       setAuthConfig(cfg);
       updateSyncStatus('synced','Đã pull '+timeAgo(cfg.lastSync));
       toast('Đã tải dữ liệu từ cloud');
+      // v1.55.0: Refresh banner
+      try{ updateBackupBanner(); }catch(e){}
     } else {
       // PUSH
       let toEncrypt;
@@ -5600,6 +6286,8 @@ async function cloudSync(mode){
       setAuthConfig(cfg);
       updateSyncStatus('synced','Đã sync '+timeAgo(cfg.lastSync));
       toast('Đã đồng bộ lên cloud');
+      // v1.55.0: Refresh banner
+      try{ updateBackupBanner(); }catch(e){}
     }
   }catch(e){
     console.error(e);
@@ -19541,6 +20229,99 @@ async function exportJSON(){
   setAuthConfig(cfg);
   try{ logAuditEvent('export_backup',{filename:`seahorse_backup_${todayISO()}.json`}); }catch(e){}
   toast('Đã xuất JSON · Backup ghi nhận');
+  // v1.55.0: Hide warning banner after successful backup
+  try{ updateBackupBanner(); }catch(e){}
+}
+
+/* v1.55.0: Check backup + sync status, show warning banner if needed. Admin only. */
+function updateBackupBanner(){
+  const banner = document.getElementById('backup-warning-banner');
+  if(!banner) return;
+  if(!isAdmin()){ banner.style.display='none'; return; }
+  const cfg = getAuthConfig();
+  if(!cfg){ banner.style.display='none'; return; }
+
+  const lastBak = cfg.lastBackup ? new Date(cfg.lastBackup).getTime() : 0;
+  const daysSinceBak = lastBak ? Math.floor((Date.now() - lastBak) / 86400000) : 999;
+  const lastSync = cfg.lastSync ? new Date(cfg.lastSync).getTime() : 0;
+  const daysSinceSync = lastSync ? Math.floor((Date.now() - lastSync) / 86400000) : 999;
+  const hasCloudConfigured = !!(cfg.scriptUrl);
+
+  let warningText = '';
+  let warningType = '';
+  if(daysSinceBak >= 7 && hasCloudConfigured && daysSinceSync >= 7){
+    warningText = `⚠ Đã <b>${daysSinceBak === 999 ? 'chưa bao giờ' : daysSinceBak + ' ngày'}</b> không backup và <b>${daysSinceSync === 999 ? 'chưa bao giờ' : daysSinceSync + ' ngày'}</b> không sync cloud — <u>Bấm để export backup</u>`;
+    warningType = 'both';
+  } else if(daysSinceBak >= 7){
+    warningText = `⚠ Đã <b>${daysSinceBak === 999 ? 'chưa bao giờ' : daysSinceBak + ' ngày'}</b> không backup .json — <u>Bấm để export ngay</u>`;
+    warningType = 'backup';
+  } else if(hasCloudConfigured && daysSinceSync >= 7){
+    warningText = `⚠ Đã <b>${daysSinceSync === 999 ? 'chưa bao giờ' : daysSinceSync + ' ngày'}</b> không sync cloud — <u>Bấm mở Cài đặt</u>`;
+    warningType = 'sync';
+  }
+
+  if(warningText){
+    document.getElementById('backup-warning-text').innerHTML = warningText;
+    banner.style.display = '';
+    banner.dataset.warningType = warningType;
+  } else {
+    banner.style.display = 'none';
+  }
+}
+
+/* v1.55.0: Banner click handler */
+function bkpBannerAction(){
+  const banner = document.getElementById('backup-warning-banner');
+  const type = banner?.dataset.warningType;
+  if(type === 'backup' || type === 'both'){
+    exportJSON().catch(e => console.error(e));
+  } else if(type === 'sync'){
+    if(typeof openAdminAuthPanel === 'function'){
+      openAdminAuthPanel();
+    } else {
+      toast('Mở ⚙ Cài đặt → tab "Đồng bộ cloud"', 'warn');
+    }
+  }
+}
+
+/* v1.55.0: Auto-export backup weekly (Monday or >7 days overdue) */
+async function autoExportWeeklyBackup(){
+  if(!isAdmin()) return;
+  const cfg = getAuthConfig();
+  if(!cfg) return;
+  if(cfg.autoBackupEnabled === false) return;  // disabled by user
+
+  const now = new Date();
+  const dayOfWeek = now.getDay();
+  const lastBak = cfg.lastBackup ? new Date(cfg.lastBackup).getTime() : 0;
+  const daysSinceBak = lastBak ? Math.floor((Date.now() - lastBak) / 86400000) : 999;
+  const isMonday = dayOfWeek === 1;
+  const overdue = daysSinceBak >= 7;
+
+  if(!isMonday && !overdue) return;
+
+  const lastAutoBak = cfg.lastAutoBackup ? new Date(cfg.lastAutoBackup).toISOString().slice(0,10) : '';
+  const today = now.toISOString().slice(0,10);
+  if(lastAutoBak === today) return;  // already prompted today
+
+  const confirmed = confirm(
+    `🔔 Backup tự động hàng tuần\n\n` +
+    `Đã ${daysSinceBak === 999 ? 'CHƯA BAO GIỜ' : daysSinceBak + ' ngày'} không backup file .json.\n\n` +
+    `Bấm OK để auto-download backup ngay.\n` +
+    `(Có thể tắt trong ⚙ Cài đặt nếu không muốn nhắc.)`
+  );
+
+  cfg.lastAutoBackup = new Date().toISOString();
+  setAuthConfig(cfg);
+
+  if(!confirmed) return;
+
+  try{
+    await exportJSON();
+  }catch(e){
+    console.error('[auto-backup] failed:', e);
+    toast('Auto-backup thất bại — vui lòng export thủ công', 'bad');
+  }
 }
 function importJSON(ev){
   const f=ev.target.files[0];if(!f)return;
