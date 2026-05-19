@@ -2300,7 +2300,7 @@ body{min-height:100vh;background-image:radial-gradient(circle at 20% 0%,rgba(184
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='1.56.0';            // bumped on each release
+const APP_VERSION='1.59.0';            // bumped on each release
 
 /* ============================================================
    PWA — Service Worker registration + Install prompt
@@ -2675,6 +2675,74 @@ function totpRememberDevice(userName){
 /* Clear remembered device (admin reset or user logout) */
 function totpClearRememberedDevice(userName){
   try{ localStorage.removeItem(totpRememberKey(userName)); }catch(e){}
+}
+
+/* ============================================================
+   COMPRESSION (v1.57.0) — Reduce payload size for Apps Script
+   Uses browser-native CompressionStream API (gzip)
+   Supported: Chrome 80+, Edge 80+, Firefox 113+, Safari 16.4+
+   Fallback: no compression (return raw)
+   ============================================================ */
+
+/* Check if CompressionStream is available */
+function _compressionSupported(){
+  return typeof CompressionStream !== 'undefined' && typeof DecompressionStream !== 'undefined';
+}
+
+/* Compress string → base64 gzip */
+async function gzipCompress(str){
+  if(!_compressionSupported()){
+    // Fallback: return original wrapped to identify
+    return {compressed:false, data:str};
+  }
+  try{
+    const stream = new Blob([str]).stream().pipeThrough(new CompressionStream('gzip'));
+    const compressedBlob = await new Response(stream).blob();
+    const buffer = await compressedBlob.arrayBuffer();
+    // Convert to base64
+    const bytes = new Uint8Array(buffer);
+    let binary = '';
+    const chunkSize = 8192;
+    for(let i = 0; i < bytes.length; i += chunkSize){
+      binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunkSize));
+    }
+    const b64 = btoa(binary);
+    return {compressed:true, data:b64, origSize:str.length, compSize:b64.length};
+  }catch(e){
+    console.warn('[gzip] compress failed:', e);
+    return {compressed:false, data:str};
+  }
+}
+
+/* Decompress base64 gzip → string */
+async function gzipDecompress(b64){
+  if(!_compressionSupported()){
+    throw new Error('CompressionStream not supported on this browser');
+  }
+  // Base64 → bytes
+  const binary = atob(b64);
+  const bytes = new Uint8Array(binary.length);
+  for(let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  // Decompress
+  const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream('gzip'));
+  const text = await new Response(stream).text();
+  return text;
+}
+
+/* v1.57.0: Decode cloud response — handles both compressed (gz:true) and legacy formats */
+async function decodeCloudPayload(responseData){
+  if(responseData.gz && responseData.payload_gz){
+    const decompressed = await gzipDecompress(responseData.payload_gz);
+    return JSON.parse(decompressed);
+  }
+  return responseData.payload || null;
+}
+
+/* Format bytes for display */
+function _fmtBytes(n){
+  if(n < 1024) return n + ' B';
+  if(n < 1024*1024) return (n/1024).toFixed(1) + ' KB';
+  return (n/1024/1024).toFixed(2) + ' MB';
 }
 
 /* ============================================================
@@ -3257,13 +3325,11 @@ async function authAction(){
       }
       const wrappingKey=await deriveWrappingKey(pw,cfg.admin.salt,cfg.admin.iter);
       CRYPTO_KEY=await unwrapMasterKey(cfg.admin.wrap,wrappingKey);
-      // v1.56.0: 2FA gate for admin if enabled
+      // v1.59.0: Banking-grade — ALWAYS require 2FA if enabled (no remember device)
       if(cfg.admin.totp2fa?.enabled && cfg.admin.totp2fa.secret){
-        if(!totpIsDeviceRemembered('admin')){
-          _PENDING_LOGIN = {user: cfg.admin, pw, name:'admin', isAdmin: true};
-          show2FALoginPrompt(cfg.admin, true);
-          return;
-        }
+        _PENDING_LOGIN = {user: cfg.admin, pw, name:'admin', isAdmin: true};
+        show2FALoginPrompt(cfg.admin, true);
+        return;
       }
       CURRENT_ROLE='admin';
       CURRENT_USER=null;
@@ -3285,14 +3351,11 @@ async function authAction(){
       }
       const wrappingKey=await deriveWrappingKey(pw,matched.salt,matched.iter);
       CRYPTO_KEY=await unwrapMasterKey(matched.wrap,wrappingKey);
-      // v1.56.0: 2FA gate — if enabled and not on remembered device, require code
+      // v1.59.0: Banking-grade — ALWAYS require 2FA if enabled (no remember device)
       if(matched.totp2fa?.enabled && matched.totp2fa.secret){
-        if(!totpIsDeviceRemembered(matched.name)){
-          // Show 2FA prompt
-          _PENDING_LOGIN = {user: matched, pw, name};
-          show2FALoginPrompt(matched);
-          return;
-        }
+        _PENDING_LOGIN = {user: matched, pw, name};
+        show2FALoginPrompt(matched);
+        return;
       }
       CURRENT_ROLE='user';
       CURRENT_USER=matched;
@@ -3566,7 +3629,9 @@ const TAB_TO_FIELDS={
 };
 /* Shared/config fields that everyone (incl. users) can load — non-sensitive.
    IMPORTANT v1.39.1: bankAccounts/bankSnapshots/loans REMOVED from shared — chỉ user có quyền tab 'banking' mới load. */
-const SHARED_FIELDS=['fxRate','displayCcy','companyInfo','meta','presence','auditLog','vesselExpenseCats','omProjectExpenseCats','hrExpenseCats','qnExpenseCats','departments','vendors','expenseTypes','revenueTypes'];
+// v1.57.0: auditLog REMOVED from shared sync — stays local only (admin trên 1 máy chính)
+// Trade-off: nếu admin đăng nhập máy khác → audit log empty. Đổi lại: giảm payload size.
+const SHARED_FIELDS=['fxRate','displayCcy','companyInfo','meta','presence','vesselExpenseCats','omProjectExpenseCats','hrExpenseCats','qnExpenseCats','departments','vendors','expenseTypes','revenueTypes'];
 /* All possible data fields (used by admin or for save-merge) */
 const ALL_DATA_FIELDS=[
   'plans','projects','vessels','onhires','events',
@@ -3768,6 +3833,45 @@ function openSettings(){
         <label>Nhập lại</label>
         <input type="password" id="set-pw-new2" placeholder="">
       </div>
+
+      <!-- v1.58.0: 2FA cho admin -->
+      <hr style="border:none;border-top:1px solid var(--rule);margin:8px 0">
+      <div style="font-family:var(--font-display);font-size:15px;font-weight:600;display:flex;align-items:center;gap:8px">
+        🔐 Xác thực 2 lớp (2FA) cho admin
+        <span style="font-size:9px;color:var(--accent);font-weight:600;padding:2px 6px;background:rgba(184,71,46,.1);border-radius:2px">v1.58.0</span>
+      </div>
+      ${(()=>{
+        const admin2fa = cfg.admin && cfg.admin.totp2fa;
+        if(admin2fa && admin2fa.enabled){
+          const unusedCodes = (admin2fa.backupCodes||[]).filter(c => (typeof c === 'object' && !c.usedAt) || typeof c === 'string').length;
+          return `
+          <div style="padding:12px 14px;background:rgba(74,107,44,.08);border-left:4px solid var(--good);font-size:12px;color:var(--ink);margin-top:6px">
+            <div style="font-weight:600;color:var(--good);margin-bottom:4px">✓ 2FA đã được BẬT cho admin</div>
+            <div style="font-size:11px;color:var(--muted);line-height:1.6">
+              📅 Bật từ: <b>${admin2fa.enabledAt ? new Date(admin2fa.enabledAt).toLocaleDateString('vi-VN') : '?'}</b><br>
+              🔑 Backup codes còn lại: <b>${unusedCodes}/10</b><br>
+              📱 Mỗi lần đăng nhập sẽ hỏi mã 6 số từ Google Authenticator (banking-grade)
+            </div>
+            <div style="margin-top:8px;display:flex;gap:6px">
+              <button class="btn-sec" style="font-size:11px;color:var(--bad)" onclick="adminReset2FA()">↩ Tắt / Reset 2FA admin</button>
+            </div>
+          </div>`;
+        } else {
+          return `
+          <div style="padding:12px 14px;background:rgba(28,58,92,.05);border-left:4px solid var(--ink-soft);font-size:12px;color:var(--ink);margin-top:6px">
+            <div style="margin-bottom:6px">
+              <b>Tăng bảo mật admin với 2FA</b> — sau khi nhập password đúng, app sẽ hỏi thêm <b>6 số từ Google Authenticator</b>.
+            </div>
+            <div style="font-size:11px;color:var(--muted);line-height:1.6;margin-bottom:10px">
+              🔒 Bảo vệ admin khỏi: mất mật khẩu, phishing, brute force.<br>
+              📱 Cần app trên ĐT: Google Authenticator / Microsoft Authenticator / Authy.<br>
+              ⏰ <b>Mỗi lần đăng nhập</b> đều hỏi mã 6 số (banking-grade, an toàn cao nhất).<br>
+              🔑 Sẽ tạo 10 backup codes phòng khi mất ĐT.
+            </div>
+            <button class="btn-primary" style="font-size:12px" onclick="adminSetup2FA()">🔐 Bật 2FA cho admin</button>
+          </div>`;
+        }
+      })()}
       `}
 
       <hr style="border:none;border-top:1px solid var(--rule);margin:8px 0">
@@ -4064,7 +4168,7 @@ function userEditorModal(initial,idx){
             <input type="checkbox" id="user-2fa-enabled" ${initial.totp2fa?.enabled?'checked':''} style="margin-top:3px" onchange="_userToggle2FA(this, ${idx===null?'null':idx})">
             <div style="flex:1">
               <div><b style="color:#1c3a5c">🔐 Xác thực 2 lớp (2FA) — Google Authenticator</b> <span style="font-size:9px;color:var(--accent);font-weight:600">v1.56.0</span></div>
-              <div style="font-size:11px;color:var(--muted);font-style:italic;margin-top:2px">NV phải nhập mã 6 số từ app trên ĐT mỗi 7 ngày. Tăng bảo mật cao — chống mất mật khẩu / phishing. Khuyến nghị bắt buộc cho admin/BOD/L2 approver.</div>
+              <div style="font-size:11px;color:var(--muted);font-style:italic;margin-top:2px">NV phải nhập mã 6 số từ app Google Authenticator <b>mỗi lần đăng nhập</b> (banking-grade). Tăng bảo mật cao — chống mất mật khẩu / phishing. Khuyến nghị bắt buộc cho admin/BOD/L2 approver.</div>
               ${initial.totp2fa?.enabled ? `<div style="margin-top:6px;padding:6px 10px;background:rgba(74,107,44,.1);border-left:3px solid var(--good);font-size:11px;color:var(--ink)">
                 ✓ Đã bật 2FA từ ${initial.totp2fa.enabledAt ? new Date(initial.totp2fa.enabledAt).toLocaleDateString('vi-VN') : '?'} ·
                 ${(initial.totp2fa.backupCodes||[]).filter(c => !c.usedAt && typeof c !== 'string').length || (initial.totp2fa.backupCodes||[]).length}/10 backup codes còn lại ·
@@ -4206,10 +4310,9 @@ function show2FALoginPrompt(user, isAdminLogin){
         style="width:100%;padding:14px;font-size:26px;font-family:var(--font-mono);letter-spacing:.3em;text-align:center;border:2px solid var(--accent);background:#fff;box-sizing:border-box"
         onkeydown="if(event.key==='Enter') _verify2FALogin()">
 
-      <label style="display:flex;align-items:center;gap:8px;margin-top:14px;cursor:pointer;font-size:12px">
-        <input type="checkbox" id="auth-2fa-remember" checked>
-        <span>Nhớ thiết bị này 7 ngày (không hỏi lại trên trình duyệt này)</span>
-      </label>
+      <div style="margin-top:12px;padding:8px 12px;background:rgba(28,58,92,.04);border-left:3px solid var(--ink-soft);font-size:11px;color:var(--muted);font-style:italic">
+        🏦 <b>Bảo mật chuẩn ngân hàng</b>: Hệ thống yêu cầu mã 6 số mỗi lần đăng nhập để đảm bảo an toàn dữ liệu tài chính.
+      </div>
 
       <div id="auth-2fa-err" style="color:var(--bad);font-size:12px;margin-top:8px;min-height:18px"></div>
 
@@ -4237,7 +4340,6 @@ function show2FALoginPrompt(user, isAdminLogin){
 async function _verify2FALogin(){
   const codeEl = document.getElementById('auth-2fa-code');
   const errEl = document.getElementById('auth-2fa-err');
-  const rememberEl = document.getElementById('auth-2fa-remember');
   if(!codeEl || !_PENDING_LOGIN) return;
   const code = codeEl.value.trim().replace(/\s/g, '');
   errEl.textContent = '';
@@ -4252,9 +4354,7 @@ async function _verify2FALogin(){
     try{ logAuditEvent('2fa_fail', {target:_PENDING_LOGIN.name}); }catch(e){}
     return;
   }
-  if(rememberEl?.checked){
-    totpRememberDevice(_PENDING_LOGIN.user.name || _PENDING_LOGIN.name);
-  }
+  // v1.59.0: Banking-grade — no "remember device" — always re-verify next login
   await _complete2FALogin();
 }
 
@@ -4573,6 +4673,215 @@ function _user2FAReset(idx){
   try{ logAuditEvent('2fa_reset', {target:u.name, by:actorName()}); }catch(e){}
   toast('↩ Đã reset 2FA — NV cần setup lại từ đầu','good');
   closeModal();
+}
+
+/* v1.58.0: Admin self-setup 2FA — opens setup modal similar to user 2FA */
+async function adminSetup2FA(){
+  if(!isAdmin()){ toast('Chỉ admin','bad'); return; }
+  const cfg = getAuthConfig();
+  if(cfg.admin?.totp2fa?.enabled){
+    toast('Admin đã bật 2FA rồi','good');
+    return;
+  }
+
+  const secret = totpGenerateSecret();
+  const issuer = (S.companyInfo?.short || 'Seahorse').replace(/[^a-zA-Z0-9]/g, '');
+  const uri = totpGetUri(secret, 'admin', issuer);
+  const qrSvg = totpRenderQR(uri, 220);
+
+  const body = `
+    <div style="font-size:13px;line-height:1.5">
+      <div style="font-size:12px;color:var(--muted);margin-bottom:14px;padding:8px 12px;background:rgba(184,71,46,.06);border-left:3px solid var(--accent)">
+        🔐 Bật 2FA cho tài khoản <b>admin</b> — sau khi setup, <b>mỗi lần đăng nhập</b> sẽ cần nhập mã 6 số (banking-grade).
+      </div>
+
+      <div style="display:grid;grid-template-columns:240px 1fr;gap:20px;align-items:start">
+        <div>
+          <div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.08em;font-weight:600;margin-bottom:6px">Quét QR Code</div>
+          ${qrSvg}
+        </div>
+        <div>
+          <div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.08em;font-weight:600;margin-bottom:6px">Hướng dẫn</div>
+          <ol style="padding-left:18px;font-size:12px;color:var(--ink);margin:0">
+            <li style="margin-bottom:6px">Mở app <b>Google Authenticator</b> trên ĐT của Cường</li>
+            <li style="margin-bottom:6px">Bấm <b>+</b> → "Scan QR Code"</li>
+            <li style="margin-bottom:6px">Hướng camera vào QR code bên trái</li>
+            <li style="margin-bottom:6px">App ĐT hiện entry mới: <b>Seahorse:admin</b> với 6 số đổi mỗi 30s</li>
+            <li>Nhập 6 số đó vào ô bên dưới:</li>
+          </ol>
+          <div style="margin-top:14px">
+            <input type="text" id="admin-totp-verify" maxlength="6" pattern="[0-9]{6}"
+              placeholder="000000"
+              style="width:160px;padding:10px 14px;font-size:22px;font-family:var(--font-mono);letter-spacing:.3em;text-align:center;border:2px solid var(--accent);background:#fff">
+            <div style="font-size:11px;color:var(--muted);margin-top:6px">Nhập 6 chữ số đang hiện trên ĐT (đổi mỗi 30 giây)</div>
+            <div id="admin-totp-err" style="color:var(--bad);font-size:11px;margin-top:4px;min-height:14px"></div>
+          </div>
+          <details style="margin-top:14px;font-size:11px;color:var(--muted)">
+            <summary style="cursor:pointer">Không quét được QR? Nhập tay</summary>
+            <div style="margin-top:6px;padding:8px;background:rgba(28,58,92,.04);font-family:var(--font-mono);font-size:11px">
+              Account: <b>admin</b><br>
+              Issuer: <b>${esc(issuer)}</b><br>
+              Secret: <b style="letter-spacing:.1em">${secret.match(/.{1,4}/g).join(' ')}</b><br>
+              <span style="color:var(--muted)">Time-based · 30 giây · 6 số · SHA1</span>
+            </div>
+          </details>
+        </div>
+      </div>
+    </div>
+  `;
+
+  const footer = `
+    <button class="btn-sec" onclick="closeModal()">Hủy</button>
+    <button class="btn-primary" onclick="_adminSetup2FAVerify('${secret}')">✓ Xác nhận & Bật 2FA admin</button>
+  `;
+
+  openModal('🔐 Bật 2FA cho admin', body, footer);
+  setTimeout(() => document.getElementById('admin-totp-verify')?.focus(), 100);
+}
+
+/* v1.58.0: Verify first TOTP code → save secret + show backup codes */
+async function _adminSetup2FAVerify(secret){
+  const codeEl = document.getElementById('admin-totp-verify');
+  const errEl = document.getElementById('admin-totp-err');
+  if(!codeEl) return;
+  const code = codeEl.value.trim().replace(/\s/g, '');
+  errEl.textContent = '';
+  if(!/^\d{6}$/.test(code)){
+    errEl.textContent = 'Vui lòng nhập đúng 6 chữ số';
+    return;
+  }
+
+  const ok = await totpVerify(secret, code);
+  if(!ok){
+    errEl.textContent = '❌ Mã không đúng — kiểm tra giờ ĐT chính xác? Thử mã mới (đổi mỗi 30s).';
+    codeEl.select();
+    return;
+  }
+
+  // Generate backup codes
+  const backupCodesPlain = totpGenerateBackupCodes();
+  const backupCodesHashed = await Promise.all(backupCodesPlain.map(async c => ({
+    hash: await totpHashBackupCode(c),
+    usedAt: null
+  })));
+
+  // Save to admin
+  const cfg = getAuthConfig();
+  cfg.admin.totp2fa = {
+    enabled: true,
+    secret,
+    backupCodes: backupCodesHashed,
+    enabledAt: new Date().toISOString(),
+    enabledBy: 'admin (self)'
+  };
+  setAuthConfig(cfg);
+  try{ logAuditEvent('admin_2fa_enable', {by:'admin'}); }catch(e){}
+
+  // Show backup codes (one-time view)
+  _adminShow2FABackupCodes(backupCodesPlain);
+}
+
+/* v1.58.0: Show admin's backup codes */
+function _adminShow2FABackupCodes(plainCodes){
+  const body = `
+    <div style="padding:14px 18px;background:rgba(184,71,46,.08);border-left:4px solid var(--accent);margin-bottom:14px">
+      <div style="font-weight:600;color:var(--accent);margin-bottom:6px">⚠ QUAN TRỌNG — In/lưu các mã này NGAY</div>
+      <div style="font-size:12px;color:var(--ink)">
+        Đây là <b>10 mã backup</b> dùng để đăng nhập <b>admin</b> khi mất ĐT.<br>
+        Mỗi mã <b>chỉ dùng được 1 LẦN</b>. Hệ thống sẽ KHÔNG hiển thị lại bộ mã này.<br>
+        <span style="color:var(--bad);font-weight:600">Đóng cửa sổ này = mất luôn các mã chưa lưu!</span>
+      </div>
+    </div>
+
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;padding:14px;background:#fff;border:1px solid var(--rule);font-family:var(--font-mono);font-size:14px;letter-spacing:.05em">
+      ${plainCodes.map((c,i) => `<div style="padding:6px 10px;background:var(--paper-2);border:1px dashed var(--rule)"><span style="color:var(--muted);font-size:10px">${String(i+1).padStart(2,'0')}.</span> <b>${esc(c)}</b></div>`).join('')}
+    </div>
+
+    <div style="margin-top:14px;font-size:11px;color:var(--muted)">
+      💡 <b>Cách dùng</b>: Khi mất ĐT, ở màn hình đăng nhập 2FA, bấm "Dùng backup code" → nhập 1 mã chưa dùng.<br>
+      📌 <b>Lưu trữ an toàn</b>: In giấy + cất két sắt. KHÔNG lưu vào email/Drive của chính tài khoản admin.<br>
+      🔄 <b>Sau khi dùng 7-8 mã</b>: Vào Cài đặt → "Reset 2FA admin" để tạo bộ mới.
+    </div>
+  `;
+
+  const footer = `
+    <button class="btn-sec" onclick="_adminPrint2FABackupCodes('${plainCodes.join(',')}')">🖨 In ra giấy</button>
+    <button class="btn-sec" onclick="_adminCopy2FABackupCodes('${plainCodes.join(',')}')">📋 Copy</button>
+    <button class="btn-primary" onclick="_adminConfirm2FASaved()">✓ Tôi đã lưu các mã</button>
+  `;
+
+  openModal('🔑 Backup Codes · admin', body, footer);
+}
+
+/* v1.58.0: Print admin backup codes */
+function _adminPrint2FABackupCodes(codesStr){
+  const codes = codesStr.split(',');
+  const win = window.open('', '_blank', 'width=720,height=900');
+  if(!win){ toast('Trình duyệt chặn popup — bật popup cho trang này','bad'); return; }
+  win.document.write(`
+    <!DOCTYPE html><html><head><meta charset="utf-8"><title>Admin 2FA Backup Codes</title>
+    <style>body{font-family:Georgia,serif;max-width:600px;margin:30px auto;padding:20px;color:#1c3a5c}
+    h1{color:#b8472e;border-bottom:2px solid #b8472e;padding-bottom:8px}
+    .codes{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin:20px 0}
+    .code{padding:10px;border:1px dashed #888;font-family:monospace;font-size:16px;letter-spacing:.05em}
+    .note{font-size:11px;color:#666;margin-top:20px;border-top:1px solid #ddd;padding-top:10px}</style></head>
+    <body>
+    <h1>🔑 ADMIN 2FA Backup Codes</h1>
+    <p><b>Tài khoản:</b> admin (quyền cao nhất)</p>
+    <p><b>Hệ thống:</b> ${esc(S.companyInfo?.short||'Seahorse')} Quản trị</p>
+    <p><b>Ngày tạo:</b> ${new Date().toLocaleString('vi-VN')}</p>
+    <p style="color:#b8472e;font-weight:bold">⚠ MỖI MÃ CHỈ DÙNG ĐƯỢC 1 LẦN. Cất két sắt.</p>
+    <div class="codes">
+      ${codes.map((c,i) => `<div class="code"><span style="color:#888">${String(i+1).padStart(2,'0')}.</span> ${esc(c)}</div>`).join('')}
+    </div>
+    <div class="note">
+      📌 Dùng khi mất ĐT / không truy cập Google Authenticator.<br>
+      📌 Đăng nhập admin → bấm "Dùng backup code" → nhập 1 mã chưa dùng.<br>
+      📌 Sau khi dùng 7-8 mã → vào Cài đặt → Reset 2FA admin để tạo bộ mới.
+    </div>
+    </body></html>
+  `);
+  setTimeout(() => win.print(), 400);
+}
+
+/* v1.58.0: Copy admin backup codes */
+function _adminCopy2FABackupCodes(codesStr){
+  const codes = codesStr.split(',');
+  const text = `Seahorse ADMIN 2FA Backup Codes (${new Date().toLocaleString('vi-VN')}):\n\n` +
+    codes.map((c,i) => `${String(i+1).padStart(2,'0')}. ${c}`).join('\n') +
+    `\n\n⚠ Mỗi mã chỉ dùng 1 lần. Cất két sắt.`;
+  navigator.clipboard.writeText(text).then(
+    () => toast('✓ Đã copy 10 mã vào clipboard','good'),
+    () => toast('Không copy được — vui lòng in ra giấy','bad')
+  );
+}
+
+/* v1.58.0: Confirm admin saved backup codes */
+function _adminConfirm2FASaved(){
+  if(!confirm('Xác nhận: Cường đã LƯU 10 backup codes (in giấy / copy)?\n\nĐóng cửa sổ này = KHÔNG HIỆN LẠI bộ mã này.')) return;
+  closeModal();
+  toast('✓ Đã bật 2FA cho admin + lưu backup codes','good');
+  setTimeout(() => openSettings(), 300);  // refresh settings
+}
+
+/* v1.58.0: Reset admin 2FA — disable + clear secret */
+function adminReset2FA(){
+  if(!isAdmin()){ toast('Chỉ admin','bad'); return; }
+  const cfg = getAuthConfig();
+  if(!cfg.admin?.totp2fa?.enabled){
+    toast('Admin chưa bật 2FA','warn');
+    return;
+  }
+  if(!confirm('Tắt 2FA cho admin?\n\nSau khi tắt:\n- Admin không cần nhập mã 2FA khi đăng nhập\n- Tất cả backup codes bị xóa\n- Có thể bật lại từ đầu nếu muốn\n\nTiếp tục?')) return;
+  cfg.admin.totp2fa = {
+    enabled: false, secret: null, backupCodes: [],
+    disabledAt: new Date().toISOString(), disabledBy: 'admin (self)'
+  };
+  setAuthConfig(cfg);
+  totpClearRememberedDevice('admin');
+  try{ logAuditEvent('admin_2fa_disable', {by:'admin'}); }catch(e){}
+  toast('↩ Đã tắt 2FA admin','good');
+  setTimeout(() => openSettings(), 300);
 }
 
 async function saveUser(idx){
@@ -6149,14 +6458,31 @@ async function cloudSync(mode){
       const res=await fetch(cfg.scriptUrl+'?action=load&key=data',{method:'GET'});
       const data=await res.json();
       if(!data.ok){updateSyncStatus('error',data.error||'Lỗi');return;}
-      if(!data.payload){
+      // v1.57.0: Handle compressed payload (gz:true)
+      let payloadObj;
+      if(data.gz && data.payload_gz){
+        // Compressed format — decompress first
+        try{
+          const decompressed = await gzipDecompress(data.payload_gz);
+          payloadObj = JSON.parse(decompressed);
+        }catch(e){
+          updateSyncStatus('error','Không giải nén được payload: '+e.message);
+          toast('Lỗi giải nén — '+e.message,'bad');
+          return;
+        }
+      } else if(data.payload){
+        // Legacy uncompressed format
+        payloadObj = data.payload;
+      } else {
         updateSyncStatus('idle');
         toast('Cloud chưa có dữ liệu. Bấm Sync để đẩy lên.');
         return;
       }
-      const decoded=await decryptJSON(data.payload);
+      const decoded=await decryptJSON(payloadObj);
       // Filter for current user (admin gets everything)
       const filteredCloud=filterStateForUser(Object.assign(defaultState(),decoded));
+      // v1.57.0: Preserve local audit log when pulling (not synced anymore)
+      const localAuditLog = S.auditLog || [];
       // Confirm overwrite if local has more (admin only — users always pull-merge silently)
       if(CURRENT_ROLE==='admin' && S.transactions && S.transactions.length>0 && S.transactions.length>(decoded.transactions||[]).length){
         if(!confirm(`Local có ${S.transactions.length} bút toán, cloud có ${(decoded.transactions||[]).length}. Vẫn ghi đè local bằng cloud?`)){
@@ -6164,6 +6490,7 @@ async function cloudSync(mode){
         }
       }
       S=filteredCloud;
+      S.auditLog = localAuditLog;  // restore local audit log
       await saveStateEncrypted();
       renderAll({fromSync:true});
       cfg.lastSync=new Date().toISOString();
@@ -6182,8 +6509,12 @@ async function cloudSync(mode){
           const res0=await fetch(cfg.scriptUrl+'?action=load&key=data',{method:'GET'});
           const data0=await res0.json();
           let cloudFull={};
-          if(data0.ok && data0.payload){
-            cloudFull=await decryptJSON(data0.payload);
+          // v1.57.0: Handle compressed payload
+          if(data0.ok){
+            const decodedPayload = await decodeCloudPayload(data0);
+            if(decodedPayload){
+              cloudFull=await decryptJSON(decodedPayload);
+            }
           }
           // For admin: merge ALL record-array fields (admin owns everything)
           const adminMergeFields=ALL_DATA_FIELDS;
@@ -6222,8 +6553,12 @@ async function cloudSync(mode){
           const res0=await fetch(cfg.scriptUrl+'?action=load&key=data',{method:'GET'});
           const data0=await res0.json();
           let cloudFull={};
-          if(data0.ok && data0.payload){
-            cloudFull=await decryptJSON(data0.payload);
+          // v1.57.0: Handle compressed payload
+          if(data0.ok){
+            const decodedPayload = await decodeCloudPayload(data0);
+            if(decodedPayload){
+              cloudFull=await decryptJSON(decodedPayload);
+            }
           }
           // Build merged state: start from cloud (full state)
           // Then for each allowed field: merge by ID (not replace)
@@ -6265,27 +6600,50 @@ async function cloudSync(mode){
         }
       }
       const payload=await encryptJSON(toEncrypt);
-      // Size guard: Apps Script PropertiesService limit ~9KB, Sheet cell ~50KB
-      // We chunk to "data" sheet which can hold larger, but practical safe limit ~80KB
-      const payloadSize=JSON.stringify(payload).length;
-      if(payloadSize>80*1024){
-        const sizeKB=Math.round(payloadSize/1024);
-        console.error('[sync push] payload too large:',sizeKB,'KB');
-        updateSyncStatus('error',`Payload quá lớn (${sizeKB}KB)`);
-        toast(`Dữ liệu quá lớn (${sizeKB}KB) — không sync được. Có thể logo công ty quá to. Vào Cài đặt → xóa/giảm logo.`,'bad');
+      // v1.57.0: Compress payload to fit Apps Script POST size limit
+      const payloadJson = JSON.stringify(payload);
+      const origSize = payloadJson.length;
+
+      let finalBody;
+      let finalSize;
+      let compressionInfo = '';
+
+      if(_compressionSupported()){
+        const compressed = await gzipCompress(payloadJson);
+        if(compressed.compressed){
+          finalBody = JSON.stringify({action:'save', key:'data', payload_gz:compressed.data, gz:true});
+          finalSize = finalBody.length;
+          const ratio = Math.round((1 - compressed.compSize / origSize) * 100);
+          compressionInfo = ` (nén ${ratio}%: ${_fmtBytes(origSize)} → ${_fmtBytes(compressed.compSize)})`;
+          console.log('[sync push] gzip:', _fmtBytes(origSize), '→', _fmtBytes(compressed.compSize), `(${ratio}% smaller)`);
+        } else {
+          finalBody = JSON.stringify({action:'save', key:'data', payload});
+          finalSize = finalBody.length;
+        }
+      } else {
+        finalBody = JSON.stringify({action:'save', key:'data', payload});
+        finalSize = finalBody.length;
+      }
+
+      // Size guard with relaxed limit since we now compress
+      if(finalSize > 80*1024){
+        const sizeKB = Math.round(finalSize/1024);
+        console.error('[sync push] payload too large after compression:', sizeKB, 'KB');
+        updateSyncStatus('error', `Payload quá lớn (${sizeKB}KB sau nén)`);
+        toast(`Dữ liệu vẫn quá lớn sau khi nén (${sizeKB}KB) — Liên hệ admin/dev`, 'bad');
         return;
       }
       const res=await fetch(cfg.scriptUrl,{
         method:'POST',
         headers:{'Content-Type':'text/plain'},
-        body:JSON.stringify({action:'save',key:'data',payload})
+        body:finalBody
       });
       const data=await res.json();
       if(!data.ok){updateSyncStatus('error',data.error||'Lỗi');toast('Sync thất bại','bad');return;}
       cfg.lastSync=new Date().toISOString();
       setAuthConfig(cfg);
       updateSyncStatus('synced','Đã sync '+timeAgo(cfg.lastSync));
-      toast('Đã đồng bộ lên cloud');
+      toast('Đã đồng bộ lên cloud' + compressionInfo);
       // v1.55.0: Refresh banner
       try{ updateBackupBanner(); }catch(e){}
     }
@@ -7045,8 +7403,8 @@ function logAuditEvent(action, detail){
     action,
     detail:detail||null
   });
-  if(S.auditLog.length>500){
-    S.auditLog=S.auditLog.slice(-500);
+  if(S.auditLog.length>200){  // v1.57.0: 500 → 200 to reduce size
+    S.auditLog=S.auditLog.slice(-200);
   }
 }
 
@@ -22573,6 +22931,19 @@ function renderAll(opts){
 
 /* ===== INIT ===== */
 document.getElementById('opt-date').value=todayISO();
+
+// v1.59.0: Banking-grade migration — clear old "remember device" tokens from v1.56-v1.58
+try{
+  const prefix = (APP_VERSION.includes('-DEMO')) ? 'seahorse_demo_2fa_remember_' : 'seahorse_2fa_remember_';
+  const toRemove = [];
+  for(let i = 0; i < localStorage.length; i++){
+    const k = localStorage.key(i);
+    if(k && k.startsWith(prefix)) toRemove.push(k);
+  }
+  toRemove.forEach(k => localStorage.removeItem(k));
+  if(toRemove.length > 0) console.log('[v1.59.0] Cleared', toRemove.length, '2FA remember tokens (banking-grade mode)');
+}catch(e){console.warn('[v1.59.0 migration]', e);}
+
 // Show auth overlay; renderAll will be called after successful login
 showAuthOverlay();
 
