@@ -1971,6 +1971,9 @@ body{min-height:100vh;background-image:radial-gradient(circle at 20% 0%,rgba(184
         Mảng "Quản lý hộ" tính theo doanh thu phí QL tàu hộ, không bao gồm thu/chi hộ chủ tàu.
         Số liệu USD/VND quy đổi về USD theo tỷ giá hiện tại (${(S.fxRate||25000).toLocaleString('vi-VN')} VND/USD).
       </div>
+
+      <!-- v1.51.0: Note Quỹ Tiền Lương — Thu/Chi/Tồn qua các năm -->
+      <div id="bcqt-salary-fund-note" style="margin-top:14px;padding:10px 14px;background:linear-gradient(135deg,rgba(196,138,57,.08) 0%,rgba(196,138,57,.02) 100%);border-left:4px solid var(--warn);border-radius:2px"></div>
     </div>
   </div>
 
@@ -2275,7 +2278,7 @@ body{min-height:100vh;background-image:radial-gradient(circle at 20% 0%,rgba(184
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='1.50.0';            // bumped on each release
+const APP_VERSION='1.51.0';            // bumped on each release
 
 /* ============================================================
    PWA — Service Worker registration + Install prompt
@@ -16249,6 +16252,9 @@ function renderBCQT(){
   // v1.50.0: Render Phần 2 — 5 executive blocks
   renderBcqtExecBlocks(range, data);
 
+  // v1.51.0: Render Quỹ Tiền Lương note
+  renderBcqtSalaryFundNote();
+
   // v1.50.0: Re-render any open accordion (data may have changed with filter)
   document.querySelectorAll('.rep-acc[open]').forEach(d => {
     d.dataset.rendered = '';  // mark as dirty
@@ -16270,6 +16276,108 @@ function renderBCQT(){
 }
 
 /* v1.50.0: Render 5 executive blocks for BOD overview */
+/* v1.51.0: Aggregate Quỹ Tiền Lương — Thu/Chi/Tồn qua các năm */
+function bcqtSalaryFundByYear(){
+  const sf = S.salaryFund;
+  if(!sf){ return { years: [], rows: [], totalIn: 0, totalOut: 0, balance: 0 }; }
+  const fxRate = S.fxRate || 25000;
+  const toVnd = (amt, ccy) => (ccy === 'USD') ? (amt * fxRate) : amt;  // Quỹ TL chủ yếu VND
+
+  // Aggregate by year
+  const byYear = {};  // {2024: {in, out}, 2025: ...}
+  (sf.contributions||[]).forEach(c => {
+    if(!c.contributedAt) return;
+    const y = String(c.contributedAt).slice(0, 4);
+    if(!/^\d{4}$/.test(y)) return;
+    if(!byYear[y]) byYear[y] = { in: 0, out: 0 };
+    byYear[y].in += toVnd(+c.amount || 0, c.ccy || 'VND');
+  });
+  (sf.withdrawals||[]).forEach(w => {
+    if(!w.date) return;
+    const y = String(w.date).slice(0, 4);
+    if(!/^\d{4}$/.test(y)) return;
+    if(!byYear[y]) byYear[y] = { in: 0, out: 0 };
+    byYear[y].out += toVnd(+w.amount || 0, w.ccy || 'VND');
+  });
+
+  // Build sorted rows with running balance
+  const years = Object.keys(byYear).sort();
+  let runBal = 0;
+  const rows = years.map(y => {
+    const yIn = byYear[y].in;
+    const yOut = byYear[y].out;
+    const yNet = yIn - yOut;
+    runBal += yNet;
+    return {
+      year: y,
+      in: yIn,
+      out: yOut,
+      net: yNet,
+      balance: runBal
+    };
+  });
+  const totalIn = rows.reduce((s,r)=>s+r.in, 0);
+  const totalOut = rows.reduce((s,r)=>s+r.out, 0);
+  return { years, rows, totalIn, totalOut, balance: runBal };
+}
+
+/* v1.51.0: Render note Quỹ Tiền Lương Thu/Chi/Tồn qua các năm */
+function renderBcqtSalaryFundNote(){
+  const wrap = document.getElementById('bcqt-salary-fund-note');
+  if(!wrap) return;
+  const sf = bcqtSalaryFundByYear();
+  const fmtVnd = n => (Math.round(n||0)).toLocaleString('vi-VN');
+  const balColor = sf.balance >= 0 ? 'var(--good)' : 'var(--bad)';
+
+  if(!sf.rows.length){
+    wrap.innerHTML = `<div style="font-size:12px;color:var(--muted)"><b>💰 Quỹ Tiền Lương</b> — Chưa có giao dịch nào trong quỹ. Vào tab "💰 Quỹ TL" để bắt đầu trích quỹ từ doanh thu.</div>`;
+    return;
+  }
+
+  let tbl = `<thead><tr>
+    <th style="text-align:left;font-size:11px;padding:6px 8px">Năm</th>
+    <th class="r" style="font-size:11px;padding:6px 8px">Thu trích (+)</th>
+    <th class="r" style="font-size:11px;padding:6px 8px">Chi (−)</th>
+    <th class="r" style="font-size:11px;padding:6px 8px">Tăng/giảm (Net)</th>
+    <th class="r" style="font-size:11px;padding:6px 8px">Tồn cuối năm</th>
+  </tr></thead><tbody>`;
+
+  sf.rows.forEach(r => {
+    const netColor = r.net >= 0 ? 'var(--good)' : 'var(--bad)';
+    const bColor = r.balance >= 0 ? 'var(--good)' : 'var(--bad)';
+    tbl += `<tr style="font-size:12px">
+      <td style="padding:5px 8px;font-family:var(--font-mono);font-weight:600">${r.year}</td>
+      <td class="r mono" style="padding:5px 8px;color:var(--good)">${fmtVnd(r.in)}</td>
+      <td class="r mono" style="padding:5px 8px;color:var(--bad)">${fmtVnd(r.out)}</td>
+      <td class="r mono" style="padding:5px 8px;color:${netColor};font-weight:600">${r.net>=0?'+':''}${fmtVnd(r.net)}</td>
+      <td class="r mono" style="padding:5px 8px;color:${bColor};font-weight:700">${fmtVnd(r.balance)}</td>
+    </tr>`;
+  });
+
+  // Total row
+  tbl += `<tr style="border-top:2px solid var(--ink);background:rgba(196,138,57,.06);font-weight:700;font-size:12px">
+    <td style="padding:6px 8px">∑ Tổng cộng</td>
+    <td class="r mono" style="padding:6px 8px;color:var(--good)">${fmtVnd(sf.totalIn)}</td>
+    <td class="r mono" style="padding:6px 8px;color:var(--bad)">${fmtVnd(sf.totalOut)}</td>
+    <td class="r mono" style="padding:6px 8px;color:${sf.balance>=0?'var(--good)':'var(--bad)'}">${(sf.totalIn-sf.totalOut)>=0?'+':''}${fmtVnd(sf.totalIn-sf.totalOut)}</td>
+    <td class="r mono" style="padding:6px 8px;color:${balColor};font-size:14px">${fmtVnd(sf.balance)}</td>
+  </tr>`;
+  tbl += '</tbody>';
+
+  wrap.innerHTML = `
+    <div style="font-size:12px;font-weight:600;color:var(--ink);margin-bottom:6px;display:flex;align-items:center;gap:6px">
+      💰 <span>Quỹ Tiền Lương — Thu / Chi / Tồn qua các năm</span>
+      <span style="font-weight:400;color:var(--muted);font-style:italic;font-size:11px">(VND · Tồn = lũy kế Thu − Chi từ năm đầu tiên)</span>
+    </div>
+    <div class="tbl-scroll"><table class="tbl" style="font-size:11px">${tbl}</table></div>
+    <div style="margin-top:6px;font-size:10px;color:var(--muted);font-style:italic">
+      💡 <b>Thu trích</b>: từ AR doanh thu (theo % cấu hình ở tab 💰 Quỹ TL).
+      <b>Chi</b>: rút quỹ cho ${(sf.rows.length>0?'phụ cấp, thưởng, phúc lợi, tham quan, bảo hiểm...':'các mục được duyệt')}.
+      Số liệu quy đổi VND theo FX rate hiện tại (${(S.fxRate||25000).toLocaleString('vi-VN')} VND/USD).
+    </div>
+  `;
+}
+
 function renderBcqtExecBlocks(range, data){
   const wrap = document.getElementById('bcqt-exec-blocks');
   if(!wrap) return;
