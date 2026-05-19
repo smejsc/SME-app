@@ -2142,7 +2142,7 @@ body{min-height:100vh;background-image:radial-gradient(circle at 20% 0%,rgba(184
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='1.47.0';            // bumped on each release
+const APP_VERSION='1.48.0';            // bumped on each release
 
 /* ============================================================
    PWA — Service Worker registration + Install prompt
@@ -7362,9 +7362,9 @@ function catalogImport(kind){
     department: null,  // departments không có template Excel riêng — TODO
     vessel: 'vessels',
     project: 'projects',
-    expenseType: null,  // TODO
-    revenueType: null,  // TODO
-    vendor: null  // TODO
+    expenseType: 'expense_types',  // v1.48.0
+    revenueType: 'revenue_types',  // v1.48.0
+    vendor: 'vendors'  // v1.47.0: linked to vendors template
   };
   const tplKey = tplMap[kind];
   if(!tplKey){
@@ -19053,6 +19053,48 @@ const EXCEL_TEMPLATES={
         aliases:['Address','Địa chỉ ĐKKD','Trụ sở']}
     ]
   },
+  expense_types:{
+    // v1.48.0: Loại chi phí (Expense Type) — Master data
+    name:'Loại chi phí (CP) — Master data',
+    target:'expenseTypes',
+    columns:[
+      {key:'code',     label:'Mã loại CP * (VD: BUNKER_PO, PORT, SALARY)', required:true, type:'text',
+        aliases:['Code','Mã','Mã loại','Expense code']},
+      {key:'label',    label:'Tên hiển thị *', required:true, type:'text',
+        aliases:['Tên','Name','Label','Tên loại CP']},
+      {key:'group',    label:'Nhóm * (PO/VESSEL/HR/TRAVEL/OVERHEAD/FINANCE/OTHER/BOD)', required:true, type:'expenseGroup',
+        aliases:['Group','Nhóm CP','Phân loại']},
+      {key:'icon',     label:'Icon (emoji — VD: ⛽, 🔩, 👥)', required:false, type:'text',
+        aliases:['Biểu tượng','Emoji','Symbol']},
+      {key:'isPO',     label:'Là PO (true/false — tồn kho không vào P&L)', required:false, type:'boolean',
+        aliases:['PO','Tồn kho','isPO']},
+      {key:'isFuel',   label:'Là nhiên liệu (true/false — bắt buộc 3 trường fuel)', required:false, type:'boolean',
+        aliases:['Fuel','Nhiên liệu','isFuel']},
+      {key:'defaultVendor', label:'NCC mặc định (tùy chọn — VD: CBCNV)', required:false, type:'text',
+        aliases:['Default vendor','NCC default','Vendor default']},
+      {key:'hint',     label:'Ghi chú / Hướng dẫn cho NV', required:false, type:'text',
+        aliases:['Note','Hint','Ghi chú','Mô tả']}
+    ]
+  },
+  revenue_types:{
+    // v1.48.0: Loại doanh thu (Revenue Type) — Master data
+    name:'Loại doanh thu (DT) — Master data',
+    target:'revenueTypes',
+    columns:[
+      {key:'code',     label:'Mã loại DT * (VD: VESSEL_SERVICE, OM, MGMT_FEE)', required:true, type:'text',
+        aliases:['Code','Mã','Mã loại','Revenue code']},
+      {key:'label',    label:'Tên hiển thị *', required:true, type:'text',
+        aliases:['Tên','Name','Label','Tên loại DT']},
+      {key:'group',    label:'Nhóm * (VESSEL_OPS/OM/MGMT/OTHER/BOD)', required:true, type:'revenueGroup',
+        aliases:['Group','Nhóm DT','Phân loại']},
+      {key:'icon',     label:'Icon (emoji — VD: ⛵, 🔧, 📋)', required:false, type:'text',
+        aliases:['Biểu tượng','Emoji','Symbol']},
+      {key:'isBODOnly', label:'Chỉ BOD xem được (true/false)', required:false, type:'boolean',
+        aliases:['BOD only','Nội bộ BOD','isBODOnly']},
+      {key:'hint',     label:'Ghi chú / Hướng dẫn cho NV', required:false, type:'text',
+        aliases:['Note','Hint','Ghi chú','Mô tả']}
+    ]
+  },
   op_transactions:{
     // v1.46.0: Thu/Chi hộ tàu QL — import history
     name:'Thu/Chi hộ tàu QL (Vận hành)',
@@ -19490,6 +19532,16 @@ function _excelRowToRecord(row, colMap, tpl){
         if(!v) rec.errors.push(`Tàu QL hộ "${val}" không tìm thấy — tạo tàu trước ở tab 06`);
         rec.data._opVesselId = v ? v.id : null;
       } else { rec.errors.push('Tàu QL hộ bắt buộc'); rec.data._opVesselId = null; }
+    } else if(c.type==='expenseGroup'){
+      // v1.48.0: PO/VESSEL/HR/TRAVEL/OVERHEAD/FINANCE/OTHER/BOD
+      const valid=['PO','VESSEL','HR','TRAVEL','OVERHEAD','FINANCE','OTHER','BOD'];
+      val=(val||'OTHER').toString().toUpperCase().trim();
+      if(!valid.includes(val)){rec.warnings.push(`${c.key}: nhóm CP '${val}' không hợp lệ, dùng OTHER`); val='OTHER';}
+    } else if(c.type==='revenueGroup'){
+      // v1.48.0: VESSEL_OPS/OM/MGMT/OTHER/BOD
+      const valid=['VESSEL_OPS','OM','MGMT','OTHER','BOD'];
+      val=(val||'OTHER').toString().toUpperCase().replace(/[\s-]/g,'_').trim();
+      if(!valid.includes(val)){rec.warnings.push(`${c.key}: nhóm DT '${val}' không hợp lệ, dùng OTHER`); val='OTHER';}
     }
 
     if(c.required && (val===''||val===0) && c.type!=='number'){
@@ -19591,6 +19643,68 @@ function excelConfirmImport(){
         _importedFromExcel: true,
         _importBatch: 'IMP-' + new Date().toISOString().slice(0,10)
       });
+      created++;
+      return;
+    }
+    if(tpl.target==='expenseTypes'){
+      // v1.48.0: Loại CP import
+      if(!S.expenseTypes) S.expenseTypes = [];
+      const code = (d.code||'').trim().toUpperCase().replace(/[^A-Z0-9_]/g,'_');
+      const label = (d.label||'').trim();
+      if(!code){ warnings.push('Bỏ qua dòng không có Mã loại CP'); return; }
+      if(!label){ warnings.push(`Bỏ qua dòng "${code}" không có Tên`); return; }
+      // Check duplicate code
+      const dup = S.expenseTypes.find(t => t.code === code);
+      if(dup){
+        warnings.push(`Bỏ qua: Mã "${code}" đã có (${dup.label})`);
+        return;
+      }
+      S.expenseTypes.push({
+        id: 'ET-' + code + '-' + uid().slice(-4),
+        code,
+        label,
+        group: (d.group||'OTHER'),
+        icon: (d.icon||'📝').trim().slice(0,4),
+        isPO: !!d.isPO,
+        isFuel: !!d.isFuel,
+        defaultVendor: (d.defaultVendor||'').trim() || undefined,
+        hint: (d.hint||'').trim() || undefined,
+        createdBy: actorName(),
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        _importedFromExcel: true,
+        _importBatch: 'IMP-' + new Date().toISOString().slice(0,10)
+      });
+      created++;
+      return;
+    }
+    if(tpl.target==='revenueTypes'){
+      // v1.48.0: Loại DT import
+      if(!S.revenueTypes) S.revenueTypes = [];
+      const code = (d.code||'').trim().toUpperCase().replace(/[^A-Z0-9_]/g,'_');
+      const label = (d.label||'').trim();
+      if(!code){ warnings.push('Bỏ qua dòng không có Mã loại DT'); return; }
+      if(!label){ warnings.push(`Bỏ qua dòng "${code}" không có Tên`); return; }
+      const dup = S.revenueTypes.find(t => t.code === code);
+      if(dup){
+        warnings.push(`Bỏ qua: Mã "${code}" đã có (${dup.label})`);
+        return;
+      }
+      const rec = {
+        id: 'RT-' + code + '-' + uid().slice(-4),
+        code,
+        label,
+        group: (d.group||'OTHER'),
+        icon: (d.icon||'📝').trim().slice(0,4),
+        hint: (d.hint||'').trim() || undefined,
+        createdBy: actorName(),
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        _importedFromExcel: true,
+        _importBatch: 'IMP-' + new Date().toISOString().slice(0,10)
+      };
+      if(d.isBODOnly) rec.isBODOnly = true;
+      S.revenueTypes.push(rec);
       created++;
       return;
     }
@@ -20014,7 +20128,7 @@ function excelConfirmImport(){
   closeModal();
   EXCEL_PARSED_DATA=null;
   renderAll();
-  const masterTargets=['fixedAssets','tools','vessels','projects','bankAccounts','bankSnapshots','loans','warehouses','invMovements','events','opTransactions','vendors'];
+  const masterTargets=['fixedAssets','tools','vessels','projects','bankAccounts','bankSnapshots','loans','warehouses','invMovements','events','opTransactions','vendors','expenseTypes','revenueTypes'];
   let msg;
   if(masterTargets.includes(tpl.target)){
     msg = `Đã import ${created} bản ghi`;
