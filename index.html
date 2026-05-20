@@ -467,6 +467,10 @@ body{min-height:100vh;background-image:radial-gradient(circle at 20% 0%,rgba(184
           <input type="password" id="auth-pw" placeholder="••••••••" autocomplete="current-password">
         </div>
         <div class="auth-error" id="auth-err"></div>
+        <!-- v1.60.0: Quên mật khẩu admin link -->
+        <div style="margin-top:8px;text-align:right">
+          <a href="#" onclick="event.preventDefault();showRecoveryFlow();" style="font-size:11px;color:var(--accent);text-decoration:underline">🔑 Quên mật khẩu admin? Dùng Recovery Key</a>
+        </div>
       </div>
 
       <!-- SETUP form (first run) -->
@@ -2300,7 +2304,7 @@ body{min-height:100vh;background-image:radial-gradient(circle at 20% 0%,rgba(184
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='1.59.0';            // bumped on each release
+const APP_VERSION='1.61.0';            // bumped on each release
 
 /* ============================================================
    PWA — Service Worker registration + Install prompt
@@ -2479,6 +2483,317 @@ async function decryptJSON(payload){
   const ct=b64ToBytes(payload.ct);
   const data=await crypto.subtle.decrypt({name:'AES-GCM',iv},CRYPTO_KEY,ct);
   return JSON.parse(new TextDecoder().decode(data));
+}
+
+/* ============================================================
+   CLOUD BACKUP (v1.61.0) — Auto-backup to Google Drive
+   Silent backup via Apps Script → DriveApp.createFile()
+   Backup is encrypted with separate "backup password" (not admin password)
+   ============================================================ */
+
+/* Setup backup password — derive wrapping key for backup files */
+async function setupBackupPassword(pw){
+  if(!pw || pw.length < 8) throw new Error('Backup password ≥ 8 ký tự');
+  const salt = bytesToB64(rand(16));
+  const hash = await sha256Hex(pw + salt);
+  // Wrap CRYPTO_KEY with key derived from backup password
+  const wrappingKey = await deriveWrappingKey(pw, salt, PBKDF2_ITER_NEW);
+  const wrap = await wrapMasterKey(CRYPTO_KEY, wrappingKey);
+  return {salt, hash, wrap, iter: PBKDF2_ITER_NEW, createdAt: new Date().toISOString()};
+}
+
+/* Verify backup password (used during restore) */
+async function verifyBackupPassword(pw, backupAuth){
+  const hash = await sha256Hex(pw + backupAuth.salt);
+  return hash === backupAuth.hash;
+}
+
+/* Build encrypted backup payload — encrypted with backup password (different from admin password) */
+async function buildEncryptedBackup(backupPw){
+  // Encrypt current state S using a fresh key, then wrap with backup pw
+  const masterKey = CRYPTO_KEY;
+  if(!masterKey) throw new Error('Chưa unlock master key');
+  // Create backup auth (salt + hash + wrap) using backup pw
+  const salt = bytesToB64(rand(16));
+  const hash = await sha256Hex(backupPw + salt);
+  const wrappingKey = await deriveWrappingKey(backupPw, salt, PBKDF2_ITER_NEW);
+  const wrap = await wrapMasterKey(masterKey, wrappingKey);
+  // Encrypt S
+  const payload = await encryptJSON(S);
+  // Backup file format
+  return {
+    seahorseBackup: true,
+    version: APP_VERSION,
+    createdAt: new Date().toISOString(),
+    actor: actorName(),
+    auth: {
+      // Backup-specific auth (NOT admin auth)
+      backup: {salt, hash, wrap, iter: PBKDF2_ITER_NEW},
+      // Also keep admin auth for full reset capability
+      admin: getAuthConfig().admin,
+      users: getAuthConfig().users || []
+    },
+    payload
+  };
+}
+
+/* Silent cloud backup — runs in background, no popup */
+async function cloudBackupSilent(){
+  try{
+    if(!isAdmin()) return {ok:false, reason:'not admin'};
+    const cfg = getAuthConfig();
+    if(!cfg) return {ok:false, reason:'no cfg'};
+    if(cfg.autoBackupEnabled === false) return {ok:false, reason:'disabled'};
+    if(!cfg.scriptUrl) return {ok:false, reason:'no scriptUrl'};
+    if(!cfg.backupPassword || !cfg.backupPassword.hash){
+      console.warn('[cloud-backup] No backup password set — skipping');
+      return {ok:false, reason:'no backup password'};
+    }
+    // Check if backup needed (>= 7 days)
+    const lastBak = cfg.lastCloudBackup ? new Date(cfg.lastCloudBackup).getTime() : 0;
+    const daysSince = lastBak ? Math.floor((Date.now() - lastBak) / 86400000) : 999;
+    if(daysSince < 7) return {ok:false, reason:'too recent'};
+
+    // Get backup password from session storage (set during login)
+    const backupPw = sessionStorage.getItem('seahorse_backup_pw');
+    if(!backupPw){
+      console.warn('[cloud-backup] Backup password not in session — will prompt next login');
+      return {ok:false, reason:'no pw in session'};
+    }
+
+    // Build backup
+    const backup = await buildEncryptedBackup(backupPw);
+    const content = JSON.stringify(backup);
+
+    // Upload to Drive via Apps Script
+    const filename = `Seahorse_backup_${new Date().toISOString().slice(0,10)}_${Date.now().toString(36)}.json`;
+    const res = await fetch(cfg.scriptUrl, {
+      method: 'POST',
+      headers: {'Content-Type': 'text/plain'},
+      body: JSON.stringify({action: 'backup_upload', filename, content})
+    });
+    const data = await res.json();
+    if(!data.ok) throw new Error(data.error || 'Upload failed');
+
+    cfg.lastCloudBackup = new Date().toISOString();
+    cfg.lastCloudBackupFile = data.filename;
+    setAuthConfig(cfg);
+    try{ logAuditEvent('cloud_backup', {filename, size:content.length}); }catch(e){}
+    console.log('[cloud-backup] OK:', filename, '·', _fmtBytes(content.length));
+    toast(`✓ Backup cloud · ${new Date().toLocaleDateString('vi-VN')}`, 'good');
+    return {ok:true, filename, size:content.length};
+  }catch(e){
+    console.error('[cloud-backup] failed:', e);
+    return {ok:false, reason:e.message};
+  }
+}
+
+/* List backups from Drive */
+async function listCloudBackups(){
+  const cfg = getAuthConfig();
+  if(!cfg.scriptUrl) throw new Error('Chưa cấu hình Apps Script URL');
+  const res = await fetch(cfg.scriptUrl, {
+    method: 'POST',
+    headers: {'Content-Type': 'text/plain'},
+    body: JSON.stringify({action: 'backup_list'})
+  });
+  const data = await res.json();
+  if(!data.ok) throw new Error(data.error || 'List failed');
+  return data.files || [];
+}
+
+/* Fetch one backup file */
+async function fetchCloudBackup(fileId){
+  const cfg = getAuthConfig();
+  if(!cfg.scriptUrl) throw new Error('Chưa cấu hình Apps Script URL');
+  const res = await fetch(cfg.scriptUrl, {
+    method: 'POST',
+    headers: {'Content-Type': 'text/plain'},
+    body: JSON.stringify({action: 'backup_get', fileId})
+  });
+  const data = await res.json();
+  if(!data.ok) throw new Error(data.error || 'Fetch failed');
+  return JSON.parse(data.content);
+}
+
+/* v1.61.0: Show setup backup password prompt (first time admin login) */
+function showSetupBackupPasswordPrompt(){
+  const body = `
+    <div style="font-size:13px;line-height:1.6;color:var(--ink)">
+      <div style="padding:12px 14px;background:rgba(184,71,46,.06);border-left:4px solid var(--accent);margin-bottom:14px">
+        <div style="font-weight:600;color:var(--accent);margin-bottom:4px">🔐 Bảo mật cấp 2: Password Backup</div>
+        <div style="font-size:12px;color:var(--muted);line-height:1.6">
+          <b>Để auto-backup file lên Google Drive an toàn</b>, vui lòng đặt 1 password riêng cho backup.<br>
+          📌 <b>Khác với password admin</b> — nếu Drive bị xâm nhập, hacker vẫn không decrypt được backup.<br>
+          🔑 <b>Khi quên password admin</b> → dùng backup password để restore data từ Drive.
+        </div>
+      </div>
+
+      <div class="field">
+        <label>Backup Password (≥ 8 ký tự, KHÁC password admin)</label>
+        <input type="password" id="setup-backup-pw1" placeholder="VD: SeahorseBackup2026" autocomplete="new-password">
+      </div>
+      <div class="field">
+        <label>Nhập lại</label>
+        <input type="password" id="setup-backup-pw2" placeholder="Nhập lại" autocomplete="new-password">
+      </div>
+
+      <div id="setup-backup-err" style="color:var(--bad);font-size:12px;min-height:16px"></div>
+
+      <div style="padding:10px 12px;background:rgba(28,58,92,.04);border-left:3px solid var(--ink-soft);font-size:11px;color:var(--muted);margin-top:14px">
+        💡 <b>Gợi ý</b>: Đặt password backup dễ nhớ (chung với BGD/kế toán trưởng). Mỗi thứ 2 hàng tuần, app sẽ tự động backup lên Drive.
+      </div>
+    </div>
+  `;
+  const footer = `
+    <button class="btn-sec" onclick="closeModal();_skipBackupPasswordSetup()">Để sau</button>
+    <button class="btn-primary" onclick="_saveBackupPasswordSetup()">✓ Lưu Backup Password</button>
+  `;
+  openModal('🔑 Đặt Backup Password', body, footer);
+  setTimeout(() => document.getElementById('setup-backup-pw1')?.focus(), 100);
+}
+
+/* v1.61.0: Save backup password setup */
+async function _saveBackupPasswordSetup(){
+  const pw1 = document.getElementById('setup-backup-pw1').value;
+  const pw2 = document.getElementById('setup-backup-pw2').value;
+  const errEl = document.getElementById('setup-backup-err');
+  errEl.textContent = '';
+  if(pw1.length < 8){ errEl.textContent = 'Password ≥ 8 ký tự'; return; }
+  if(pw1 !== pw2){ errEl.textContent = 'Nhập lại không khớp'; return; }
+  // Check different from admin password
+  const cfg = getAuthConfig();
+  const adminHash = await sha256Hex(pw1 + cfg.admin.salt);
+  if(adminHash === cfg.admin.hash){
+    errEl.textContent = '❌ Phải KHÁC password admin (để defense-in-depth)';
+    return;
+  }
+  try{
+    const backupAuth = await setupBackupPassword(pw1);
+    cfg.backupPassword = backupAuth;
+    setAuthConfig(cfg);
+    sessionStorage.setItem('seahorse_backup_pw', pw1);
+    try{ logAuditEvent('backup_pw_setup', {by:'admin'}); }catch(e){}
+    closeModal();
+    toast('✓ Đã đặt Backup Password — sẽ tự backup lên Drive','good');
+    // Trigger first cloud backup
+    setTimeout(() => cloudBackupSilent(), 1500);
+  }catch(e){
+    errEl.textContent = 'Lỗi: ' + e.message;
+  }
+}
+
+/* v1.61.0: Skip backup password setup (postpone) */
+function _skipBackupPasswordSetup(){
+  toast('⚠ Bỏ qua tạm — KHÔNG có auto-backup. Có thể setup sau trong Cài đặt.','warn');
+}
+
+/* v1.61.0: Prompt for backup password during login (if missing in session) */
+async function promptBackupPasswordForSession(){
+  return new Promise((resolve) => {
+    const cfg = getAuthConfig();
+    if(!cfg.backupPassword?.hash){ resolve(null); return; }
+    const body = `
+      <div style="font-size:13px;line-height:1.6">
+        <div style="padding:10px 12px;background:rgba(28,58,92,.04);border-left:3px solid var(--ink-soft);font-size:12px;color:var(--muted);margin-bottom:14px">
+          🔐 Nhập <b>Backup Password</b> để app tự backup data lên Google Drive trong phiên này.<br>
+          (Có thể bấm "Bỏ qua" — auto-backup sẽ không chạy.)
+        </div>
+        <div class="field">
+          <label>Backup Password</label>
+          <input type="password" id="session-backup-pw" placeholder="Đã đặt lúc setup">
+        </div>
+        <div id="session-backup-err" style="color:var(--bad);font-size:12px;min-height:14px"></div>
+      </div>
+    `;
+    const footer = `
+      <button class="btn-sec" onclick="closeModal();window._resolveBackupPw(null)">Bỏ qua</button>
+      <button class="btn-primary" onclick="window._verifySessionBackupPw()">✓ Xác nhận</button>
+    `;
+    window._resolveBackupPw = resolve;
+    window._verifySessionBackupPw = async () => {
+      const pw = document.getElementById('session-backup-pw').value;
+      const errEl = document.getElementById('session-backup-err');
+      errEl.textContent = '';
+      const ok = await verifyBackupPassword(pw, cfg.backupPassword);
+      if(!ok){ errEl.textContent = '❌ Backup password sai'; return; }
+      sessionStorage.setItem('seahorse_backup_pw', pw);
+      closeModal();
+      resolve(pw);
+    };
+    openModal('🔐 Backup Password (phiên đăng nhập)', body, footer);
+    setTimeout(() => document.getElementById('session-backup-pw')?.focus(), 100);
+  });
+}
+
+/* ============================================================
+   RECOVERY KEY (v1.60.0) — Admin password recovery
+   Allows admin to reset password using a printed 24-char key.
+   Master key K is wrapped with key derived from Recovery Key.
+   ============================================================ */
+
+/* Generate 24-char Recovery Key formatted as 6 groups of 4 chars (uppercase) */
+function recoveryGenerateKey(){
+  const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // omit I, O, 0, 1 (confusing)
+  const bytes = new Uint8Array(24);
+  crypto.getRandomValues(bytes);
+  let chars = '';
+  for(let i = 0; i < 24; i++){
+    chars += alphabet[bytes[i] % alphabet.length];
+  }
+  return chars.match(/.{4}/g).join('-');
+}
+
+/* Derive key from Recovery Key for wrapping/unwrapping master key */
+async function deriveRecoveryKey(recoveryKey, salt){
+  const clean = String(recoveryKey).replace(/[-\s]/g, '').toUpperCase();
+  const enc = new TextEncoder().encode(clean);
+  const baseKey = await crypto.subtle.importKey('raw', enc, {name:'PBKDF2'}, false, ['deriveKey']);
+  const saltBytes = typeof salt === 'string' ? b64ToBytes(salt) : salt;
+  return await crypto.subtle.deriveKey(
+    {name:'PBKDF2', salt: saltBytes, iterations: 200000, hash:'SHA-256'},
+    baseKey,
+    {name:'AES-GCM', length:256},
+    false, ['wrapKey','unwrapKey']
+  );
+}
+
+/* Wrap master key with Recovery Key — returns {salt, wrap, iter} */
+async function wrapMasterKeyWithRecovery(masterKey, recoveryKey){
+  const salt = bytesToB64(rand(16));
+  const wrapKey = await deriveRecoveryKey(recoveryKey, salt);
+  const wrap = await wrapMasterKey(masterKey, wrapKey);
+  return {salt, wrap, iter: 200000};
+}
+
+/* Unwrap master key using Recovery Key — for recovery flow */
+async function unwrapMasterKeyWithRecovery(recoveryWrap, recoveryKey){
+  const wrapKey = await deriveRecoveryKey(recoveryKey, recoveryWrap.salt);
+  return await unwrapMasterKey(recoveryWrap.wrap, wrapKey);
+}
+
+/* ============================================================
+   URL WHITELIST (v1.60.0) — Phishing prevention
+   ============================================================ */
+const TRUSTED_HOSTS = [
+  'app.seahorse.com.vn',
+  'erp.seahorse.com.vn',
+  'hanguyen70.github.io',
+  'localhost',
+  '127.0.0.1'
+];
+
+function checkHostnameSafety(){
+  try{
+    const h = window.location.hostname;
+    if(!h) return;
+    if(TRUSTED_HOSTS.includes(h)) return;
+    const banner = document.createElement('div');
+    banner.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:99998;background:#b8472e;color:#fff;text-align:center;padding:14px 16px;font-family:Inter,sans-serif;font-size:14px;font-weight:600;border-bottom:2px solid #8b3a2a;box-shadow:0 4px 12px rgba(0,0,0,.3)';
+    banner.innerHTML = `⚠ CẢNH BÁO BẢO MẬT: Bạn đang truy cập từ <b>${h}</b> — không phải trang chính thức. <b>KHÔNG nhập mật khẩu/2FA tại đây</b> — có thể là trang giả mạo. <a href="https://app.seahorse.com.vn" style="color:#fff;text-decoration:underline">Mở trang chính thức →</a>`;
+    document.body.insertBefore(banner, document.body.firstChild);
+    console.warn('[security] Untrusted hostname:', h);
+  }catch(e){}
 }
 
 /* ============================================================
@@ -3441,6 +3756,17 @@ async function authAction(){
         try{ updateBackupBanner(); }catch(e){console.warn('[backup banner]',e);}
         try{ autoExportWeeklyBackup(); }catch(e){console.warn('[auto-backup]',e);}
       },2500);
+      // v1.61.0: Prompt setup backup password if not set
+      setTimeout(()=>{
+        try{
+          if(!cfg.backupPassword || !cfg.backupPassword.hash){
+            showSetupBackupPasswordPrompt();
+          } else {
+            // Try silent cloud backup if password is in session
+            cloudBackupSilent().catch(e => console.warn('[cloud-backup]',e));
+          }
+        }catch(e){console.warn('[backup pw setup]',e);}
+      }, 3500);
       // Alert admin về vi phạm bảo mật trong 24h qua
       setTimeout(()=>{
         try{
@@ -3834,7 +4160,46 @@ function openSettings(){
         <input type="password" id="set-pw-new2" placeholder="">
       </div>
 
-      <!-- v1.58.0: 2FA cho admin -->
+      <!-- v1.61.0: Backup Cloud Status -->
+      <hr style="border:none;border-top:1px solid var(--rule);margin:8px 0">
+      <div style="font-family:var(--font-display);font-size:15px;font-weight:600;display:flex;align-items:center;gap:8px">
+        ☁ Backup Cloud (Google Drive)
+        <span style="font-size:9px;color:var(--accent);font-weight:600;padding:2px 6px;background:rgba(184,71,46,.1);border-radius:2px">v1.61.0</span>
+      </div>
+      ${(()=>{
+        const hasBackupPw = !!(cfg.backupPassword && cfg.backupPassword.hash);
+        const lastCloud = cfg.lastCloudBackup ? new Date(cfg.lastCloudBackup) : null;
+        const lastCloudFile = cfg.lastCloudBackupFile || '';
+        if(!hasBackupPw){
+          return `
+          <div style="padding:12px 14px;background:rgba(184,71,46,.06);border-left:4px solid var(--accent);font-size:12px;color:var(--ink);margin-top:6px">
+            <div style="font-weight:600;color:var(--accent);margin-bottom:4px">⚠ CHƯA cài đặt Backup Password</div>
+            <div style="font-size:11px;color:var(--ink);line-height:1.6;margin-bottom:10px">
+              Auto-backup lên Google Drive cần password riêng (KHÁC password admin) để encrypt file backup.<br>
+              <b>Khi quên password admin</b> → dùng backup password để khôi phục data từ Drive.
+            </div>
+            <button class="btn-primary" style="font-size:12px" onclick="showSetupBackupPasswordPrompt()">🔑 Cài đặt Backup Password</button>
+          </div>`;
+        } else {
+          return `
+          <div style="padding:12px 14px;background:rgba(74,107,44,.08);border-left:4px solid var(--good);font-size:12px;color:var(--ink);margin-top:6px">
+            <div style="font-weight:600;color:var(--good);margin-bottom:4px">✓ Auto-backup cloud đã KÍCH HOẠT</div>
+            <div style="font-size:11px;color:var(--muted);line-height:1.6">
+              📅 Backup gần nhất: <b>${lastCloud ? lastCloud.toLocaleString('vi-VN') : 'Chưa có'}</b>${lastCloudFile?'<br>📄 File: '+esc(lastCloudFile):''}<br>
+              📂 Lưu trong: <b>Google Drive → folder "Seahorse Backups"</b><br>
+              ⏰ Tự động chạy mỗi 7 ngày (background)<br>
+              🔄 Giữ 12 file gần nhất (tự xóa file cũ)
+            </div>
+            <div style="margin-top:8px;display:flex;gap:6px;flex-wrap:wrap">
+              <button class="btn-sec" style="font-size:11px" onclick="manualCloudBackup()">☁ Backup ngay</button>
+              <button class="btn-sec" style="font-size:11px" onclick="showCloudBackupList()">📋 Xem danh sách backup</button>
+              <button class="btn-sec" style="font-size:11px;color:var(--bad)" onclick="changeBackupPassword()">🔑 Đổi Backup Password</button>
+            </div>
+          </div>`;
+        }
+      })()}
+
+      <!-- 2FA admin section (v1.58.0) -->
       <hr style="border:none;border-top:1px solid var(--rule);margin:8px 0">
       <div style="font-family:var(--font-display);font-size:15px;font-weight:600;display:flex;align-items:center;gap:8px">
         🔐 Xác thực 2 lớp (2FA) cho admin
@@ -3931,7 +4296,11 @@ async function saveSettings(){
       const newSalt=bytesToB64(rand(16));
       const newHash=await sha256Hex(pwNew+newSalt);
       const newWrap=await wrapMasterKey(CRYPTO_KEY, await deriveWrappingKey(pwNew,newSalt,PBKDF2_ITER_NEW));
-      cfg.admin={salt:newSalt,hash:newHash,wrap:newWrap,iter:PBKDF2_ITER_NEW};
+      // v1.60.0: Preserve recoveryWrap + totp2fa when changing password
+      cfg.admin.salt = newSalt;
+      cfg.admin.hash = newHash;
+      cfg.admin.wrap = newWrap;
+      cfg.admin.iter = PBKDF2_ITER_NEW;
       toast('Đã đổi mật khẩu admin');
     }catch(e){
       if(/extractable|exportKey/i.test(e.message)){
@@ -4675,7 +5044,409 @@ function _user2FAReset(idx){
   closeModal();
 }
 
-/* v1.58.0: Admin self-setup 2FA — opens setup modal similar to user 2FA */
+/* v1.61.0: Manual cloud backup (force) */
+async function manualCloudBackup(){
+  if(!isAdmin()){ toast('Chỉ admin','bad'); return; }
+  const cfg = getAuthConfig();
+  if(!cfg.backupPassword?.hash){ showSetupBackupPasswordPrompt(); return; }
+  let backupPw = sessionStorage.getItem('seahorse_backup_pw');
+  if(!backupPw){
+    backupPw = await promptBackupPasswordForSession();
+    if(!backupPw){ toast('Cần backup password để backup','warn'); return; }
+  }
+  toast('☁ Đang backup lên Drive...');
+  try{
+    const backup = await buildEncryptedBackup(backupPw);
+    const content = JSON.stringify(backup);
+    const filename = `Seahorse_backup_${new Date().toISOString().slice(0,10)}_${Date.now().toString(36)}.json`;
+    const res = await fetch(cfg.scriptUrl, {
+      method: 'POST',
+      headers: {'Content-Type': 'text/plain'},
+      body: JSON.stringify({action: 'backup_upload', filename, content})
+    });
+    const data = await res.json();
+    if(!data.ok) throw new Error(data.error || 'Upload failed');
+    cfg.lastCloudBackup = new Date().toISOString();
+    cfg.lastCloudBackupFile = data.filename;
+    setAuthConfig(cfg);
+    try{ logAuditEvent('cloud_backup_manual', {filename, size:content.length}); }catch(e){}
+    toast(`✓ Đã backup lên Drive · ${_fmtBytes(content.length)}`,'good');
+    setTimeout(() => openSettings(), 500);
+  }catch(e){
+    toast('Backup thất bại: ' + e.message, 'bad');
+  }
+}
+
+/* v1.61.0: Show list of cloud backups */
+async function showCloudBackupList(){
+  if(!isAdmin()){ toast('Chỉ admin','bad'); return; }
+  const cfg = getAuthConfig();
+  if(!cfg.scriptUrl){ toast('Chưa cấu hình Apps Script URL','bad'); return; }
+  toast('Đang tải danh sách backup...');
+  try{
+    const files = await listCloudBackups();
+    if(files.length === 0){
+      toast('Chưa có backup nào trên Drive','warn');
+      return;
+    }
+    const body = `
+      <div style="font-size:13px">
+        <div style="padding:10px 12px;background:rgba(28,58,92,.04);border-left:3px solid var(--ink-soft);font-size:11px;color:var(--muted);margin-bottom:14px">
+          📂 Folder Drive: <b>"Seahorse Backups"</b> · Giữ 12 file gần nhất (tự rotate)
+        </div>
+        <table class="tbl" style="font-size:12px;width:100%">
+          <thead><tr><th>Tên file</th><th style="text-align:right">Kích thước</th><th>Ngày tạo</th><th></th></tr></thead>
+          <tbody>
+            ${files.map((f,i) => `
+              <tr ${i===0?'style="background:rgba(74,107,44,.05);font-weight:600"':''}>
+                <td style="font-family:var(--font-mono);font-size:11px">${esc(f.name)}${i===0?' <span style="color:var(--good);font-size:10px">(mới nhất)</span>':''}</td>
+                <td style="text-align:right">${_fmtBytes(f.size)}</td>
+                <td style="font-size:11px;color:var(--muted)">${new Date(f.createdAt).toLocaleString('vi-VN')}</td>
+                <td><button class="btn-sec" style="font-size:10px;padding:4px 8px" onclick="downloadCloudBackup('${f.id}','${esc(f.name)}')">📥 Tải về</button></td>
+              </tr>`).join('')}
+          </tbody>
+        </table>
+        <div style="margin-top:14px;font-size:11px;color:var(--muted);line-height:1.6">
+          💡 <b>Khôi phục từ Drive</b>: Khi setup app mới hoặc reset → tab "Khôi phục từ file" → tải 1 file ở trên về máy → upload vào app + nhập Backup Password.
+        </div>
+      </div>
+    `;
+    const footer = `<button class="btn-primary" onclick="closeModal()">Đóng</button>`;
+    openModal('☁ Backup Cloud · Google Drive', body, footer);
+  }catch(e){
+    toast('Lỗi tải danh sách: ' + e.message, 'bad');
+  }
+}
+
+/* v1.61.0: Download cloud backup → save as .json file locally */
+async function downloadCloudBackup(fileId, filename){
+  try{
+    toast('Đang tải file backup...');
+    const backup = await fetchCloudBackup(fileId);
+    const blob = new Blob([JSON.stringify(backup)], {type:'application/json'});
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = filename;
+    document.body.appendChild(a); a.click(); a.remove();
+    URL.revokeObjectURL(url);
+    toast('✓ Đã tải file backup','good');
+  }catch(e){
+    toast('Lỗi tải: ' + e.message, 'bad');
+  }
+}
+
+/* v1.61.0: Change backup password */
+async function changeBackupPassword(){
+  if(!isAdmin()){ toast('Chỉ admin','bad'); return; }
+  const cfg = getAuthConfig();
+  if(!cfg.backupPassword?.hash){ showSetupBackupPasswordPrompt(); return; }
+  const body = `
+    <div style="font-size:13px;line-height:1.6">
+      <div style="padding:10px 12px;background:rgba(184,71,46,.06);border-left:3px solid var(--accent);font-size:12px;color:var(--ink);margin-bottom:14px">
+        ⚠ Sau khi đổi: Các backup CŨ trên Drive vẫn dùng password CŨ. Backup MỚI sẽ dùng password mới.<br>
+        Để đảm bảo khôi phục được, nên nhớ cả 2 password (cũ + mới) hoặc xóa backup cũ.
+      </div>
+      <div class="field">
+        <label>Backup password HIỆN TẠI</label>
+        <input type="password" id="ch-backup-pw-old" placeholder="Password đang dùng">
+      </div>
+      <div class="field">
+        <label>Backup password MỚI (≥ 8 ký tự, KHÁC password admin)</label>
+        <input type="password" id="ch-backup-pw-new" placeholder="Mới">
+      </div>
+      <div class="field">
+        <label>Nhập lại</label>
+        <input type="password" id="ch-backup-pw-new2" placeholder="Nhập lại">
+      </div>
+      <div id="ch-backup-err" style="color:var(--bad);font-size:12px;min-height:14px"></div>
+    </div>
+  `;
+  const footer = `
+    <button class="btn-sec" onclick="closeModal()">Hủy</button>
+    <button class="btn-primary" onclick="_executeChangeBackupPw()">✓ Đổi password</button>
+  `;
+  openModal('🔑 Đổi Backup Password', body, footer);
+}
+
+async function _executeChangeBackupPw(){
+  const pwOld = document.getElementById('ch-backup-pw-old').value;
+  const pwNew = document.getElementById('ch-backup-pw-new').value;
+  const pwNew2 = document.getElementById('ch-backup-pw-new2').value;
+  const errEl = document.getElementById('ch-backup-err');
+  errEl.textContent = '';
+  const cfg = getAuthConfig();
+  if(!await verifyBackupPassword(pwOld, cfg.backupPassword)){
+    errEl.textContent = '❌ Backup password hiện tại sai'; return;
+  }
+  if(pwNew.length < 8){ errEl.textContent = 'Password mới ≥ 8 ký tự'; return; }
+  if(pwNew !== pwNew2){ errEl.textContent = 'Nhập lại không khớp'; return; }
+  const adminHashCheck = await sha256Hex(pwNew + cfg.admin.salt);
+  if(adminHashCheck === cfg.admin.hash){ errEl.textContent = '❌ Phải KHÁC password admin'; return; }
+  try{
+    const newAuth = await setupBackupPassword(pwNew);
+    cfg.backupPassword = newAuth;
+    setAuthConfig(cfg);
+    sessionStorage.setItem('seahorse_backup_pw', pwNew);
+    try{ logAuditEvent('backup_pw_change', {by:'admin'}); }catch(e){}
+    closeModal();
+    toast('✓ Đã đổi Backup Password','good');
+    setTimeout(() => openSettings(), 300);
+  }catch(e){
+    errEl.textContent = 'Lỗi: ' + e.message;
+  }
+}
+
+/* v1.61.0: Manual cloud backup (force) — END */
+
+/* v1.60.0: Create Recovery Key for admin */
+async function adminCreateRecoveryKey(isReplace){
+  if(!isAdmin()){ toast('Chỉ admin','bad'); return; }
+  if(!CRYPTO_KEY){ toast('Lỗi: chưa load CRYPTO_KEY','bad'); return; }
+  const cfg = getAuthConfig();
+  if(isReplace){
+    if(!confirm('Tạo Recovery Key mới sẽ VÔ HIỆU hóa Recovery Key cũ.\n\nNếu Cường đã in/lưu Recovery Key cũ → CẦN cập nhật bằng key mới.\n\nTiếp tục?')) return;
+  }
+
+  // Generate new Recovery Key
+  const recoveryKey = recoveryGenerateKey();
+  // Wrap current master key with Recovery Key
+  let recoveryWrap;
+  try{
+    recoveryWrap = await wrapMasterKeyWithRecovery(CRYPTO_KEY, recoveryKey);
+  }catch(e){
+    toast('Lỗi tạo Recovery Key: ' + e.message, 'bad');
+    return;
+  }
+
+  // Save to cfg (DON'T save the plaintext key — only wrap)
+  cfg.admin.recoveryWrap = recoveryWrap;
+  cfg.admin.recoveryCreatedAt = new Date().toISOString();
+  setAuthConfig(cfg);
+  try{ logAuditEvent('recovery_key_create', {by:'admin', isReplace}); }catch(e){}
+
+  // Show Recovery Key to admin (ONE-TIME — not saved plaintext anywhere)
+  _adminShowRecoveryKey(recoveryKey);
+}
+
+/* v1.60.0: Display Recovery Key (one-time view) */
+function _adminShowRecoveryKey(recoveryKey){
+  const body = `
+    <div style="padding:14px 18px;background:rgba(184,71,46,.08);border-left:4px solid var(--accent);margin-bottom:14px">
+      <div style="font-weight:600;color:var(--accent);margin-bottom:6px;font-size:14px">⚠ CỰC KỲ QUAN TRỌNG — In/lưu ngay NGAY BÂY GIỜ</div>
+      <div style="font-size:12px;color:var(--ink);line-height:1.6">
+        Đây là <b>RECOVERY KEY</b> — dùng để reset mật khẩu admin khi quên.<br>
+        <b>Hệ thống KHÔNG LƯU plaintext key này</b> — sau khi đóng cửa sổ sẽ KHÔNG HIỂN THỊ LẠI.<br>
+        <span style="color:var(--bad);font-weight:700">📌 BẮT BUỘC: in ra giấy + cất KÉT SẮT (offline, không lưu Drive/email).</span>
+      </div>
+    </div>
+
+    <div style="padding:24px;background:#fff;border:2px dashed var(--accent);text-align:center;margin:14px 0">
+      <div style="font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.15em;font-weight:600;margin-bottom:8px">RECOVERY KEY (24 ký tự)</div>
+      <div style="font-family:var(--font-mono);font-size:22px;font-weight:700;letter-spacing:.15em;color:var(--ink);padding:14px;background:rgba(184,71,46,.05);border:1px solid var(--rule);user-select:all">${esc(recoveryKey)}</div>
+      <div style="margin-top:10px;font-size:11px;color:var(--muted)">Lưu ý: không có ký tự I, O, 0, 1 (tránh nhầm lẫn)</div>
+    </div>
+
+    <div style="margin-top:14px;font-size:11px;color:var(--muted);line-height:1.6">
+      💡 <b>Cách dùng</b>: Khi quên password admin → ở màn hình login bấm "Quên mật khẩu?" → nhập 24 ký tự này → nhập password mới.<br>
+      🔒 <b>Bảo mật</b>: Người có Recovery Key này CÓ THỂ reset password admin và truy cập toàn bộ data. Bảo quản như mật khẩu ngân hàng.<br>
+      🔄 <b>Định kỳ</b>: 6-12 tháng nên tạo lại key mới (vô hiệu key cũ) — phòng key bị lộ.
+    </div>
+  `;
+
+  const footer = `
+    <button class="btn-sec" onclick="_adminPrintRecoveryKey('${recoveryKey}')">🖨 In ra giấy</button>
+    <button class="btn-sec" onclick="_adminCopyRecoveryKey('${recoveryKey}')">📋 Copy</button>
+    <button class="btn-primary" onclick="_adminConfirmRecoveryKeySaved()">✓ Tôi đã lưu Key</button>
+  `;
+
+  openModal('🔑 Recovery Key · Admin', body, footer);
+}
+
+/* v1.60.0: Print Recovery Key */
+function _adminPrintRecoveryKey(key){
+  const win = window.open('', '_blank', 'width=720,height=600');
+  if(!win){ toast('Trình duyệt chặn popup — bật popup','bad'); return; }
+  win.document.write(`
+    <!DOCTYPE html><html><head><meta charset="utf-8"><title>Admin Recovery Key</title>
+    <style>body{font-family:Georgia,serif;max-width:600px;margin:30px auto;padding:20px;color:#1c3a5c}
+    h1{color:#b8472e;border-bottom:2px solid #b8472e;padding-bottom:8px}
+    .key{margin:30px 0;padding:24px;border:2px dashed #b8472e;text-align:center;background:#fff8f0}
+    .key-label{font-size:11px;color:#888;text-transform:uppercase;letter-spacing:2px;font-weight:bold;margin-bottom:8px}
+    .key-value{font-family:'Courier New',monospace;font-size:28px;font-weight:bold;letter-spacing:4px;color:#1c3a5c}
+    .note{font-size:11px;color:#666;margin-top:20px;border-top:1px solid #ddd;padding-top:10px;line-height:1.7}</style></head>
+    <body>
+    <h1>🔑 ADMIN RECOVERY KEY</h1>
+    <p><b>Hệ thống:</b> ${esc(S.companyInfo?.short||'Seahorse')} Quản trị</p>
+    <p><b>Tài khoản:</b> admin (quyền cao nhất)</p>
+    <p><b>Ngày tạo:</b> ${new Date().toLocaleString('vi-VN')}</p>
+    <p style="color:#b8472e;font-weight:bold">⚠ CỰC KỲ QUAN TRỌNG — Cất két sắt offline.</p>
+
+    <div class="key">
+      <div class="key-label">RECOVERY KEY (24 ký tự)</div>
+      <div class="key-value">${esc(key)}</div>
+    </div>
+
+    <div class="note">
+      📌 <b>Cách dùng</b>: Khi quên mật khẩu admin Seahorse → ở màn hình đăng nhập bấm "Quên mật khẩu?" → nhập 24 ký tự ở trên → nhập mật khẩu mới.<br><br>
+      🔒 <b>Bảo mật</b>: Người có Recovery Key này có thể reset mật khẩu admin. Bảo quản như mật khẩu ngân hàng:<br>
+      ▸ Cất KÉT SẮT văn phòng (KHÔNG lưu Google Drive / email)<br>
+      ▸ Có thể chia 2: 1 phần ở văn phòng, 1 phần ở nhà<br>
+      ▸ Đừng ghi cùng giấy với mật khẩu thật<br><br>
+      🔄 <b>Định kỳ</b>: 6-12 tháng tạo Recovery Key mới (key cũ sẽ vô hiệu).<br>
+      📌 <b>Đặc điểm</b>: Key không có ký tự I, O, 0, 1 (tránh nhầm lẫn khi đọc).
+    </div>
+    </body></html>
+  `);
+  setTimeout(() => win.print(), 400);
+}
+
+/* v1.60.0: Copy Recovery Key */
+function _adminCopyRecoveryKey(key){
+  const text = `Seahorse ADMIN RECOVERY KEY (${new Date().toLocaleString('vi-VN')}):\n\n${key}\n\n⚠ Cất két sắt. Dùng khi quên mật khẩu admin.`;
+  navigator.clipboard.writeText(text).then(
+    () => toast('✓ Đã copy Recovery Key vào clipboard','good'),
+    () => toast('Không copy được — vui lòng in ra giấy','bad')
+  );
+}
+
+/* v1.60.0: Confirm saved */
+function _adminConfirmRecoveryKeySaved(){
+  if(!confirm('Xác nhận: Cường đã LƯU Recovery Key (in giấy/copy)?\n\nĐóng cửa sổ này = KHÔNG HIỂN THỊ LẠI Key. Nếu mất, phải tạo Key mới.')) return;
+  closeModal();
+  toast('✓ Đã tạo Recovery Key','good');
+  setTimeout(() => openSettings(), 300);
+}
+
+/* v1.60.0: Recovery flow — invoked from login screen "Quên mật khẩu?" link */
+function showRecoveryFlow(){
+  const cfg = getAuthConfig();
+  if(!cfg || !cfg.admin?.recoveryWrap){
+    toast('Chưa có Recovery Key được tạo — không thể khôi phục. Liên hệ Anthropic support.','bad');
+    return;
+  }
+
+  const overlay = document.getElementById('auth-overlay');
+  let recoveryEl = document.getElementById('auth-recovery-section');
+  if(!recoveryEl){
+    recoveryEl = document.createElement('div');
+    recoveryEl.id = 'auth-recovery-section';
+    recoveryEl.style.cssText = 'position:absolute;inset:0;background:var(--paper);display:flex;align-items:center;justify-content:center;z-index:99;overflow-y:auto;padding:20px';
+    overlay.appendChild(recoveryEl);
+  }
+  recoveryEl.innerHTML = `
+    <div style="max-width:460px;width:100%;padding:30px;background:var(--paper);border:1px solid var(--rule);box-shadow:0 8px 32px rgba(0,0,0,.12)">
+      <div style="font-family:var(--font-display);font-size:18px;font-weight:600;color:var(--accent);margin-bottom:6px">🔑 Khôi phục mật khẩu admin</div>
+      <div style="font-size:12px;color:var(--muted);margin-bottom:20px">Nhập Recovery Key 24 ký tự (đã in lúc tạo)</div>
+
+      <div class="field">
+        <label style="font-size:11px">RECOVERY KEY (XXXX-XXXX-XXXX-XXXX-XXXX-XXXX)</label>
+        <input type="text" id="recovery-key-input"
+          placeholder="VD: SX7K-3MNR-9PVB-T2QH-N5WD-J8YC"
+          style="width:100%;padding:12px;font-size:15px;font-family:var(--font-mono);letter-spacing:.1em;text-transform:uppercase;border:2px solid var(--accent);background:#fff;box-sizing:border-box"
+          oninput="this.value=this.value.toUpperCase()">
+        <div style="font-size:10px;color:var(--muted);margin-top:4px">Cho phép có gạch ngang hoặc không. Không phân biệt hoa/thường.</div>
+      </div>
+
+      <div class="field">
+        <label style="font-size:11px">MẬT KHẨU ADMIN MỚI (tối thiểu 8 ký tự)</label>
+        <input type="password" id="recovery-pw-new"
+          placeholder="Mật khẩu admin mới"
+          style="width:100%;padding:10px 12px;font-size:14px;border:1px solid var(--rule);box-sizing:border-box">
+      </div>
+
+      <div class="field">
+        <label style="font-size:11px">NHẬP LẠI MẬT KHẨU MỚI</label>
+        <input type="password" id="recovery-pw-new2"
+          placeholder="Nhập lại"
+          style="width:100%;padding:10px 12px;font-size:14px;border:1px solid var(--rule);box-sizing:border-box">
+      </div>
+
+      <div id="recovery-err" style="color:var(--bad);font-size:12px;margin-top:8px;min-height:18px"></div>
+
+      <div style="display:flex;gap:8px;margin-top:18px">
+        <button class="btn-sec" onclick="_cancelRecoveryFlow()" style="flex:1">← Hủy</button>
+        <button class="btn-primary" onclick="_executeRecoveryFlow()" style="flex:2">🔑 Khôi phục mật khẩu</button>
+      </div>
+
+      <div style="margin-top:18px;padding:10px;background:rgba(184,71,46,.05);border-left:3px solid var(--accent);font-size:11px;color:var(--muted);line-height:1.6">
+        ⚠ <b>Cảnh báo</b>: Sau khi reset, mật khẩu cũ sẽ KHÔNG dùng được. Nếu Cường vẫn nhớ password cũ → bấm Hủy + login bình thường.
+      </div>
+    </div>
+  `;
+  setTimeout(() => document.getElementById('recovery-key-input')?.focus(), 100);
+}
+
+/* v1.60.0: Execute recovery */
+async function _executeRecoveryFlow(){
+  const keyEl = document.getElementById('recovery-key-input');
+  const pwEl = document.getElementById('recovery-pw-new');
+  const pw2El = document.getElementById('recovery-pw-new2');
+  const errEl = document.getElementById('recovery-err');
+  if(!keyEl || !pwEl) return;
+  const key = keyEl.value.trim().replace(/\s/g, '');
+  const pw = pwEl.value;
+  const pw2 = pw2El.value;
+  errEl.textContent = '';
+  // Validate
+  const cleanKey = key.replace(/-/g, '');
+  if(cleanKey.length !== 24){
+    errEl.textContent = 'Recovery Key phải đủ 24 ký tự (đã có/không có gạch ngang).';
+    return;
+  }
+  if(pw.length < 8){ errEl.textContent = 'Mật khẩu mới tối thiểu 8 ký tự.'; return; }
+  if(pw !== pw2){ errEl.textContent = 'Mật khẩu nhập lại không khớp.'; return; }
+
+  const cfg = getAuthConfig();
+  if(!cfg.admin?.recoveryWrap){
+    errEl.textContent = 'Lỗi: không tìm thấy Recovery Wrap. Liên hệ support.';
+    return;
+  }
+
+  // Try to unwrap master key with Recovery Key
+  let masterKey;
+  try{
+    masterKey = await unwrapMasterKeyWithRecovery(cfg.admin.recoveryWrap, key);
+  }catch(e){
+    errEl.textContent = '❌ Recovery Key KHÔNG HỢP LỆ — kiểm tra lại 24 ký tự.';
+    keyEl.select();
+    try{ logAuditEvent('recovery_fail', {by:'unknown'}); }catch(e){}
+    return;
+  }
+
+  // Recovery Key correct → re-wrap master key with new password
+  try{
+    const salt = bytesToB64(rand(16));
+    const hash = await sha256Hex(pw + salt);
+    const wrap = await wrapMasterKey(masterKey, await deriveWrappingKey(pw, salt, PBKDF2_ITER_NEW));
+    cfg.admin.salt = salt;
+    cfg.admin.hash = hash;
+    cfg.admin.wrap = wrap;
+    cfg.admin.iter = PBKDF2_ITER_NEW;
+    cfg.admin.passwordRecoveredAt = new Date().toISOString();
+    // Optionally re-wrap Recovery Key (keep same recoveryWrap — still valid)
+    setAuthConfig(cfg);
+    try{ logAuditEvent('recovery_success', {by:'admin'}); }catch(e){}
+
+    toast('✓ Đã khôi phục mật khẩu — đăng nhập với password mới','good');
+    document.getElementById('auth-recovery-section')?.remove();
+    document.getElementById('auth-pw').value = pw;
+    document.getElementById('auth-name').value = 'admin';
+    // Auto-submit login
+    setTimeout(() => {
+      const btn = document.querySelector('#auth-overlay button[onclick*="doAuthLogin"]');
+      if(btn) btn.click();
+    }, 500);
+  }catch(e){
+    errEl.textContent = 'Lỗi khi lưu mật khẩu mới: ' + e.message;
+  }
+}
+
+/* v1.60.0: Cancel recovery */
+function _cancelRecoveryFlow(){
+  document.getElementById('auth-recovery-section')?.remove();
+}
+
+
 async function adminSetup2FA(){
   if(!isAdmin()){ toast('Chỉ admin','bad'); return; }
   const cfg = getAuthConfig();
@@ -22931,6 +23702,9 @@ function renderAll(opts){
 
 /* ===== INIT ===== */
 document.getElementById('opt-date').value=todayISO();
+
+// v1.60.0: URL whitelist check (phishing prevention)
+try{ checkHostnameSafety(); }catch(e){console.warn('[security check]',e);}
 
 // v1.59.0: Banking-grade migration — clear old "remember device" tokens from v1.56-v1.58
 try{
