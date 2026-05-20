@@ -2327,7 +2327,7 @@ body{min-height:100vh;background-image:radial-gradient(circle at 20% 0%,rgba(184
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='1.73.0';            // bumped on each release
+const APP_VERSION='1.74.0';            // bumped on each release
 
 /* v1.68.0: URL Apps Script của công ty — nhúng cứng để NV không cần nhập / không cần ?join=.
    Khi máy mới mở app, app tự dùng URL này kết nối cloud → vào thẳng Login.
@@ -6609,6 +6609,35 @@ function lookupUserDeptName(userName){
 */
 function canSeeAllRecords(){
   return isAdmin() || canCheckAcc() || canApproveL1() || canApproveL2();
+}
+
+/* ===== v1.74.0: Company helpers (đa công ty) ===== */
+/* ID công ty mẹ — dùng làm mặc định khi bút toán chưa gắn công ty */
+function getParentCompanyId(){
+  const list = S.companies||[];
+  const parent = list.find(c=>c.isParent);
+  return parent ? parent.id : (list[0] ? list[0].id : 'CO-PARENT');
+}
+/* Tên công ty theo id — fallback an toàn */
+function companyName(id){
+  if(!id) return companyName(getParentCompanyId());
+  const c = (S.companies||[]).find(x=>x.id===id);
+  return c ? c.name : '—';
+}
+/* Mã công ty theo id */
+function companyCode(id){
+  const c = (S.companies||[]).find(x=>x.id===id);
+  return c ? c.code : '';
+}
+/* Sinh HTML <option> cho dropdown chọn công ty; selectedId mặc định = công ty mẹ */
+function companyOptionsHtml(selectedId){
+  const sel = selectedId || getParentCompanyId();
+  const list = (S.companies||[]).slice().sort((a,b)=>{
+    if(a.isParent&&!b.isParent) return -1;
+    if(!a.isParent&&b.isParent) return 1;
+    return (a.code||'').localeCompare(b.code||'');
+  });
+  return list.map(c=>`<option value="${c.id}" ${c.id===sel?'selected':''}>${esc(c.name)}${c.isParent?' (mẹ)':''}</option>`).join('');
 }
 
 /* Filter records by createdBy if user is NV thường (not admin, not approver).
@@ -15802,6 +15831,7 @@ function renderArAp(kind){
 
   let h=`<thead><tr>
     <th>${isAp?'Nhà cung cấp':'Khách hàng'}</th>
+    <th>Công ty</th>
     <th>Mảng / Dự án</th>
     <th>Diễn giải</th>
     ${isAp?'<th title="Người nhập / Bộ phận">Người nhập</th>':''}
@@ -15871,6 +15901,7 @@ function renderArAp(kind){
     const rowBg=wfS==='approved'?'':'background:rgba(196,138,57,.03)';
     h+=`<tr style="${rowBg}">
       <td><b>${esc(r.partner) || '—'}</b></td>
+      <td style="font-size:11px"><span class="chip" style="background:#534ab7;color:#fff;font-size:9px">${esc(companyCode(r.companyId)||companyCode(getParentCompanyId()))}</span></td>
       <td><span class="chip ${SEGMENTS[r.segment]?SEGMENTS[r.segment].chip:''}">${segLabel}</span>${link?' '+link:''}</td>
       <td style="max-width:240px">${esc(r.desc) || '—'}</td>
       ${isAp?`<td style="font-size:11px"><b>${esc(r.createdBy)||'—'}</b>${r.createdByDept?'<br><span style="color:var(--muted)">'+esc(r.createdByDept)+'</span>':''}</td>`:''}
@@ -15887,7 +15918,7 @@ function renderArAp(kind){
       <td><div class="row-actions">${actionBtns.join('')}</div></td>
     </tr>`;
   });
-  const colSpan=isAp?6:5;
+  const colSpan=isAp?7:6;
   h+=`<tr class="total"><td colspan="${colSpan}"><b>CHỈ ĐÃ DUYỆT</b> (vào báo cáo BI)</td>
     <td class="r"><b>${fmt(sumNet)}</b></td>
     <td class="r" style="color:var(--muted);font-size:11px">${fmt(sumVat)}</td>
@@ -16103,6 +16134,8 @@ function _arEditorBody(r,isPayable){
   const segOpts=Object.entries(SEGMENTS).map(([k,v])=>`<option value="${k}" ${k===(r.segment||'')?'selected':''}>${esc(v.name)}</option>`).join('');
   const projOpts='<option value="">— Không gắn dự án —</option>'+activeOnly(S.projects).map(p=>`<option value="${p.id}" ${p.id===r.projectId?'selected':''}>${esc(p.code)} · ${esc(p.name)}</option>`).join('');
   const vesselOpts='<option value="">— Không gắn tàu —</option>'+activeOnly(S.vessels).map(v=>`<option value="${v.id}" ${v.id===r.vesselId?'selected':''}>${esc(v.name)} (${v.type==='SERVICE'?'DV':'KT'})</option>`).join('');
+  // v1.74.0: Company dropdown — mặc định công ty mẹ
+  const companyOpts=companyOptionsHtml(r.companyId);
 
   // v1.45.0: Người lập + Phòng/Ban (read-only chữ ký)
   // For NEW record: show current actor. For EDIT: show stored createdBy + createdByDept
@@ -16247,6 +16280,7 @@ function _arEditorBody(r,isPayable){
       </div>
       <div class="field" style="grid-column:span 2"><label>Diễn giải</label><input type="text" id="ar-desc" value="${(r.desc||'').replace(/"/g,'&quot;')}" placeholder="Nội dung — VD: Cước thuê tàu T5/2026" ${lockedAttr}></div>
       ${expenseTypeBlock}
+      <div class="field"><label>Công ty *</label><select id="ar-company" ${lockedAttr}>${companyOpts}</select></div>
       <div class="field"><label>Mảng *</label><select id="ar-segment" ${lockedAttr}>${segOpts}</select></div>
       <div class="field"><label>Dự án (tùy chọn)</label><select id="ar-project" ${lockedAttr}>${projOpts}</select></div>
       <div class="field"><label>Tàu (tùy chọn)</label><select id="ar-vessel" ${lockedAttr}>${vesselOpts}</select></div>
@@ -16965,6 +16999,8 @@ function saveAr(kind,id){
   const amount=amountGross;
   const ccy=document.getElementById('ar-ccy').value;
   const segment=document.getElementById('ar-segment').value;
+  const coEl=document.getElementById('ar-company');
+  const companyId=coEl?coEl.value:getParentCompanyId();
   const projectId=document.getElementById('ar-project').value;
   const vesselId=document.getElementById('ar-vessel').value;
   const issueDate=document.getElementById('ar-issue').value;
@@ -17005,7 +17041,7 @@ function saveAr(kind,id){
     const r=S[list].find(x=>x.id===id);
     if(!r){err.textContent='Không tìm thấy';return;}
     if(!wfCanEdit(r)){err.textContent='Bản ghi đã khóa sửa do trạng thái phê duyệt';return;}
-    const updates = {partner,vendorId,desc,amountNet,vatPercent,vatAmount,amountGross,amount,ccy,segment,projectId,vesselId,issueDate,dueDate,dueMonth,dueAmount};
+    const updates = {partner,vendorId,desc,amountNet,vatPercent,vatAmount,amountGross,amount,ccy,segment,companyId,projectId,vesselId,issueDate,dueDate,dueMonth,dueAmount};
     if(kind==='ap'){
       updates.expenseType = expenseType;
       // Always set fuel fields (null = not a fuel record)
@@ -17019,7 +17055,7 @@ function saveAr(kind,id){
   } else {
     const newRec = {
       id:uid(),
-      partner,vendorId,desc,amountNet,vatPercent,vatAmount,amountGross,amount,ccy,segment,projectId,vesselId,issueDate,dueDate,dueMonth,dueAmount,
+      partner,vendorId,desc,amountNet,vatPercent,vatAmount,amountGross,amount,ccy,segment,companyId,projectId,vesselId,issueDate,dueDate,dueMonth,dueAmount,
       payments:[],
       status:'draft',
       submittedBy:'',submittedAt:'',
