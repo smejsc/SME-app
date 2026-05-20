@@ -1024,6 +1024,9 @@ body{min-height:100vh;background-image:radial-gradient(circle at 20% 0%,rgba(184
           <option value="approved">Đã duyệt</option>
           <option value="rejected">Từ chối</option>
         </select>
+        <select id="ar-filter-company" onchange="renderAR()" style="padding:6px 10px;border:1px solid var(--rule);background:var(--paper);font-family:var(--font-mono);font-size:12px;min-width:150px" title="Lọc theo công ty">
+          <option value="">— Tất cả công ty —</option>
+        </select>
         <button class="btn-primary" onclick="openReceivableModal(null)">+ Thêm phải thu</button>
         <button class="btn-sec" onclick="openMultiRowModal('ar')" title="Nhập phiếu nhiều dòng — 1 KH có nhiều hóa đơn">📋 Nhập nhiều dòng</button>
       </div>
@@ -1063,6 +1066,9 @@ body{min-height:100vh;background-image:radial-gradient(circle at 20% 0%,rgba(184
         </select>
         <select id="ap-filter-vendor" onchange="renderAR()" style="padding:6px 10px;border:1px solid var(--rule);background:var(--paper);font-family:var(--font-mono);font-size:12px;min-width:160px" title="v1.45.0: Lọc theo nhà cung cấp">
           <option value="">— Mọi nhà cung cấp —</option>
+        </select>
+        <select id="ap-filter-company" onchange="renderAR()" style="padding:6px 10px;border:1px solid var(--rule);background:var(--paper);font-family:var(--font-mono);font-size:12px;min-width:150px" title="Lọc theo công ty">
+          <option value="">— Tất cả công ty —</option>
         </select>
         <button class="btn-primary" onclick="openPayableModal(null)">+ Thêm phải trả</button>
         <button class="btn-sec" onclick="openMultiRowModal('ap')" title="Nhập phiếu nhiều dòng — 1 NCC có nhiều hóa đơn">📋 Nhập nhiều dòng</button>
@@ -1957,6 +1963,13 @@ body{min-height:100vh;background-image:radial-gradient(circle at 20% 0%,rgba(184
           </div>
         </div>
 
+        <div class="field" id="bcqt-company-wrap" style="margin:0;min-width:170px">
+          <label style="font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);font-weight:600">Công ty</label>
+          <select id="bcqt-company" onchange="renderBCQT()" style="padding:8px 12px;border:1px solid var(--rule);background:var(--paper);font-family:var(--font-mono);font-size:13px;min-width:170px">
+            <option value="">🏛 Tất cả (hợp nhất)</option>
+          </select>
+        </div>
+
         <div style="margin-left:auto">
           <button class="btn-sec" onclick="bcqtExportExcel()" style="white-space:nowrap">📊 Xuất Excel</button>
         </div>
@@ -2327,7 +2340,7 @@ body{min-height:100vh;background-image:radial-gradient(circle at 20% 0%,rgba(184
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='1.74.0';            // bumped on each release
+const APP_VERSION='1.75.0';            // bumped on each release
 
 /* v1.68.0: URL Apps Script của công ty — nhúng cứng để NV không cần nhập / không cần ?join=.
    Khi máy mới mở app, app tự dùng URL này kết nối cloud → vào thẳng Login.
@@ -15780,10 +15793,25 @@ function renderArAp(kind){
   // v1.45.0: AP-only filters
   const creatorFilter = isAp ? ((document.getElementById('ap-filter-creator')||{}).value||'') : '';
   const vendorFilter = isAp ? ((document.getElementById('ap-filter-vendor')||{}).value||'') : '';
+  // v1.75.0: Company filter (cả AR và AP)
+  const companyFilter = (document.getElementById(isAp?'ap-filter-company':'ar-filter-company')||{}).value||'';
   const tEl=document.getElementById(tableId);
   if(!tEl) return;
   // Apply per-user scoping (NV thường chỉ thấy bản ghi do mình tạo)
   const all=scopedRecords(S[list]||[]);
+
+  // v1.75.0: Populate company filter dropdown (cả AR và AP)
+  const coSel = document.getElementById(isAp?'ap-filter-company':'ar-filter-company');
+  if(coSel){
+    const cur = coSel.value;
+    coSel.innerHTML = '<option value="">— Tất cả công ty —</option>' +
+      (S.companies||[]).slice().sort((a,b)=>{
+        if(a.isParent&&!b.isParent) return -1;
+        if(!a.isParent&&b.isParent) return 1;
+        return (a.code||'').localeCompare(b.code||'');
+      }).map(c=>`<option value="${c.id}" ${c.id===cur?'selected':''}>${esc(c.name)}${c.isParent?' (mẹ)':''}</option>`).join('');
+    coSel.value = cur;
+  }
 
   // v1.45.0: For AP — populate creator + vendor dropdowns from ALL scoped records (before status filter)
   if(isAp){
@@ -15809,11 +15837,12 @@ function renderArAp(kind){
     tEl.innerHTML=`<tr><td class="empty">Chưa có ${isAp?'phải trả — bấm "+ Thêm phải trả"':'phải thu — bấm "+ Thêm phải thu"'}</td></tr>`;
     return;
   }
-  // Filter by status + creator + vendor
+  // Filter by status + creator + vendor + company
   let rows=all.filter(r=>{
     if(stFilter && wfStatus(r)!==stFilter) return false;
     if(creatorFilter && (r.createdBy||'')!==creatorFilter) return false;
     if(vendorFilter && (r.partner||'')!==vendorFilter) return false;
+    if(companyFilter && (r.companyId||getParentCompanyId())!==companyFilter) return false;
     return true;
   });
   if(!rows.length){
@@ -18898,6 +18927,9 @@ function bcqtToUsd(amount, ccy){
 function bcqtAggregate(range){
   if(!range) return null;
   const { from, to } = range;
+  // v1.75.0: Lọc theo công ty — rỗng = tất cả (hợp nhất)
+  const coFilter = (document.getElementById('bcqt-company')||{}).value||'';
+  const matchCompany = r => !coFilter || (r.companyId||getParentCompanyId())===coFilter;
   // Init buckets — 5 mảng + total
   const segs = ['VESSEL_SERVICE','VESSEL_TECH','OM','VESSEL_MGMT','OTHER'];
   const data = {};
@@ -18906,6 +18938,7 @@ function bcqtAggregate(range){
   // AR — Revenue
   (S.receivables||[]).forEach(r => {
     if(!r.issueDate || r.issueDate < from || r.issueDate > to) return;
+    if(!matchCompany(r)) return;
     const seg = r.segment || 'OTHER';
     if(!data[seg]) return;
     const amt = bcqtToUsd(r.amountNet || r.amount || 0, r.ccy);
@@ -18916,6 +18949,7 @@ function bcqtAggregate(range){
   // AP — Cost (TẤT CẢ chi phí, kể cả PO tồn kho — theo yêu cầu Cường)
   (S.payables||[]).forEach(r => {
     if(!r.issueDate || r.issueDate < from || r.issueDate > to) return;
+    if(!matchCompany(r)) return;
     const seg = r.segment || 'OTHER';
     if(!data[seg]) return;
     // v1.49.0: KHÔNG loại trừ PO — tính tổng tất cả chi phí
@@ -18959,10 +18993,26 @@ function renderBCQT(){
     yearSel.innerHTML = yArr.map(y => `<option value="${y}" ${+y===currentYear?'selected':''}>${y}</option>`).join('');
   }
 
+  // v1.75.0: Điền dropdown công ty
+  const coSel = document.getElementById('bcqt-company');
+  if(coSel){
+    const cur = coSel.value;
+    coSel.innerHTML = '<option value="">🏛 Tất cả (hợp nhất)</option>' +
+      (S.companies||[]).slice().sort((a,b)=>{
+        if(a.isParent&&!b.isParent) return -1;
+        if(!a.isParent&&b.isParent) return 1;
+        return (a.code||'').localeCompare(b.code||'');
+      }).map(c=>`<option value="${c.id}" ${c.id===cur?'selected':''}>${esc(c.name)}${c.isParent?' (mẹ)':''}</option>`).join('');
+    coSel.value = cur;
+  }
+
   const range = bcqtGetDateRange();
   const labelEl = document.getElementById('bcqt-period-label');
+  // v1.75.0: tên công ty đang xem
+  const coFilterVal = (document.getElementById('bcqt-company')||{}).value||'';
+  const coLabel = coFilterVal ? companyName(coFilterVal) : 'Tất cả công ty (hợp nhất)';
   if(labelEl){
-    labelEl.innerHTML = range ? `📅 <b>Kỳ báo cáo:</b> ${esc(range.label)} · <span style="color:var(--muted)">${range.from} → ${range.to}</span>` : '⚠ Chọn từ ngày & đến ngày';
+    labelEl.innerHTML = range ? `📅 <b>Kỳ báo cáo:</b> ${esc(range.label)} · <span style="color:var(--muted)">${range.from} → ${range.to}</span> &nbsp;·&nbsp; 🏛 <b>${esc(coLabel)}</b>` : '⚠ Chọn từ ngày & đến ngày';
   }
   if(!range){
     document.getElementById('bcqt-kpi-cards').innerHTML = '';
