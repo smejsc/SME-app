@@ -2278,7 +2278,7 @@ body{min-height:100vh;background-image:radial-gradient(circle at 20% 0%,rgba(184
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='1.64.0';            // bumped on each release
+const APP_VERSION='1.64.1';            // bumped on each release
 
 /* ============================================================
    PWA — Service Worker registration + Install prompt
@@ -3177,6 +3177,30 @@ async function pushCfgToCloud(adminPassword, extraUserPasswords){
   try{
     const res0=await fetch(cfg.scriptUrl+'?action=load&key=auth', {method:'GET'});
     const data0=await res0.json();
+    // v1.64.0: GUARD — cloud có cfg admin KHÁC với local admin → cảnh báo đè nhầm cty
+    if(data0.ok && data0.payload && data0.payload.v===2){
+      // Thử pull + so sánh admin hash
+      try{
+        const cloudWrapAdmin=(data0.payload.wraps||[]).find(w=>w.name.toLowerCase()==='admin');
+        if(cloudWrapAdmin && isPushingAsAdmin){
+          // Thử unwrap bằng password admin local
+          let cloudMK=null;
+          try{ cloudMK=await unwrapCfgMasterKey(cloudWrapAdmin, adminPassword); }catch(e){ cloudMK=null; }
+          if(!cloudMK){
+            // KHÔNG unwrap được cfg cloud bằng password admin local
+            // → cfg cloud thuộc 1 môi trường khác (admin khác)
+            if(!window._cfgPushConfirmOverwrite){
+              window._cfgPushConfirmOverwrite=true;
+              throw new Error('⚠ CẢNH BÁO: Cloud này đã có tài khoản admin KHÁC. '+
+                'Nếu bạn tiếp tục đẩy, sẽ GHI ĐÈ và làm hỏng dữ liệu công ty. '+
+                'Nếu bạn chắc chắn (vd: đổi mật khẩu admin) — bấm "Đẩy" LẦN NỮA để xác nhận.');
+            }
+          }
+        }
+      }catch(guardErr){
+        if(/CẢNH BÁO/.test(guardErr.message)) throw guardErr;
+      }
+    }
     if(data0.ok && data0.payload && data0.payload.v===2 && Array.isArray(data0.payload.wraps)){
       // Find wrap to use: admin if admin pushing, else current user's wrap
       const myWrap = data0.payload.wraps.find(w => w.name === pusherName);
@@ -3262,6 +3286,7 @@ async function pushCfgToCloud(adminPassword, extraUserPasswords){
   if(!data.ok) throw new Error(data.error||'Lỗi push cfg');
   cfg.lastCfgSync=new Date().toISOString();
   setAuthConfig(cfg);
+  window._cfgPushConfirmOverwrite=false;  // v1.64.0: reset guard flag
   return {wrapCount: wraps.length, wrappedNames: wraps.map(w=>w.name)};
 }
 
@@ -3820,6 +3845,40 @@ async function authSetup(){
   err.textContent='';
   if(pw1.length<8){err.textContent='Mật khẩu tối thiểu 8 ký tự';return;}
   if(pw1!==pw2){err.textContent='Hai mật khẩu không khớp';return;}
+  // v1.64.0: HARD GUARD — nếu có scriptUrl, kiểm tra cloud trước.
+  // Cloud đã có cfg auth → TỪ CHỐI tạo admin mới (chống NV cố tình đè cloud).
+  if(scriptUrl){
+    if(!/^https:\/\/script\.google\.com\/macros\/s\/.+\/exec$/.test(scriptUrl)){
+      err.textContent='Apps Script URL không hợp lệ';return;
+    }
+    err.style.color='var(--muted)';
+    err.textContent='Đang kiểm tra cloud...';
+    try{
+      const res=await fetch(scriptUrl+'?action=load&key=auth',{method:'GET'});
+      const data=await res.json();
+      if(data.ok && (data.payload || data.payload_gz)){
+        // Cloud ĐÃ có tài khoản → CHẶN tạo admin mới
+        err.style.color='var(--bad)';
+        err.innerHTML='⛔ <b>Cloud này đã có tài khoản công ty.</b><br>'+
+          'KHÔNG thể tạo admin mới — sẽ làm hỏng dữ liệu. '+
+          'Nếu bạn là nhân viên: quay lại chọn <b>"Tôi đã có tài khoản"</b> và đăng nhập bằng tài khoản được cấp.<br>'+
+          'Nếu bạn là admin quên mật khẩu: dùng backup .json để khôi phục.';
+        try{ logAuditEvent('blocked_admin_setup',{scriptUrl,reason:'cloud already has auth data'}); }catch(e){}
+        return;
+      }
+    }catch(e){
+      // Network lỗi — cảnh báo nhưng cho tiếp tục (offline setup hợp lệ)
+      err.style.color='var(--accent)';
+      err.textContent='⚠ Không kiểm tra được cloud ('+e.message+'). Chỉ tiếp tục nếu chắc chắn đây là setup MỚI.';
+      // Cho user bấm lại lần 2 để xác nhận
+      if(!window._authSetupConfirmedOffline){
+        window._authSetupConfirmedOffline=true;
+        return;
+      }
+    }
+    err.style.color='var(--bad)';
+    err.textContent='';
+  }
   try{
     const masterKey=await generateMasterKey();
     const saltAdmin=bytesToB64(rand(16));
@@ -3840,6 +3899,7 @@ async function authSetup(){
     CURRENT_USER=null;
     S=defaultState();
     await saveStateEncrypted();
+    window._authSetupConfirmedOffline=false;
     document.getElementById('auth-overlay').classList.add('hide');
     applyRoleUI();
     setupFxControls();
