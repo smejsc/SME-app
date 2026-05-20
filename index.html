@@ -2278,7 +2278,7 @@ body{min-height:100vh;background-image:radial-gradient(circle at 20% 0%,rgba(184
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='1.62.2';            // bumped on each release
+const APP_VERSION='1.63.0';            // bumped on each release
 
 /* ============================================================
    PWA — Service Worker registration + Install prompt
@@ -3895,7 +3895,7 @@ function authResetPrompt(){
 const ALL_TABS=[
   {id:'plan',label:'Kế hoạch'},
   {id:'projects',label:'Dự án'},
-  {id:'vessels',label:'Tàu & Onhire'},
+  {id:'vessels',label:'ON-OFFHIRE (khai thác tàu)'},
   {id:'catalog',label:'Danh mục (master data)'},
   {id:'receivables',label:'Phải thu'},
   {id:'payables',label:'Phải trả'},
@@ -3913,6 +3913,43 @@ const ALL_TABS=[
   {id:'rates',label:'Đơn giá'},
   {id:'nsnn',label:'NSNN (Thuế)'}
 ];
+
+/* v1.63.0: Preset 5 vai trò NV — chọn vai trò → auto-tick tabs + cờ quyền.
+   Vẫn cho admin sửa tay sau khi áp preset. */
+const PRESET_ROLES={
+  nv: {
+    label:'NV — Nhân viên nhập liệu',
+    desc:'Nhập Phải trả (công nợ AP)',
+    tabs:['payables'],
+    flags:{}
+  },
+  nv_kho: {
+    label:'NV Kho — Quản lý vật tư & tài sản',
+    desc:'Kho vật tư, TSCĐ, CCDC & MMTB',
+    tabs:['inventory','fixed_assets','tools'],
+    flags:{}
+  },
+  nv_kt: {
+    label:'NV KT — Kế toán viên',
+    desc:'Phải trả, Ngân hàng, NSNN + KT Kiểm hồ sơ',
+    tabs:['payables','banking','nsnn'],
+    flags:{canCheckAcc:true}
+  },
+  ktt: {
+    label:'KTT — Kế toán trưởng',
+    desc:'Tất cả tab (trừ Dashboard & BOD) + KT Kiểm + Duyệt L1 + L2 + Quản lý NV',
+    tabs:['projects','vessels','catalog','receivables','payables','op_input',
+          'vessel_expense','hr_expense','qn_expense','banking','cashflow',
+          'operations','inventory','fixed_assets','tools','nsnn'],
+    flags:{canCheckAcc:true,canApproveL1:true,canApproveL2:true,canManageUsers:true}
+  },
+  custom: {
+    label:'Tùy chỉnh — Tự chọn tab & quyền',
+    desc:'Không áp preset — admin tự tick tab và cờ quyền',
+    tabs:null,
+    flags:null
+  }
+};
 
 /* Maps tab → data fields needed.
    When a non-admin user logs in, only these fields are loaded into RAM for tabs they have.
@@ -4423,6 +4460,17 @@ function userEditorModal(initial,idx){
         <input type="password" id="user-pw2" placeholder="">
       </div>
       <div style="margin-top:8px">
+        <div style="font-size:11px;color:var(--accent);letter-spacing:.08em;text-transform:uppercase;font-weight:600;margin-bottom:6px">⚡ Preset vai trò <span style="font-size:9px;color:var(--accent);font-weight:600">v1.63.0</span></div>
+        <div style="border:1px solid var(--accent);padding:10px 14px;background:rgba(184,71,46,.04)">
+          <div style="font-size:11px;color:var(--muted);font-style:italic;margin-bottom:8px">Chọn vai trò → app tự tick tab + cờ quyền phù hợp. Sau đó vẫn có thể chỉnh tay bên dưới.</div>
+          <select id="user-role-preset" onchange="applyRolePreset()" style="padding:8px 10px;border:1px solid var(--rule);background:var(--paper);font-size:13px;width:100%">
+            <option value="">— Chọn vai trò để áp preset —</option>
+            ${Object.entries(PRESET_ROLES).map(([k,v])=>`<option value="${k}">${esc(v.label)}</option>`).join('')}
+          </select>
+          <div id="role-preset-desc" style="font-size:11px;color:var(--muted);margin-top:6px;min-height:14px"></div>
+        </div>
+      </div>
+      <div style="margin-top:8px">
         <div style="font-size:11px;color:var(--muted);letter-spacing:.08em;text-transform:uppercase;font-weight:600;margin-bottom:6px">Tab được phép truy cập</div>
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:0;border:1px solid var(--rule);padding:8px 14px;background:var(--paper-2)">
           ${checks}
@@ -4594,6 +4642,47 @@ function userEditorModal(initial,idx){
   const foot=`<button class="btn-sec" onclick="openSettings()">Hủy</button>
               <button class="btn-primary" onclick="saveUser(${isEdit?idx:'null'})">Lưu nhân viên</button>`;
   openModal(isEdit?'Sửa nhân viên':'Thêm nhân viên',body,foot);
+}
+
+/* v1.63.0: Áp preset vai trò — tự tick tabs + cờ quyền theo PRESET_ROLES */
+function applyRolePreset(){
+  const sel=document.getElementById('user-role-preset');
+  const descEl=document.getElementById('role-preset-desc');
+  if(!sel)return;
+  const key=sel.value;
+  if(!key || !PRESET_ROLES[key]){ if(descEl)descEl.textContent=''; return; }
+  const preset=PRESET_ROLES[key];
+  if(descEl) descEl.textContent='ℹ '+preset.desc;
+  // 'custom' → không áp gì
+  if(key==='custom'){ return; }
+  // Tick tabs: uncheck all → check theo preset
+  document.querySelectorAll('input[data-tab]').forEach(cb=>{
+    cb.checked = preset.tabs ? preset.tabs.includes(cb.getAttribute('data-tab')) : cb.checked;
+  });
+  // Set cờ quyền
+  const flagMap={
+    canCheckAcc:'user-can-check-acc',
+    canApproveL1:'user-can-approve-l1',
+    canApproveL2:'user-can-approve-l2',
+    canConfirmPayment:'user-can-confirm',
+    canManageUsers:'user-can-manage-users'
+  };
+  // Reset các cờ trong preset về false trước, rồi set true theo flags
+  Object.values(flagMap).forEach(id=>{
+    const el=document.getElementById(id);
+    if(el && preset.flags) el.checked=false;
+  });
+  if(preset.flags){
+    Object.entries(preset.flags).forEach(([flag,val])=>{
+      const el=document.getElementById(flagMap[flag]);
+      if(el) el.checked=!!val;
+    });
+  }
+  // KTT có canManageUsers → cảnh báo nếu người áp không phải admin
+  if(key==='ktt' && !isAdmin()){
+    if(descEl) descEl.innerHTML='ℹ '+preset.desc+'<br><span style="color:var(--accent)">⚠ Cờ "Quản lý NV" và "Duyệt L2" chỉ admin mới lưu được.</span>';
+  }
+  toast('Đã áp preset: '+preset.label.split('—')[0].trim(),'good');
 }
 
 function addUser(){
@@ -6263,16 +6352,30 @@ function wfCanDelete(r){
 }
 
 /* Submit → KT viên (Hằng) kiểm hồ sơ
-   v1.37.4: AR fast-track — nếu kind='ar' VÀ user có canApproveL1 (hoặc admin):
-            skip pending_acc + pending_l1, gửi thẳng pending_l2.
+   v1.37.4: AR fast-track — nếu kind='ar' VÀ user có canApproveL1 (hoặc admin)
+   v1.63.0: AR auto-approve — KTT (canApproveL2) hoặc admin nhập AR/Doanh thu
+            → save = status 'approved' NGAY, bypass KT Kiểm → L1 → L2.
+            Chỉ áp dụng cho AR (kind='ar'), KHÔNG áp dụng AP.
    kind: 'ar' | 'ap' | undefined (legacy → AP behavior, không fast-track) */
 function wfSubmit(r, kind){
   r.submittedBy=actorName();
   r.submittedAt=new Date().toISOString();
   // Clear any previous rejection
   r.rejectedBy=''; r.rejectedAt=''; r.rejectReason=''; r.rejectedAtLevel=null;
-  // Fast-track AR for KT trưởng (canApproveL1) or admin
-  if(kind==='ar' && (isAdmin() || canApproveL1())){
+  // v1.63.0: AR full auto-approve for KTT (canApproveL2) or admin
+  if(kind==='ar' && (isAdmin() || canApproveL2())){
+    r.status='approved';
+    r.accCheckedBy=actorName()+' (tự động duyệt)';
+    r.accCheckedAt=new Date().toISOString();
+    r.approvedL1By=actorName()+' (tự động duyệt)';
+    r.approvedL1At=new Date().toISOString();
+    r.approvedL2By=actorName()+' (tự động duyệt)';
+    r.approvedL2At=new Date().toISOString();
+    try{ logAuditEvent('ar_auto_approve',{recordId:r.id,partner:r.partner||'',amount:r.amount||0,ccy:r.ccy||'',actor:actorName(),note:'AR nhập bởi KTT/admin — tự động duyệt (bypass KT Kiểm/L1/L2)'}); }catch(e){}
+    return;
+  }
+  // v1.37.4: AR fast-track for KT trưởng (canApproveL1) — skip to pending_l2
+  if(kind==='ar' && canApproveL1()){
     r.status='pending_l2';
     r.accCheckedBy=actorName()+' (fast-track AR)';
     r.accCheckedAt=new Date().toISOString();
