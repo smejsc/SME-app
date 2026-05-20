@@ -1049,6 +1049,7 @@ body{min-height:100vh;background-image:radial-gradient(circle at 20% 0%,rgba(184
         </select>
         <button class="btn-primary" onclick="openPayableModal(null)">+ Thêm phải trả</button>
         <button class="btn-sec" onclick="openMultiRowModal('ap')" title="Nhập phiếu nhiều dòng — 1 NCC có nhiều hóa đơn">📋 Nhập nhiều dòng</button>
+        <button class="btn-sec" onclick="openVatExportDialog()" title="Xuất Excel hóa đơn VAT để đối chiếu Cổng thông tin thuế">📊 Xuất bảng kê VAT</button>
       </div>
     </div>
     <div class="section-body"><div class="tbl-scroll"><table class="tbl" id="ap-table"></table></div></div>
@@ -2186,6 +2187,7 @@ body{min-height:100vh;background-image:radial-gradient(circle at 20% 0%,rgba(184
   <div style="display:flex;gap:0;border-bottom:1px solid var(--rule);margin-bottom:16px;background:rgba(0,0,0,.02)">
     <button class="nsnn-subtab active" data-subtab="overview" onclick="_nsnnSwitchSubtab('overview')" style="padding:10px 16px;border:none;background:none;cursor:pointer;font-weight:600;border-bottom:2px solid var(--accent);color:var(--accent)">📊 Tổng quan</button>
     <button class="nsnn-subtab" data-subtab="by-month" onclick="_nsnnSwitchSubtab('by-month')" style="padding:10px 16px;border:none;background:none;cursor:pointer;font-weight:500;color:var(--muted)">📅 Theo tháng</button>
+    <button class="nsnn-subtab" data-subtab="vat" onclick="_nsnnSwitchSubtab('vat')" style="padding:10px 16px;border:none;background:none;cursor:pointer;font-weight:500;color:var(--muted)">🧾 Bảng kê GTGT</button>
     <button class="nsnn-subtab" data-subtab="records" onclick="_nsnnSwitchSubtab('records')" style="padding:10px 16px;border:none;background:none;cursor:pointer;font-weight:500;color:var(--muted)">📝 Bút toán thuế</button>
   </div>
 
@@ -2198,6 +2200,36 @@ body{min-height:100vh;background-image:radial-gradient(circle at 20% 0%,rgba(184
         <span style="font-size:11px;color:var(--muted);font-style:italic">10 loại thuế · phát sinh + đã nộp + còn lại</span>
       </div>
       <div class="section-body"><div class="tbl-scroll"><table class="tbl" id="nsnn-summary"></table></div></div>
+    </div>
+  </div>
+
+  <!-- Sub-tab: Bảng kê GTGT (v1.66.0) -->
+  <div id="nsnn-subtab-vat" class="nsnn-subtab-content" style="display:none">
+    <div class="section">
+      <div class="section-head" style="flex-wrap:wrap;gap:8px">
+        <div class="section-title"><span class="tag">🧾</span>Bảng kê hóa đơn GTGT đầu vào</div>
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+          <span style="font-size:12px;color:var(--muted)">Tháng</span>
+          <input type="month" id="nsnn-vat-month" onchange="renderNsnnVat()" style="padding:5px 8px;border:1px solid var(--rule);font-family:var(--font-mono);font-size:12px">
+          <select id="nsnn-vat-status" onchange="renderNsnnVat()" style="padding:5px 8px;border:1px solid var(--rule);background:var(--paper);font-size:12px">
+            <option value="all">Mọi trạng thái</option>
+            <option value="approved">Chỉ đã duyệt</option>
+            <option value="not_draft">Bỏ Nháp</option>
+          </select>
+          <select id="nsnn-vat-vtype" onchange="renderNsnnVat()" style="padding:5px 8px;border:1px solid var(--rule);background:var(--paper);font-size:12px">
+            <option value="company">DN có MST</option>
+            <option value="all">Mọi loại NCC</option>
+          </select>
+          <button class="btn-sec" onclick="nsnnVatExportExcel()" style="font-size:12px">📊 Xuất Excel</button>
+          <button class="btn-sec" onclick="nsnnVatExportPDF()" style="font-size:12px">📄 Xuất PDF</button>
+        </div>
+      </div>
+      <div class="section-body">
+        <div style="font-size:11px;color:var(--muted);font-style:italic;margin-bottom:8px">
+          Bảng tự gom mọi hóa đơn Phải trả có VAT — là <b>view động</b>, sửa/xóa AP sẽ tự cập nhật. KTT xuất Excel/PDF để NV KT đối chiếu Cổng thông tin thuế.
+        </div>
+        <div class="tbl-scroll"><table class="tbl compact" id="nsnn-vat-table"></table></div>
+      </div>
     </div>
   </div>
 
@@ -2278,7 +2310,7 @@ body{min-height:100vh;background-image:radial-gradient(circle at 20% 0%,rgba(184
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='1.65.0';            // bumped on each release
+const APP_VERSION='1.66.0';            // bumped on each release
 
 /* ============================================================
    PWA — Service Worker registration + Install prompt
@@ -15720,6 +15752,166 @@ function arReturn(kind,id){
   if(wfReturnToDraft(r)){saveState();renderAll();toast('Đã trả về Nháp');}
 }
 
+/* ============================================================
+   v1.66.0: BẢNG KÊ THUẾ GTGT (VAT) — hàm gom dữ liệu dùng chung
+   Dùng cho: nút xuất ở tab 04 + bảng động ở tab 12 NSNN.
+   Nguồn dữ liệu DUY NHẤT = S.payables. Bảng GTGT chỉ là "view".
+   ============================================================ */
+
+/* Gom hóa đơn VAT từ AP theo bộ lọc. Trả về mảng record đã lọc. */
+function vatGatherRows(opt){
+  opt = opt || {};
+  const month = opt.month || '';            // 'YYYY-MM' — '' = mọi tháng
+  const from = opt.from || '';              // 'YYYY-MM-DD'
+  const to = opt.to || '';
+  const stFilter = opt.status || 'all';     // all | approved | not_draft
+  const vtypeFilter = opt.vtype || 'company'; // company | all
+  const onlyWithVat = opt.onlyWithVat !== false; // mặc định chỉ lấy dòng có VAT
+  let rows = (S.payables||[]).filter(r=>{
+    const d = r.issueDate || '';
+    if(month && !d.startsWith(month)) return false;
+    if(from && d < from) return false;
+    if(to && d > to) return false;
+    if(onlyWithVat && !(+r.vatAmount>0 || +r.vatPercent>0)) return false;
+    const wfS = wfStatus(r);
+    if(stFilter==='approved' && wfS!=='approved') return false;
+    if(stFilter==='not_draft' && (wfS==='draft'||wfS==='rejected')) return false;
+    if(vtypeFilter==='company'){
+      const v = (S.vendors||[]).find(x=>x.id===r.vendorId);
+      const vt = v ? (v.vendorType||'company') : 'company';
+      if(vt!=='company') return false;
+    }
+    return true;
+  });
+  rows.sort((a,b)=>(a.issueDate||'').localeCompare(b.issueDate||''));
+  return rows;
+}
+
+/* Chuyển 1 record AP → 1 dòng bảng kê VAT (object chuẩn hóa) */
+function vatRowData(r){
+  const v = (S.vendors||[]).find(x=>x.id===r.vendorId);
+  return {
+    invoiceNo: r.invoiceNo||'',
+    issueDate: r.issueDate||'',
+    vendorName: r.partner||(v?v.name:'')||'',
+    taxCode: v?(v.taxCode||''):'',
+    address: v?(v.address||''):'',
+    desc: r.desc||'',
+    net: +r.amountNet||+r.amount||0,
+    vatPercent: +r.vatPercent||0,
+    vatAmount: +r.vatAmount||0,
+    gross: +r.amountGross||+r.amount||0,
+    ccy: r.ccy||'USD',
+    status: wfStatus(r),
+    createdBy: r.createdBy||'',
+    createdByDept: r.createdByDept||lookupUserDeptName(r.createdBy)||''
+  };
+}
+
+const VAT_STATUS_LABEL = {
+  draft:'Nháp', pending_acc:'Chờ KT kiểm', pending_l1:'Trình ký (chờ L1)',
+  pending_l2:'Chờ thanh toán (L2)', approved:'Đã duyệt', rejected:'Bị từ chối'
+};
+
+/* ===== Dialog xuất bảng kê VAT (gọi từ nút tab 04) ===== */
+function openVatExportDialog(){
+  const now=new Date();
+  const curMonth=now.getFullYear()+'-'+String(now.getMonth()+1).padStart(2,'0');
+  const body=`
+    <div style="font-size:13px;line-height:1.6">
+      <div style="padding:10px 12px;background:rgba(28,58,92,.04);border-left:3px solid var(--ink);font-size:11px;color:var(--muted);margin-bottom:14px">
+        Xuất bảng kê hóa đơn VAT đầu vào (hóa đơn mua — Phải trả) để <b>đối chiếu Cổng thông tin thuế</b>.
+        Cột: NCC · MST · số HĐ · ngày HĐ · tiền chưa VAT · %VAT · tiền VAT · tổng.
+      </div>
+      <div class="field">
+        <label>Tháng kê khai</label>
+        <input type="month" id="vat-export-month" value="${curMonth}" style="padding:8px 10px;border:1px solid var(--rule);font-family:var(--font-mono)">
+      </div>
+      <div class="field">
+        <label>Lọc theo trạng thái</label>
+        <select id="vat-export-status" style="padding:8px 10px;border:1px solid var(--rule);background:var(--paper);font-size:13px;width:100%">
+          <option value="all">Tất cả bút toán (Nháp + đang duyệt + đã duyệt)</option>
+          <option value="approved">Chỉ bút toán đã duyệt</option>
+          <option value="not_draft">Đã gửi duyệt trở lên (bỏ Nháp)</option>
+        </select>
+      </div>
+      <div class="field">
+        <label>Đối tượng NCC</label>
+        <select id="vat-export-vtype" style="padding:8px 10px;border:1px solid var(--rule);background:var(--paper);font-size:13px;width:100%">
+          <option value="company">Chỉ Doanh nghiệp có MST (đối chiếu Cổng thuế)</option>
+          <option value="all">Tất cả loại NCC</option>
+        </select>
+      </div>
+      <div id="vat-export-preview" style="font-size:12px;color:var(--muted);margin-top:8px;min-height:18px"></div>
+    </div>
+  `;
+  const foot=`<button class="btn-sec" onclick="closeModal()">Hủy</button>
+              <button class="btn-primary" onclick="doVatExport()">📊 Xuất Excel</button>`;
+  openModal('Xuất bảng kê hóa đơn VAT', body, foot);
+  setTimeout(()=>{
+    ['vat-export-month','vat-export-status','vat-export-vtype'].forEach(id=>{
+      const el=document.getElementById(id); if(el) el.onchange=_vatExportPreview;
+    });
+    _vatExportPreview();
+  },100);
+}
+
+function _vatExportOpts(){
+  return {
+    month:(document.getElementById('vat-export-month')||{}).value||'',
+    status:(document.getElementById('vat-export-status')||{}).value||'all',
+    vtype:(document.getElementById('vat-export-vtype')||{}).value||'company'
+  };
+}
+
+function _vatExportPreview(){
+  const el=document.getElementById('vat-export-preview');
+  if(!el) return;
+  const rows=vatGatherRows(_vatExportOpts());
+  if(!rows.length){ el.textContent='Không có hóa đơn VAT nào khớp bộ lọc.'; return; }
+  const byCcy={};
+  rows.forEach(r=>{ const c=r.ccy||'USD'; byCcy[c]=(byCcy[c]||0)+(+r.vatAmount||0); });
+  const vatStr=Object.entries(byCcy).map(([c,v])=>fmt(v,c)).join(' · ');
+  el.innerHTML=`Tìm thấy <b>${rows.length}</b> hóa đơn · Tổng VAT: <b>${vatStr}</b>`;
+}
+
+/* Xuất file Excel bảng kê VAT */
+function doVatExport(){
+  const opt=_vatExportOpts();
+  if(!opt.month){ toast('Chọn tháng kê khai','bad'); return; }
+  const rows=vatGatherRows(opt);
+  if(!rows.length){ toast('Không có hóa đơn VAT trong tháng đã chọn','warn'); return; }
+  const data=rows.map(vatRowData);
+  const aoa=[
+    ['BẢNG KÊ HÓA ĐƠN VAT ĐẦU VÀO — THÁNG '+opt.month],
+    ['Công ty: '+((S.companyInfo&&S.companyInfo.name)||'Seahorse Marine & Energy JSC')],
+    ['Xuất lúc: '+new Date().toLocaleString('vi-VN')+'  ·  Người xuất: '+actorName()],
+    [],
+    ['STT','Số hóa đơn','Ngày HĐ','Tên NCC','MST','Địa chỉ','Diễn giải','Tiền chưa VAT','%VAT','Tiền VAT','Tổng sau VAT','Tiền tệ','Trạng thái','Người nhập','Bộ phận']
+  ];
+  let sumNet=0,sumVat=0,sumGross=0;
+  data.forEach((d,i)=>{
+    aoa.push([
+      i+1, d.invoiceNo, d.issueDate, d.vendorName, d.taxCode, d.address, d.desc,
+      d.net, d.vatPercent, d.vatAmount, d.gross, d.ccy,
+      VAT_STATUS_LABEL[d.status]||d.status, d.createdBy, d.createdByDept
+    ]);
+    sumNet+=d.net; sumVat+=d.vatAmount; sumGross+=d.gross;
+  });
+  aoa.push([]);
+  aoa.push(['','','','','','','TỔNG CỘNG', sumNet, '', sumVat, sumGross, '', '', '', '']);
+  const ws=XLSX.utils.aoa_to_sheet(aoa);
+  ws['!cols']=[{wch:5},{wch:16},{wch:12},{wch:30},{wch:15},{wch:30},{wch:28},{wch:15},{wch:8},{wch:15},{wch:16},{wch:8},{wch:18},{wch:16},{wch:18}];
+  ws['!merges']=[{s:{r:0,c:0},e:{r:0,c:14}},{s:{r:1,c:0},e:{r:1,c:14}},{s:{r:2,c:0},e:{r:2,c:14}}];
+  const wb=XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb,ws,'Bảng kê VAT '+opt.month);
+  const fname=`Bang-ke-VAT-${opt.month}.xlsx`;
+  XLSX.writeFile(wb,fname);
+  try{ logAuditEvent('vat_export',{month:opt.month,rows:data.length,sumVat}); }catch(e){}
+  toast(`✓ Đã xuất ${data.length} hóa đơn VAT`,'good');
+  closeModal();
+}
+
 /* ===== Create / edit modals for receivable & payable ===== */
 function _arEditorBody(r,isPayable){
   const segOpts=Object.entries(SEGMENTS).map(([k,v])=>`<option value="${k}" ${k===(r.segment||'')?'selected':''}>${esc(v.name)}</option>`).join('');
@@ -20535,6 +20727,144 @@ function _nsnnSwitchSubtab(name){
   document.querySelectorAll('.nsnn-subtab-content').forEach(d=>{
     d.style.display = (d.id===`nsnn-subtab-${name}`)?'block':'none';
   });
+  if(name==='vat') renderNsnnVat();
+}
+
+/* ===== v1.66.0: Bảng kê GTGT động trong tab NSNN ===== */
+function _nsnnVatOpts(){
+  let month=(document.getElementById('nsnn-vat-month')||{}).value||'';
+  if(!month){
+    const now=new Date();
+    month=now.getFullYear()+'-'+String(now.getMonth()+1).padStart(2,'0');
+    const el=document.getElementById('nsnn-vat-month'); if(el) el.value=month;
+  }
+  return {
+    month,
+    status:(document.getElementById('nsnn-vat-status')||{}).value||'all',
+    vtype:(document.getElementById('nsnn-vat-vtype')||{}).value||'company'
+  };
+}
+
+function renderNsnnVat(){
+  const tEl=document.getElementById('nsnn-vat-table');
+  if(!tEl) return;
+  const opt=_nsnnVatOpts();
+  const rows=vatGatherRows(opt).map(vatRowData);
+  if(!rows.length){
+    tEl.innerHTML='<tr><td class="empty">Không có hóa đơn VAT nào trong tháng '+esc(opt.month)+'</td></tr>';
+    return;
+  }
+  let h=`<thead><tr>
+    <th>STT</th><th>Số HĐ</th><th class="mono">Ngày HĐ</th><th>Nhà cung cấp</th>
+    <th class="mono">MST</th><th>Diễn giải</th>
+    <th class="r">Chưa VAT</th><th class="r">%VAT</th><th class="r">Tiền VAT</th><th class="r">Tổng</th>
+    <th class="c">Trạng thái</th><th>Người nhập</th>
+  </tr></thead><tbody>`;
+  const byCcy={};
+  rows.forEach((d,i)=>{
+    const c=d.ccy||'USD';
+    if(!byCcy[c]) byCcy[c]={net:0,vat:0,gross:0};
+    byCcy[c].net+=d.net; byCcy[c].vat+=d.vatAmount; byCcy[c].gross+=d.gross;
+    h+=`<tr>
+      <td>${i+1}</td>
+      <td class="mono" style="font-size:11px">${esc(d.invoiceNo)||'—'}</td>
+      <td class="mono" style="font-size:11px">${esc(d.issueDate)||'—'}</td>
+      <td><b>${esc(d.vendorName)||'—'}</b></td>
+      <td class="mono" style="font-size:11px">${esc(d.taxCode)||'—'}</td>
+      <td style="max-width:200px;font-size:12px">${esc(d.desc)||'—'}</td>
+      <td class="r num">${fmt(d.net,d.ccy)}</td>
+      <td class="r num" style="font-size:11px">${d.vatPercent?d.vatPercent+'%':'—'}</td>
+      <td class="r num" style="font-weight:600">${fmt(d.vatAmount,d.ccy)}</td>
+      <td class="r num">${fmt(d.gross,d.ccy)}</td>
+      <td class="c"><span style="font-size:10px">${VAT_STATUS_LABEL[d.status]||d.status}</span></td>
+      <td style="font-size:11px">${esc(d.createdBy)||'—'}${d.createdByDept?'<br><span style="color:var(--muted)">'+esc(d.createdByDept)+'</span>':''}</td>
+    </tr>`;
+  });
+  Object.entries(byCcy).forEach(([c,s])=>{
+    h+=`<tr style="background:rgba(196,138,57,.06);font-weight:600">
+      <td colspan="6" style="text-align:right">TỔNG (${c})</td>
+      <td class="r num">${fmt(s.net,c)}</td><td></td>
+      <td class="r num">${fmt(s.vat,c)}</td><td class="r num">${fmt(s.gross,c)}</td>
+      <td colspan="2"></td>
+    </tr>`;
+  });
+  h+='</tbody>';
+  tEl.innerHTML=h;
+}
+
+function nsnnVatExportExcel(){
+  const opt=_nsnnVatOpts();
+  const rows=vatGatherRows(opt).map(vatRowData);
+  if(!rows.length){ toast('Không có dữ liệu để xuất','warn'); return; }
+  const aoa=[
+    ['BẢNG KÊ HÓA ĐƠN GTGT ĐẦU VÀO — THÁNG '+opt.month],
+    ['Công ty: '+((S.companyInfo&&S.companyInfo.name)||'Seahorse Marine & Energy JSC')],
+    ['Xuất lúc: '+new Date().toLocaleString('vi-VN')+'  ·  Người xuất: '+actorName()],
+    [],
+    ['STT','Số hóa đơn','Ngày HĐ','Tên NCC','MST','Địa chỉ','Diễn giải','Tiền chưa VAT','%VAT','Tiền VAT','Tổng sau VAT','Tiền tệ','Trạng thái','Người nhập','Bộ phận']
+  ];
+  let sumNet=0,sumVat=0,sumGross=0;
+  rows.forEach((d,i)=>{
+    aoa.push([i+1,d.invoiceNo,d.issueDate,d.vendorName,d.taxCode,d.address,d.desc,
+      d.net,d.vatPercent,d.vatAmount,d.gross,d.ccy,
+      VAT_STATUS_LABEL[d.status]||d.status,d.createdBy,d.createdByDept]);
+    sumNet+=d.net; sumVat+=d.vatAmount; sumGross+=d.gross;
+  });
+  aoa.push([]);
+  aoa.push(['','','','','','','TỔNG CỘNG',sumNet,'',sumVat,sumGross,'','','','']);
+  const ws=XLSX.utils.aoa_to_sheet(aoa);
+  ws['!cols']=[{wch:5},{wch:16},{wch:12},{wch:30},{wch:15},{wch:30},{wch:28},{wch:15},{wch:8},{wch:15},{wch:16},{wch:8},{wch:18},{wch:16},{wch:18}];
+  ws['!merges']=[{s:{r:0,c:0},e:{r:0,c:14}},{s:{r:1,c:0},e:{r:1,c:14}},{s:{r:2,c:0},e:{r:2,c:14}}];
+  const wb=XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb,ws,'Bang ke GTGT '+opt.month);
+  XLSX.writeFile(wb,`Bang-ke-GTGT-${opt.month}.xlsx`);
+  try{ logAuditEvent('vat_export',{month:opt.month,rows:rows.length,sumVat,via:'nsnn-excel'}); }catch(e){}
+  toast(`✓ Đã xuất ${rows.length} hóa đơn GTGT`,'good');
+}
+
+function nsnnVatExportPDF(){
+  const opt=_nsnnVatOpts();
+  const rows=vatGatherRows(opt).map(vatRowData);
+  if(!rows.length){ toast('Không có dữ liệu để xuất','warn'); return; }
+  const byCcy={};
+  rows.forEach(d=>{ const c=d.ccy||'USD'; if(!byCcy[c])byCcy[c]={net:0,vat:0,gross:0};
+    byCcy[c].net+=d.net; byCcy[c].vat+=d.vatAmount; byCcy[c].gross+=d.gross; });
+  const compName=(S.companyInfo&&S.companyInfo.name)||'Seahorse Marine & Energy JSC';
+  let trs=rows.map((d,i)=>`<tr>
+    <td>${i+1}</td><td>${esc(d.invoiceNo)||'—'}</td><td>${esc(d.issueDate)||'—'}</td>
+    <td>${esc(d.vendorName)||'—'}</td><td>${esc(d.taxCode)||'—'}</td>
+    <td style="text-align:right">${fmt(d.net,d.ccy)}</td>
+    <td style="text-align:center">${d.vatPercent?d.vatPercent+'%':'—'}</td>
+    <td style="text-align:right">${fmt(d.vatAmount,d.ccy)}</td>
+    <td style="text-align:right">${fmt(d.gross,d.ccy)}</td>
+    <td>${esc(d.createdBy)||'—'}</td>
+  </tr>`).join('');
+  let totRows=Object.entries(byCcy).map(([c,s])=>`<tr style="font-weight:bold;background:#f0f0f0">
+    <td colspan="5" style="text-align:right">TỔNG (${c})</td>
+    <td style="text-align:right">${fmt(s.net,c)}</td><td></td>
+    <td style="text-align:right">${fmt(s.vat,c)}</td>
+    <td style="text-align:right">${fmt(s.gross,c)}</td><td></td></tr>`).join('');
+  const win=window.open('','_blank');
+  win.document.write(`<!DOCTYPE html><html><head><meta charset="utf-8"><title>Bảng kê GTGT ${opt.month}</title>
+    <style>body{font-family:Arial,sans-serif;font-size:11px;padding:20px;color:#222}
+    h2{text-align:center;margin:4px 0}.sub{text-align:center;font-size:11px;color:#555;margin-bottom:14px}
+    table{width:100%;border-collapse:collapse}th,td{border:1px solid #999;padding:4px 6px}
+    th{background:#1c3a5c;color:#fff;font-size:10px}td{font-size:10px}
+    .sign{margin-top:30px;display:flex;justify-content:space-around;text-align:center;font-size:11px}
+    @media print{button{display:none}}</style></head><body>
+    <h2>BẢNG KÊ HÓA ĐƠN GTGT ĐẦU VÀO</h2>
+    <div class="sub">${esc(compName)} · Tháng ${esc(opt.month)}<br>
+    Xuất lúc: ${new Date().toLocaleString('vi-VN')} · Người xuất: ${esc(actorName())}</div>
+    <table><thead><tr><th>STT</th><th>Số HĐ</th><th>Ngày HĐ</th><th>Tên NCC</th><th>MST</th>
+    <th>Chưa VAT</th><th>%VAT</th><th>Tiền VAT</th><th>Tổng</th><th>Người nhập</th></tr></thead>
+    <tbody>${trs}${totRows}</tbody></table>
+    <div class="sign"><div>NGƯỜI LẬP<br><br><br>_______________</div>
+    <div>KẾ TOÁN TRƯỞNG<br><br><br>_______________</div></div>
+    <div style="margin-top:20px;text-align:center"><button onclick="window.print()" style="padding:8px 20px">🖨 In</button></div>
+    </body></html>`);
+  win.document.close();
+  try{ logAuditEvent('vat_export',{month:opt.month,rows:rows.length,via:'nsnn-pdf'}); }catch(e){}
+  toast('✓ Mở bản in PDF — bấm In trong cửa sổ mới','good');
 }
 
 /* === Compute auto tax amounts for a period ===
