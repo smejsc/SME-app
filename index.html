@@ -467,8 +467,8 @@ body{min-height:100vh;background-image:radial-gradient(circle at 20% 0%,rgba(184
           <input type="password" id="auth-pw" placeholder="••••••••" autocomplete="current-password">
         </div>
         <div class="auth-error" id="auth-err"></div>
-        <!-- v1.60.0: Quên mật khẩu admin link -->
-        <div style="margin-top:8px;text-align:right">
+        <!-- v1.70.0: Recovery Key đã bỏ — ẩn link cho màn Login sạch -->
+        <div style="margin-top:8px;text-align:right;display:none">
           <a href="#" onclick="event.preventDefault();showRecoveryFlow();" style="font-size:11px;color:var(--accent);text-decoration:underline">🔑 Quên mật khẩu admin? Dùng Recovery Key</a>
         </div>
       </div>
@@ -2310,7 +2310,7 @@ body{min-height:100vh;background-image:radial-gradient(circle at 20% 0%,rgba(184
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='1.69.0';            // bumped on each release
+const APP_VERSION='1.71.0';            // bumped on each release
 
 /* v1.68.0: URL Apps Script của công ty — nhúng cứng để NV không cần nhập / không cần ?join=.
    Khi máy mới mở app, app tự dùng URL này kết nối cloud → vào thẳng Login.
@@ -6817,13 +6817,15 @@ function wfReturnToDraft(r){
 */
 function helpDetectRole(){
   if(CURRENT_ROLE==='admin') return 'admin';
-  if(!CURRENT_USER) return 'input';
-  if(CURRENT_USER.canManageUsers) return 'subadmin';
-  if(CURRENT_USER.canApproveL2) return 'l2';
-  if(CURRENT_USER.canApproveL1) return 'l1';
-  if((CURRENT_USER.tabs||[]).includes('banking')) return 'tckt';
-  if(CURRENT_USER.isViewer) return 'viewer';
-  return 'input';
+  if(!CURRENT_USER) return 'nv';
+  // KTT: có quyền duyệt L1/L2 hoặc quản lý NV
+  if(CURRENT_USER.canApproveL1 || CURRENT_USER.canApproveL2 || CURRENT_USER.canManageUsers) return 'ktt';
+  // NV KT: có quyền KT Kiểm hồ sơ
+  if(CURRENT_USER.canCheckAcc) return 'nvkt';
+  // NV Kho: có tab kho/tài sản
+  const tabs = CURRENT_USER.tabs||[];
+  if(tabs.includes('inventory') || tabs.includes('fixed_assets') || tabs.includes('tools')) return 'nvkho';
+  return 'nv';
 }
 
 /* Welcome onboarding — fires on first login per user.
@@ -6843,14 +6845,12 @@ function checkWelcomePopup(){
 function showWelcomeModal(userKey, flag){
   const role = helpDetectRole();
   const roleInfo = {
-    admin: {icon:'⚡', title:'Admin', focus:'Toàn quyền hệ thống — quản lý NV, cấu hình, sync, audit'},
-    subadmin: {icon:'🛡', title:'Sub-admin', focus:'Quản lý nhân viên (tạo/sửa/xóa NV + đẩy auth cloud)'},
-    l2: {icon:'✓✓', title:'Duyệt L2', focus:'Phó GĐ — duyệt cuối, bút toán vào BI sau khi bạn duyệt'},
-    l1: {icon:'✓', title:'Duyệt L1', focus:'Trưởng BP — kiểm tra nghiệp vụ trước khi trình L2'},
-    tckt: {icon:'₫', title:'TCKT (Banking)', focus:'Quản lý TK ngân hàng, snapshot số dư, vay vốn'},
-    input: {icon:'✎', title:'NV Nhập liệu', focus:'Ghi nhận AR/AP/Thu-Chi hộ tại tab 04 Công nợ + Kho, trình ký lên duyệt'},
-    viewer: {icon:'👁', title:'Viewer', focus:'Chỉ đọc báo cáo BI — không nhập, không sửa'}
-  }[role];
+    admin: {icon:'🛡', title:'Quản trị viên (Admin)', focus:'Toàn quyền hệ thống — tạo NV, cấu hình, duyệt thay, sao lưu, bảo mật'},
+    ktt: {icon:'✓✓', title:'Kế toán trưởng (KTT)', focus:'Duyệt hóa đơn 2 cấp (L1+L2), quản lý nhân viên, xuất bảng kê GTGT'},
+    nvkt: {icon:'📝', title:'NV Kế toán', focus:'Kiểm tra chứng từ hóa đơn (KT Kiểm) + xuất bảng kê thuế VAT'},
+    nvkho: {icon:'📦', title:'NV Kho', focus:'Quản lý kho vật tư, tài sản cố định, công cụ dụng cụ'},
+    nv: {icon:'✎', title:'NV Nhập liệu', focus:'Nhập hóa đơn nhà cung cấp (Phải trả) vào tab 04 Công nợ'}
+  }[role] || {icon:'✎', title:'Nhân viên', focus:'Sử dụng các tab được phân quyền'};
   const displayName = isAdmin() ? 'Admin' : (CURRENT_USER && CURRENT_USER.name) || 'NV';
   const body = `
     <div style="text-align:center;padding:14px 0 20px">
@@ -6898,9 +6898,8 @@ function _dismissWelcome(flag){
 function openHelpModal(targetSection){
   const role = helpDetectRole();
   const defaultSection = targetSection || ({
-    admin:'role-input', subadmin:'role-subadmin',
-    l2:'role-l2', l1:'role-l1', tckt:'role-tckt',
-    input:'role-input', viewer:'common'
+    admin:'role-admin', ktt:'role-ktt', nvkt:'role-nvkt',
+    nvkho:'role-nvkho', nv:'role-nv'
   }[role]) || 'common';
   const body = _renderHelpContent(role, defaultSection);
   const foot = `<button class="btn-sec" onclick="closeModal()">Đóng (Esc)</button>
@@ -6965,23 +6964,23 @@ function _renderHelpContent(activeRole, defaultSection){
     <div class="help-toc" id="help-toc">
       <div class="help-toc-title">Mục lục</div>
       <a onclick="_helpJump('common')"><span class="role-tag">00</span>Chung</a>
-      <a onclick="_helpJump('role-input')"><span class="role-tag">01</span>NV Nhập liệu</a>
+      <a onclick="_helpJump('role-nv')"><span class="role-tag">NV</span>NV Nhập liệu</a>
+      <a onclick="_helpJump('role-nvkho')"><span class="role-tag">KHO</span>NV Kho</a>
+      <a onclick="_helpJump('role-nvkt')"><span class="role-tag">KT</span>NV Kế toán</a>
+      <a onclick="_helpJump('role-ktt')"><span class="role-tag">KTT</span>Kế toán trưởng</a>
+      <a onclick="_helpJump('role-admin')"><span class="role-tag">AD</span>Admin</a>
       <a onclick="_helpJump('vat')"><span class="role-tag">VAT</span>Hóa đơn VAT</a>
-      <a onclick="_helpJump('role-l1')"><span class="role-tag">02</span>Duyệt L1</a>
-      <a onclick="_helpJump('role-l2')"><span class="role-tag">03</span>Duyệt L2</a>
-      <a onclick="_helpJump('role-tckt')"><span class="role-tag">04</span>TCKT</a>
-      <a onclick="_helpJump('role-subadmin')"><span class="role-tag">05</span>Sub-admin</a>
       <a onclick="_helpJump('faq')"><span class="role-tag">F</span>FAQ</a>
       <a onclick="_helpJump('contact')"><span class="role-tag">★</span>Liên hệ</a>
     </div>
     <div class="help-content" id="help-content-scroll">
       ${_helpSection_common()}
-      ${_helpSection_input()}
+      ${_helpSection_nv()}
+      ${_helpSection_nvkho()}
+      ${_helpSection_nvkt()}
+      ${_helpSection_ktt()}
+      ${_helpSection_admin()}
       ${_helpSection_vat()}
-      ${_helpSection_l1()}
-      ${_helpSection_l2()}
-      ${_helpSection_tckt()}
-      ${_helpSection_subadmin()}
       ${_helpSection_faq()}
       ${_helpSection_contact()}
     </div>
@@ -7121,82 +7120,36 @@ function _helpSection_common(){
   </div>`;
 }
 
-function _helpSection_input(){
-  return `<div class="help-section" id="help-role-input">
+function _helpSection_nv(){
+  return `<div class="help-section" id="help-role-nv">
     <div class="help-role-banner">
       <div class="help-role-banner-icon">✎</div>
       <div>
-        <div class="help-role-banner-title">Phần 01 · NV <em>Nhập liệu</em></div>
-        <div class="help-role-banner-sub">Ghi nhận chứng từ — bút toán bạn nhập sẽ trình ký lên duyệt L1 → L2 trước khi vào BI</div>
+        <div class="help-role-banner-title">NV <em>Nhập liệu</em></div>
+        <div class="help-role-banner-sub">Nhập hóa đơn nhà cung cấp (Phải trả) — bút toán bạn nhập sẽ qua KT Kiểm → Duyệt L1 → L2</div>
       </div>
     </div>
 
-    <h3>1. Tab Phải thu (AR / Doanh thu)</h3>
-    <p>Dùng khi công ty <strong>xuất hóa đơn</strong> cho khách (charter, OM fee...).</p>
-    <div class="help-step"><span class="help-step-num">1</span><div class="help-step-content"><h5>Bấm "+ Thêm Phải thu"</h5></div></div>
-    <div class="help-step"><span class="help-step-num">2</span><div class="help-step-content"><h5>Điền thông tin bắt buộc (dấu *)</h5>Khách hàng *, Loại doanh thu *, Dự án/Tàu, Số tiền *, VAT %, CCY, Ngày HĐ, Ngày đáo hạn</div></div>
-    <div class="help-step"><span class="help-step-num">3</span><div class="help-step-content"><h5>Lưu → Trạng thái "Nháp"</h5></div></div>
-    <div class="help-step"><span class="help-step-num">4</span><div class="help-step-content"><h5>Trình ký → chờ L1 duyệt</h5></div></div>
-    <div class="help-callout tip"><strong>Nhập hàng loạt</strong><br>Dùng <strong>≡ Menu → 📥 Import Excel</strong> với template có sẵn nếu bạn có file Excel.</div>
+    <h3>1. Nhiệm vụ chính</h3>
+    <p>Nhập hóa đơn nhà cung cấp vào tab <strong>04 Công nợ → Phải trả</strong> ngay khi nhận hóa đơn.</p>
+    <div class="help-callout tip"><strong>Nhập sớm</strong><br>Nhập hóa đơn NGAY khi nhận — chưa cần đủ hồ sơ. Lưu ở trạng thái Nháp, bổ sung chứng từ sau.</div>
 
-    <h3>2. Tab Phải trả (AP / Chi phí)</h3>
-    <p>Dùng khi công ty <strong>nhận hóa đơn</strong> từ NCC. Quy trình giống AR nhưng chọn <strong>loại chi phí</strong>:</p>
-    <ul>
-      <li><strong>VESSEL_DIRECT</strong>: nhiên liệu, vật tư tàu, phí cảng</li>
-      <li><strong>HR</strong>: lương, BHXH, phụ cấp</li>
-      <li><strong>QN</strong>: quản lý chung (văn phòng, điện, internet)</li>
-      <li><strong>OTHER</strong>: khác</li>
-    </ul>
+    <h3>2. Cách nhập hóa đơn Phải trả</h3>
+    <div class="help-step"><span class="help-step-num">1</span><div class="help-step-content"><h5>Vào tab 04 Công nợ → Phải trả</h5></div></div>
+    <div class="help-step"><span class="help-step-num">2</span><div class="help-step-content"><h5>Bấm "+ Thêm phải trả" hoặc "Nhập nhiều dòng"</h5>Nhập nhiều dòng dùng khi 1 NCC có nhiều hóa đơn.</div></div>
+    <div class="help-step"><span class="help-step-num">3</span><div class="help-step-content"><h5>Điền thông tin bắt buộc (dấu *)</h5>NCC, số hóa đơn, ngày HĐ, số tiền chưa VAT, % VAT.</div></div>
+    <div class="help-step"><span class="help-step-num">4</span><div class="help-step-content"><h5>Lưu Nháp</h5>Khi đủ hồ sơ → bấm gửi duyệt (mũi tên →) để chuyển NV KT kiểm tra.</div></div>
+    <div class="help-callout info"><strong>Chữ ký phiếu</strong><br>Mỗi hóa đơn tự ghi: tên bạn — bộ phận — ngày nhập. Giúp công ty giám sát hóa đơn đang ở đâu.</div>
 
-    <h3>3. Tab Công nợ — Sub-tab Thu/Chi hộ tàu QL (v1.44.0+)</h3>
-    <p>Dùng cho <strong>tàu công ty quản lý hộ chủ tàu</strong>. <strong>Từ v1.44.0</strong>: form nhập Thu/Chi hộ đã chuyển từ tab 06 sang tab <strong>04 Công nợ → Thu-Chi hộ tàu QL</strong> để thống nhất chỗ NV nhập liệu.</p>
-    <div class="help-callout info"><strong>Cấu trúc mới 04 Công nợ</strong>
-      <ul style="margin-top:6px">
-        <li>💰 Phải thu (Doanh thu + AR)</li>
-        <li>💸 Phải trả (Tổng AP)</li>
-        <li>⚓ Thu-Chi hộ tàu QL ← <b>chuyển từ tab 06</b></li>
-      </ul>
-    </div>
+    <h3>3. Nếu hóa đơn bị trả lại</h3>
+    <p>Người kiểm tra (NV KT hoặc KTT) có thể trả hóa đơn về nếu thiếu hồ sơ. Bạn xem ghi chú, bổ sung rồi gửi lại.</p>
 
-    <h4>3.1. Thu hộ (IN) — đơn giản</h4>
-    <p>Vào sub-tab "Thu-Chi hộ tàu QL" → Ngày, Tàu QL, Loại = Thu hộ, Diễn giải, Số tiền → Lưu.</p>
-
-    <h4>3.2. Chi hộ (OUT) — có chứng từ</h4>
-    <div class="help-callout warn"><strong>v1.40.1+</strong><br>Khi chọn Loại = <strong>Chi hộ</strong>, app tự hiện thêm 3 ô <strong>NCC / Số HĐ / Số HD</strong> để chủ tàu kiểm tra.</div>
-    <div class="help-screenshot">┌────────────────────────────────────────────────┐
-│  📄 Thông tin chứng từ chi hộ                  │
-├────────────────────────────────────────────────┤
-│  Tên NCC: [ Cty CP Cảng Vũng Tàu          ]   │
-│  Số HĐ:   [ HD-2026-001 ]                      │
-│  Số HD:   [ HD-VAT-12345 ]                     │
-└────────────────────────────────────────────────┘</div>
-
-    <h4>3.3. Tab 06 QL vận hành tàu — chỉ tổng hợp + báo cáo</h4>
-    <p>Sau khi nhập ở 04, vào tab <strong>06 QL vận hành tàu</strong> để xem:</p>
-    <ul>
-      <li>Tàu quản lý + ngưỡng số dư</li>
-      <li>Trạng thái số dư từng tàu (cảnh báo nếu thấp hơn ngưỡng)</li>
-      <li>Sổ Thu hộ &amp; Chi hộ đầy đủ (mọi tháng)</li>
-      <li>📄 Xuất PDF cho chủ tàu</li>
-    </ul>
-
-    <h4>3.4. Báo cáo PDF cho chủ tàu</h4>
-    <p>Cuối tháng vào tab 06 → bấm <strong>📄 Xuất PDF</strong>.</p>
-    <div class="help-callout info"><strong>Báo cáo 2 trang</strong><br><strong>Trang 1</strong>: Tổng hợp (Tồn đầu/Thu/Chi/Phí/Tồn cuối) — chủ tàu ký nhanh<br><strong>Trang 2</strong>: Chi tiết với cột NCC/HĐ/HD — chủ tàu kiểm tra</div>
-
-    <h3>4. Tab Kho vật tư</h3>
-    <p>Quản lý xuất nhập tồn theo <strong>kho</strong> (theo vị trí: kho tàu, kho VP).</p>
-    <ol>
-      <li>Tạo kho (mã, tên, loại VESSEL/OFFICE)</li>
-      <li>Chọn kho + tháng</li>
-      <li>+ Bút toán: tên vật tư, ĐVT, tồn đầu, nhập, xuất, giá trị</li>
-      <li>App tự tính: tồn cuối = đầu + nhập − xuất</li>
-    </ol>
+    <h3>4. Nhập hàng loạt bằng Excel</h3>
+    <p>Nếu có nhiều hóa đơn: <strong>≡ Menu → 📥 Import Excel hàng loạt</strong> → tải template → điền → import.</p>
 
     <h3>5. Tab Danh mục</h3>
-    <p>6 sub-tab: 🏢 Phòng/Ban · ⛵ Tàu · 📐 Dự án · 💸 Loại CP · 💰 Loại DT · 🤝 NCC</p>
-    <p>NV <strong>thêm mới + import được</strong>. Chỉ admin sửa/xóa.</p>
-    <div class="help-callout warn"><strong>Cẩn trọng khi thêm</strong><br>App chuẩn hóa tên (uppercase, bỏ dấu) để check trùng. Tìm trong danh sách trước khi tạo mới.</div>
+    <p>Có thể thêm mới Nhà cung cấp ở tab <strong>Danh mục → NCC</strong>. Nhập đủ mã số thuế + địa chỉ.</p>
+    <div class="help-callout warn"><strong>Tránh trùng NCC</strong><br>Tìm trong danh sách trước khi tạo mới — app chuẩn hóa tên để check trùng.</div>
   </div>`;
 }
 
@@ -7244,150 +7197,142 @@ function _helpSection_vat(){
   </div>`;
 }
 
-function _helpSection_l1(){
-  return `<div class="help-section" id="help-role-l1">
+function _helpSection_nvkho(){
+  return `<div class="help-section" id="help-role-nvkho">
     <div class="help-role-banner">
-      <div class="help-role-banner-icon">✓</div>
+      <div class="help-role-banner-icon">📦</div>
       <div>
-        <div class="help-role-banner-title">Phần 02 · NV Duyệt <em>L1</em></div>
-        <div class="help-role-banner-sub">Trưởng bộ phận — duyệt cấp 1. Sau khi bạn duyệt, bút toán chuyển sang chờ L2</div>
+        <div class="help-role-banner-title">NV <em>Kho</em></div>
+        <div class="help-role-banner-sub">Quản lý kho vật tư, tài sản cố định, công cụ dụng cụ</div>
       </div>
     </div>
 
-    <h3>1. Workflow phê duyệt 2 cấp</h3>
-    <div class="help-screenshot">  Nháp ──trình ký──> Trình ký (L1) ──duyệt──> Chờ TT (L2) ──duyệt──> Đã duyệt (vào BI)
-                              │                                                  
-                              └──── từ chối có lý do ───> Bị từ chối             </div>
+    <h3>1. Nhiệm vụ chính</h3>
+    <p>Quản lý vật tư và tài sản công ty qua nhóm tab <strong>09 Tài sản</strong>: Kho vật tư · TSCĐ · CCDC &amp; MMTB.</p>
 
-    <h3>2. Duyệt hàng loạt</h3>
-    <div class="help-step"><span class="help-step-num">1</span><div class="help-step-content"><h5>Vào tab "07 Phê duyệt"</h5></div></div>
-    <div class="help-step"><span class="help-step-num">2</span><div class="help-step-content"><h5>Chọn cấp = "Trình ký (chờ L1)"</h5>App liệt kê tất cả bút toán chờ bạn.</div></div>
-    <div class="help-step"><span class="help-step-num">3</span><div class="help-step-content"><h5>Lọc theo BP / loại / tháng</h5>Xem theo nhóm.</div></div>
-    <div class="help-step"><span class="help-step-num">4</span><div class="help-step-content"><h5>Review + Tick + Bấm "✓ Duyệt L1"</h5>Mặc định tick hết — bỏ tick những dòng chưa muốn duyệt.</div></div>
-    <div class="help-step"><span class="help-step-num">5</span><div class="help-step-content"><h5>Từ chối nếu sai → nhập lý do</h5>Bút toán quay về NV nhập để sửa.</div></div>
+    <h3>2. Tab Kho vật tư</h3>
+    <p>Quản lý xuất nhập tồn theo từng kho (kho tàu, kho văn phòng, chi nhánh...).</p>
+    <div class="help-step"><span class="help-step-num">1</span><div class="help-step-content"><h5>Tạo kho</h5>Mã kho, tên, loại (tàu / văn phòng).</div></div>
+    <div class="help-step"><span class="help-step-num">2</span><div class="help-step-content"><h5>Chọn kho + tháng</h5></div></div>
+    <div class="help-step"><span class="help-step-num">3</span><div class="help-step-content"><h5>Cập nhật vật tư</h5>Tên vật tư, đơn vị tính, tồn đầu, nhập, xuất, giá trị.</div></div>
+    <div class="help-callout tip"><strong>Tự tính tồn cuối</strong><br>Tồn cuối = Tồn đầu + Nhập − Xuất. App tự tính, bạn không cần tính tay.</div>
 
-    <div class="help-callout danger"><strong>Trách nhiệm L1</strong><br>Bạn là tuyến đầu: số tiền có khớp HĐ không, loại CP có đúng không, dự án/tàu có đúng không. Sai ở L1 → khó truy trách nhiệm ở L2.</div>
+    <h3>3. Tab TSCĐ (Tài sản cố định)</h3>
+    <p>Theo dõi tàu, nhà xưởng, phương tiện, máy móc lớn.</p>
+    <ul>
+      <li>Mã TS, tên, nhóm, ngày mua, nguyên giá</li>
+      <li>Thời hạn khấu hao, tình trạng (đang dùng / bảo trì / đã thanh lý)</li>
+    </ul>
 
-    <h3>3. Xem ai đã duyệt gì</h3>
-    <p>Bấm vào dòng để xem lịch sử: ai trình, ai duyệt L1, lúc nào. Admin xem đầy đủ trong Audit Log.</p>
+    <h3>4. Tab CCDC &amp; MMTB</h3>
+    <p>Công cụ dụng cụ và máy móc thiết bị nhỏ — phân theo bộ phận sử dụng (Tàu / Văn phòng / Chi nhánh).</p>
+
+    <h3>5. Nhập hàng loạt bằng Excel</h3>
+    <p>Mỗi tab có nút <strong>📥 Import Excel</strong> — tải template, điền, import nhanh nhiều dòng.</p>
   </div>`;
 }
 
-function _helpSection_l2(){
-  return `<div class="help-section" id="help-role-l2">
+function _helpSection_nvkt(){
+  return `<div class="help-section" id="help-role-nvkt">
+    <div class="help-role-banner">
+      <div class="help-role-banner-icon">📝</div>
+      <div>
+        <div class="help-role-banner-title">NV <em>Kế toán</em></div>
+        <div class="help-role-banner-sub">Kiểm tra chứng từ hóa đơn (KT Kiểm) + xuất bảng kê thuế VAT</div>
+      </div>
+    </div>
+
+    <h3>1. Nhiệm vụ chính</h3>
+    <p>Hai việc chính: <strong>kiểm tra chứng từ</strong> hóa đơn NV nhập, và <strong>xuất bảng kê VAT</strong> đối chiếu Cổng thông tin thuế.</p>
+
+    <h3>2. Kiểm chứng từ (KT Kiểm)</h3>
+    <div class="help-step"><span class="help-step-num">1</span><div class="help-step-content"><h5>Vào tab 07 Phê duyệt</h5>Chọn cấp = "Chờ KT viên kiểm".</div></div>
+    <div class="help-step"><span class="help-step-num">2</span><div class="help-step-content"><h5>Mở từng hóa đơn</h5>Đối chiếu chứng từ đầy đủ, đúng số tiền, đúng NCC.</div></div>
+    <div class="help-step"><span class="help-step-num">3</span><div class="help-step-content"><h5>Đủ hồ sơ → bấm "Trình ký"</h5>Hóa đơn chuyển lên KTT duyệt L1.</div></div>
+    <div class="help-step"><span class="help-step-num">4</span><div class="help-step-content"><h5>Thiếu hồ sơ → trả lại NV</h5>Ghi rõ lý do để NV bổ sung.</div></div>
+    <div class="help-callout info"><strong>Kiểm tại bảng Phải trả</strong><br>Bạn cũng có thể kiểm hóa đơn ngay tại tab 04 Phải trả — mỗi dòng "Chờ KT kiểm" có nút Trình ký / Trả lại.</div>
+
+    <h3>3. Xuất bảng kê thuế VAT</h3>
+    <h4>Cách 1 — tại tab Phải trả</h4>
+    <p>Tab <strong>04 Công nợ → Phải trả</strong> → nút <strong>"📊 Xuất bảng kê VAT"</strong> → chọn tháng → tải file Excel.</p>
+    <h4>Cách 2 — tại tab NSNN</h4>
+    <p>Tab <strong>12 NSNN → "🧾 Bảng kê GTGT"</strong> → bảng động hiện mọi hóa đơn VAT trong tháng.</p>
+    <div class="help-step"><span class="help-step-num">1</span><div class="help-step-content"><h5>Cuối tháng — xuất bảng kê VAT</h5></div></div>
+    <div class="help-step"><span class="help-step-num">2</span><div class="help-step-content"><h5>Đối chiếu với Cổng thông tin thuế</h5>So sánh từng hóa đơn.</div></div>
+
+    <h3>4. Tab Ngân hàng &amp; NSNN</h3>
+    <p>NV KT cũng truy cập tab Ngân hàng (tài khoản, số dư, vay vốn) và tab NSNN (theo dõi thuế).</p>
+  </div>`;
+}
+
+function _helpSection_ktt(){
+  return `<div class="help-section" id="help-role-ktt">
     <div class="help-role-banner">
       <div class="help-role-banner-icon">✓✓</div>
       <div>
-        <div class="help-role-banner-title">Phần 03 · NV Duyệt <em>L2</em></div>
-        <div class="help-role-banner-sub">Phó GĐ / Phụ trách — tuyến cuối. Bút toán đã duyệt L2 mới vào BI</div>
+        <div class="help-role-banner-title">Kế toán trưởng <em>(KTT)</em></div>
+        <div class="help-role-banner-sub">Duyệt hóa đơn 2 cấp (L1 + L2), quản lý nhân viên, xuất bảng kê GTGT</div>
       </div>
     </div>
 
-    <h3>1. L1 vs L2</h3>
-    <table>
-      <thead><tr><th>Khía cạnh</th><th>L1</th><th>L2</th></tr></thead>
-      <tbody>
-        <tr><td>Vai trò</td><td>Trưởng BP kiểm tra nghiệp vụ</td><td>Phó GĐ duyệt tài chính</td></tr>
-        <tr><td>Sau duyệt</td><td>Chờ TT (chờ L2)</td><td>Đã duyệt — vào BI</td></tr>
-        <tr><td>Vào BI?</td><td>Chưa</td><td>Có</td></tr>
-        <tr><td>Phạm vi</td><td>Theo BP</td><td>Toàn công ty</td></tr>
-      </tbody>
-    </table>
+    <h3>1. Quy trình duyệt hóa đơn Phải trả</h3>
+    <div class="help-screenshot">  NV nhập ──> KT Kiểm ──> Duyệt L1 ──> Duyệt L2 ──> Đã duyệt (vào BI)
+            (NV KT)      (KTT)        (KTT)
+            └─── thiếu hồ sơ ở bất kỳ bước → trả lại NV ───┘</div>
 
-    <h3>2. Cách duyệt L2</h3>
-    <p>Giống L1 nhưng chọn cấp = <strong>"Chờ TT (chờ L2)"</strong> + bấm nút <strong>"✓✓ Duyệt L2"</strong>.</p>
+    <h3>2. Duyệt L1 — Trình ký</h3>
+    <p>Tab <strong>07 Phê duyệt</strong> → chọn cấp = "Trình ký (chờ L1)".</p>
+    <div class="help-callout info"><strong>Mục đích L1</strong><br>Kiểm tra hồ sơ lần 2 sau khi NV KT đã soát. Phản hồi NV nhập về tình trạng hồ sơ. Đủ → duyệt. Thiếu → trả lại.</div>
 
-    <h3>3. Trách nhiệm tài chính</h3>
-    <div class="help-callout danger"><strong>L2 là tuyến cuối</strong><br>Sau duyệt L2 → bút toán vào BI cho ban quản trị. Sửa/xóa sau đó rất khó (phải nhờ admin bỏ duyệt). Trước khi tick "Duyệt L2":<br>• Đọc kỹ tổng số tiền<br>• Đọc kỹ loại CP/DT (vào sai mục = sai báo cáo cả tháng)<br>• Check kỳ ghi nhận (đúng tháng không)</div>
+    <h3>3. Duyệt L2 — Phê duyệt thanh toán</h3>
+    <p>Tab <strong>07 Phê duyệt</strong> → chọn cấp = "Chờ thanh toán (chờ L2)".</p>
+    <div class="help-callout info"><strong>Mục đích L2</strong><br>Cân đối dòng tiền trước khi duyệt thanh toán. Sau khi duyệt L2 → hóa đơn vào báo cáo BI chính thức.</div>
+    <div class="help-callout danger"><strong>L2 là tuyến cuối</strong><br>Trước khi duyệt L2: đọc kỹ tổng số tiền, đúng loại chi phí, đúng kỳ ghi nhận. Sửa sau khi duyệt L2 rất khó (phải nhờ admin bỏ duyệt).</div>
 
-    <h3>4. AR Fast-track</h3>
-    <p>NV có cờ <code>canApproveL2</code> nhập AR có thể <strong>BYPASS L1</strong> (vào thẳng pending L2). Dành cho NV cấp cao trực tiếp ghi nhận DT.</p>
+    <h3>4. Phải thu (AR) — tự động duyệt</h3>
+    <p>Khi KTT hoặc Admin nhập doanh thu (Phải thu) → hóa đơn được <strong>tự động duyệt ngay</strong>, không qua 3 cấp.</p>
+    <div class="help-callout warn"><strong>KTT tự nhập Phải trả</strong><br>Nếu KTT tự nhập hóa đơn Phải trả, hóa đơn đó phải do Admin duyệt — nguyên tắc người nhập khác người duyệt.</div>
+
+    <h3>5. Xuất bảng kê GTGT</h3>
+    <p>Tab <strong>12 NSNN → "🧾 Bảng kê GTGT"</strong> → chọn tháng → <strong>Xuất Excel</strong> hoặc <strong>Xuất PDF</strong> (có ô ký Người lập và Kế toán trưởng) để in cho NV KT đối chiếu.</p>
+
+    <h3>6. Quản lý nhân viên</h3>
+    <p>Tab <strong>≡ Menu → ⚙ Cài đặt</strong> → Quản lý NV: tạo NV mới, cấp vai trò bằng preset, gửi link mời.</p>
+    <div class="help-callout warn"><strong>Giới hạn</strong><br>KTT không cấp được cờ "Duyệt L2" hay "Quản lý NV" cho NV khác — chỉ Admin làm được.</div>
   </div>`;
 }
 
-function _helpSection_tckt(){
-  return `<div class="help-section" id="help-role-tckt">
-    <div class="help-role-banner">
-      <div class="help-role-banner-icon">₫</div>
-      <div>
-        <div class="help-role-banner-title">Phần 04 · NV <em>TCKT</em> (Banking)</div>
-        <div class="help-role-banner-sub">Quản lý TK ngân hàng, snapshot số dư, vay vốn — bảo mật cao</div>
-      </div>
-    </div>
-
-    <div class="help-callout warn"><strong>Trách nhiệm bảo mật</strong><br>Không chia sẻ màn hình tab Banking trong họp công khai. Không để máy mở app khi rời chỗ — app tự logout sau 30 phút không hoạt động.</div>
-
-    <h3>1. Tab "05 Ngân hàng — Tài khoản"</h3>
-    <h4>1.1. Thêm TK mới</h4>
-    <ol>
-      <li>+ Thêm tài khoản</li>
-      <li>Tên TK, số TK, ngân hàng, CCY, ghi chú</li>
-      <li>Lưu</li>
-    </ol>
-
-    <h4>1.2. Snapshot số dư (định kỳ)</h4>
-    <div class="help-step"><span class="help-step-num">1</span><div class="help-step-content"><h5>Vào sub-tab "Snapshot số dư"</h5></div></div>
-    <div class="help-step"><span class="help-step-num">2</span><div class="help-step-content"><h5>Chọn TK + ngày + số dư hiện tại</h5>Lấy từ sao kê NH.</div></div>
-    <div class="help-step"><span class="help-step-num">3</span><div class="help-step-content"><h5>Lưu — app tự tính biến động</h5></div></div>
-
-    <h3>2. Quản lý Vay vốn</h3>
-    <ul>
-      <li>Thông tin khoản vay: NH, loại, HĐ, gốc, lãi suất, kỳ hạn</li>
-      <li>Lịch trả gốc lãi: app tự sinh schedule</li>
-      <li>Ghi nhận trả từng kỳ</li>
-    </ul>
-
-    <h3>3. Cashflow Forecast</h3>
-    <p>Dự báo dòng tiền dựa trên:</p>
-    <ul>
-      <li>Số dư NH hiện tại (snapshot mới nhất)</li>
-      <li>AR sắp đến hạn (+)</li>
-      <li>AP sắp đến hạn (−)</li>
-      <li>Lịch trả nợ vay</li>
-    </ul>
-    <div class="help-callout tip"><strong>Tần suất snapshot</strong><br>Mỗi tuần 1 lần là tốt nhất. Hàng ngày nếu giao dịch nhiều.</div>
-  </div>`;
-}
-
-function _helpSection_subadmin(){
-  return `<div class="help-section" id="help-role-subadmin">
+function _helpSection_admin(){
+  return `<div class="help-section" id="help-role-admin">
     <div class="help-role-banner">
       <div class="help-role-banner-icon">🛡</div>
       <div>
-        <div class="help-role-banner-title">Phần 05 · <em>Sub-admin</em> (Kế toán trưởng)</div>
-        <div class="help-role-banner-sub">Quản lý NV thay admin — không thấy Apps Script URL, mật khẩu admin, audit log</div>
+        <div class="help-role-banner-title">Quản trị viên <em>(Admin)</em></div>
+        <div class="help-role-banner-sub">Toàn quyền hệ thống — tạo NV, cấu hình, duyệt thay, sao lưu, bảo mật</div>
       </div>
     </div>
 
-    <h3>1. Quyền của bạn</h3>
-    <table>
-      <thead><tr><th>Hành động</th><th>Được làm?</th></tr></thead>
-      <tbody>
-        <tr><td>Tạo NV mới</td><td>✅</td></tr>
-        <tr><td>Sửa quyền NV (tab, password, cờ L1)</td><td>✅</td></tr>
-        <tr><td>Xóa NV thường</td><td>✅</td></tr>
-        <tr><td>Đẩy auth cloud (bằng password CỦA BẠN)</td><td>✅</td></tr>
-        <tr><td>Cấp cờ L2/BOD/QL NV</td><td>❌ Chỉ admin</td></tr>
-        <tr><td>Sửa/xóa chính mình</td><td>❌ Nhờ admin</td></tr>
-        <tr><td>Sửa/xóa NV có quyền cao (L2/BOD/QL NV)</td><td>❌ Chỉ admin</td></tr>
-        <tr><td>Apps Script URL / mật khẩu admin / audit log</td><td>❌ Chỉ admin</td></tr>
-      </tbody>
-    </table>
+    <h3>1. Tạo nhân viên mới</h3>
+    <div class="help-step"><span class="help-step-num">1</span><div class="help-step-content"><h5>≡ Menu → ⚙ Cài đặt &amp; Phân quyền → Quản lý NV</h5></div></div>
+    <div class="help-step"><span class="help-step-num">2</span><div class="help-step-content"><h5>+ Thêm nhân viên</h5>Điền tên đăng nhập, email/SĐT, phòng ban.</div></div>
+    <div class="help-step"><span class="help-step-num">3</span><div class="help-step-content"><h5>Chọn Preset vai trò</h5>NV / NV Kho / NV KT / KTT — app tự tick tab và quyền phù hợp.</div></div>
+    <div class="help-step"><span class="help-step-num">4</span><div class="help-step-content"><h5>Lưu → modal "Mời nhân viên"</h5>Copy tin nhắn Zalo (có link + mật khẩu tạm) gửi NV.</div></div>
 
-    <h3>2. Tạo NV mới</h3>
-    <div class="help-step"><span class="help-step-num">1</span><div class="help-step-content"><h5>≡ Menu → ⚙ Cài đặt &amp; Phân quyền</h5>Banner đỏ cam: "🛡 Chế độ phân quyền giới hạn"</div></div>
-    <div class="help-step"><span class="help-step-num">2</span><div class="help-step-content"><h5>+ Thêm nhân viên</h5></div></div>
-    <div class="help-step"><span class="help-step-num">3</span><div class="help-step-content"><h5>Điền form</h5>Tên đăng nhập (không dấu/space), Email/SĐT, Phòng/Ban, Mật khẩu tạm (≥8 ký tự)</div></div>
-    <div class="help-step"><span class="help-step-num">4</span><div class="help-step-content"><h5>Tick tab NV được truy cập</h5>VD: Phải thu, Phải trả, Danh mục. Không tick tab nhạy cảm.</div></div>
-    <div class="help-step"><span class="help-step-num">5</span><div class="help-step-content"><h5>(Tùy chọn) Cấp cờ DUYỆT L1</h5><strong>KHÔNG được</strong> tick L2 / BOD / Quản lý NV.</div></div>
+    <h3>2. Duyệt thay khi cần</h3>
+    <p>Khi KTT tự nhập hóa đơn Phải trả, Admin duyệt thay (vì người nhập không tự duyệt được). Vào tab 07 Phê duyệt như bình thường.</p>
 
-    <h3>3. Đẩy auth lên cloud</h3>
-    <div class="help-step"><span class="help-step-num">1</span><div class="help-step-content"><h5>🔐 Đẩy auth lên cloud</h5></div></div>
-    <div class="help-step"><span class="help-step-num">2</span><div class="help-step-content"><h5>Nhập mật khẩu CỦA BẠN (không phải admin)</h5>App dùng password của bạn để wrap. Wrap admin trên cloud không bị ảnh hưởng.</div></div>
-    <div class="help-step"><span class="help-step-num">3</span><div class="help-step-content"><h5>(Tùy chọn) Nhập password NV cụ thể</h5>Để NV pull cfg được ngay. Bỏ trống → NV phải đăng nhập 1 lần trên máy này trước.</div></div>
-    <div class="help-step"><span class="help-step-num">4</span><div class="help-step-content"><h5>🚀 Đẩy lên cloud</h5></div></div>
+    <h3>3. Sao lưu &amp; bảo mật</h3>
+    <ul>
+      <li>Tự động sao lưu lên Google Drive định kỳ</li>
+      <li>2FA (xác thực 2 lớp) cho tài khoản admin</li>
+      <li>Đặt mật khẩu sao lưu riêng</li>
+      <li>Audit log — nhật ký mọi thao tác</li>
+    </ul>
 
-    <div class="help-callout danger"><strong>Lỗi thường gặp</strong><br>"Sub-admin không thể khởi tạo master key mới" → nhờ admin push cfg lần đầu trước<br>"Mật khẩu của bạn đã thay đổi trên cloud" → nhờ admin re-push để sync wrap của bạn</div>
+    <h3>4. Cấu hình hệ thống</h3>
+    <p>Apps Script URL (đồng bộ cloud), tỷ giá, thông tin công ty, các danh mục mặc định.</p>
+
+    <div class="help-callout danger"><strong>Bảo mật tài khoản admin</strong><br>Không chia sẻ mật khẩu admin. Giữ kỹ mã 2FA và mã dự phòng. Mật khẩu admin mất thì không khôi phục được — chỉ khôi phục từ file backup.</div>
   </div>`;
 }
 
