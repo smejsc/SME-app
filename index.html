@@ -2278,7 +2278,7 @@ body{min-height:100vh;background-image:radial-gradient(circle at 20% 0%,rgba(184
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='1.63.0';            // bumped on each release
+const APP_VERSION='1.64.0';            // bumped on each release
 
 /* ============================================================
    PWA — Service Worker registration + Install prompt
@@ -3590,12 +3590,35 @@ async function forceLogoutSession(){
 }
 
 async function authAction(){
-  const cfg=getAuthConfig();
+  let cfg=getAuthConfig();
+  // v1.64.0: Máy mới qua Smart Setup — có pending scriptUrl, cfg local chưa có
+  // → pull cfg từ cloud trước khi login
   if(!cfg){
-    const mode=document.querySelector('.auth-tab.active').dataset.mode;
-    if(mode==='restore') return authRestore();
-    if(mode==='cloud') return authCloudPull();
-    return authSetup();
+    const pendingUrl=sessionStorage.getItem('seahorse_pending_scripturl');
+    if(pendingUrl){
+      const err=document.getElementById('auth-err');
+      const name=document.getElementById('auth-name').value.trim();
+      const pw=document.getElementById('auth-pw').value;
+      if(!name||!pw){ if(err)err.textContent='Nhập tên đăng nhập và mật khẩu'; return; }
+      if(err){ err.style.color='var(--muted)'; err.textContent='Đang tải tài khoản từ cloud...'; }
+      try{
+        const pulled=await pullCfgFromCloud(pendingUrl, name, pw);
+        if(!pulled){ throw new Error('Không giải mã được — kiểm tra mật khẩu'); }
+        // cfg đã lưu local → tiếp tục login bình thường
+        cfg=getAuthConfig();
+        sessionStorage.removeItem('seahorse_pending_scripturl');
+        if(err) err.textContent='';
+      }catch(e){
+        if(err){ err.style.color='var(--bad)'; err.textContent='Lỗi: '+e.message; }
+        return;
+      }
+    } else {
+      const tabEl=document.querySelector('.auth-tab.active');
+      const mode=tabEl?tabEl.dataset.mode:'setup';
+      if(mode==='restore') return authRestore();
+      if(mode==='cloud') return authCloudPull();
+      return authSetup();
+    }
   }
   const name=document.getElementById('auth-name').value.trim();
   const pw=document.getElementById('auth-pw').value;
@@ -5877,6 +5900,11 @@ async function saveUser(idx){
         viewerProjectIds:isViewer?viewerProjectIds:[]
       });
       toast('Đã tạo nhân viên '+name);
+      setAuthConfig(cfg);
+      closeModal();
+      // v1.64.0: Hiện modal "Mời NV" với link onboarding + mẫu tin nhắn
+      setTimeout(()=>showInviteModalAfterCreate(name, fullName, pw), 300);
+      return;
     }
     setAuthConfig(cfg);
     closeModal();
@@ -5888,6 +5916,54 @@ async function saveUser(idx){
       err.textContent='Lỗi: '+e.message;
     }
   }
+}
+
+/* v1.64.0: Modal "Mời NV" — hiện sau khi tạo NV mới.
+   Cung cấp link onboarding ?join=<URL> + password + mẫu tin nhắn Zalo. */
+function showInviteModalAfterCreate(username, fullName, tempPw){
+  const cfg=getAuthConfig();
+  const scriptUrl=cfg.scriptUrl||'';
+  const appUrl=window.location.origin+window.location.pathname;
+  const joinLink=scriptUrl
+    ? `${appUrl}?join=${encodeURIComponent(scriptUrl)}`
+    : appUrl;
+  const zaloMsg=`Chào ${fullName||username}, bạn được cấp tài khoản phần mềm Seahorse Manager.
+1. Mở link: ${joinLink}
+2. Đăng nhập:
+   • Tên đăng nhập: ${username}
+   • Mật khẩu tạm: ${tempPw}
+3. Hệ thống sẽ yêu cầu đổi mật khẩu mới ngay lần đầu.
+Lưu ý: KHÔNG chia sẻ mật khẩu cho người khác.`;
+  const body=`
+    <div style="font-size:13px;line-height:1.6">
+      <div style="padding:10px 12px;background:rgba(74,107,44,.08);border-left:4px solid var(--good);font-size:12px;margin-bottom:14px">
+        ✓ Đã tạo tài khoản <b>${esc(username)}</b>${fullName?' ('+esc(fullName)+')':''}. Gửi thông tin sau cho NV qua <b>Zalo</b>.
+      </div>
+
+      ${scriptUrl?'':'<div style="padding:8px 12px;background:rgba(184,71,46,.06);border-left:3px solid var(--accent);font-size:11px;margin-bottom:12px">⚠ Chưa cấu hình Apps Script URL — link mời sẽ KHÔNG tự điền URL. NV phải nhập URL thủ công.</div>'}
+
+      <div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.08em;font-weight:600;margin-bottom:4px">🔗 Link mời (NV bấm vào → vào thẳng Login)</div>
+      <div style="display:flex;gap:6px;margin-bottom:12px">
+        <input type="text" id="invite-link" value="${esc(joinLink)}" readonly style="flex:1;font-family:var(--font-mono);font-size:10px;padding:6px 8px;border:1px solid var(--rule);background:var(--paper-2)">
+        <button class="btn-sec" style="font-size:11px" onclick="navigator.clipboard.writeText(document.getElementById('invite-link').value);toast('✓ Đã copy link','good')">Copy</button>
+      </div>
+
+      <div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.08em;font-weight:600;margin-bottom:4px">🔑 Mật khẩu tạm</div>
+      <div style="display:flex;gap:6px;margin-bottom:12px">
+        <input type="text" id="invite-pw" value="${esc(tempPw)}" readonly style="flex:1;font-family:var(--font-mono);font-size:13px;padding:6px 8px;border:1px solid var(--rule);background:var(--paper-2)">
+        <button class="btn-sec" style="font-size:11px" onclick="navigator.clipboard.writeText(document.getElementById('invite-pw').value);toast('✓ Đã copy mật khẩu','good')">Copy</button>
+      </div>
+      <div style="font-size:11px;color:var(--muted);font-style:italic;margin-bottom:14px">NV sẽ bị buộc đổi mật khẩu này ngay lần đăng nhập đầu tiên.</div>
+
+      <div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.08em;font-weight:600;margin-bottom:4px">💬 Mẫu tin nhắn Zalo (copy toàn bộ)</div>
+      <textarea id="invite-zalo" readonly style="width:100%;height:130px;font-size:11px;padding:8px;border:1px solid var(--rule);background:var(--paper-2);font-family:var(--font-body);resize:vertical">${esc(zaloMsg)}</textarea>
+    </div>
+  `;
+  const foot=`
+    <button class="btn-sec" onclick="closeModal();openSettings()">Đóng</button>
+    <button class="btn-primary" onclick="navigator.clipboard.writeText(document.getElementById('invite-zalo').value);toast('✓ Đã copy tin nhắn — dán vào Zalo','good')">📋 Copy tin nhắn Zalo</button>
+  `;
+  openModal('📨 Mời nhân viên '+esc(username), body, foot);
 }
 
 /* Send email invite via mailto:
@@ -6040,11 +6116,12 @@ function showAuthOverlay(){
   if(cfg){
     loginBlock.style.display='block';
     setupBlock.style.display='none';
+    const smart=document.getElementById('auth-smart-setup');
+    if(smart) smart.style.display='none';
     actionBtn.textContent='Đăng nhập';
     msg.innerHTML='Đăng nhập với tên <b>admin</b> hoặc tên nhân viên đã được tạo.';
     setTimeout(()=>{
       document.getElementById('auth-name').focus();
-      // Enter on name → move to password; Enter on password → submit
       document.getElementById('auth-name').onkeydown=e=>{
         if(e.key==='Enter'){e.preventDefault();document.getElementById('auth-pw').focus();}
       };
@@ -6053,13 +6130,161 @@ function showAuthOverlay(){
       };
     },100);
   } else {
+    // v1.64.0: Máy mới, chưa có cfg local → Smart Setup
+    // Check ?join= link — NV onboarding qua link
+    const params=new URLSearchParams(window.location.search);
+    const joinUrl=params.get('join');
+    if(joinUrl){
+      // NV vào qua link mời → cấu hình URL sẵn, vào thẳng Login (KHÔNG cho tạo admin)
+      _smartSetupJoinViaLink(decodeURIComponent(joinUrl));
+      overlay.classList.remove('hide');
+      return;
+    }
     loginBlock.style.display='none';
-    setupBlock.style.display='block';
-    actionBtn.textContent='Tạo tài khoản admin';
-    msg.innerHTML='Lần đầu sử dụng. Tạo <b>mật khẩu admin</b>. Sau đó có thể tạo thêm mật khẩu nhập liệu trong Cài đặt.';
-    setTimeout(()=>document.getElementById('setup-pw1').focus(),100);
+    setupBlock.style.display='none';
+    showSmartSetupChoice();
   }
   overlay.classList.remove('hide');
+}
+
+/* v1.64.0: Smart Setup — máy mới, hỏi "Đã có tài khoản?" */
+function showSmartSetupChoice(){
+  const overlay=document.getElementById('auth-overlay');
+  let el=document.getElementById('auth-smart-setup');
+  if(!el){
+    el=document.createElement('div');
+    el.id='auth-smart-setup';
+    (overlay.querySelector('.auth-body')||overlay).appendChild(el);
+  }
+  el.style.cssText='display:block;max-width:440px;margin:0 auto';
+  el.innerHTML=`
+    <div style="font-family:var(--font-display);font-size:20px;font-weight:600;color:var(--ink);margin-bottom:6px">Chào mừng đến Seahorse</div>
+    <div style="font-size:12px;color:var(--muted);margin-bottom:22px">Thiết bị/trình duyệt này chưa có dữ liệu. Vui lòng chọn:</div>
+
+    <button onclick="_smartSetupExisting()" style="width:100%;text-align:left;padding:15px;margin-bottom:12px;background:rgba(28,58,92,.04);border:1px solid var(--ink);cursor:pointer;border-radius:2px;font-family:var(--font-body)">
+      <div style="font-weight:600;color:var(--ink);font-size:14px">✓ Tôi đã có tài khoản</div>
+      <div style="font-size:11px;color:var(--muted);margin-top:4px;line-height:1.5">Công ty đã dùng Seahorse. Nhập Apps Script URL → đăng nhập với tài khoản đã có. <b>Đa số nhân viên chọn mục này.</b></div>
+    </button>
+
+    <button onclick="_smartSetupNew()" style="width:100%;text-align:left;padding:15px;background:rgba(184,71,46,.04);border:1px solid var(--accent);cursor:pointer;border-radius:2px;font-family:var(--font-body)">
+      <div style="font-weight:600;color:var(--accent);font-size:14px">⚠ Cài đặt lần đầu (chỉ Admin)</div>
+      <div style="font-size:11px;color:var(--muted);margin-top:4px;line-height:1.5">CHỈ chọn nếu công ty <b>chưa từng</b> dùng Seahorse và bạn là người quản trị. Tạo tài khoản admin đầu tiên.</div>
+    </button>
+  `;
+}
+
+/* v1.64.0: NV/admin đã có tài khoản → nhập URL → pull cfg → Login */
+function _smartSetupExisting(){
+  const el=document.getElementById('auth-smart-setup');
+  el.innerHTML=`
+    <div style="font-family:var(--font-display);font-size:18px;font-weight:600;color:var(--ink);margin-bottom:6px">Kết nối tài khoản</div>
+    <div style="font-size:12px;color:var(--muted);margin-bottom:18px">Nhập Apps Script URL (admin/công ty cung cấp). Sau đó đăng nhập bình thường.</div>
+    <div class="field">
+      <label>Apps Script URL</label>
+      <input type="text" id="smart-existing-url" placeholder="https://script.google.com/macros/s/.../exec" style="font-family:var(--font-mono);font-size:11px">
+    </div>
+    <div id="smart-existing-err" style="font-size:12px;color:var(--bad);min-height:16px"></div>
+    <div style="display:flex;gap:8px;margin-top:10px">
+      <button class="btn-sec" onclick="showSmartSetupChoice()">← Quay lại</button>
+      <button class="btn-primary" onclick="_smartSetupConnectExisting()" style="flex:1">Kết nối &amp; tiếp tục</button>
+    </div>
+  `;
+  setTimeout(()=>document.getElementById('smart-existing-url')?.focus(),100);
+}
+
+/* v1.64.0: Kết nối cloud với URL → pull cfg → show Login */
+async function _smartSetupConnectExisting(){
+  const url=document.getElementById('smart-existing-url').value.trim();
+  const errEl=document.getElementById('smart-existing-err');
+  errEl.textContent='';
+  if(!url || !/^https:\/\/script\.google\.com\/macros\/s\/.+\/exec$/.test(url)){
+    errEl.textContent='URL không hợp lệ — phải dạng https://script.google.com/macros/s/.../exec';
+    return;
+  }
+  errEl.style.color='var(--muted)';
+  errEl.textContent='Đang kết nối...';
+  try{
+    const res=await fetch(url+'?action=load&key=auth',{method:'GET'});
+    const data=await res.json();
+    if(!data.ok){ throw new Error(data.error||'Không kết nối được'); }
+    if(!data.payload && !data.payload_gz){
+      errEl.style.color='var(--bad)';
+      errEl.textContent='Cloud chưa có tài khoản nào. Nếu bạn là admin lần đầu → quay lại chọn "Cài đặt lần đầu".';
+      return;
+    }
+    // Cloud có auth → lưu scriptUrl tạm, hiện Login (login sẽ pull cfg)
+    sessionStorage.setItem('seahorse_pending_scripturl', url);
+    errEl.style.color='var(--good)';
+    errEl.textContent='✓ Đã kết nối. Vui lòng đăng nhập.';
+    setTimeout(()=>{
+      const el=document.getElementById('auth-smart-setup');
+      if(el) el.style.display='none';
+      document.getElementById('auth-login-form').style.display='block';
+      document.getElementById('auth-action-btn').textContent='Đăng nhập';
+      document.getElementById('auth-msg').innerHTML='Đăng nhập với tài khoản đã được cấp.';
+      document.getElementById('auth-name')?.focus();
+    },800);
+  }catch(e){
+    errEl.style.color='var(--bad)';
+    errEl.textContent='Lỗi: '+e.message;
+  }
+}
+
+/* v1.64.0: NV vào qua link mời ?join=<URL> */
+async function _smartSetupJoinViaLink(url){
+  const overlay=document.getElementById('auth-overlay');
+  let el=document.getElementById('auth-smart-setup');
+  if(!el){ el=document.createElement('div'); el.id='auth-smart-setup'; (overlay.querySelector('.auth-body')||overlay).appendChild(el); }
+  el.style.cssText='display:block;max-width:440px;margin:0 auto';
+  el.innerHTML=`<div style="font-size:13px;color:var(--muted)">Đang kết nối qua link mời...</div>`;
+  document.getElementById('auth-login-form').style.display='none';
+  document.getElementById('auth-setup-form').style.display='none';
+  try{
+    const res=await fetch(url+'?action=load&key=auth',{method:'GET'});
+    const data=await res.json();
+    if(!data.ok || (!data.payload && !data.payload_gz)){
+      throw new Error('Link mời không hợp lệ hoặc cloud chưa có dữ liệu');
+    }
+    sessionStorage.setItem('seahorse_pending_scripturl', url);
+    el.style.display='none';
+    document.getElementById('auth-login-form').style.display='block';
+    document.getElementById('auth-action-btn').textContent='Đăng nhập';
+    document.getElementById('auth-msg').innerHTML='👋 Chào mừng! Đăng nhập với tài khoản admin đã cấp cho bạn.';
+    setTimeout(()=>document.getElementById('auth-name')?.focus(),100);
+  }catch(e){
+    el.innerHTML=`<div style="font-size:13px;color:var(--bad)">❌ ${esc(e.message)}</div>
+      <button class="btn-sec" style="margin-top:10px" onclick="showSmartSetupChoice()">Tiếp tục thủ công</button>`;
+  }
+}
+
+/* v1.64.0: Admin lần đầu — chỉ cho setup nếu chắc chắn chưa có cloud data */
+function _smartSetupNew(){
+  const el=document.getElementById('auth-smart-setup');
+  el.innerHTML=`
+    <div style="font-family:var(--font-display);font-size:18px;font-weight:600;color:var(--accent);margin-bottom:6px">⚠ Cài đặt admin lần đầu</div>
+    <div style="padding:12px 14px;background:rgba(184,71,46,.06);border-left:4px solid var(--accent);font-size:12px;color:var(--ink);line-height:1.6;margin-bottom:16px">
+      <b>Chỉ tiếp tục nếu:</b><br>
+      • Công ty CHƯA TỪNG dùng Seahorse, HOẶC<br>
+      • Bạn muốn tạo môi trường hoàn toàn mới.<br><br>
+      <b style="color:var(--accent)">⚠ Nếu công ty đã có dữ liệu trên cloud</b> — KHÔNG tạo admin mới ở đây (sẽ tạo tài khoản tách biệt). Hãy quay lại chọn "Tôi đã có tài khoản".
+    </div>
+    <div style="display:flex;gap:8px">
+      <button class="btn-sec" onclick="showSmartSetupChoice()">← Quay lại</button>
+      <button class="btn-primary" onclick="_smartSetupProceedNew()" style="flex:1">Tôi hiểu — Tạo admin mới</button>
+    </div>
+  `;
+}
+
+/* v1.64.0: Proceed to actual admin setup form */
+function _smartSetupProceedNew(){
+  const el=document.getElementById('auth-smart-setup');
+  if(el) el.style.display='none';
+  document.getElementById('auth-login-form').style.display='none';
+  const setupBlock=document.getElementById('auth-setup-form');
+  setupBlock.style.display='block';
+  document.getElementById('auth-action-btn').textContent='Tạo tài khoản admin';
+  document.getElementById('auth-msg').innerHTML='Tạo <b>mật khẩu admin</b> cho môi trường mới.';
+  setTimeout(()=>document.getElementById('setup-pw1')?.focus(),100);
 }
 
 /* ============================================================
