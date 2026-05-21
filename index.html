@@ -916,7 +916,7 @@ body{min-height:100vh;background-image:radial-gradient(circle at 20% 0%,rgba(184
       <div class="section-head">
         <div class="section-title"><span class="tag">⛵</span>Danh mục Tàu (tổng hợp) <span id="cat-vessel-count" style="text-transform:none;font-weight:400;color:var(--muted);font-size:11px">(0)</span></div>
         <div style="display:flex;gap:8px">
-          <button class="btn-sec" onclick="catalogQuickAdd('vessel')" id="cat-vessel-add-btn">+ Thêm tàu công ty</button>
+          <button class="btn-sec" onclick="navTo('fixed_assets')" id="cat-vessel-add-btn" title="Tàu công ty được nhập tại tab 09 Tài sản">↗ Thêm tàu công ty (tại 09 Tài sản)</button>
           <button class="btn-sec" onclick="catalogImport('vessel')" id="cat-vessel-import-btn">📥 Import Excel</button>
           <button class="btn-sec" onclick="navTo('operations')">↗ QL vận hành tàu</button>
         </div>
@@ -2370,7 +2370,7 @@ body{min-height:100vh;background-image:radial-gradient(circle at 20% 0%,rgba(184
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='1.81.0';            // bumped on each release
+const APP_VERSION='1.82.0';            // bumped on each release
 
 /* v1.68.0: URL Apps Script của công ty — nhúng cứng để NV không cần nhập / không cần ?join=.
    Khi máy mới mở app, app tự dùng URL này kết nối cloud → vào thẳng Login.
@@ -16285,15 +16285,64 @@ function doVatExport(){
 }
 
 /* ===== Create / edit modals for receivable & payable ===== */
+/* v1.82.0: Sinh options dropdown Tàu lọc theo Mảng công việc.
+   - VESSEL_SERVICE → tàu công ty loại DV (SERVICE)
+   - VESSEL_TECH    → tàu công ty loại KT (TECH)
+   - VESSEL_MGMT    → tàu quản lý vận hành (S.opVessels)
+   - OM             → không lọc tàu (gắn dự án); ô để trống
+   - OTHER (QL chung) → không gắn tàu (lương, CPHC, đào tạo, logistics...) */
+function _arVesselOptsForSegment(segment, selectedId){
+  let opts='<option value="">— Không gắn tàu —</option>';
+  if(segment==='VESSEL_SERVICE' || segment==='VESSEL_TECH'){
+    const wantType = segment==='VESSEL_SERVICE'?'SERVICE':'TECH';
+    const list=activeOnly(S.vessels).filter(v=>v.type===wantType);
+    if(list.length){
+      const inner=list.map(v=>`<option value="${v.id}" ${v.id===selectedId?'selected':''}>${esc(v.name)} (${wantType==='SERVICE'?'DV':'KT'})</option>`).join('');
+      opts+=`<optgroup label="⛵ Tàu công ty — ${wantType==='SERVICE'?'Dịch vụ':'Kỹ thuật'}">${inner}</optgroup>`;
+    }
+  } else if(segment==='VESSEL_MGMT'){
+    const list=(S.opVessels||[]);
+    if(list.length){
+      const inner=list.map(v=>`<option value="${v.id}" ${v.id===selectedId?'selected':''}>${esc(v.name)}${v.owner?' · '+esc(v.owner):''}</option>`).join('');
+      opts+=`<optgroup label="🚢 Tàu quản lý vận hành">${inner}</optgroup>`;
+    }
+  }
+  // OM và OTHER: chỉ có "Không gắn tàu"
+  return opts;
+}
+
+/* v1.82.0: Khi NV đổi Mảng → cập nhật lại dropdown Tàu cho khớp.
+   QL chung (OTHER) → vô hiệu ô tàu. */
+function _arSegmentChanged(){
+  const segEl=document.getElementById('ar-segment');
+  const vesEl=document.getElementById('ar-vessel');
+  if(!segEl || !vesEl) return;
+  const seg=segEl.value;
+  const cur=vesEl.value;
+  vesEl.innerHTML=_arVesselOptsForSegment(seg, cur);
+  // nếu tàu cũ không còn trong danh sách mới → reset
+  if(cur && !Array.from(vesEl.options).some(o=>o.value===cur)){
+    vesEl.value='';
+  }
+  // QL chung: chi phí lương/CPHC/đào tạo/logistics — không gắn tàu
+  const isQLC = seg==='OTHER';
+  vesEl.disabled = isQLC;
+  vesEl.style.opacity = isQLC ? '0.5' : '1';
+  if(isQLC) vesEl.value='';
+  // gợi ý nhãn động
+  const lbl=vesEl.closest('.field')?.querySelector('label');
+  if(lbl){
+    if(isQLC) lbl.textContent='Tàu (không áp dụng cho QL chung)';
+    else if(seg==='OM') lbl.textContent='Tàu (O&M — thường gắn dự án)';
+    else lbl.textContent='Tàu (tùy chọn)';
+  }
+}
+
 function _arEditorBody(r,isPayable){
   const segOpts=Object.entries(SEGMENTS).map(([k,v])=>`<option value="${k}" ${k===(r.segment||'')?'selected':''}>${esc(v.name)}</option>`).join('');
   const projOpts='<option value="">— Không gắn dự án —</option>'+activeOnly(S.projects).map(p=>`<option value="${p.id}" ${p.id===r.projectId?'selected':''}>${esc(p.code)} · ${esc(p.name)}</option>`).join('');
-  // v1.81.0: gộp tàu công ty sở hữu (S.vessels) + tàu quản lý vận hành (S.opVessels)
-  const ownVesselOpts=activeOnly(S.vessels).map(v=>`<option value="${v.id}" ${v.id===r.vesselId?'selected':''}>${esc(v.name)} (${v.type==='SERVICE'?'DV':'KT'})</option>`).join('');
-  const opVesselOpts=(S.opVessels||[]).map(v=>`<option value="${v.id}" ${v.id===r.vesselId?'selected':''}>${esc(v.name)}${v.owner?' · '+esc(v.owner):''}</option>`).join('');
-  let vesselOpts='<option value="">— Không gắn tàu —</option>';
-  if(ownVesselOpts) vesselOpts+=`<optgroup label="⛵ Tàu công ty">${ownVesselOpts}</optgroup>`;
-  if(opVesselOpts) vesselOpts+=`<optgroup label="🚢 Tàu quản lý vận hành">${opVesselOpts}</optgroup>`;
+  // v1.82.0: dropdown tàu lọc theo Mảng — sinh bằng helper
+  const vesselOpts=_arVesselOptsForSegment(r.segment||'', r.vesselId||'');
   // v1.74.0: Company dropdown — mặc định công ty mẹ
   const companyOpts=companyOptionsHtml(r.companyId);
 
@@ -16441,7 +16490,7 @@ function _arEditorBody(r,isPayable){
       <div class="field" style="grid-column:span 2"><label>Diễn giải</label><input type="text" id="ar-desc" value="${(r.desc||'').replace(/"/g,'&quot;')}" placeholder="Nội dung — VD: Cước thuê tàu T5/2026" ${lockedAttr}></div>
       ${expenseTypeBlock}
       <div class="field"><label>Công ty *</label><select id="ar-company" ${lockedAttr}>${companyOpts}</select></div>
-      <div class="field"><label>Mảng *</label><select id="ar-segment" ${lockedAttr}>${segOpts}</select></div>
+      <div class="field"><label>Mảng *</label><select id="ar-segment" ${lockedAttr} onchange="_arSegmentChanged()">${segOpts}</select></div>
       <div class="field"><label>Dự án (tùy chọn)</label><select id="ar-project" ${lockedAttr}>${projOpts}</select></div>
       <div class="field"><label>Tàu (tùy chọn)</label><select id="ar-vessel" ${lockedAttr}>${vesselOpts}</select></div>
     </div>
@@ -16570,6 +16619,7 @@ function openReceivableModal(id){
   const foot=`<button class="btn-sec" onclick="closeModal()">Hủy</button>
               <button class="btn-primary" onclick="saveAr('ar','${id||''}')">${isEdit?'Cập nhật':'Lưu phải thu'}</button>`;
   openModal(isEdit?'Sửa khoản phải thu':'Thêm phải thu',body,foot);
+  setTimeout(_arSegmentChanged, 60);  // v1.82.0: áp lọc tàu theo mảng
 }
 function openPayableModal(id){
   const isEdit=!!id;
@@ -16579,6 +16629,7 @@ function openPayableModal(id){
   const foot=`<button class="btn-sec" onclick="closeModal()">Hủy</button>
               <button class="btn-primary" onclick="saveAr('ap','${id||''}')">${isEdit?'Cập nhật':'Lưu phải trả'}</button>`;
   openModal(isEdit?'Sửa khoản phải trả':'Thêm phải trả',body,foot);
+  setTimeout(_arSegmentChanged, 60);  // v1.82.0: áp lọc tàu theo mảng
 }
 
 /* ============================================================
