@@ -2340,7 +2340,7 @@ body{min-height:100vh;background-image:radial-gradient(circle at 20% 0%,rgba(184
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='1.75.0';            // bumped on each release
+const APP_VERSION='1.77.0';            // bumped on each release
 
 /* v1.68.0: URL Apps Script của công ty — nhúng cứng để NV không cần nhập / không cần ?join=.
    Khi máy mới mở app, app tự dùng URL này kết nối cloud → vào thẳng Login.
@@ -4603,6 +4603,18 @@ function userEditorModal(initial,idx){
         </div>
       </div>
       <div class="field">
+        <label>🏛 Công ty được gán <span style="font-weight:400;color:var(--muted)">(phân quyền đa công ty)</span></label>
+        <select id="user-company" style="padding:8px 10px;border:1px solid var(--rule);background:var(--paper);font-size:13px">
+          <option value="">🏛 Tất cả công ty (không giới hạn)</option>
+          ${(S.companies||[]).slice().sort((a,b)=>{
+            if(a.isParent&&!b.isParent) return -1;
+            if(!a.isParent&&b.isParent) return 1;
+            return (a.code||'').localeCompare(b.code||'');
+          }).map(c=>`<option value="${esc(c.id)}" ${initial.companyId===c.id?'selected':''}>${esc(c.name)}${c.isParent?' (mẹ)':''}</option>`).join('')}
+        </select>
+        <div style="font-size:11px;color:var(--muted);font-style:italic;margin-top:4px">NV/NV KT gán 1 công ty → chỉ thấy dữ liệu công ty đó. Để trống = thấy tất cả. KTT/Admin/BOD luôn thấy hết bất kể cài đặt này.</div>
+      </div>
+      <div class="field">
         <label>${isEdit?'Mật khẩu mới (để trống = giữ nguyên)':'Mật khẩu'} (tối thiểu 8 ký tự)</label>
         <input type="password" id="user-pw" placeholder="${isEdit?'Để trống nếu không đổi':''}">
       </div>
@@ -4866,6 +4878,7 @@ function editUser(idx){
     assignedOpVesselIds:u.assignedOpVesselIds||[],
     isViewer:!!u.isViewer,
     departmentId:u.departmentId||'',
+    companyId:u.companyId||'',
     isBOD:!!u.isBOD,
     canManageUsers:!!u.canManageUsers,  // v1.40.0
     viewerReports:u.viewerReports||[],
@@ -5942,6 +5955,7 @@ async function saveUser(idx){
     }
   }
   const departmentId=document.getElementById('user-department')?.value||'';
+  const companyId=document.getElementById('user-company')?.value||'';
   const assignedVesselIds=Array.from(document.querySelectorAll('input[data-vessel]:checked')).map(c=>c.dataset.vessel);
   const assignedProjectIds=Array.from(document.querySelectorAll('input[data-project]:checked')).map(c=>c.dataset.project);
   const assignedOpVesselIds=Array.from(document.querySelectorAll('input[data-opvessel]:checked')).map(c=>c.dataset.opvessel);
@@ -5979,6 +5993,7 @@ async function saveUser(idx){
       u.email=email;
       u.phone=phone;
       u.departmentId=departmentId;
+      u.companyId=companyId;
       u.isBOD=isBOD;
       u.canManageUsers=canManageUsersFlag;  // v1.40.0
       u.isViewer=isViewer;
@@ -6013,6 +6028,7 @@ async function saveUser(idx){
         isBOD,                    // NEW v1.30.2: BOD flag — xem bút toán BOD_ONLY
         canManageUsers:canManageUsersFlag,  // v1.40.0: sub-admin (HR) flag
         departmentId,
+        companyId,
         tabs:finalTabs,
         canConfirmPayment:isViewer?false:canConfirmPayment,
         canApproveL1:isViewer?false:canApproveL1,
@@ -6642,10 +6658,17 @@ function companyCode(id){
   const c = (S.companies||[]).find(x=>x.id===id);
   return c ? c.code : '';
 }
-/* Sinh HTML <option> cho dropdown chọn công ty; selectedId mặc định = công ty mẹ */
+/* Sinh HTML <option> cho dropdown chọn công ty; selectedId mặc định = công ty mẹ.
+   v1.76.0: NV bị gán công ty → chỉ hiện công ty đó. */
 function companyOptionsHtml(selectedId){
-  const sel = selectedId || getParentCompanyId();
-  const list = (S.companies||[]).slice().sort((a,b)=>{
+  let list = (S.companies||[]).slice();
+  // NV bị giới hạn công ty → chỉ chọn được công ty của mình
+  if(isCompanyScoped()){
+    const myCo = getActorCompanyId();
+    list = list.filter(c=>c.id===myCo);
+  }
+  const sel = selectedId || (isCompanyScoped()?getActorCompanyId():getParentCompanyId());
+  list.sort((a,b)=>{
     if(a.isParent&&!b.isParent) return -1;
     if(!a.isParent&&b.isParent) return 1;
     return (a.code||'').localeCompare(b.code||'');
@@ -6653,12 +6676,34 @@ function companyOptionsHtml(selectedId){
   return list.map(c=>`<option value="${c.id}" ${c.id===sel?'selected':''}>${esc(c.name)}${c.isParent?' (mẹ)':''}</option>`).join('');
 }
 
+/* v1.76.0: Công ty được gán cho NV hiện tại — rỗng = không giới hạn */
+function getActorCompanyId(){
+  if(CURRENT_ROLE==='admin') return '';
+  return (CURRENT_USER && CURRENT_USER.companyId) || '';
+}
+/* v1.76.0: NV có bị giới hạn theo công ty không?
+   KTT/Admin/BOD luôn thấy hết. NV/NV KT bị giới hạn nếu được gán 1 công ty. */
+function isCompanyScoped(){
+  if(isAdmin() || canApproveL2() || (CURRENT_USER && CURRENT_USER.isBOD)) return false;
+  return !!getActorCompanyId();
+}
+
 /* Filter records by createdBy if user is NV thường (not admin, not approver).
-   Used by all "expense/AR/AP ledger" rendering. */
+   Used by all "expense/AR/AP ledger" rendering.
+   v1.76.0: thêm lọc theo công ty được gán (đa công ty — option 1B). */
 function scopedRecords(records){
-  if(canSeeAllRecords()) return records;
-  const me=actorName();
-  return records.filter(r=>r.createdBy===me);
+  let out = records;
+  // Lọc theo người tạo (NV nhập liệu thường)
+  if(!canSeeAllRecords()){
+    const me=actorName();
+    out = out.filter(r=>r.createdBy===me);
+  }
+  // Lọc theo công ty được gán (áp cho cả NV KT — chỉ KTT/Admin/BOD thoát)
+  if(isCompanyScoped()){
+    const myCo = getActorCompanyId();
+    out = out.filter(r=>(r.companyId||getParentCompanyId())===myCo);
+  }
+  return out;
 }
 
 /* Show a small banner indicating the user is in restricted scope.
@@ -22522,6 +22567,8 @@ const EXCEL_TEMPLATES={
     name:'Phải thu (Doanh thu)',
     target:'receivables',
     columns:[
+      {key:'companyName', label:'Công ty (để trống = công ty mẹ)', required:false, type:'companyLookup',
+        aliases:['Company','Cty','Pháp nhân','Đơn vị']},
       {key:'partner',     label:'Khách hàng *',         required:true,  type:'text',
         aliases:['Customer','Khách','KH','Đối tác','Tên KH']},
       {key:'desc',        label:'Diễn giải',            required:false, type:'text',
@@ -22555,10 +22602,12 @@ const EXCEL_TEMPLATES={
     name:'Phải trả (Chi phí)',
     target:'payables',
     columns:[
+      {key:'companyName', label:'Công ty (để trống = công ty mẹ)', required:false, type:'companyLookup',
+        aliases:['Company','Cty','Pháp nhân','Đơn vị']},
       {key:'partner',     label:'NCC *',                required:true,  type:'text',
-        aliases:['Nhà cung cấp','Vendor','NCC','Tên NCC','Đối tác']},
+        aliases:['Nhà cung cấp','Vendor','NCC','Tên NCC','Đối tác','Đối tượng nhận tiền','Đối tượng']},
       {key:'desc',        label:'Diễn giải',            required:false, type:'text',
-        aliases:['Description','Mô tả','Nội dung']},
+        aliases:['Description','Mô tả','Nội dung','Nội dung thanh toán']},
       {key:'costCategory',label:'Loại chi phí (mã/code)', required:false, type:'text',
         aliases:['Loại CP','Mã loại CP','Expense type','Loại','Expense category']},
       {key:'segment',     label:'Mảng',                 required:false, type:'segment',
@@ -22568,13 +22617,13 @@ const EXCEL_TEMPLATES={
       {key:'vesselName',  label:'Tên tàu',              required:false, type:'vesselLookup',
         aliases:['Tàu','Vessel','Tên Tàu']},
       {key:'issueDate',   label:'Ngày HĐ *',            required:true,  type:'date',
-        aliases:['Issue date','Ngày','Ngày phát sinh','Ngày hóa đơn','Date']},
+        aliases:['Issue date','Ngày','Ngày phát sinh','Ngày hóa đơn','Date','Ngày chi']},
       {key:'dueDate',     label:'Hạn TT',               required:false, type:'date',
         aliases:['Due date','Hạn thanh toán','Hạn']},
       {key:'dueMonth',    label:'DK tháng TT (YYYY-MM)',required:false, type:'month',
         aliases:['Tháng TT','Due month']},
       {key:'amountNet',   label:'Net *',                required:true,  type:'number',
-        aliases:['Số tiền chưa VAT','Net amount','Tiền','Amount','Số tiền']},
+        aliases:['Số tiền chưa VAT','Net amount','Tiền','Amount','Số tiền','Số tiền (Net)','Số tiền Net']},
       {key:'vatPercent',  label:'% VAT',                required:false, type:'number',
         aliases:['VAT %','VAT','Thuế GTGT']},
       {key:'ccy',         label:'CCY',                  required:false, type:'ccy',
@@ -23213,6 +23262,16 @@ function _excelRowToRecord(row, colMap, tpl){
         if(!v) rec.warnings.push(`Tàu "${val}" không tìm thấy, để trống`);
         rec.data._vesselId=v?v.id:null;
       } else rec.data._vesselId=null;
+    } else if(c.type==='companyLookup'){
+      // v1.77.0: khớp công ty theo tên hoặc mã; để trống = công ty mẹ
+      if(val){
+        const needle=String(val).trim().toLowerCase();
+        const co=(S.companies||[]).find(x=>
+          (x.name||'').trim().toLowerCase()===needle ||
+          (x.code||'').trim().toLowerCase()===needle);
+        if(!co){ rec.warnings.push(`Công ty "${val}" không tìm thấy, dùng công ty mẹ`); rec.data._companyId=getParentCompanyId(); }
+        else rec.data._companyId=co.id;
+      } else rec.data._companyId=getParentCompanyId();
     } else if(c.type==='entityLookup'){
       // For vessel_expense — match by vessel name OR project code
       if(val){
@@ -23873,6 +23932,7 @@ function excelConfirmImport(){
       segment:d.segment||(tpl.origin==='hr_expense'?'OTHER':(tpl.origin==='qn_expense'?'OM':'VESSEL_SERVICE')),
       projectId:d._projectId||null,
       vesselId:d._vesselId||null,
+      companyId:d._companyId||getParentCompanyId(),
       issueDate:d.issueDate||todayISO(),
       dueDate:d.dueDate||'',
       dueMonth:d.dueMonth||'',
