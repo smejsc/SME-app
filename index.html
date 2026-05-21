@@ -1033,6 +1033,8 @@ body{min-height:100vh;background-image:radial-gradient(circle at 20% 0%,rgba(184
         </select>
         <button class="btn-primary" onclick="openReceivableModal(null)">+ Thêm phải thu</button>
         <button class="btn-sec" onclick="openMultiRowModal('ar')" title="Nhập phiếu nhiều dòng — 1 KH có nhiều hóa đơn">📋 Nhập nhiều dòng</button>
+        <button class="btn-sec" onclick="arExportExcel('ar')" title="Xuất sổ phải thu ra Excel để đối chiếu" style="font-size:12px">📊 Xuất Excel</button>
+        <button class="btn-sec" onclick="arExportPdf('ar')" title="Xuất sổ phải thu ra PDF để đối chiếu" style="font-size:12px">📄 Xuất PDF</button>
       </div>
     </div>
     <div class="section-body"><div class="tbl-scroll"><table class="tbl" id="ar-table"></table></div></div>
@@ -1746,7 +1748,7 @@ body{min-height:100vh;background-image:radial-gradient(circle at 20% 0%,rgba(184
         <div class="field"><label>Mã TS *</label><input type="text" id="fa-code" placeholder="VD: TSCĐ-2026-001"></div>
         <div class="field"><label>Tên TS *</label><input type="text" id="fa-name" placeholder="VD: Tàu SH-Aries, Nhà văn phòng 12 Lê Lợi..."></div>
         <div class="field"><label>Nhóm *</label>
-          <select id="fa-group">
+          <select id="fa-group" onchange="onFaGroupChange()">
             <option value="REAL_ESTATE">Bất động sản (đất, nhà)</option>
             <option value="VESSEL">Tàu thuyền</option>
             <option value="BUILDING">Nhà xưởng / kiến trúc</option>
@@ -1757,6 +1759,20 @@ body{min-height:100vh;background-image:radial-gradient(circle at 20% 0%,rgba(184
           </select>
         </div>
         <div class="field"><label>Vị trí / Đặt tại</label><input type="text" id="fa-location" placeholder="VD: VP HCM, Cảng Vũng Tàu, KCN Dung Quất..."></div>
+      </div>
+      <!-- v1.85.0: Loại tàu — chỉ hiện khi Nhóm = Tàu thuyền. Tàu sẽ tự đẩy sang Danh mục để gắn chi phí/doanh thu. -->
+      <div class="form-grid" id="fa-vessel-row" style="grid-template-columns:1fr 3fr;display:none">
+        <div class="field"><label>Loại tàu *</label>
+          <select id="fa-vessel-type">
+            <option value="SERVICE">Dịch vụ (DV)</option>
+            <option value="TECH">Kỹ thuật (KT)</option>
+          </select>
+        </div>
+        <div class="field" style="display:flex;align-items:flex-end">
+          <div style="font-size:11px;color:var(--muted);font-style:italic;padding:6px 10px;background:rgba(28,58,92,.04);border-left:3px solid var(--accent)">
+            ⛵ Tàu này sẽ tự xuất hiện trong <b>Danh mục → Tàu</b> (nhóm Tàu công ty) để NV chọn khi nhập chi phí/doanh thu. Loại tàu quyết định phân mảng DV/KT.
+          </div>
+        </div>
       </div>
       <div class="form-grid" style="grid-template-columns:1.4fr 1fr 1fr 0.6fr 1fr">
         <div class="field"><label>🏛 Công ty</label><select id="fa-company"></select></div>
@@ -2378,7 +2394,7 @@ body{min-height:100vh;background-image:radial-gradient(circle at 20% 0%,rgba(184
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='1.84.0';            // bumped on each release
+const APP_VERSION='1.86.0';            // bumped on each release
 
 /* v1.68.0: URL Apps Script của công ty — nhúng cứng để NV không cần nhập / không cần ?join=.
    Khi máy mới mở app, app tự dùng URL này kết nối cloud → vào thẳng Login.
@@ -3888,6 +3904,27 @@ async function authAction(){
           }
         }
       }catch(e){console.warn('[migrate v1.44.0 op_input] failed:',e);}
+      // v1.85.0: Đồng bộ TSCĐ nhóm Tàu (dữ liệu cũ) sang Danh mục Tàu
+      try{
+        if(Array.isArray(S.fixedAssets)){
+          let synced=0;
+          S.fixedAssets.forEach(a=>{
+            if(a.group!=='VESSEL') return;
+            // Bản ghi cũ chưa có liên kết Danh mục → tạo
+            const linked = a.vesselId && (S.vessels||[]).some(v=>v.id===a.vesselId);
+            if(!linked){
+              if(!a.vesselType) a.vesselType='SERVICE';  // mặc định DV, admin sửa lại sau
+              syncVesselFromAsset(a);
+              synced++;
+            }
+          });
+          if(synced>0){
+            saveState();
+            console.log(`[migrate v1.85.0] Synced ${synced} TSCĐ tàu vào Danh mục`);
+            setTimeout(()=>toast(`⛵ v1.85.0: Đã đưa ${synced} tàu (TSCĐ) vào Danh mục Tàu. Kiểm tra lại Loại tàu DV/KT tại tab 09 Tài sản`,'good'),2800);
+          }
+        }
+      }catch(e){console.warn('[migrate v1.85.0 vessel-asset] failed:',e);}
       const lastBak=cfg.lastBackup?new Date(cfg.lastBackup).getTime():0;
       const daysSinceBak=lastBak?Math.floor((Date.now()-lastBak)/86400000):999;
       // v1.55.0: Show persistent banner + auto-trigger weekly backup
@@ -9498,23 +9535,29 @@ function renderCatalog(){
       list.forEach(v => {
         const typeChip = v.type==='SERVICE' ? '<span class="chip chip-1">DV</span>' :
                          v.type==='TECH' ? '<span class="chip chip-2">KT</span>' : '<span class="chip">?</span>';
+        const fromAsset = !!v.fromAssetId;  // v1.85.0: tàu sinh từ TSCĐ
         const statusChip = v.archived
           ? `<span class="chip" style="background:#a8362b;color:#fff;font-size:10px" title="Đã đóng bởi ${esc(v.archivedBy||'?')} lúc ${v.archivedAt?new Date(v.archivedAt).toLocaleDateString('vi-VN'):'?'}">⊘ ĐÃ ĐÓNG</span>`
           : `<span class="chip chip-good" style="font-size:10px">✓ ACTIVE</span>`;
-        const archiveBtn = canArchive
+        const archiveBtn = (canArchive && !fromAsset)
           ? (v.archived
               ? `<button class="icon-btn" title="Mở lại (unarchive)" onclick="toggleArchiveVessel('${v.id}')" style="color:var(--good)">↺</button>`
               : `<button class="icon-btn" title="Đóng (archive) — ẩn khỏi dropdown nhập mới" onclick="toggleArchiveVessel('${v.id}')" style="color:var(--warn)">⊘</button>`)
           : '';
+        // v1.85.0: tàu sinh từ TSCĐ → read-only ở Danh mục, sửa tại tab 09 Tài sản
+        const actionBtns = fromAsset
+          ? `<button class="icon-btn" title="Tàu này quản tại tab 09 Tài sản — bấm để mở" onclick="navTo('fixed_assets')">↗</button>`
+          : `${archiveBtn}<button class="icon-btn" title="Sửa" onclick="editVessel('${v.id}')">✎</button><button class="icon-btn danger" title="Xóa" onclick="delVessel('${v.id}')">✕</button>`;
+        const sourceChip = fromAsset ? ' <span class="chip" style="font-size:9px;background:#1c3a5c;color:#fff" title="Tàu sở hữu — nhập tại tab 09 Tài sản">TSCĐ</span>' : '';
         h += `<tr style="${v.archived?'opacity:0.55;background:rgba(168,54,43,.04)':''}">
-          <td><b>${esc(v.name)}</b></td>
+          <td><b>${esc(v.name)}</b>${sourceChip}</td>
           <td>${typeChip}</td>
           <td class="mono" style="font-size:11px">${esc(v.imoNumber||'—')}</td>
           <td style="font-size:11px">${esc(v.flagState||'—')}</td>
           <td class="r mono">${fmtQty(v.dwt||0)}</td>
           <td class="r mono">${fmtQty(v.grt||0)}</td>
           <td>${statusChip}</td>
-          <td><div class="row-actions">${archiveBtn}<button class="icon-btn" title="Sửa" onclick="editVessel('${v.id}')">✎</button><button class="icon-btn danger" title="Xóa" onclick="delVessel('${v.id}')">✕</button></div></td>
+          <td><div class="row-actions">${actionBtns}</div></td>
         </tr>`;
       });
       // Nhóm 2: Tàu quản lý vận hành (chỉ đọc — sửa ở tab QL vận hành)
@@ -11346,6 +11389,7 @@ function addVessel(){
 function delVessel(id){
   if(!isAdmin()){toast('Chỉ admin mới xóa được tàu','bad');return;}
   const v=S.vessels.find(x=>x.id===id);if(!v)return;
+  if(v.fromAssetId){toast('Tàu này là TSCĐ — xóa tại tab 09 Tài sản','bad');navTo('fixed_assets');return;}
   const oh=S.onhires.filter(o=>o.vesselId===id).length;
   confirmDelete('tàu này',
     `${esc(v.name)} · ${v.type==='SERVICE'?'Tàu dịch vụ':'Tàu kỹ thuật'} · IMO ${esc(v.imo) || '—'}<br>${oh?`<b style="color:var(--bad)">⚠ ${oh} bản ghi onhire</b> cũng sẽ bị xóa kèm.`:'Không có bản ghi onhire.'}`,
@@ -11353,6 +11397,7 @@ function delVessel(id){
 }
 function editVessel(id){
   const v=S.vessels.find(x=>x.id===id);if(!v)return;
+  if(v.fromAssetId){toast('Tàu này là TSCĐ — sửa tên/loại tại tab 09 Tài sản','bad');navTo('fixed_assets');return;}
   openEditModal('Sửa thông tin tàu',[
     {key:'name',label:'Tên tàu',span:2},
     {key:'type',label:'Loại',type:'select',options:[{v:'SERVICE',t:'Dịch vụ'},{v:'TECH',t:'Kỹ thuật'}]},
@@ -12967,6 +13012,15 @@ function resetFaForm(){
   document.getElementById('fa-years').value=10;
   document.getElementById('fa-bookvalue').value=0;
   document.getElementById('fa-months-dep').value=0;
+  onFaGroupChange();
+}
+
+/* v1.85.0: Hiện ô "Loại tàu" khi Nhóm = Tàu thuyền (VESSEL) */
+function onFaGroupChange(){
+  const grp=document.getElementById('fa-group');
+  const row=document.getElementById('fa-vessel-row');
+  if(!grp||!row) return;
+  row.style.display = grp.value==='VESSEL' ? 'grid' : 'none';
 }
 
 function addFixedAsset(){
@@ -12975,11 +13029,12 @@ function addFixedAsset(){
   if(!code||!name){toast('Nhập mã + tên TSCĐ','bad');return;}
   const cost=+document.getElementById('fa-cost').value||0;
   if(cost<=0){toast('Nguyên giá > 0','bad');return;}
+  const group=document.getElementById('fa-group').value;
 
-  S.fixedAssets.push({
+  const asset={
     id:uid(),
     code, name,
-    group:document.getElementById('fa-group').value,
+    group,
     companyId:(document.getElementById('fa-company')||{}).value||getParentCompanyId(),
     purchaseDate:document.getElementById('fa-date').value||todayISO(),
     originalCost:cost,
@@ -12993,11 +13048,37 @@ function addFixedAsset(){
     history:[],
     createdBy:actorName(),
     createdAt:new Date().toISOString()
-  });
+  };
+  // v1.85.0: TSCĐ nhóm Tàu thuyền — lưu loại tàu + tự đẩy sang Danh mục Tàu
+  if(group==='VESSEL'){
+    asset.vesselType=document.getElementById('fa-vessel-type').value||'SERVICE';
+  }
+  S.fixedAssets.push(asset);
+  if(group==='VESSEL') syncVesselFromAsset(asset);
+
   saveState();
   resetFaForm();
   renderAll();
-  toast('Đã thêm TSCĐ');
+  toast(group==='VESSEL'?'Đã thêm TSCĐ tàu — đã đưa vào Danh mục Tàu':'Đã thêm TSCĐ');
+}
+
+/* v1.85.0: Đồng bộ TSCĐ nhóm VESSEL ↔ bản ghi Danh mục Tàu (S.vessels).
+   Một tàu sở hữu = một TSCĐ + một bản ghi S.vessels liên kết qua asset.vesselId.
+   Bản ghi S.vessels được đánh dấu fromAssetId để hiển thị read-only ở Danh mục. */
+function syncVesselFromAsset(asset){
+  if(!asset || asset.group!=='VESSEL') return;
+  let v = asset.vesselId ? (S.vessels||[]).find(x=>x.id===asset.vesselId) : null;
+  if(!v){
+    v={id:uid(), fromAssetId:asset.id};
+    S.vessels.push(v);
+    asset.vesselId=v.id;
+  }
+  v.name=asset.name;
+  v.type=asset.vesselType||'SERVICE';
+  v.companyId=asset.companyId;
+  v.fromAssetId=asset.id;
+  // Tàu thanh lý → archive trong Danh mục để ẩn khỏi dropdown nhập mới
+  v.archived = asset.status==='LIQUIDATED';
 }
 
 function deleteFixedAsset(id){
@@ -13011,13 +13092,33 @@ function deleteFixedAsset(id){
       toast('TSCĐ đã có lịch sử ghi nhận — không xóa được. Liên hệ admin.','bad');return;
     }
   }
-  confirmDelete('TSCĐ này', `<b>${esc(a.code)}</b> · ${esc(a.name)}<br>Nguyên giá: ${fmtFull(a.originalCost,a.ccy)}<br>${(a.history||[]).length?`⚠ Có ${a.history.length} lịch sử ghi nhận`:'Không có lịch sử'}`,
-    ()=>{S.fixedAssets=S.fixedAssets.filter(x=>x.id!==id);saveState();toast('Đã xóa');renderAll();});
+  // v1.85.0: TSCĐ tàu — kiểm tra dữ liệu gắn vào bản ghi Danh mục Tàu
+  let vesselWarn='';
+  if(a.group==='VESSEL' && a.vesselId){
+    const vid=a.vesselId;
+    const ohN=(S.onhires||[]).filter(o=>o.vesselId===vid).length;
+    const evN=(S.events||[]).filter(e=>e.vesselId===vid).length;
+    const exN=(S.payables||[]).filter(x=>x.vesselId===vid).length
+            +(S.receivables||[]).filter(x=>x.vesselId===vid).length;
+    const tlN=(S.tools||[]).filter(t=>t.vesselId===vid).length;
+    const total=ohN+evN+exN+tlN;
+    if(total>0){
+      vesselWarn=`<br><b style="color:var(--bad)">⚠ Tàu này đang được dùng: ${[ohN&&ohN+' onhire',evN&&evN+' đoạn vận hành',exN&&exN+' chi phí/doanh thu',tlN&&tlN+' CCDC'].filter(Boolean).join(' · ')}.</b><br><span style="font-size:11px;color:var(--muted)">Bản ghi tàu trong Danh mục sẽ được giữ lại (đóng/archive) để không mất liên kết dữ liệu cũ.</span>`;
+    } else {
+      vesselWarn='<br><span style="font-size:11px;color:var(--muted)">Bản ghi tàu trong Danh mục cũng sẽ bị xóa.</span>';
+    }
+  }
+  confirmDelete('TSCĐ này', `<b>${esc(a.code)}</b> · ${esc(a.name)}<br>Nguyên giá: ${fmtFull(a.originalCost,a.ccy)}<br>${(a.history||[]).length?`⚠ Có ${a.history.length} lịch sử ghi nhận`:'Không có lịch sử'}${vesselWarn}`,
+    ()=>{
+      if(a.group==='VESSEL' && a.vesselId) unlinkVesselFromAsset(a);
+      S.fixedAssets=S.fixedAssets.filter(x=>x.id!==id);
+      saveState();toast('Đã xóa');renderAll();
+    });
 }
 
 function editFixedAsset(id){
   const a=S.fixedAssets.find(x=>x.id===id);if(!a)return;
-  openEditModal('Sửa TSCĐ',[
+  const fields=[
     {key:'code',label:'Mã TSCĐ'},
     {key:'name',label:'Tên',span:2},
     {key:'group',label:'Nhóm',type:'select',options:Object.entries(FA_GROUPS).map(([k,v])=>({v:k,t:v.label}))},
@@ -13030,10 +13131,47 @@ function editFixedAsset(id){
     {key:'location',label:'Vị trí',span:2},
     {key:'status',label:'Tình trạng',type:'select',options:Object.entries(FA_STATUS).map(([k,v])=>({v:k,t:v.label}))},
     {key:'notes',label:'Ghi chú',span:2}
-  ],a,(d)=>{
+  ];
+  // v1.85.0: TSCĐ nhóm Tàu thuyền — cho sửa loại tàu (đồng bộ sang Danh mục)
+  if(a.group==='VESSEL'){
+    if(!a.vesselType) a.vesselType='SERVICE';
+    fields.splice(4,0,{key:'vesselType',label:'Loại tàu',type:'select',options:[{v:'SERVICE',t:'Dịch vụ (DV)'},{v:'TECH',t:'Kỹ thuật (KT)'}]});
+  }
+  openEditModal('Sửa TSCĐ',fields,a,(d)=>{
     if(!d.code.trim()||!d.name.trim()){toast('Mã + tên bắt buộc','bad');return false;}
-    Object.assign(a,d);saveState();
+    const wasVessel=a.group==='VESSEL';
+    Object.assign(a,d);
+    // Đồng bộ Danh mục Tàu
+    if(a.group==='VESSEL'){
+      syncVesselFromAsset(a);
+    } else if(wasVessel && a.vesselId){
+      // Đổi nhóm từ Tàu sang nhóm khác → gỡ bản ghi Danh mục
+      unlinkVesselFromAsset(a);
+    }
+    saveState();
   });
+}
+
+/* v1.85.0: Gỡ bản ghi Danh mục Tàu khi TSCĐ không còn là tàu (hoặc bị xóa).
+   Chỉ gỡ khi tàu chưa được dùng ở nơi khác — nếu đã có dữ liệu gắn vào thì giữ lại + cảnh báo. */
+function unlinkVesselFromAsset(asset){
+  if(!asset || !asset.vesselId) return true;
+  const vid=asset.vesselId;
+  const used = (S.onhires||[]).some(o=>o.vesselId===vid)
+    || (S.events||[]).some(e=>e.vesselId===vid)
+    || (S.payables||[]).some(x=>x.vesselId===vid)
+    || (S.receivables||[]).some(x=>x.vesselId===vid)
+    || (S.tools||[]).some(t=>t.vesselId===vid);
+  if(used){
+    // Còn dữ liệu tham chiếu — không xóa bản ghi, chỉ tách liên kết và archive
+    const v=(S.vessels||[]).find(x=>x.id===vid);
+    if(v){ delete v.fromAssetId; v.archived=true; }
+    delete asset.vesselId;
+    return false;
+  }
+  S.vessels=(S.vessels||[]).filter(x=>x.id!==vid);
+  delete asset.vesselId;
+  return true;
 }
 
 /* Open asset detail with history + add event */
@@ -13250,6 +13388,12 @@ function renderFixedAssets(){
   rows.forEach(a=>{
     const g=FA_GROUPS[a.group]||{label:a.group,icon:'❓'};
     const stat=FA_STATUS[a.status]||{label:a.status,cls:''};
+    // v1.85.0: chip loại tàu DV/KT cho TSCĐ nhóm Tàu
+    const vTypeChip = a.group==='VESSEL'
+      ? (a.vesselType==='TECH'
+          ? ' <span class="chip chip-2" style="font-size:9px">KT</span>'
+          : ' <span class="chip chip-1" style="font-size:9px">DV</span>')
+      : '';
     const cost=+a.originalCost||0;
     const book=+a.bookValue||0;
     const depPct=cost>0?((1-book/cost)*100).toFixed(0):0;
@@ -13257,7 +13401,7 @@ function renderFixedAssets(){
     const histCount=(a.history||[]).length;
     h+=`<tr style="cursor:pointer" onclick="openAssetDetail('fa','${a.id}')">
       <td><b style="color:var(--accent)">${esc(a.code)}</b><br><span style="font-size:11px">${esc(a.name)}</span></td>
-      <td><span style="color:${g.color||'var(--muted)'};font-weight:600">${g.icon} ${g.label}</span></td>
+      <td><span style="color:${g.color||'var(--muted)'};font-weight:600">${g.icon} ${g.label}</span>${vTypeChip}</td>
       <td style="font-size:11px;color:var(--muted)">${a.location||'—'}</td>
       <td class="mono" style="font-size:11px">${a.purchaseDate||'—'}</td>
       <td class="r num">${fmt(cost,a.ccy)}</td>
@@ -15998,6 +16142,7 @@ function renderArAp(kind){
     <th>Công ty</th>
     <th>Mảng / Dự án</th>
     <th>Diễn giải</th>
+    <th class="mono" title="Số hóa đơn GTGT">Số HĐ</th>
     ${isAp?'<th title="Người nhập / Bộ phận">Người nhập</th>':''}
     <th class="mono">Ngày PS</th>
     <th class="mono">Hạn TT</th>
@@ -16068,6 +16213,7 @@ function renderArAp(kind){
       <td style="font-size:11px"><span class="chip" style="background:#534ab7;color:#fff;font-size:9px">${esc(companyCode(r.companyId)||companyCode(getParentCompanyId()))}</span></td>
       <td><span class="chip ${SEGMENTS[r.segment]?SEGMENTS[r.segment].chip:''}">${segLabel}</span>${link?' '+link:''}</td>
       <td style="max-width:240px">${esc(r.desc) || '—'}</td>
+      <td class="mono" style="font-size:11px">${esc(r.invoiceNo) || '—'}</td>
       ${isAp?`<td style="font-size:11px"><b>${esc(r.createdBy)||'—'}</b>${r.createdByDept?'<br><span style="color:var(--muted)">'+esc(r.createdByDept)+'</span>':''}</td>`:''}
       <td class="mono" style="font-size:11px">${r.issueDate||'—'}</td>
       <td class="mono" style="font-size:11px">${r.dueDate||'—'}</td>
@@ -16082,7 +16228,7 @@ function renderArAp(kind){
       <td><div class="row-actions">${actionBtns.join('')}</div></td>
     </tr>`;
   });
-  const colSpan=isAp?7:6;
+  const colSpan=isAp?8:7;
   h+=`<tr class="total"><td colspan="${colSpan}"><b>CHỈ ĐÃ DUYỆT</b> (vào báo cáo BI)</td>
     <td class="r"><b>${fmt(sumNet)}</b></td>
     <td class="r" style="color:var(--muted);font-size:11px">${fmt(sumVat)}</td>
@@ -16497,6 +16643,7 @@ function _arEditorBody(r,isPayable){
         <div id="ar-partner-hint" style="font-size:11px;color:var(--muted);margin-top:4px"></div>
       </div>
       <div class="field" style="grid-column:span 2"><label>Diễn giải</label><input type="text" id="ar-desc" value="${(r.desc||'').replace(/"/g,'&quot;')}" placeholder="Nội dung — VD: Cước thuê tàu T5/2026" ${lockedAttr}></div>
+      <div class="field"><label>Số hóa đơn ${isPayable?'':'<span style="color:var(--muted);text-transform:none;font-weight:400;font-size:10px">(số HĐ GTGT đầu ra)</span>'}</label><input type="text" id="ar-invoice" value="${(r.invoiceNo||'').replace(/"/g,'&quot;')}" placeholder="VD: 00012345 / Ký hiệu 1C26TYY" ${lockedAttr}></div>
       ${expenseTypeBlock}
       <div class="field"><label>Công ty *</label><select id="ar-company" ${lockedAttr}>${companyOpts}</select></div>
       <div class="field"><label>Mảng *</label><select id="ar-segment" ${lockedAttr} onchange="_arSegmentChanged()">${segOpts}</select></div>
@@ -17210,6 +17357,8 @@ function saveAr(kind,id){
   err.textContent='';
   const partner=document.getElementById('ar-partner').value.trim();
   const desc=document.getElementById('ar-desc').value.trim();
+  const invEl=document.getElementById('ar-invoice');
+  const invoiceNo=invEl?invEl.value.trim():'';
   const amountNet=+document.getElementById('ar-amount-net').value||0;
   const vatPercentRaw=document.getElementById('ar-vat-percent').value;
   const vatPercent=vatPercentRaw==='custom'?'custom':(+vatPercentRaw||0);
@@ -17261,7 +17410,7 @@ function saveAr(kind,id){
     const r=S[list].find(x=>x.id===id);
     if(!r){err.textContent='Không tìm thấy';return;}
     if(!wfCanEdit(r)){err.textContent='Bản ghi đã khóa sửa do trạng thái phê duyệt';return;}
-    const updates = {partner,vendorId,desc,amountNet,vatPercent,vatAmount,amountGross,amount,ccy,segment,companyId,projectId,vesselId,issueDate,dueDate,dueMonth,dueAmount};
+    const updates = {partner,vendorId,desc,invoiceNo,amountNet,vatPercent,vatAmount,amountGross,amount,ccy,segment,companyId,projectId,vesselId,issueDate,dueDate,dueMonth,dueAmount};
     if(kind==='ap'){
       updates.expenseType = expenseType;
       // Always set fuel fields (null = not a fuel record)
@@ -17275,7 +17424,7 @@ function saveAr(kind,id){
   } else {
     const newRec = {
       id:uid(),
-      partner,vendorId,desc,amountNet,vatPercent,vatAmount,amountGross,amount,ccy,segment,companyId,projectId,vesselId,issueDate,dueDate,dueMonth,dueAmount,
+      partner,vendorId,desc,invoiceNo,amountNet,vatPercent,vatAmount,amountGross,amount,ccy,segment,companyId,projectId,vesselId,issueDate,dueDate,dueMonth,dueAmount,
       payments:[],
       status:'draft',
       submittedBy:'',submittedAt:'',
@@ -22890,6 +23039,8 @@ const EXCEL_TEMPLATES={
         aliases:['Customer','Khách','KH','Đối tác','Tên KH']},
       {key:'desc',        label:'Diễn giải',            required:false, type:'text',
         aliases:['Description','Nội dung','Mô tả']},
+      {key:'invoiceNo',   label:'Số hóa đơn',           required:false, type:'text',
+        aliases:['Invoice','Invoice No','Số HĐ','Số hoá đơn','So hoa don','HĐ']},
       {key:'segment',     label:'Mảng (VESSEL_SERVICE/VESSEL_TECH/OM/VESSEL_MGMT/OTHER)', required:false, type:'segment',
         aliases:['Segment','Mảng hoạt động']},
       {key:'projectCode', label:'Mã dự án (PRJ-...)',   required:false, type:'projectLookup',
@@ -23023,6 +23174,8 @@ const EXCEL_TEMPLATES={
       {key:'code',              label:'Mã TS *',                required:true,  type:'text'},
       {key:'name',              label:'Tên TS *',               required:true,  type:'text'},
       {key:'group',             label:'Nhóm (REAL_ESTATE/VESSEL/BUILDING/VEHICLE/MACHINE/INTANGIBLE/OTHER) *', required:true, type:'faGroup'},
+      {key:'vesselType',        label:'Loại tàu (SERVICE/TECH — chỉ khi Nhóm=VESSEL)', required:false, type:'vesselType',
+        aliases:['Loại tàu','Loai tau','Vessel Type']},
       {key:'companyName',       label:'Công ty (để trống = công ty mẹ)', required:false, type:'companyLookup',
         aliases:['Company','Cty','Pháp nhân','Đơn vị']},
       {key:'location',          label:'Vị trí / Đặt tại',       required:false, type:'text',
@@ -23542,6 +23695,115 @@ function assetExportPdf(which){
   toast('✓ Đang mở cửa sổ in PDF');
 }
 
+/* v1.86.0: Xuất sổ Phải thu / Phải trả ra Excel — tôn trọng filter trạng thái + công ty đang chọn */
+function arExportExcel(kind){
+  const isAp = kind==='ap';
+  if(typeof XLSX==='undefined'){ toast('Thư viện Excel chưa sẵn sàng','bad'); return; }
+  const rows = _arExportRows(kind);
+  if(!rows.length){ toast('Chưa có dữ liệu để xuất','bad'); return; }
+  const data = rows.map((r,i)=>{
+    const net=+r.amountNet||+r.amount||0, vat=+r.vatAmount||0, tot=+r.amountGross||+r.amount||0;
+    const pd=arPaidTotal(r), rem=arRemaining(r);
+    const proj=r.projectId?(S.projects||[]).find(p=>p.id===r.projectId):null;
+    const o={
+      'STT':i+1,
+      'Số hóa đơn':r.invoiceNo||'',
+      [isAp?'Nhà cung cấp':'Khách hàng']:r.partner||'',
+      'Công ty':companyName(r.companyId),
+      'Mảng':(r.segment&&SEGMENTS[r.segment])?SEGMENTS[r.segment].name:'',
+      'Dự án / Tàu':proj?proj.code:(anyVesselName(r.vesselId)||''),
+      'Diễn giải':r.desc||'',
+      'Ngày phát sinh':r.issueDate||'',
+      'Hạn thanh toán':r.dueDate||'',
+      'CCY':r.ccy||'USD',
+      'Số tiền chưa VAT':net,
+      'Tiền VAT':vat,
+      'Tổng sau VAT':tot,
+      ['Đã '+(isAp?'trả':'thu')]:pd,
+      'Còn lại':rem,
+      'Trạng thái duyệt':(wfState(r)||{}).label||r.status||'',
+      'Người lập':r.createdBy||''
+    };
+    return o;
+  });
+  const ws=XLSX.utils.json_to_sheet(data);
+  const wb=XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, isAp?'Phai tra':'Phai thu');
+  const fname=(isAp?'So-Phai-tra-':'So-Phai-thu-')+new Date().toISOString().slice(0,10)+'.xlsx';
+  XLSX.writeFile(wb, fname);
+  toast('✓ Đã xuất '+data.length+' dòng ra Excel');
+}
+
+/* v1.86.0: Xuất sổ Phải thu / Phải trả ra PDF — cửa sổ in trình duyệt */
+function arExportPdf(kind){
+  const isAp = kind==='ap';
+  const rows = _arExportRows(kind);
+  if(!rows.length){ toast('Chưa có dữ liệu để xuất','bad'); return; }
+  const fmtN=n=>(+n||0).toLocaleString('vi-VN');
+  const title=isAp?'SỔ PHẢI TRẢ (CÔNG NỢ NHÀ CUNG CẤP)':'SỔ PHẢI THU (CÔNG NỢ KHÁCH HÀNG)';
+  const head=['STT','Số HĐ',isAp?'Nhà cung cấp':'Khách hàng','Công ty','Diễn giải','Ngày PS','CCY','Net','VAT','Tổng','Đã '+(isAp?'trả':'thu'),'Còn lại','Duyệt'];
+  const bodyRows=rows.map((r,i)=>{
+    const net=+r.amountNet||+r.amount||0, vat=+r.vatAmount||0, tot=+r.amountGross||+r.amount||0;
+    return [i+1, r.invoiceNo||'-', r.partner||'', companyName(r.companyId), r.desc||'',
+      r.issueDate||'', r.ccy||'USD', fmtN(net), fmtN(vat), fmtN(tot),
+      fmtN(arPaidTotal(r)), fmtN(arRemaining(r)), (wfState(r)||{}).label||r.status||''];
+  });
+  // Tổng — gom theo CCY để không cộng lẫn USD/VND
+  const byCcy={};
+  rows.forEach(r=>{
+    const c=r.ccy||'USD';
+    if(!byCcy[c]) byCcy[c]={tot:0,paid:0,rem:0};
+    byCcy[c].tot+=(+r.amountGross||+r.amount||0);
+    byCcy[c].paid+=arPaidTotal(r);
+    byCcy[c].rem+=arRemaining(r);
+  });
+  const totalLines=Object.entries(byCcy).map(([c,v])=>
+    `${c}: Tổng <b>${fmtN(v.tot)}</b> · Đã ${isAp?'trả':'thu'} <b>${fmtN(v.paid)}</b> · Còn lại <b>${fmtN(v.rem)}</b>`).join(' &nbsp;|&nbsp; ');
+  const win=window.open('','_blank');
+  if(!win){ toast('Trình duyệt chặn cửa sổ in — cho phép popup','bad'); return; }
+  const esc2=s=>String(s==null?'':s).replace(/[<>&]/g,c=>({'<':'&lt;','>':'&gt;','&':'&amp;'}[c]));
+  win.document.write(`<!doctype html><html><head><meta charset="utf-8"><title>${title}</title>
+    <style>
+      body{font-family:Arial,sans-serif;font-size:12px;color:#1c3a5c;padding:24px}
+      h1{font-size:16px;color:#b8472e;margin:0 0 2px}
+      .sub{font-size:11px;color:#888;margin-bottom:14px}
+      table{width:100%;border-collapse:collapse}
+      th,td{border:1px solid #ccc;padding:4px 6px;text-align:left;font-size:10px}
+      th{background:#1c3a5c;color:#fff}
+      tr:nth-child(even) td{background:#f5f4ef}
+      .num{text-align:right}
+      .foot{margin-top:10px;font-size:11px;color:#555}
+    </style></head><body>
+    <h1>SEAHORSE MARINE & ENERGY JSC</h1>
+    <div class="sub">${title} · Xuất ngày ${new Date().toLocaleDateString('vi-VN')} · ${rows.length} bản ghi</div>
+    <table><thead><tr>${head.map(h=>`<th>${esc2(h)}</th>`).join('')}</tr></thead>
+    <tbody>${bodyRows.map(r=>`<tr>${r.map((c,i)=>`<td class="${i>=7&&i<=11?'num':''}">${esc2(c)}</td>`).join('')}</tr>`).join('')}</tbody></table>
+    <div class="foot">${totalLines}<br><span style="font-size:10px;color:#888">Lưu ý: tổng được gom riêng theo từng loại tiền tệ.</span></div>
+    <script>window.onload=function(){window.print();}<\/script>
+    </body></html>`);
+  win.document.close();
+  toast('✓ Đang mở cửa sổ in PDF');
+}
+
+/* v1.86.0: Lấy danh sách bản ghi AR/AP theo đúng filter đang hiển thị trên bảng */
+function _arExportRows(kind){
+  const isAp = kind==='ap';
+  const list = isAp?'payables':'receivables';
+  const all = scopedRecords(S[list]||[]);
+  const stFilter=(document.getElementById(isAp?'ap-filter-status':'ar-filter-status')||{}).value||'';
+  const companyFilter=(document.getElementById(isAp?'ap-filter-company':'ar-filter-company')||{}).value||'';
+  const creatorFilter=isAp?((document.getElementById('ap-filter-creator')||{}).value||''):'';
+  const vendorFilter=isAp?((document.getElementById('ap-filter-vendor')||{}).value||''):'';
+  let rows=all.filter(r=>{
+    if(stFilter && wfStatus(r)!==stFilter) return false;
+    if(creatorFilter && (r.createdBy||'')!==creatorFilter) return false;
+    if(vendorFilter && (r.partner||'')!==vendorFilter) return false;
+    if(companyFilter && (r.companyId||getParentCompanyId())!==companyFilter) return false;
+    return true;
+  });
+  return [...rows].sort((a,b)=>(b.issueDate||'').localeCompare(a.issueDate||''));
+}
+
 /* ===== IMPORT MODAL ===== */
 function openExcelImport(){
   if(!isAdmin() && !canApproveL1() && !canApproveL2()){
@@ -23812,8 +24074,14 @@ function _excelRowToRecord(row, colMap, tpl){
       val=(val||'OTHER').toUpperCase();
       if(!valid.includes(val)){rec.warnings.push(`${c.key}: bộ phận không hợp lệ, dùng OTHER`); val='OTHER';}
     } else if(c.type==='vesselType'){
-      val=(val||'SERVICE').toUpperCase();
-      if(val!=='SERVICE' && val!=='TECH'){rec.warnings.push(`${c.key}: loại tàu không hợp lệ, dùng SERVICE`); val='SERVICE';}
+      if(c.required){
+        val=(val||'SERVICE').toUpperCase();
+        if(val!=='SERVICE' && val!=='TECH'){rec.warnings.push(`${c.key}: loại tàu không hợp lệ, dùng SERVICE`); val='SERVICE';}
+      } else {
+        // Cột tùy chọn (TSCĐ): để trống là hợp lệ — chỉ kiểm khi có giá trị
+        val=(val||'').toUpperCase();
+        if(val && val!=='SERVICE' && val!=='TECH'){rec.warnings.push(`${c.key}: loại tàu không hợp lệ, dùng SERVICE`); val='SERVICE';}
+      }
     } else if(c.type==='boolean'){
       const s=String(val).toLowerCase().trim();
       if(['true','yes','y','1','x','co','có','đúng','dung'].includes(s)) val=true;
@@ -24180,10 +24448,11 @@ function excelConfirmImport(){
       return;
     }
     if(tpl.target==='fixedAssets'){
-      S.fixedAssets.push({
+      const grp=d.group||'OTHER';
+      const fa={
         id:uid(),
         code:d.code, name:d.name,
-        group:d.group||'OTHER',
+        group:grp,
         companyId:d._companyId||getParentCompanyId(),
         location:d.location||'',
         purchaseDate:d.purchaseDate||todayISO(),
@@ -24198,7 +24467,14 @@ function excelConfirmImport(){
         createdBy:actorName(),
         createdAt:new Date().toISOString(),
         _importedFromExcel:true
-      });
+      };
+      // v1.85.0: TSCĐ nhóm Tàu — gắn loại tàu + đẩy sang Danh mục Tàu
+      if(grp==='VESSEL'){
+        fa.vesselType=(d.vesselType||'SERVICE').toUpperCase();
+        if(fa.vesselType!=='SERVICE' && fa.vesselType!=='TECH') fa.vesselType='SERVICE';
+      }
+      S.fixedAssets.push(fa);
+      if(grp==='VESSEL') syncVesselFromAsset(fa);
       created++;
       return;
     }
@@ -24496,6 +24772,7 @@ function excelConfirmImport(){
       id:uid(),
       partner:d.partner||'',
       desc:d.desc||'',
+      invoiceNo:d.invoiceNo||'',
       costCategory:d.costCategory||'',
       expenseType:d.costCategory||'',  // v1.43.0: also store as expenseType for fuel detection
       amountNet:net, vatPercent, vatAmount, amountGross:gross, amount:gross,
