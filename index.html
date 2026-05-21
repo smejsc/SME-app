@@ -582,6 +582,7 @@ body{min-height:100vh;background-image:radial-gradient(circle at 20% 0%,rgba(184
       <div class="menu-pop" id="admin-menu-pop">
         <button onclick="closeAdminMenu();openSettings()"><span class="ico">⚙</span>Cài đặt &amp; Phân quyền</button>
         <button class="admin-only-item" onclick="closeAdminMenu();openAdminChecklist()"><span class="ico">✅</span>Checklist vận hành</button>
+        <button class="admin-only-item" onclick="closeAdminMenu();openHistoricalData()"><span class="ico">📊</span>Số liệu lịch sử (năm cũ)</button>
         <button class="admin-only-item" onclick="closeAdminMenu();seedDemo()"><span class="ico">▤</span>Nạp Demo Data</button>
         <div class="divider admin-only-item"></div>
         <button class="admin-only-item" onclick="closeAdminMenu();openExcelImport()"><span class="ico">📥</span>Import Excel hàng loạt</button>
@@ -2000,6 +2001,13 @@ body{min-height:100vh;background-image:radial-gradient(circle at 20% 0%,rgba(184
           </select>
         </div>
 
+        <div class="field" id="bcqt-hist-wrap" style="margin:0;align-self:flex-end">
+          <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:12px;color:var(--ink);padding:8px 0;white-space:nowrap" title="Cộng thêm số liệu tổng hợp các năm cũ vào báo cáo">
+            <input type="checkbox" id="bcqt-include-hist" onchange="renderBCQT()" style="cursor:pointer">
+            📊 Gồm số liệu lịch sử
+          </label>
+        </div>
+
         <div style="margin-left:auto">
           <button class="btn-sec" onclick="bcqtExportExcel()" style="white-space:nowrap">📊 Xuất Excel</button>
         </div>
@@ -2370,7 +2378,7 @@ body{min-height:100vh;background-image:radial-gradient(circle at 20% 0%,rgba(184
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='1.82.0';            // bumped on each release
+const APP_VERSION='1.84.0';            // bumped on each release
 
 /* v1.68.0: URL Apps Script của công ty — nhúng cứng để NV không cần nhập / không cần ?join=.
    Khi máy mới mở app, app tự dùng URL này kết nối cloud → vào thẳng Login.
@@ -8546,6 +8554,7 @@ function defaultState(){
     expenseTypes:[],  // v1.30.1: admin-manageable. Auto-populated from DEFAULT_EXPENSE_TYPES on admin login.
     revenueTypes:[],  // v1.30.4: admin-manageable. Auto-populated from DEFAULT_REVENUE_TYPES on admin login.
     adminChecklist:[],  // v1.78.0: checklist vận hành — [{id, text, period, done, doneAt, note}]
+    historicalData:[],  // v1.83.0: số liệu lịch sử tổng hợp — [{id,year,kind,segment,vesselId,projectId,companyId,amount,ccy,note}]
     meta:{created:new Date().toISOString()}
   };
 }
@@ -19105,6 +19114,150 @@ function bcqtToUsd(amount, ccy){
   return (+amount || 0);  // USD or unknown → assume USD
 }
 
+/* ===== v1.83.0: SỐ LIỆU LỊCH SỬ (năm cũ — tổng hợp) ===== */
+function _ensureHistorical(){ if(!S.historicalData) S.historicalData=[]; }
+
+function openHistoricalData(){
+  if(!isAdmin()){ toast('Chỉ admin quản lý số liệu lịch sử','bad'); return; }
+  _ensureHistorical();
+  const body=`
+    <div style="font-size:13px">
+      <div style="font-size:11px;color:var(--muted);font-style:italic;margin-bottom:10px;padding:6px 10px;background:rgba(28,58,92,.04);border-left:3px solid var(--accent)">
+        📊 Nhập số liệu TỔNG HỢP các năm cũ (doanh thu / chi phí) theo Mảng, Dự án, Tàu — phục vụ Báo cáo Quản trị đánh giá xu hướng và hiệu quả tàu nhiều năm. Đây là số tổng hợp, KHÔNG phải bút toán chi tiết.
+      </div>
+      <div style="display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap">
+        <button class="btn-sec" onclick="addHistoricalRow()" style="font-size:12px">+ Thêm dòng số liệu</button>
+      </div>
+      <div id="historical-body"></div>
+    </div>
+  `;
+  openModal('📊 Số liệu lịch sử (năm cũ)', body,
+    '<button class="btn-sec" onclick="closeModal()">Đóng</button>');
+  renderHistoricalBody();
+}
+
+function renderHistoricalBody(){
+  const el=document.getElementById('historical-body'); if(!el) return;
+  _ensureHistorical();
+  const list=S.historicalData.slice().sort((a,b)=>
+    (b.year-a.year) || (a.kind||'').localeCompare(b.kind||''));
+  if(!list.length){
+    el.innerHTML='<div style="color:var(--muted);font-size:12px">Chưa có số liệu — bấm "+ Thêm dòng số liệu"</div>';
+    return;
+  }
+  const segName=s=>SEGMENTS[s]?SEGMENTS[s].name:(s||'—');
+  let h='<table class="tbl" style="font-size:12px"><thead><tr>'+
+    '<th>Năm</th><th>Loại</th><th>Mảng</th><th>Tàu</th><th>Dự án</th><th>Công ty</th><th class="r">Số tiền</th><th></th></tr></thead><tbody>';
+  list.forEach(r=>{
+    const proj=r.projectId?(S.projects||[]).find(p=>p.id===r.projectId):null;
+    const isRev=r.kind==='revenue';
+    h+=`<tr>
+      <td><b>${r.year}</b></td>
+      <td><span class="chip ${isRev?'chip-good':''}" style="font-size:10px">${isRev?'Doanh thu':'Chi phí'}</span></td>
+      <td style="font-size:11px">${esc(segName(r.segment))}</td>
+      <td style="font-size:11px;color:var(--muted)">${esc(anyVesselName(r.vesselId)||'—')}</td>
+      <td style="font-size:11px;color:var(--muted)">${proj?esc(proj.code):'—'}</td>
+      <td style="font-size:11px;color:var(--muted)">${esc(companyName(r.companyId))}</td>
+      <td class="r num" style="font-weight:600;color:${isRev?'var(--good)':'var(--accent)'}">${fmt(r.amount,r.ccy)}</td>
+      <td><div class="row-actions">
+        <button class="icon-btn" title="Sửa" onclick="editHistoricalRow('${r.id}')">✎</button>
+        <button class="icon-btn danger" title="Xóa" onclick="deleteHistoricalRow('${r.id}')">✕</button>
+      </div></td>
+    </tr>`;
+  });
+  h+='</tbody></table>';
+  el.innerHTML=h;
+}
+
+function _historicalForm(r){
+  const yr=new Date().getFullYear();
+  const segOpts=Object.entries(SEGMENTS).map(([k,v])=>`<option value="${k}" ${k===(r.segment||'')?'selected':''}>${esc(v.name)}</option>`).join('');
+  const projOpts='<option value="">— Không gắn dự án —</option>'+(S.projects||[]).map(p=>`<option value="${p.id}" ${p.id===r.projectId?'selected':''}>${esc(p.code)} · ${esc(p.name)}</option>`).join('');
+  const ownV=activeOnly(S.vessels).map(v=>`<option value="${v.id}" ${v.id===r.vesselId?'selected':''}>${esc(v.name)} (${v.type==='SERVICE'?'DV':'KT'})</option>`).join('');
+  const opV=(S.opVessels||[]).map(v=>`<option value="${v.id}" ${v.id===r.vesselId?'selected':''}>${esc(v.name)}${v.owner?' · '+esc(v.owner):''}</option>`).join('');
+  let vesselOpts='<option value="">— Không gắn tàu —</option>';
+  if(ownV) vesselOpts+=`<optgroup label="⛵ Tàu công ty">${ownV}</optgroup>`;
+  if(opV) vesselOpts+=`<optgroup label="🚢 Tàu quản lý vận hành">${opV}</optgroup>`;
+  return `
+    <div style="font-size:13px">
+      <div class="form-grid" style="grid-template-columns:1fr 1fr">
+        <div class="field"><label>Năm *</label><input type="number" id="hd-year" value="${r.year||yr-1}" min="2000" max="${yr}"></div>
+        <div class="field"><label>Loại *</label>
+          <select id="hd-kind">
+            <option value="revenue" ${r.kind==='revenue'?'selected':''}>Doanh thu</option>
+            <option value="cost" ${r.kind==='cost'?'selected':''}>Chi phí</option>
+          </select>
+        </div>
+      </div>
+      <div class="field"><label>Mảng *</label><select id="hd-segment">${segOpts}</select></div>
+      <div class="form-grid" style="grid-template-columns:1fr 1fr">
+        <div class="field"><label>Tàu (để đánh giá hiệu quả tàu)</label><select id="hd-vessel">${vesselOpts}</select></div>
+        <div class="field"><label>Dự án (tùy chọn)</label><select id="hd-project">${projOpts}</select></div>
+      </div>
+      <div class="form-grid" style="grid-template-columns:1.4fr 1fr 0.7fr">
+        <div class="field"><label>🏛 Công ty</label><select id="hd-company">${companyOptionsHtml(r.companyId)}</select></div>
+        <div class="field"><label>Số tiền *</label><input type="number" id="hd-amount" value="${r.amount||0}"></div>
+        <div class="field"><label>CCY</label><select id="hd-ccy"><option ${r.ccy==='VND'?'selected':''}>VND</option><option ${r.ccy==='USD'?'selected':''}>USD</option></select></div>
+      </div>
+      <div class="field"><label>Ghi chú</label><input type="text" id="hd-note" value="${(r.note||'').replace(/"/g,'&quot;')}" placeholder="Tùy chọn"></div>
+      <div id="hd-err" style="color:var(--bad);font-size:12px"></div>
+    </div>
+  `;
+}
+
+function addHistoricalRow(){
+  openModal('+ Thêm số liệu lịch sử', _historicalForm({}),
+    `<button class="btn-sec" onclick="openHistoricalData()">← Quay lại</button>
+     <button class="btn-primary" onclick="_saveHistoricalRow('')">Lưu</button>`);
+}
+
+function editHistoricalRow(id){
+  const r=(S.historicalData||[]).find(x=>x.id===id);
+  if(!r){ toast('Không tìm thấy','bad'); return; }
+  openModal('Sửa số liệu lịch sử', _historicalForm(r),
+    `<button class="btn-sec" onclick="openHistoricalData()">← Quay lại</button>
+     <button class="btn-primary" onclick="_saveHistoricalRow('${id}')">Cập nhật</button>`);
+}
+
+function _saveHistoricalRow(id){
+  const err=document.getElementById('hd-err');
+  const year=+document.getElementById('hd-year').value||0;
+  const amount=+document.getElementById('hd-amount').value||0;
+  if(year<2000){ err.textContent='Nhập năm hợp lệ'; return; }
+  if(amount<=0){ err.textContent='Số tiền phải > 0'; return; }
+  _ensureHistorical();
+  const rec={
+    year, amount,
+    kind:document.getElementById('hd-kind').value,
+    segment:document.getElementById('hd-segment').value,
+    vesselId:document.getElementById('hd-vessel').value||'',
+    projectId:document.getElementById('hd-project').value||'',
+    companyId:document.getElementById('hd-company').value||getParentCompanyId(),
+    ccy:document.getElementById('hd-ccy').value,
+    note:document.getElementById('hd-note').value.trim()
+  };
+  if(id){
+    const r=S.historicalData.find(x=>x.id===id);
+    if(r) Object.assign(r, rec);
+    toast('✓ Đã cập nhật');
+  } else {
+    rec.id='HD-'+Date.now().toString(36)+Math.random().toString(36).slice(2,6);
+    S.historicalData.push(rec);
+    toast('✓ Đã thêm số liệu');
+  }
+  saveState();
+  openHistoricalData();
+}
+
+function deleteHistoricalRow(id){
+  const r=(S.historicalData||[]).find(x=>x.id===id);
+  if(!r) return;
+  if(!confirm(`Xóa số liệu ${r.year} — ${r.kind==='revenue'?'Doanh thu':'Chi phí'}?`)) return;
+  S.historicalData=S.historicalData.filter(x=>x.id!==id);
+  saveState();
+  renderHistoricalBody();
+}
+
 /* Aggregate AR + AP by segment for the given date range */
 function bcqtAggregate(range){
   if(!range) return null;
@@ -19140,6 +19293,23 @@ function bcqtAggregate(range){
     data[seg].apCount++;
   });
 
+  // v1.83.0: Số liệu lịch sử — cộng khi checkbox bật + năm trong khoảng báo cáo
+  // v1.84.0: chỉ Admin / BOD / Viewer được xem số liệu lịch sử (bảo mật tầng logic)
+  const canSeeHist = isAdmin() || (CURRENT_USER && CURRENT_USER.isBOD) || isViewer();
+  const includeHist = canSeeHist && !!(document.getElementById('bcqt-include-hist')||{}).checked;
+  if(includeHist){
+    const fromY = +from.slice(0,4), toY = +to.slice(0,4);
+    (S.historicalData||[]).forEach(r => {
+      if(r.year < fromY || r.year > toY) return;
+      if(!matchCompany(r)) return;
+      const seg = r.segment || 'OTHER';
+      if(!data[seg]) return;
+      const amt = bcqtToUsd(r.amount || 0, r.ccy);
+      if(r.kind==='revenue') data[seg].revenue += amt;
+      else data[seg].cost += amt;
+    });
+  }
+
   // Calculate profit + total
   let totalRev = 0, totalCost = 0, totalAR = 0, totalAP = 0;
   segs.forEach(s => {
@@ -19162,6 +19332,16 @@ function bcqtAggregate(range){
 }
 
 function renderBCQT(){
+  // v1.84.0: ẩn nút tích "Gồm số liệu lịch sử" nếu không phải Admin/BOD/Viewer
+  const histWrap = document.getElementById('bcqt-hist-wrap');
+  if(histWrap){
+    const canSeeHist = isAdmin() || (CURRENT_USER && CURRENT_USER.isBOD) || isViewer();
+    histWrap.style.display = canSeeHist ? '' : 'none';
+    if(!canSeeHist){
+      const cb=document.getElementById('bcqt-include-hist');
+      if(cb) cb.checked=false;
+    }
+  }
   // Fill year dropdown if needed
   const yearSel = document.getElementById('bcqt-year');
   if(yearSel && yearSel.options.length === 0){
