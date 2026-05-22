@@ -2432,7 +2432,7 @@ body{min-height:100vh;background-image:radial-gradient(circle at 20% 0%,rgba(184
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='2.08.0';            // bumped on each release
+const APP_VERSION='2.07.0';            // bumped on each release
 
 /* v1.68.0: URL Apps Script của công ty — nhúng cứng để NV không cần nhập / không cần ?join=.
    Khi máy mới mở app, app tự dùng URL này kết nối cloud → vào thẳng Login.
@@ -3334,9 +3334,19 @@ async function pushCfgToCloud(adminPassword, extraUserPasswords){
   // Try to preserve existing wraps from cloud (for NV who self-wrapped)
   let existingWraps=[];
   let existingMasterKey=null;
+  // v2.05.0: phân biệt "cloud xác nhận trống" vs "không đọc được cloud".
+  // cloudReadOk=true CHỈ khi đã đọc cloud thành công (dù trống hay có dữ liệu).
+  // Nếu fetch/parse lỗi → cloudReadOk=false → KHÔNG được tạo master key mới
+  // (tránh xoá sạch wrap NV khi mạng chập chờn).
+  let cloudReadOk=false;
+  let cloudHasCfg=false;
   try{
     const res0=await fetch(cfg.scriptUrl+'?action=load&key=auth', {method:'GET'});
     const data0=await res0.json();
+    cloudReadOk=true;  // đọc + parse JSON thành công
+    if(data0.ok && data0.payload && data0.payload.v===2){
+      cloudHasCfg=true;
+    }
     // v1.64.0: GUARD — cloud có cfg admin KHÁC với local admin → cảnh báo đè nhầm cty
     if(data0.ok && data0.payload && data0.payload.v===2){
       // Thử pull + so sánh admin hash
@@ -3367,13 +3377,17 @@ async function pushCfgToCloud(adminPassword, extraUserPasswords){
       if(myWrap){
         try{
           existingMasterKey=await unwrapCfgMasterKey(myWrap, adminPassword);
+          // v2.05.0: unwrap THÀNH CÔNG → master key cũ được giữ → wrap NV cũ vẫn khớp.
+          // Giữ TẤT CẢ wrap cũ để mọi NV vẫn đăng nhập được, dù lần đẩy này
+          // admin chỉ nhập mật khẩu cho một vài NV. (Trước đây có nhánh xóa sạch.)
           existingWraps=data0.payload.wraps;
         }catch(e){
-          // Password changed → can't unwrap existing master key
+          // Password admin đổi / sai → không lấy được master key cũ.
           if(!isPushingAsAdmin){
-            // Sub-admin CANNOT generate new master key (would invalidate admin wrap)
             throw new Error('Mật khẩu của bạn đã thay đổi trên cloud — nhờ admin push lại trước');
           }
+          // Master key sẽ là key MỚI → wrap NV cũ (gói key cũ) không còn dùng được.
+          // Không giữ existingWraps trong trường hợp này là đúng bản chất.
           existingMasterKey=null;
           existingWraps=[];
         }
@@ -3387,13 +3401,31 @@ async function pushCfgToCloud(adminPassword, extraUserPasswords){
     if(!isPushingAsAdmin && e.message && (e.message.includes('chưa có wrap') || e.message.includes('mật khẩu của bạn đã'))){
       throw e;
     }
-    // Admin: no existing cfg → fresh
+    // v1.64.0 guard cảnh báo đè nhầm công ty — vẫn phải ném ra
+    if(e.message && /CẢNH BÁO/.test(e.message)) throw e;
+    // cloudReadOk vẫn false → khối kiểm tra bên dưới sẽ chặn
+  }
+
+  // v2.05.0: AN TOÀN — nếu KHÔNG đọc được cloud, TUYỆT ĐỐI không đẩy.
+  // Đẩy lúc này sẽ tạo master key mới và xoá sạch wrap của mọi NV.
+  if(!cloudReadOk){
+    throw new Error('Không đọc được cấu hình trên cloud (mạng yếu hoặc Google Script lỗi). '+
+      'KHÔNG đẩy lúc này để tránh làm mất quyền đăng nhập của nhân viên. '+
+      'Kiểm tra kết nối mạng rồi thử lại.');
   }
 
   // Use existing master key if available (to preserve NV wraps), else generate new
   // v1.40.0: Sub-admin CANNOT generate new master key (would orphan admin wrap)
   if(!existingMasterKey && !isPushingAsAdmin){
     throw new Error('Sub-admin không thể khởi tạo master key mới — nhờ admin push lần đầu trước');
+  }
+  // v2.05.0: nếu cloud ĐÃ CÓ cfg nhưng không lấy được master key cũ → KHÔNG tạo key mới.
+  // Tạo key mới lúc này = xoá sạch wrap NV. Bắt admin kiểm tra mật khẩu.
+  // Ngoại lệ: người dùng đã xác nhận ghi đè (window._cfgPushConfirmOverwrite) — cho qua.
+  if(cloudHasCfg && !existingMasterKey && isPushingAsAdmin && !window._cfgPushConfirmOverwrite){
+    throw new Error('Cloud đã có cấu hình nhưng không mở được bằng mật khẩu admin vừa nhập. '+
+      'Kiểm tra lại mật khẩu admin. Nếu cố đẩy, toàn bộ nhân viên sẽ mất quyền đăng nhập. '+
+      'Nếu chắc chắn cần khởi tạo lại — bấm "Đẩy" LẦN NỮA để xác nhận.');
   }
   const masterKey = existingMasterKey || await generateCfgMasterKey();
 
@@ -3459,8 +3491,12 @@ async function pullCfgFromCloud(scriptUrl, userName, password){
   const res=await fetch(scriptUrl+'?action=load&key=auth', {method:'GET'});
   const data=await res.json();
   if(!data.ok) throw new Error(data.error||'Lỗi pull cfg');
-  if(!data.payload) throw new Error('Cloud chưa có cfg auth — admin phải push từ máy gốc trước');
-  const payload=data.payload;
+  // v2.06.0: cfg auth trên cloud có thể ở dạng nén gzip (payload_gz).
+  // Trước đây chỉ đọc data.payload → bỏ sót payload_gz → NV pull từ máy mới
+  // không lấy được cfg → báo "không tìm thấy wrap". Dùng decodeCloudPayload
+  // để xử lý cả 2 dạng (nén và không nén).
+  const payload = await decodeCloudPayload(data);
+  if(!payload) throw new Error('Cloud chưa có cfg auth — admin phải push từ máy gốc trước');
   if(payload.v!==2 || !Array.isArray(payload.wraps)){
     throw new Error('Cfg cloud schema cũ — admin phải re-push để upgrade lên schema v2');
   }
@@ -3472,8 +3508,14 @@ async function pullCfgFromCloud(scriptUrl, userName, password){
   // Try unwrap
   let masterKey;
   try{
+    // v2.07.0: log chẩn đoán — in giá trị wrap + password để bắt lỗi lệch
+    console.log('[cfg-unwrap] wrap cho', userName, '→ salt=', wrap.salt,
+      '· iter=', wrap.iter, '· iv=', wrap.iv,
+      '· ct.len=', (wrap.ct||'').length, '· pw.len=', (password||'').length);
     masterKey=await unwrapCfgMasterKey(wrap, password);
+    console.log('[cfg-unwrap] unwrap master key THÀNH CÔNG');
   } catch(e){
+    console.log('[cfg-unwrap] unwrap THẤT BẠI:', e && e.message);
     throw new Error('Mật khẩu không đúng — không thể giải mã cfg');
   }
   // Decrypt cfg
@@ -3566,7 +3608,7 @@ function openCfgSyncDialog(){
   const pusherLabel = subAdminMode ? (CURRENT_USER && CURRENT_USER.name) : 'admin';
   const userListHtml=(cfg.users||[]).map(u=>`
     <div style="display:flex;gap:8px;align-items:center;padding:6px 0;border-bottom:1px solid var(--rule)">
-      <span style="flex:1;font-weight:600;font-size:12px">${esc(u.name)}</span>
+      <span style="flex:1;font-weight:600;font-size:12px">${esc(u.name)}<span class="cfg-wrap-flag" data-nv="${esc(u.name)}" style="font-weight:400;font-size:10px;color:var(--muted);margin-left:6px">kiểm tra…</span></span>
       <input type="password" id="cfg-nv-pw-${esc(u.name)}" placeholder="(để trống nếu chưa biết)"
              style="flex:2;padding:4px 8px;border:1px solid var(--rule);font-size:11px;font-family:var(--font-mono)">
     </div>
@@ -3607,6 +3649,32 @@ function openCfgSyncDialog(){
     `<button class="btn-sec" onclick="closeModal()">Hủy</button>
      <button class="btn-primary" onclick="_doCfgSyncPush()">🚀 Đẩy lên cloud</button>`);
   setTimeout(()=>{const el=document.getElementById('cfg-sync-pw');if(el)el.focus();},100);
+  _cfgSyncCheckWraps();
+}
+
+/* v2.04.0: kiểm cloud — NV nào thiếu wrap thì đánh dấu đỏ trong dialog đẩy auth */
+async function _cfgSyncCheckWraps(){
+  const cfg=getAuthConfig();
+  if(!cfg||!cfg.scriptUrl) return;
+  let cloudNames=new Set();
+  try{
+    const res=await fetch(cfg.scriptUrl+'?action=load&key=auth',{method:'GET'});
+    const data=await res.json();
+    if(data.ok && data.payload && Array.isArray(data.payload.wraps)){
+      data.payload.wraps.forEach(w=>cloudNames.add((w.name||'').toLowerCase()));
+    }
+  }catch(e){ /* offline — bỏ qua, không chặn */ }
+  document.querySelectorAll('.cfg-wrap-flag').forEach(el=>{
+    const nv=(el.getAttribute('data-nv')||'').toLowerCase();
+    if(cloudNames.has(nv)){
+      el.textContent='✓ đã có wrap';
+      el.style.color='var(--good)';
+    } else {
+      el.textContent='⚠ chưa có wrap — nhập mật khẩu';
+      el.style.color='var(--bad)';
+      el.style.fontWeight='600';
+    }
+  });
 }
 
 async function _doCfgSyncPush(){
@@ -3780,15 +3848,23 @@ async function authAction(){
   // → pull cfg từ cloud trước khi login
   if(!cfg){
     const pendingUrl=sessionStorage.getItem('seahorse_pending_scripturl');
-    if(pendingUrl){
+    // v2.06.0: máy trắng — pull cfg từ cloud nếu có pendingUrl (link mời)
+    // HOẶC có COMPANY_SCRIPT_URL nhúng sẵn trong app (bản production).
+    // Trước đây thiếu nhánh COMPANY_SCRIPT_URL → NV vào thẳng URL công ty
+    // trên máy mới không pull được cfg → không đăng nhập được.
+    const cloudUrl = pendingUrl || (COMPANY_SCRIPT_URL || '');
+    console.log('[cfg-pull] máy chưa có cfg local. pendingUrl=', !!pendingUrl, '· COMPANY_SCRIPT_URL=', !!COMPANY_SCRIPT_URL, '· sẽ pull=', !!cloudUrl);
+    if(cloudUrl){
       const err=document.getElementById('auth-err');
       const name=document.getElementById('auth-name').value.trim();
       const pw=document.getElementById('auth-pw').value;
       if(!name||!pw){ if(err)err.textContent='Nhập tên đăng nhập và mật khẩu'; return; }
       if(err){ err.style.color='var(--muted)'; err.textContent='Đang tải tài khoản từ cloud...'; }
       try{
-        const pulled=await pullCfgFromCloud(pendingUrl, name, pw);
+        console.log('[cfg-pull] đang pull cfg từ cloud cho:', name);
+        const pulled=await pullCfgFromCloud(cloudUrl, name, pw);
         if(!pulled){ throw new Error('Không giải mã được — kiểm tra mật khẩu'); }
+        console.log('[cfg-pull] pull thành công, cfg đã lưu local');
         // cfg đã lưu local → tiếp tục login bình thường
         cfg=getAuthConfig();
         sessionStorage.removeItem('seahorse_pending_scripturl');
@@ -4328,6 +4404,7 @@ function openSettings(){
       <td>${(u.tabs||[]).map(t=>{const T=ALL_TABS.find(x=>x.id===t);return T?`<span class="chip chip-5" style="margin-right:3px">${T.label}</span>`:'';}).join(' ')}</td>
       <td style="white-space:nowrap"><div class="row-actions">
         <button class="icon-btn" title="Sửa" onclick="editUser(${i})">✎</button>
+        <button class="icon-btn" title="Đặt lại mật khẩu — sinh mật khẩu mới" onclick="resetUserPw(${i})">🔑</button>
         ${u.email?`<button class="icon-btn" title="Gửi email mời" onclick="sendInviteEmail(${i})">✉</button>`:''}
         <button class="icon-btn danger" title="Xóa" onclick="deleteUser(${i})">✕</button>
       </div></td>
@@ -4746,7 +4823,11 @@ function userEditorModal(initial,idx){
       </div>
       <div class="field">
         <label>${isEdit?'Mật khẩu mới (để trống = giữ nguyên)':'Mật khẩu'} (tối thiểu 8 ký tự)</label>
-        <input type="password" id="user-pw" placeholder="${isEdit?'Để trống nếu không đổi':''}">
+        <div style="display:flex;gap:6px;align-items:center">
+          <input type="text" id="user-pw" style="flex:1" placeholder="${isEdit?'Để trống nếu không đổi':'Bấm Tạo tự động →'}">
+          <button type="button" class="btn-sec" style="white-space:nowrap;font-size:12px" onclick="document.getElementById('user-pw').value=genUserPassword()">🎲 Tạo tự động</button>
+        </div>
+        <div style="font-size:11px;color:var(--muted);font-style:italic;margin-top:4px">Bấm "Tạo tự động" để app sinh mật khẩu sẵn — sau khi lưu, app cho sao chép tin nhắn gửi NV qua Zalo.</div>
       </div>
       <div class="field">
         <label>Nhập lại mật khẩu</label>
@@ -6236,6 +6317,7 @@ Lưu ý: KHÔNG chia sẻ mật khẩu cho người khác.`;
   `;
   const foot=`
     <button class="btn-sec" onclick="closeModal();openSettings()">Đóng</button>
+    <button class="btn-sec" onclick="closeModal();openCfgSyncDialog()" title="Đẩy wrap NV lên cloud để NV đăng nhập được ở máy khác">☁ Đẩy lên cloud</button>
     <button class="btn-primary" onclick="navigator.clipboard.writeText(document.getElementById('invite-zalo').value);toast('✓ Đã copy tin nhắn — dán vào Zalo','good')">📋 Copy tin nhắn Zalo</button>
   `;
   openModal('📨 Mời nhân viên '+esc(username), body, foot);
@@ -6351,6 +6433,64 @@ function _showEmailFallback(toEmail, subject, body){
       <p style="color:var(--muted);font-style:italic;margin-top:8px">Email client tự động không mở được. Copy nội dung trên và paste vào Gmail/Outlook.</p>
     </div>`,
     `<button class="btn-sec" onclick="closeModal()">Đóng</button>`);
+}
+
+/* v2.07.0: Đặt lại mật khẩu NV — sinh mật khẩu mới, cập nhật cfg, VÀ ĐẨY LÊN CLOUD NGAY.
+   Trước đây (v2.04–v2.06) reset chỉ lưu cfg local, để admin tự đẩy sau →
+   tạo khoảng hở: hash trong cfg local và wrap trên cloud có thể thuộc 2 mật khẩu
+   khác nhau → NV đăng nhập được trên máy có cfg local nhưng KHÔNG được trên máy
+   mới (pull cfg cloud). Nay reset + đẩy cloud là MỘT thao tác liền, cùng 1 mật khẩu. */
+async function resetUserPw(idx){
+  const cfg=getAuthConfig();
+  const u=cfg.users[idx];if(!u)return;
+  if(!isAdmin()){
+    if(u.canApproveL2 || u.isBOD || u.canManageUsers){
+      toast('NV này quyền cao — chỉ admin đặt lại mật khẩu được','bad');return;
+    }
+  }
+  if(!CRYPTO_KEY){
+    toast('Phiên không hỗ trợ — Thoát và đăng nhập lại rồi thử','bad');return;
+  }
+  if(!confirm(`Đặt lại mật khẩu cho "${u.name}"?\n\nApp sẽ sinh mật khẩu mới và đẩy lên cloud ngay (cần mật khẩu admin). Mật khẩu cũ sẽ không dùng được nữa. ${u.name} sẽ phải đổi mật khẩu ngay lần đăng nhập kế tiếp.`)) return;
+  // v2.07.0: hỏi mật khẩu admin để đẩy lên cloud trong cùng thao tác
+  let adminPw=null;
+  if(cfg.scriptUrl){
+    adminPw=prompt('Nhập mật khẩu admin để đẩy mật khẩu mới của '+u.name+' lên cloud ngay.\n\n(Bắt buộc — nếu không đẩy, nhân viên sẽ không đăng nhập được trên máy mới.)');
+    if(!adminPw){ toast('Đã hủy — chưa đặt lại mật khẩu','bad'); return; }
+    // Xác thực mật khẩu admin trước khi làm gì
+    const ah=await sha256Hex(adminPw + cfg.admin.salt);
+    if(ah !== cfg.admin.hash){ toast('Mật khẩu admin không đúng — đã hủy','bad'); return; }
+  }
+  try{
+    const newPw=genUserPassword();
+    const salt=bytesToB64(rand(16));
+    const hash=await sha256Hex(newPw+salt);
+    const wrap=await wrapMasterKey(CRYPTO_KEY, await deriveWrappingKey(newPw,salt,PBKDF2_ITER_NEW));
+    u.salt=salt; u.hash=hash; u.wrap=wrap; u.iter=PBKDF2_ITER_NEW;
+    u.mustChangePassword=true;
+    setAuthConfig(cfg);
+    try{ logAuditEvent('reset_pw',{target:u.name,by:actorName()}); }catch(e){}
+    // v2.07.0: đẩy lên cloud NGAY với chính mật khẩu vừa sinh —
+    // cfg local và cloud chắc chắn cùng 1 mật khẩu, không thể lệch.
+    if(cfg.scriptUrl && adminPw){
+      try{
+        await pushCfgToCloud(adminPw, {[u.name]: newPw});
+        toast('Đã đặt lại mật khẩu '+u.name+' và đẩy lên cloud — NV đăng nhập được trên mọi máy');
+      }catch(pe){
+        toast('Đã đổi mật khẩu local nhưng ĐẨY CLOUD LỖI: '+(pe.message||pe)+' — hãy vào "Đẩy auth lên cloud" đẩy lại','bad');
+      }
+    } else {
+      toast('Đã đặt lại mật khẩu cho '+u.name+' (chưa cấu hình cloud)');
+    }
+    // Hiện modal với mật khẩu mới + mẫu tin Zalo
+    setTimeout(()=>showInviteModalAfterCreate(u.name, u.fullName||'', newPw), 300);
+  }catch(e){
+    if(/extractable|exportKey/i.test(e.message||'')){
+      toast('Phiên không hỗ trợ — Thoát và đăng nhập lại rồi thử','bad');
+    } else {
+      toast('Lỗi đặt lại mật khẩu: '+(e.message||e),'bad');
+    }
+  }
 }
 
 function deleteUser(idx){
@@ -10406,6 +10546,17 @@ function scheduleAutoSync(){
   _autoSyncTimer=setTimeout(()=>cloudSync('push'),5000); // v1.38.4: 5s debounce (đủ để gõ tiếp mà không spam)
 }
 function uid(){return Date.now().toString(36)+Math.random().toString(36).slice(2,7);}
+
+/* v2.04.0: sinh mật khẩu ngẫu nhiên dễ đọc cho NV.
+   Dạng Shm-XXXX-XX — bỏ ký tự dễ nhầm (0/O, 1/l/I), đủ mạnh, dễ đọc qua tin nhắn. */
+function genUserPassword(){
+  const chars='abcdefghjkmnpqrstuvwxyz23456789';
+  const pick=n=>{
+    const a=new Uint8Array(n); crypto.getRandomValues(a);
+    return Array.from(a,b=>chars[b%chars.length]).join('');
+  };
+  return 'Shm-'+pick(4)+'-'+pick(3);
+}
 
 /* ============================================================
    ONLINE PRESENCE — team awareness (who's online)
