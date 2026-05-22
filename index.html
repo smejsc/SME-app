@@ -2432,7 +2432,7 @@ body{min-height:100vh;background-image:radial-gradient(circle at 20% 0%,rgba(184
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='2.06.0';            // bumped on each release
+const APP_VERSION='2.07.0';            // bumped on each release
 
 /* v1.68.0: URL Apps Script của công ty — nhúng cứng để NV không cần nhập / không cần ?join=.
    Khi máy mới mở app, app tự dùng URL này kết nối cloud → vào thẳng Login.
@@ -3508,8 +3508,14 @@ async function pullCfgFromCloud(scriptUrl, userName, password){
   // Try unwrap
   let masterKey;
   try{
+    // v2.07.0: log chẩn đoán — in giá trị wrap + password để bắt lỗi lệch
+    console.log('[cfg-unwrap] wrap cho', userName, '→ salt=', wrap.salt,
+      '· iter=', wrap.iter, '· iv=', wrap.iv,
+      '· ct.len=', (wrap.ct||'').length, '· pw.len=', (password||'').length);
     masterKey=await unwrapCfgMasterKey(wrap, password);
+    console.log('[cfg-unwrap] unwrap master key THÀNH CÔNG');
   } catch(e){
+    console.log('[cfg-unwrap] unwrap THẤT BẠI:', e && e.message);
     throw new Error('Mật khẩu không đúng — không thể giải mã cfg');
   }
   // Decrypt cfg
@@ -6429,7 +6435,11 @@ function _showEmailFallback(toEmail, subject, body){
     `<button class="btn-sec" onclick="closeModal()">Đóng</button>`);
 }
 
-/* v2.04.0: Đặt lại mật khẩu NV — sinh mật khẩu mới, cập nhật wrap, buộc đổi lần đầu. */
+/* v2.07.0: Đặt lại mật khẩu NV — sinh mật khẩu mới, cập nhật cfg, VÀ ĐẨY LÊN CLOUD NGAY.
+   Trước đây (v2.04–v2.06) reset chỉ lưu cfg local, để admin tự đẩy sau →
+   tạo khoảng hở: hash trong cfg local và wrap trên cloud có thể thuộc 2 mật khẩu
+   khác nhau → NV đăng nhập được trên máy có cfg local nhưng KHÔNG được trên máy
+   mới (pull cfg cloud). Nay reset + đẩy cloud là MỘT thao tác liền, cùng 1 mật khẩu. */
 async function resetUserPw(idx){
   const cfg=getAuthConfig();
   const u=cfg.users[idx];if(!u)return;
@@ -6441,7 +6451,16 @@ async function resetUserPw(idx){
   if(!CRYPTO_KEY){
     toast('Phiên không hỗ trợ — Thoát và đăng nhập lại rồi thử','bad');return;
   }
-  if(!confirm(`Đặt lại mật khẩu cho "${u.name}"?\n\nApp sẽ sinh mật khẩu mới. Mật khẩu cũ sẽ không dùng được nữa. ${u.name} sẽ phải đổi mật khẩu ngay lần đăng nhập kế tiếp.`)) return;
+  if(!confirm(`Đặt lại mật khẩu cho "${u.name}"?\n\nApp sẽ sinh mật khẩu mới và đẩy lên cloud ngay (cần mật khẩu admin). Mật khẩu cũ sẽ không dùng được nữa. ${u.name} sẽ phải đổi mật khẩu ngay lần đăng nhập kế tiếp.`)) return;
+  // v2.07.0: hỏi mật khẩu admin để đẩy lên cloud trong cùng thao tác
+  let adminPw=null;
+  if(cfg.scriptUrl){
+    adminPw=prompt('Nhập mật khẩu admin để đẩy mật khẩu mới của '+u.name+' lên cloud ngay.\n\n(Bắt buộc — nếu không đẩy, nhân viên sẽ không đăng nhập được trên máy mới.)');
+    if(!adminPw){ toast('Đã hủy — chưa đặt lại mật khẩu','bad'); return; }
+    // Xác thực mật khẩu admin trước khi làm gì
+    const ah=await sha256Hex(adminPw + cfg.admin.salt);
+    if(ah !== cfg.admin.hash){ toast('Mật khẩu admin không đúng — đã hủy','bad'); return; }
+  }
   try{
     const newPw=genUserPassword();
     const salt=bytesToB64(rand(16));
@@ -6451,8 +6470,19 @@ async function resetUserPw(idx){
     u.mustChangePassword=true;
     setAuthConfig(cfg);
     try{ logAuditEvent('reset_pw',{target:u.name,by:actorName()}); }catch(e){}
-    toast('Đã đặt lại mật khẩu cho '+u.name);
-    // Hiện modal với mật khẩu mới + mẫu tin Zalo (tái dùng modal mời NV)
+    // v2.07.0: đẩy lên cloud NGAY với chính mật khẩu vừa sinh —
+    // cfg local và cloud chắc chắn cùng 1 mật khẩu, không thể lệch.
+    if(cfg.scriptUrl && adminPw){
+      try{
+        await pushCfgToCloud(adminPw, {[u.name]: newPw});
+        toast('Đã đặt lại mật khẩu '+u.name+' và đẩy lên cloud — NV đăng nhập được trên mọi máy');
+      }catch(pe){
+        toast('Đã đổi mật khẩu local nhưng ĐẨY CLOUD LỖI: '+(pe.message||pe)+' — hãy vào "Đẩy auth lên cloud" đẩy lại','bad');
+      }
+    } else {
+      toast('Đã đặt lại mật khẩu cho '+u.name+' (chưa cấu hình cloud)');
+    }
+    // Hiện modal với mật khẩu mới + mẫu tin Zalo
     setTimeout(()=>showInviteModalAfterCreate(u.name, u.fullName||'', newPw), 300);
   }catch(e){
     if(/extractable|exportKey/i.test(e.message||'')){
