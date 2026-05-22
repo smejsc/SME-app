@@ -1107,6 +1107,9 @@ body{min-height:100vh;background-image:radial-gradient(circle at 20% 0%,rgba(184
         </select>
         <button class="btn-primary" onclick="openPayableModal(null)">+ Thêm phải trả</button>
         <button class="btn-sec" onclick="openMultiRowModal('ap')" title="Nhập phiếu nhiều dòng — 1 NCC có nhiều hóa đơn">📋 Nhập nhiều dòng</button>
+        <button class="btn-sec" onclick="arExportExcel('ap')" title="Xuất sổ phải trả ra Excel để đối chiếu" style="font-size:12px">📊 Xuất Excel</button>
+        <button class="btn-sec" onclick="arExportPdf('ap')" title="Xuất sổ phải trả ra PDF để đối chiếu" style="font-size:12px">📄 Xuất PDF</button>
+        <button class="btn-sec" onclick="apHandoverPdf()" title="Biên bản bàn giao bộ chứng từ — có ô ký xác nhận đã nhận" style="font-size:12px">🧾 Biên bản bàn giao</button>
         <button class="btn-sec" onclick="openVatExportDialog()" title="Xuất Excel hóa đơn VAT để đối chiếu Cổng thông tin thuế">📊 Xuất bảng kê VAT</button>
       </div>
     </div>
@@ -2429,7 +2432,7 @@ body{min-height:100vh;background-image:radial-gradient(circle at 20% 0%,rgba(184
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='2.00.0';            // bumped on each release
+const APP_VERSION='2.01.0';            // bumped on each release
 
 /* v1.68.0: URL Apps Script của công ty — nhúng cứng để NV không cần nhập / không cần ?join=.
    Khi máy mới mở app, app tự dùng URL này kết nối cloud → vào thẳng Login.
@@ -24281,6 +24284,19 @@ function arExportExcel(kind){
     return o;
   });
   const ws=XLSX.utils.json_to_sheet(data);
+  // v2.01.0: định dạng phân cách nghìn cho 5 cột số tiền — dễ đối chiếu.
+  // Ô vẫn giữ GIÁ TRỊ SỐ THẬT, chỉ đổi cách hiển thị (number format).
+  // Cột K..O = Số tiền chưa VAT · Tiền VAT · Tổng sau VAT · Đã trả/thu · Còn lại
+  const range=XLSX.utils.decode_range(ws['!ref']);
+  ['K','L','M','N','O'].forEach(col=>{
+    for(let R=1; R<=range.e.r; R++){          // R=1: bỏ qua hàng tiêu đề
+      const cell=ws[col+(R+1)];
+      if(cell && cell.t==='n') cell.z='#,##0';
+    }
+  });
+  // Nới rộng các cột số cho dễ đọc
+  ws['!cols']=ws['!cols']||[];
+  [10,11,12,13,14].forEach(ci=>{ ws['!cols'][ci]={wch:16}; });
   const wb=XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, isAp?'Phai tra':'Phai thu');
   const fname=(isAp?'So-Phai-tra-':'So-Phai-thu-')+new Date().toISOString().slice(0,10)+'.xlsx';
@@ -24337,6 +24353,99 @@ function arExportPdf(kind){
     </body></html>`);
   win.document.close();
   toast('✓ Đang mở cửa sổ in PDF');
+}
+
+/* v2.01.0: Biên bản bàn giao bộ chứng từ Phải trả — NV bàn giao cho Kế toán.
+   Mỗi dòng có ô trống để KT tích xác nhận đã nhận đủ bộ chứng từ; có ô ký 2 bên. */
+function apHandoverPdf(){
+  const rows=_arExportRows('ap');
+  if(!rows.length){ toast('Chưa có dữ liệu để lập biên bản','bad'); return; }
+  const fmtN=n=>(+n||0).toLocaleString('vi-VN');
+  const esc2=s=>String(s==null?'':s).replace(/[<>&]/g,c=>({'<':'&lt;','>':'&gt;','&':'&amp;'}[c]));
+  const byCcy={};
+  rows.forEach(r=>{
+    const c=r.ccy||'USD';
+    if(!byCcy[c]) byCcy[c]=0;
+    byCcy[c]+=(+r.amountGross||+r.amount||0);
+  });
+  const totalLines=Object.entries(byCcy).map(([c,v])=>`${c}: <b>${fmtN(v)}</b>`).join(' &nbsp;|&nbsp; ');
+  const creators=[...new Set(rows.map(r=>r.createdBy||'').filter(Boolean))];
+  const handoverName=creators.length===1?creators[0]:'.....................................';
+  const bodyRows=rows.map((r,i)=>{
+    const tot=+r.amountGross||+r.amount||0;
+    return `<tr>
+      <td class="c">${i+1}</td>
+      <td>${esc2(r.invoiceNo||'-')}</td>
+      <td>${esc2(r.partner||'')}</td>
+      <td>${esc2(companyName(r.companyId))}</td>
+      <td>${esc2(r.desc||'')}</td>
+      <td class="c">${esc2(r.issueDate||'')}</td>
+      <td class="c">${esc2(r.ccy||'USD')}</td>
+      <td class="num">${fmtN(tot)}</td>
+      <td class="chk"></td>
+      <td></td>
+    </tr>`;
+  }).join('');
+  const win=window.open('','_blank');
+  if(!win){ toast('Trình duyệt chặn cửa sổ in — cho phép popup','bad'); return; }
+  const today=new Date().toLocaleDateString('vi-VN');
+  win.document.write(`<!doctype html><html><head><meta charset="utf-8"><title>Biên bản bàn giao chứng từ</title>
+    <style>
+      body{font-family:Arial,sans-serif;font-size:12px;color:#1c3a5c;padding:28px}
+      h1{font-size:15px;color:#1c3a5c;margin:0;text-align:center}
+      h2{font-size:16px;margin:6px 0 2px;text-align:center}
+      .sub{font-size:11px;color:#666;text-align:center;margin-bottom:16px}
+      .meta{font-size:11px;margin:10px 0;line-height:1.7}
+      table{width:100%;border-collapse:collapse;margin-top:8px}
+      th,td{border:1px solid #999;padding:5px 6px;text-align:left;font-size:10px;vertical-align:top}
+      th{background:#1c3a5c;color:#fff;text-align:center}
+      .num{text-align:right}
+      .c{text-align:center}
+      .chk{width:60px;text-align:center}
+      .foot-tot{margin-top:10px;font-size:11px}
+      .sign{display:flex;justify-content:space-between;margin-top:40px;font-size:11px}
+      .sign div{width:45%;text-align:center}
+      .sign .role{font-weight:bold}
+      .sign .hint{color:#888;font-size:10px;font-style:italic}
+      .sign .name{margin-top:60px}
+      .note{margin-top:18px;font-size:10px;color:#888;font-style:italic}
+    </style></head><body>
+    <h1>SEAHORSE MARINE &amp; ENERGY JSC</h1>
+    <h2>BIÊN BẢN BÀN GIAO BỘ CHỨNG TỪ</h2>
+    <div class="sub">Bàn giao hóa đơn / chứng từ Phải trả từ nhân viên sang Kế toán</div>
+    <div class="meta">
+      Hôm nay, ngày ${today}, chúng tôi gồm:<br>
+      &nbsp;&nbsp;<b>Bên bàn giao</b> (nhân viên nhập liệu): ${esc2(handoverName)}<br>
+      &nbsp;&nbsp;<b>Bên nhận</b> (kế toán): .....................................<br>
+      Tiến hành bàn giao ${rows.length} bộ chứng từ Phải trả như sau:
+    </div>
+    <table>
+      <thead><tr>
+        <th>STT</th><th>Số HĐ</th><th>Nhà cung cấp</th><th>Công ty</th>
+        <th>Diễn giải</th><th>Ngày HĐ</th><th>CCY</th><th>Số tiền</th>
+        <th>KT đã nhận</th><th>Ghi chú</th>
+      </tr></thead>
+      <tbody>${bodyRows}</tbody>
+    </table>
+    <div class="foot-tot">Tổng giá trị bàn giao: ${totalLines}
+      &nbsp;<span style="color:#888;font-size:10px">(gom riêng theo từng loại tiền tệ)</span></div>
+    <div class="note">Cột &#8220;KT đã nhận&#8221;: kế toán đánh dấu &#10003; vào từng dòng đã nhận đủ bộ chứng từ. Dòng nào thiếu thì ghi rõ ở cột Ghi chú.</div>
+    <div class="sign">
+      <div>
+        <div class="role">BÊN BÀN GIAO</div>
+        <div class="hint">(Nhân viên — ký, ghi rõ họ tên)</div>
+        <div class="name">${esc2(handoverName)}</div>
+      </div>
+      <div>
+        <div class="role">BÊN NHẬN</div>
+        <div class="hint">(Kế toán — ký, ghi rõ họ tên)</div>
+        <div class="name">&nbsp;</div>
+      </div>
+    </div>
+    <script>window.onload=function(){window.print();}<\/script>
+    </body></html>`);
+  win.document.close();
+  toast('✓ Đang mở biên bản bàn giao — cửa sổ in PDF');
 }
 
 /* v1.86.0: Lấy danh sách bản ghi AR/AP theo đúng filter đang hiển thị trên bảng */
