@@ -2432,7 +2432,7 @@ body{min-height:100vh;background-image:radial-gradient(circle at 20% 0%,rgba(184
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='2.04.0';            // bumped on each release
+const APP_VERSION='2.05.0';            // bumped on each release
 
 /* v1.68.0: URL Apps Script của công ty — nhúng cứng để NV không cần nhập / không cần ?join=.
    Khi máy mới mở app, app tự dùng URL này kết nối cloud → vào thẳng Login.
@@ -3334,9 +3334,19 @@ async function pushCfgToCloud(adminPassword, extraUserPasswords){
   // Try to preserve existing wraps from cloud (for NV who self-wrapped)
   let existingWraps=[];
   let existingMasterKey=null;
+  // v2.05.0: phân biệt "cloud xác nhận trống" vs "không đọc được cloud".
+  // cloudReadOk=true CHỈ khi đã đọc cloud thành công (dù trống hay có dữ liệu).
+  // Nếu fetch/parse lỗi → cloudReadOk=false → KHÔNG được tạo master key mới
+  // (tránh xoá sạch wrap NV khi mạng chập chờn).
+  let cloudReadOk=false;
+  let cloudHasCfg=false;
   try{
     const res0=await fetch(cfg.scriptUrl+'?action=load&key=auth', {method:'GET'});
     const data0=await res0.json();
+    cloudReadOk=true;  // đọc + parse JSON thành công
+    if(data0.ok && data0.payload && data0.payload.v===2){
+      cloudHasCfg=true;
+    }
     // v1.64.0: GUARD — cloud có cfg admin KHÁC với local admin → cảnh báo đè nhầm cty
     if(data0.ok && data0.payload && data0.payload.v===2){
       // Thử pull + so sánh admin hash
@@ -3367,13 +3377,17 @@ async function pushCfgToCloud(adminPassword, extraUserPasswords){
       if(myWrap){
         try{
           existingMasterKey=await unwrapCfgMasterKey(myWrap, adminPassword);
+          // v2.05.0: unwrap THÀNH CÔNG → master key cũ được giữ → wrap NV cũ vẫn khớp.
+          // Giữ TẤT CẢ wrap cũ để mọi NV vẫn đăng nhập được, dù lần đẩy này
+          // admin chỉ nhập mật khẩu cho một vài NV. (Trước đây có nhánh xóa sạch.)
           existingWraps=data0.payload.wraps;
         }catch(e){
-          // Password changed → can't unwrap existing master key
+          // Password admin đổi / sai → không lấy được master key cũ.
           if(!isPushingAsAdmin){
-            // Sub-admin CANNOT generate new master key (would invalidate admin wrap)
             throw new Error('Mật khẩu của bạn đã thay đổi trên cloud — nhờ admin push lại trước');
           }
+          // Master key sẽ là key MỚI → wrap NV cũ (gói key cũ) không còn dùng được.
+          // Không giữ existingWraps trong trường hợp này là đúng bản chất.
           existingMasterKey=null;
           existingWraps=[];
         }
@@ -3387,13 +3401,31 @@ async function pushCfgToCloud(adminPassword, extraUserPasswords){
     if(!isPushingAsAdmin && e.message && (e.message.includes('chưa có wrap') || e.message.includes('mật khẩu của bạn đã'))){
       throw e;
     }
-    // Admin: no existing cfg → fresh
+    // v1.64.0 guard cảnh báo đè nhầm công ty — vẫn phải ném ra
+    if(e.message && /CẢNH BÁO/.test(e.message)) throw e;
+    // cloudReadOk vẫn false → khối kiểm tra bên dưới sẽ chặn
+  }
+
+  // v2.05.0: AN TOÀN — nếu KHÔNG đọc được cloud, TUYỆT ĐỐI không đẩy.
+  // Đẩy lúc này sẽ tạo master key mới và xoá sạch wrap của mọi NV.
+  if(!cloudReadOk){
+    throw new Error('Không đọc được cấu hình trên cloud (mạng yếu hoặc Google Script lỗi). '+
+      'KHÔNG đẩy lúc này để tránh làm mất quyền đăng nhập của nhân viên. '+
+      'Kiểm tra kết nối mạng rồi thử lại.');
   }
 
   // Use existing master key if available (to preserve NV wraps), else generate new
   // v1.40.0: Sub-admin CANNOT generate new master key (would orphan admin wrap)
   if(!existingMasterKey && !isPushingAsAdmin){
     throw new Error('Sub-admin không thể khởi tạo master key mới — nhờ admin push lần đầu trước');
+  }
+  // v2.05.0: nếu cloud ĐÃ CÓ cfg nhưng không lấy được master key cũ → KHÔNG tạo key mới.
+  // Tạo key mới lúc này = xoá sạch wrap NV. Bắt admin kiểm tra mật khẩu.
+  // Ngoại lệ: người dùng đã xác nhận ghi đè (window._cfgPushConfirmOverwrite) — cho qua.
+  if(cloudHasCfg && !existingMasterKey && isPushingAsAdmin && !window._cfgPushConfirmOverwrite){
+    throw new Error('Cloud đã có cấu hình nhưng không mở được bằng mật khẩu admin vừa nhập. '+
+      'Kiểm tra lại mật khẩu admin. Nếu cố đẩy, toàn bộ nhân viên sẽ mất quyền đăng nhập. '+
+      'Nếu chắc chắn cần khởi tạo lại — bấm "Đẩy" LẦN NỮA để xác nhận.');
   }
   const masterKey = existingMasterKey || await generateCfgMasterKey();
 
