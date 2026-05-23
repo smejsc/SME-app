@@ -639,9 +639,9 @@ body{min-height:100vh;background-image:radial-gradient(circle at 20% 0%,rgba(184
     </div>
   </div>
   <div class="nav-group">
-    <button class="nav-item nav-group-btn" data-group="banking"><span class="num">05</span>Ngân hàng <span class="caret">▾</span></button>
+    <button class="nav-item nav-group-btn" data-group="banking"><span class="num">05</span>Ngân quỹ <span class="caret">▾</span></button>
     <div class="nav-submenu" id="submenu-banking">
-      <button class="nav-sub-item" data-page="banking"><span class="sub-dot"></span>Tài khoản + Vốn vay</button>
+      <button class="nav-sub-item" data-page="banking"><span class="sub-dot"></span>Quỹ TM · Tài khoản · Vốn vay</button>
       <button class="nav-sub-item" data-page="cashflow"><span class="sub-dot"></span>Cash flow (forecast)</button>
     </div>
   </div>
@@ -1440,13 +1440,21 @@ body{min-height:100vh;background-image:radial-gradient(circle at 20% 0%,rgba(184
 <section class="page" id="page-banking">
   <div class="page-head">
     <div>
-      <div class="page-title">Ngân hàng &amp; <span class="it">Tín dụng</span></div>
-      <div class="page-sub">Số dư tài khoản · Vay ngắn hạn · Vay trung-dài hạn</div>
+      <div class="page-title">Ngân <span class="it">quỹ</span></div>
+      <div class="page-sub">Quỹ tiền mặt · Số dư tài khoản · Vay ngắn hạn · Vay trung-dài hạn</div>
     </div>
-    <div class="page-meta">Snapshot số dư cuối kỳ<br>Tracking từng món vay</div>
+    <div class="page-meta">Treasury<br>Tiền mặt · Ngân hàng · Tín dụng</div>
   </div>
 
   <div class="kpi-row" id="bank-kpi"></div>
+
+  <div class="section">
+    <div class="section-head">
+      <div class="section-title">Quỹ tiền mặt</div>
+      <button class="btn-sec" onclick="addCashFund()" style="font-size:11px">+ Quỹ tiền mặt</button>
+    </div>
+    <div id="cash-funds-list"></div>
+  </div>
 
   <div class="section">
     <div class="section-head">
@@ -2460,7 +2468,7 @@ body{min-height:100vh;background-image:radial-gradient(circle at 20% 0%,rgba(184
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='2.18.0';            // bumped on each release
+const APP_VERSION='2.20.0';            // bumped on each release
 
 /* v1.68.0: URL Apps Script của công ty — nhúng cứng để NV không cần nhập / không cần ?join=.
    Khi máy mới mở app, app tự dùng URL này kết nối cloud → vào thẳng Login.
@@ -4312,7 +4320,7 @@ const ALL_TABS=[
   {id:'vessel_expense',label:'Chi phí Tàu/Dự án'},
   {id:'hr_expense',label:'Chi phí Nhân sự'},
   {id:'qn_expense',label:'Chi phí Quản lý chung'},
-  {id:'banking',label:'Ngân hàng'},
+  {id:'banking',label:'Ngân quỹ'},
   {id:'cashflow',label:'Cash flow (dự báo dòng tiền)'},
   {id:'operations',label:'Quản lý vận hành tàu'},
   {id:'inventory',label:'Kho vật tư'},
@@ -4378,8 +4386,8 @@ const TAB_TO_FIELDS={
   vessel_expense: ['vessels','payables','vesselExpenseCats','omProjectExpenseCats'],
   hr_expense:     ['payables','hrExpenseCats','projects'],
   qn_expense:     ['payables','qnExpenseCats','projects'],
-  banking:        ['bankAccounts','bankSnapshots','loans'],
-  cashflow:       ['receivables','payables','taxes','bankAccounts','bankSnapshots','loans'],
+  banking:        ['bankAccounts','bankSnapshots','loans','cashFunds','cashTxns'],
+  cashflow:       ['receivables','payables','taxes','bankAccounts','bankSnapshots','loans','cashFunds','cashTxns'],
   salary_fund:    ['salaryFund','receivables','payables'],
   operations:     ['opVessels','opTransactions'],
   inventory:      ['warehouses','invMovements','vessels'],
@@ -4403,6 +4411,7 @@ const ALL_DATA_FIELDS=[
   'vesselExpenseCats','omProjectExpenseCats','hrExpenseCats','qnExpenseCats',
   'fixedAssets','tools',
   'transactions',
+  'cashFunds','cashTxns',
   'departments','vendors','expenseTypes','revenueTypes',
   'salaryFund','taxes'
 ];
@@ -8792,6 +8801,9 @@ function defaultState(){
     bankAccounts:[],     // [{id, bankName, branch, accountNo, accountName, ccy, isActive, note, createdAt}]
     bankSnapshots:[],    // v1.31: [{id, bankAccountId, date, balance, note, createdBy, createdAt}]
     loans:[],            // v1.31: [{id, bankName, loanType, contractNo, principal, ccy, interestRate, startDate, endDate, termMonths, repayMethod, paymentSchedule:[], status, note, createdBy, createdAt}]
+    // v2.20.0: Quỹ tiền mặt (nhiều quỹ) + sổ quỹ
+    cashFunds:[],        // [{id, name, fundType:'OFFICE'|'VESSEL'|'OTHER', ccy, balance, isActive, note, createdBy, createdAt}]
+    cashTxns:[],         // [{id, fundId, date, direction:'IN'|'OUT', amount, ccy, category, desc, sourceType:'ar'|'ap'|'manual'|'transfer', sourceId, recordedBy, recordedAt}]
     salaryFund:{        // v1.32: Quỹ tiền lương (chỉ admin)
       config:{
         defaultRate:5,                // % mặc định khi tạo contribution
@@ -15199,6 +15211,166 @@ function _sfSaveConfig(){
   toast('💾 Đã lưu cấu hình quỹ');
 }
 
+/* ============================================================
+   QUỸ TIỀN MẶT (v2.20.0) — nhiều quỹ + sổ quỹ thu/chi/tồn
+   ============================================================ */
+const CASH_FUND_TYPES={
+  OFFICE:{label:'Quỹ Văn phòng', icon:'🏢'},
+  VESSEL:{label:'Quỹ Tàu',       icon:'⛵'},
+  OTHER: {label:'Quỹ khác',      icon:'💰'}
+};
+
+function cashFundBalance(fundId){
+  const f=(S.cashFunds||[]).find(x=>x.id===fundId);
+  return f ? (+f.balance||0) : 0;
+}
+
+function addCashFund(){
+  if(!isAdmin()){toast('Chỉ admin','bad');return;}
+  _cashFundModal(null);
+}
+function editCashFund(id){
+  if(!isAdmin()){toast('Chỉ admin','bad');return;}
+  const f=(S.cashFunds||[]).find(x=>x.id===id);
+  if(!f){toast('Không tìm thấy','bad');return;}
+  _cashFundModal(f);
+}
+function _cashFundModal(f){
+  const isEdit=!!f;
+  f=f||{};
+  const body=`
+    <div style="font-size:13px;display:grid;grid-template-columns:1fr 1fr;gap:10px">
+      <div class="field" style="grid-column:1/3">
+        <label>Tên quỹ *</label>
+        <input type="text" id="cf-name" value="${esc(f.name||'')}" placeholder="VD: Quỹ TM Văn phòng Vũng Tàu">
+      </div>
+      <div class="field">
+        <label>Loại quỹ *</label>
+        <select id="cf-type">
+          ${Object.entries(CASH_FUND_TYPES).map(([k,v])=>`<option value="${k}" ${f.fundType===k?'selected':''}>${v.icon} ${v.label}</option>`).join('')}
+        </select>
+      </div>
+      <div class="field">
+        <label>Loại tiền *</label>
+        <select id="cf-ccy">
+          <option value="VND" ${f.ccy==='VND'||!f.ccy?'selected':''}>VND</option>
+          <option value="USD" ${f.ccy==='USD'?'selected':''}>USD</option>
+          <option value="SGD" ${f.ccy==='SGD'?'selected':''}>SGD</option>
+          <option value="EUR" ${f.ccy==='EUR'?'selected':''}>EUR</option>
+        </select>
+      </div>
+      <div class="field">
+        <label>Số dư ${isEdit?'hiện tại':'ban đầu'}</label>
+        <input type="number" id="cf-balance" value="${+f.balance||0}" step="any" ${isEdit?'readonly style="background:var(--paper-2)"':''}>
+        ${isEdit?'<span style="font-size:10px;color:var(--muted)">Số dư chỉ thay đổi qua phiếu thu/chi quỹ</span>':''}
+      </div>
+      <div class="field">
+        <label>Trạng thái</label>
+        <label style="display:flex;align-items:center;gap:6px;padding:8px;font-size:12px">
+          <input type="checkbox" id="cf-active" ${f.isActive!==false?'checked':''}> Đang dùng
+        </label>
+      </div>
+      <div class="field" style="grid-column:1/3">
+        <label>Ghi chú</label>
+        <input type="text" id="cf-note" value="${esc(f.note||'')}" placeholder="VD: Thủ quỹ giữ · Két VP tầng 2...">
+      </div>
+      <div id="cf-err" style="grid-column:1/3;color:var(--bad);font-size:12px"></div>
+    </div>`;
+  const foot=`<button class="btn-sec" onclick="closeModal()">Hủy</button>
+              <button class="btn-primary" onclick="saveCashFund('${isEdit?f.id:''}')">${isEdit?'Lưu':'Tạo quỹ'}</button>`;
+  openModal(isEdit?'Sửa quỹ tiền mặt':'Tạo quỹ tiền mặt mới',body,foot);
+}
+function saveCashFund(id){
+  const err=document.getElementById('cf-err');
+  err.textContent='';
+  const name=document.getElementById('cf-name').value.trim();
+  const fundType=document.getElementById('cf-type').value;
+  const ccy=document.getElementById('cf-ccy').value;
+  const isActive=document.getElementById('cf-active').checked;
+  const note=document.getElementById('cf-note').value.trim();
+  if(!name){err.textContent='Nhập tên quỹ';return;}
+  S.cashFunds=S.cashFunds||[];
+  if(id){
+    const f=S.cashFunds.find(x=>x.id===id);
+    if(!f){err.textContent='Không tìm thấy quỹ';return;}
+    f.name=name; f.fundType=fundType; f.ccy=ccy; f.isActive=isActive; f.note=note;
+  } else {
+    const initBal=+document.getElementById('cf-balance').value||0;
+    const fund={id:uid(),name,fundType,ccy,balance:initBal,isActive,note,
+      createdBy:actorName(),createdAt:new Date().toISOString()};
+    S.cashFunds.push(fund);
+    // Số dư ban đầu > 0 → ghi 1 dòng sổ quỹ làm mốc
+    if(initBal>0){
+      S.cashTxns=S.cashTxns||[];
+      S.cashTxns.push({id:uid(),fundId:fund.id,date:todayISO(),direction:'IN',
+        amount:initBal,ccy,category:'Số dư ban đầu',desc:'Số dư khởi tạo quỹ',
+        sourceType:'manual',sourceId:null,recordedBy:actorName(),recordedAt:new Date().toISOString()});
+    }
+  }
+  saveState();closeModal();renderAll();
+  toast(id?'Đã lưu quỹ':'Đã tạo quỹ tiền mặt');
+}
+
+function renderCashFunds(){
+  const wrap=document.getElementById('cash-funds-list');
+  if(!wrap) return;
+  const funds=S.cashFunds||[];
+  if(!funds.length){
+    wrap.innerHTML='<div class="empty" style="padding:16px;text-align:center;color:var(--muted)">Chưa có quỹ tiền mặt. Bấm "+ Quỹ tiền mặt" để tạo.</div>';
+    return;
+  }
+  let html='<table class="table" style="font-size:12px"><thead><tr><th>Quỹ</th><th>Loại</th><th class="num">Số dư</th><th>Trạng thái</th><th></th></tr></thead><tbody>';
+  funds.forEach(f=>{
+    const t=CASH_FUND_TYPES[f.fundType]||CASH_FUND_TYPES.OTHER;
+    const bal=+f.balance||0;
+    html+=`<tr>
+      <td><b>${esc(f.name)}</b>${f.note?`<br><span style="font-size:10px;color:var(--muted)">${esc(f.note)}</span>`:''}</td>
+      <td>${t.icon} ${t.label}</td>
+      <td class="num" style="font-weight:600;color:${bal>=0?'var(--good)':'var(--bad)'}">${fmtCcy(bal,f.ccy||'VND')}</td>
+      <td>${f.isActive!==false?'<span style="color:var(--good)">● Đang dùng</span>':'<span style="color:var(--muted)">○ Ngừng</span>'}</td>
+      <td style="white-space:nowrap">
+        <button class="btn-sec" style="font-size:10px;padding:3px 8px" onclick="viewCashLedger('${f.id}')">📒 Sổ quỹ</button>
+        ${isAdmin()?`<button class="btn-sec" style="font-size:10px;padding:3px 8px" onclick="editCashFund('${f.id}')">Sửa</button>`:''}
+      </td>
+    </tr>`;
+  });
+  html+='</tbody></table>';
+  wrap.innerHTML=html;
+}
+
+function viewCashLedger(fundId){
+  const f=(S.cashFunds||[]).find(x=>x.id===fundId);
+  if(!f){toast('Không tìm thấy quỹ','bad');return;}
+  const txns=(S.cashTxns||[]).filter(t=>t.fundId===fundId)
+    .slice().sort((a,b)=>(a.date||'').localeCompare(b.date||'')||(a.recordedAt||'').localeCompare(b.recordedAt||''));
+  let running=0;
+  let rows='';
+  if(!txns.length){
+    rows='<tr><td colspan="5" class="empty" style="text-align:center;color:var(--muted)">Chưa có giao dịch</td></tr>';
+  } else {
+    txns.forEach(t=>{
+      const amt=+t.amount||0;
+      running += (t.direction==='IN'? amt : -amt);
+      rows+=`<tr>
+        <td style="font-family:var(--font-mono);font-size:11px">${esc(t.date||'')}</td>
+        <td>${t.direction==='IN'?'<span style="color:var(--good)">Thu ▲</span>':'<span style="color:var(--bad)">Chi ▼</span>'}</td>
+        <td>${esc(t.category||'')}${t.desc?`<br><span style="font-size:10px;color:var(--muted)">${esc(t.desc)}</span>`:''}</td>
+        <td class="num">${t.direction==='IN'?'+':'−'}${fmtCcy(amt,t.ccy||f.ccy||'VND')}</td>
+        <td class="num" style="font-weight:600">${fmtCcy(running,f.ccy||'VND')}</td>
+      </tr>`;
+    });
+  }
+  const body=`
+    <div style="font-size:12px;color:var(--muted);margin-bottom:8px">
+      <b>${esc(f.name)}</b> · Số dư hiện tại: <b style="color:${(+f.balance||0)>=0?'var(--good)':'var(--bad)'}">${fmtCcy(+f.balance||0,f.ccy||'VND')}</b>
+    </div>
+    <div style="max-height:50vh;overflow:auto">
+      <table class="table" style="font-size:12px"><thead><tr><th>Ngày</th><th>Loại</th><th>Diễn giải</th><th class="num">Số tiền</th><th class="num">Số dư lũy kế</th></tr></thead>
+      <tbody>${rows}</tbody></table>
+    </div>`;
+  openModal('📒 Sổ quỹ — '+esc(f.name),body,'<button class="btn-sec" onclick="closeModal()">Đóng</button>');
+}
+
 function renderBanking(){
   if(!document.getElementById('page-banking')) return;
   const accounts = S.bankAccounts||[];
@@ -15259,6 +15431,9 @@ function renderBanking(){
         <div class="kpi-sub">+ Phí NH: ${fmt(actualBankFeeYTD)} · auto từ schedule</div>
       </div>`;
   }
+
+  // Cash funds list (v2.20.0)
+  renderCashFunds();
 
   // Accounts list
   const accBox = document.getElementById('bank-accounts-list');
@@ -23923,6 +24098,8 @@ const EXCEL_TEMPLATES={
         aliases:['Issue date','Ngày','Ngày phát sinh','Ngày hóa đơn','Date','Ngày chi']},
       {key:'dueDate',     label:'Hạn TT',               required:false, type:'date',
         aliases:['Due date','Hạn thanh toán','Hạn']},
+      {key:'invoiceNo',   label:'Số hóa đơn',           required:false, type:'text',
+        aliases:['Invoice','Invoice No','Số HĐ','Số hoá đơn','So hoa don','HĐ','Số HD']},
       {key:'dueMonth',    label:'DK tháng TT (YYYY-MM)',required:false, type:'month',
         aliases:['Tháng TT','Due month']},
       {key:'amountNet',   label:'Net *',                required:true,  type:'number',
