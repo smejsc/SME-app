@@ -2479,7 +2479,7 @@ body{min-height:100vh;background-image:radial-gradient(circle at 20% 0%,rgba(184
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='2.21.1';            // bumped on each release
+const APP_VERSION='2.22.0';            // bumped on each release
 
 /* v1.68.0: URL Apps Script của công ty — nhúng cứng để NV không cần nhập / không cần ?join=.
    Khi máy mới mở app, app tự dùng URL này kết nối cloud → vào thẳng Login.
@@ -7260,6 +7260,7 @@ function wfApproveL2(r){
   r.approvedL2By=actorName();
   r.approvedL2At=new Date().toISOString();
   try{ applyAdvanceToFund(r); }catch(e){console.warn('applyAdvanceToFund failed',e);}
+  try{ applyAssetToTools(r); }catch(e){console.warn('applyAssetToTools failed',e);}
   try{ logAuditEvent('approve_l2',{recordId:r.id,partner:r.partner||r.desc,amount:r.amount,ccy:r.ccy}); }catch(e){}
   return true;
 }
@@ -7285,6 +7286,7 @@ function wfReject(r,reason){
 function wfReturnToDraft(r){
   if(!isAdmin() && !canApproveL2()){toast('Cần quyền duyệt L2 hoặc admin','bad');return false;}
   try{ reverseAdvanceFromFund(r); }catch(e){console.warn('reverseAdvanceFromFund failed',e);}
+  try{ reverseAssetFromTools(r); }catch(e){console.warn('reverseAssetFromTools failed',e);}
   r.status='draft';
   return true;
 }
@@ -8375,7 +8377,9 @@ function timeAgo(iso){
 const DEFAULT_EXPENSE_TYPES = [
   // PO (Purchase Order — Tồn kho — KHÔNG là chi phí trực tiếp)
   {id:'ET-BUNKER_PO',     code:'BUNKER_PO',     group:'PO',       label:'Mua nhiên liệu',          icon:'⛽', isPO:true, isFuel:true, hint:'CP thực lấy từ tiêu thụ tàu (Tab 03). Khi nhập AP, bắt buộc kê chi tiết loại nhiên liệu, số lượng và đơn giá.'},
-  {id:'ET-PARTS_PO',      code:'PARTS_PO',      group:'PO',       label:'Mua vật tư & phụ tùng',   icon:'🔩', isPO:true, hint:'Tồn kho → xuất kho mới là CP'},
+  {id:'ET-PARTS',         code:'PARTS',         group:'VESSEL',   label:'Vật tư & phụ tùng',       icon:'🔩', isPO:false, hint:'Mua thẳng — ghi chi phí ngay khi phát sinh, không qua kho.'},
+  {id:'ET-CCDC',          code:'CCDC',          group:'VESSEL',   label:'Mua CCDC',                icon:'🧰', isPO:false, isAsset:true, assetCategory:'TOOL',    hint:'AP duyệt xong → ghi chi phí ngay + tự thêm 1 món vào Sổ CCDC & MMTB (tab 09). Không phân bổ.'},
+  {id:'ET-MMTB',          code:'MMTB',          group:'VESSEL',   label:'Mua MMTB',                icon:'⚙', isPO:false, isAsset:true, assetCategory:'MACHINE', hint:'AP duyệt xong → ghi chi phí ngay + tự thêm 1 món vào Sổ CCDC & MMTB (tab 09). Không phân bổ.'},
   // CHI PHÍ TÀU THỰC
   {id:'ET-PORT',          code:'PORT',          group:'VESSEL',   label:'Cảng phí',                icon:'⚓', isPO:false},
   {id:'ET-AGENCY',        code:'AGENCY',        group:'VESSEL',   label:'Đại lý tàu',              icon:'🚢', isPO:false},
@@ -8467,10 +8471,21 @@ function migrateExpenseTypes(){
       labelFixed++;
     }
   });
-  if(added>0 || fuelBackfilled>0 || labelFixed>0){
+  // v2.22.0: PARTS_PO không còn là PO — vật tư/phụ tùng ghi chi phí thẳng vào P&L
+  let partsFixed=0;
+  S.expenseTypes.forEach(t=>{
+    if(t.code==='PARTS_PO' && t.isPO){
+      t.isPO=false;
+      t.label='Vật tư & phụ tùng';
+      t.hint='Mua thẳng — ghi chi phí ngay khi phát sinh, không qua kho.';
+      partsFixed++;
+    }
+  });
+  if(added>0 || fuelBackfilled>0 || labelFixed>0 || partsFixed>0){
     if(added>0) console.log('[migrate] Added',added,'expense types (default)');
     if(fuelBackfilled>0) console.log('[migrate] Backfilled isFuel on',fuelBackfilled,'types');
     if(labelFixed>0) console.log('[migrate] Fixed',labelFixed,'double-escaped labels');
+    if(partsFixed>0) console.log('[migrate] PARTS_PO → non-PO on',partsFixed,'types');
     saveState();
   }
   return added;
@@ -8488,6 +8503,14 @@ function isExpenseAdvance(typeCode){
   if(!typeCode) return false;
   const t=getExpenseType(typeCode);
   return t ? !!t.isAdvance : false;
+}
+
+/* v2.22.0: Loại chi phí CCDC/MMTB — AP duyệt xong tự ghi 1 món vào Sổ CCDC & MMTB.
+   Trả về '' nếu không phải, hoặc 'TOOL'/'MACHINE' nếu là loại tài sản. */
+function expenseAssetCategory(typeCode){
+  if(!typeCode) return '';
+  const t=getExpenseType(typeCode);
+  return (t && t.isAsset) ? (t.assetCategory||'TOOL') : '';
 }
 
 /* v2.21.0: AP loại Ứng quỹ được duyệt xong → cộng tiền vào quỹ + ghi sổ quỹ.
@@ -8532,6 +8555,66 @@ function reverseAdvanceFromFund(r){
   S.cashTxns=(S.cashTxns||[]).filter(t=>!(t.sourceType==='ap'&&t.sourceId===r.id&&t.category==='Ứng quỹ'));
   r._advanceApplied=false;
   delete r._advanceTxnAmount;
+}
+
+/* v2.22.0: AP loại CCDC/MMTB được duyệt xong → tự thêm 1 món vào Sổ CCDC & MMTB.
+   Mã tự sinh: vị trí giữ (tàu/bộ phận) + STT. Idempotent qua cờ r._assetApplied. */
+function _genAssetCode(category, dept, vesselId){
+  // tiền tố vị trí
+  let prefix='';
+  if(dept==='VESSEL' && vesselId){
+    const v=(S.vessels||[]).find(x=>x.id===vesselId);
+    const nm=(v&&v.name?v.name:'TAU').toUpperCase().replace(/[^A-Z0-9]/g,'');
+    prefix=nm.slice(0,6);
+  } else if(dept==='OFFICE') prefix='VP';
+  else if(dept==='QN') prefix='QN';
+  else prefix='KHAC';
+  const catTag = category==='MACHINE' ? 'MMTB' : 'CCDC';
+  const base=`${catTag}-${prefix}`;
+  // STT: đếm các tool đã có cùng base + 1
+  let n=0;
+  (S.tools||[]).forEach(t=>{
+    if(t.code && t.code.indexOf(base+'-')===0) n++;
+  });
+  return `${base}-${String(n+1).padStart(3,'0')}`;
+}
+function applyAssetToTools(r){
+  if(!r || r._assetApplied) return;
+  if(r.status!=='approved') return;
+  const cat = r.expenseType ? expenseAssetCategory(r.expenseType) : '';
+  if(!cat) return;
+  if(!r.assetDept) return;
+  S.tools=S.tools||[];
+  const code=_genAssetCode(cat, r.assetDept, r.assetVesselId);
+  const tool={
+    id:uid(),
+    code, name:(r.desc||r.partner||'CCDC/MMTB'),
+    category:cat,
+    dept:r.assetDept,
+    vesselId:(r.assetDept==='VESSEL')?(r.assetVesselId||null):null,
+    companyId:r.companyId||getParentCompanyId(),
+    purchaseDate:r.issueDate||todayISO(),
+    originalCost:+r.amount||0,
+    ccy:r.ccy||'VND',
+    allocationMonths:+r.assetAllocationMonths||0,  // 0 = không theo dõi phân bổ
+    bookValue:+r.amount||0,
+    monthsAllocated:0,
+    status:'ACTIVE',
+    notes:`Tự tạo từ phải trả · NCC ${r.partner||''}`,
+    history:[],
+    sourceApId:r.id,  // liên kết ngược về AP
+    createdBy:actorName(),
+    createdAt:new Date().toISOString()
+  };
+  S.tools.push(tool);
+  r._assetApplied=true;
+  r._assetToolId=tool.id;
+}
+function reverseAssetFromTools(r){
+  if(!r || !r._assetApplied) return;
+  S.tools=(S.tools||[]).filter(t=>t.id!==r._assetToolId);
+  r._assetApplied=false;
+  delete r._assetToolId;
 }
 
 /* v1.43.0: Get list of fuel-type expense codes */
@@ -17366,6 +17449,43 @@ function _arEditorBody(r,isPayable){
     `;
   }
 
+  // v2.22.0: Asset block (conditional — shown when expenseType is CCDC/MMTB)
+  let assetBlock = '';
+  if(isPayable){
+    const assetCatNow = r.expenseType ? expenseAssetCategory(r.expenseType) : '';
+    const assetDeptCur = r.assetDept || 'VESSEL';
+    const assetVesselCur = r.assetVesselId || '';
+    const assetMonthsCur = (r.assetAllocationMonths!=null) ? r.assetAllocationMonths : '';
+    const vesselOpts = (S.vessels||[]).map(v=>`<option value="${v.id}" ${assetVesselCur===v.id?'selected':''}>${esc(v.name)}</option>`).join('');
+    assetBlock = `
+      <div id="ar-asset-block" style="margin-top:14px;padding:12px 14px;background:rgba(74,107,44,.07);border-left:3px solid #4a6b2c;${assetCatNow?'':'display:none'}">
+        <div style="font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:#4a6b2c;font-weight:700;margin-bottom:8px">🧰 Ghi sổ CCDC / MMTB <span style="color:var(--bad);font-weight:400">(bắt buộc cho loại CCDC/MMTB)</span></div>
+        <div style="font-size:11px;color:var(--muted);font-style:italic;margin-bottom:8px">Khi phải trả này được duyệt xong, app tự thêm 1 món vào Sổ CCDC &amp; MMTB (tab 09 Tài sản). Mã tài sản tự sinh. Chi phí vẫn ghi vào P&amp;L bình thường.</div>
+        <div class="form-grid" style="grid-template-columns:1fr 1fr 1fr">
+          <div class="field">
+            <label>Bộ phận giữ tài sản *</label>
+            <select id="ar-asset-dept" onchange="arAssetDeptChanged()" ${lockedAttr}>
+              <option value="VESSEL" ${assetDeptCur==='VESSEL'?'selected':''}>🚢 Tàu</option>
+              <option value="OFFICE" ${assetDeptCur==='OFFICE'?'selected':''}>🏢 Văn phòng công ty</option>
+              <option value="QN" ${assetDeptCur==='QN'?'selected':''}>🏭 CN Quảng Ngãi</option>
+              <option value="OTHER" ${assetDeptCur==='OTHER'?'selected':''}>📦 Khác</option>
+            </select>
+          </div>
+          <div class="field" id="ar-asset-vessel-wrap" style="${assetDeptCur==='VESSEL'?'':'display:none'}">
+            <label>Tàu cụ thể *</label>
+            <select id="ar-asset-vessel" ${lockedAttr}>
+              <option value="">— Chọn tàu —</option>${vesselOpts}
+            </select>
+          </div>
+          <div class="field">
+            <label>Thời hạn phân bổ (tháng) <span style="color:var(--muted);text-transform:none;font-weight:400;font-size:10px">(tùy chọn — chỉ theo dõi trên sổ TS, không tính lại chi phí)</span></label>
+            <input type="number" id="ar-asset-months" value="${assetMonthsCur}" step="1" min="0" placeholder="Để trống nếu không theo dõi" ${lockedAttr}>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
   // Payment history with FX rate
   const paymentsHtml=(r.payments||[]).length
     ? `<table style="width:100%;font-size:11px;border-collapse:collapse;margin-top:6px">
@@ -17415,6 +17535,7 @@ function _arEditorBody(r,isPayable){
 
     ${fuelBlock}
     ${advanceBlock}
+    ${assetBlock}
 
     <div style="margin-top:14px;padding-top:10px;border-top:1px solid var(--rule)">
       <div style="font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);font-weight:600;margin-bottom:6px">Giá trị & VAT</div>
@@ -17477,6 +17598,19 @@ function arExpenseTypeChanged(){
   if(advBlock){
     advBlock.style.display = (code && isExpenseAdvance(code)) ? 'block' : 'none';
   }
+  // v2.22.0: Asset (CCDC/MMTB) block
+  const assetBlk = document.getElementById('ar-asset-block');
+  if(assetBlk){
+    assetBlk.style.display = (code && expenseAssetCategory(code)) ? 'block' : 'none';
+  }
+}
+
+/* v2.22.0: Bộ phận giữ TS = Tàu → hiện ô chọn tàu cụ thể */
+function arAssetDeptChanged(){
+  const dept=document.getElementById('ar-asset-dept');
+  const wrap=document.getElementById('ar-asset-vessel-wrap');
+  if(!dept||!wrap) return;
+  wrap.style.display = dept.value==='VESSEL' ? '' : 'none';
 }
 
 /* v1.43.0: Live calc value = qty × unitPrice (display only) */
@@ -18154,6 +18288,7 @@ function saveAr(kind,id){
   let expenseType = '';
   let fuelKind = null, fuelQty = null, fuelUnit = null, fuelUnitPrice = null;
   let advanceFundId = null;  // v2.21.0
+  let assetDept = null, assetVesselId = null, assetAllocationMonths = null;  // v2.22.0
   if(kind==='ap'){
     const etEl = document.getElementById('ar-expense-type');
     expenseType = etEl ? etEl.value : '';
@@ -18177,6 +18312,17 @@ function saveAr(kind,id){
       advanceFundId = afEl ? afEl.value : '';
       if(!advanceFundId){err.textContent='💰 Chọn quỹ tiền mặt nhận tiền ứng';return;}
     }
+    // v2.22.0: CCDC/MMTB — bắt buộc chọn bộ phận giữ tài sản
+    if(expenseType && expenseAssetCategory(expenseType)){
+      const adEl = document.getElementById('ar-asset-dept');
+      const avEl = document.getElementById('ar-asset-vessel');
+      const amEl = document.getElementById('ar-asset-months');
+      assetDept = adEl ? adEl.value : '';
+      assetVesselId = (assetDept==='VESSEL' && avEl) ? avEl.value : '';
+      assetAllocationMonths = (amEl && amEl.value!=='') ? (+amEl.value||0) : 0;
+      if(!assetDept){err.textContent='🧰 Chọn bộ phận giữ tài sản';return;}
+      if(assetDept==='VESSEL' && !assetVesselId){err.textContent='🧰 Bộ phận là Tàu — chọn tàu cụ thể';return;}
+    }
   }
 
   if(!partner){err.textContent='Nhập tên đối tác';return;}
@@ -18197,6 +18343,9 @@ function saveAr(kind,id){
       updates.fuelUnit = fuelUnit;
       updates.fuelUnitPrice = fuelUnitPrice;
       updates.advanceFundId = advanceFundId;  // v2.21.0
+      updates.assetDept = assetDept;  // v2.22.0
+      updates.assetVesselId = assetVesselId;
+      updates.assetAllocationMonths = assetAllocationMonths;
     }
     Object.assign(r, updates);
     touchRecord(r);  // v1.38.4: track for concurrency merge
@@ -18222,6 +18371,9 @@ function saveAr(kind,id){
       newRec.fuelUnit = fuelUnit;
       newRec.fuelUnitPrice = fuelUnitPrice;
       newRec.advanceFundId = advanceFundId;  // v2.21.0
+      newRec.assetDept = assetDept;  // v2.22.0
+      newRec.assetVesselId = assetVesselId;
+      newRec.assetAllocationMonths = assetAllocationMonths;
     }
     S[list].push(newRec);
   }
