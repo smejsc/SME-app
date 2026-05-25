@@ -2479,7 +2479,7 @@ body{min-height:100vh;background-image:radial-gradient(circle at 20% 0%,rgba(184
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='2.26.0';            // bumped on each release
+const APP_VERSION='2.28.0';            // bumped on each release
 
 /* v1.68.0: URL Apps Script của công ty — nhúng cứng để NV không cần nhập / không cần ?join=.
    Khi máy mới mở app, app tự dùng URL này kết nối cloud → vào thẳng Login.
@@ -8538,10 +8538,14 @@ function isExpenseCapEx(typeCode){
 
 /* v2.25.0: HÀM TRUNG TÂM — một khoản AP có được tính vào P&L không.
    Tất cả báo cáo chi phí/P&L/BCQT/MMR phải lọc qua hàm này.
-   Hiện tại: loại CapEx (Dock/SCL) KHÔNG vào P&L. Mọi loại khác vào P&L. */
+   - Loại CapEx (Dock/SCL) KHÔNG vào P&L (cộng vào TSCĐ).
+   - v2.27.0: Loại PO/tồn kho (BUNKER_PO) KHÔNG vào P&L lúc mua —
+     chi phí nhiên liệu lấy từ tiêu thụ thực tế (events Tab 03). */
 function apCountsInPL(r){
   if(!r) return false;
-  return !isExpenseCapEx(r.expenseType);
+  if(isExpenseCapEx(r.expenseType)) return false;
+  if(isExpensePO(r.expenseType)) return false;
+  return true;
 }
 
 /* v2.21.0: AP loại Ứng quỹ được duyệt xong → cộng tiền vào quỹ + ghi sổ quỹ.
@@ -11447,6 +11451,7 @@ function approvedTx(){
       paid:arRemaining(r)<=0.0001,
       vesselId:r.vesselId||null,
       isCapEx:isExpenseCapEx(r.expenseType),  // v2.25.0: Dock/SCL — không vào P&L
+      inPL:apCountsInPL(r),  // v2.27.0: false nếu CapEx hoặc PO (nhiên liệu tồn kho)
       _source:'ap'
     });
   });
@@ -20111,7 +20116,12 @@ function saveBankBalance(){
 }
 
 function navTo(page){
-  document.querySelector(`.nav-item[data-page="${page}"]`).click();
+  // v2.28.0: tìm cả nav-item lẫn nav-sub-item; an toàn nếu không tìm thấy
+  const el=document.querySelector(`.nav-item[data-page="${page}"]`)
+        || document.querySelector(`.nav-sub-item[data-page="${page}"]`)
+        || document.querySelector(`[data-page="${page}"]`);
+  if(el) el.click();
+  else console.warn('navTo: không tìm thấy page',page);
 }
 
 /* ============================================================
@@ -20861,6 +20871,28 @@ function bcqtAggregate(range){
     const amt = bcqtToUsd(r.amountNet || r.amount || 0, r.ccy);
     data[seg].cost += amt;
     data[seg].apCount++;
+  });
+
+  // v2.27.0: Chi phí nhiên liệu — lấy từ tiêu thụ thực tế (events Tab 03), KHÔNG từ AP mua.
+  // Kỳ: theo ngày kết thúc đoạn (endAt). Mảng: theo dự án của đoạn; không có dự án → theo loại tàu.
+  (S.events||[]).forEach(e => {
+    const endDay = (e.endAt||e.startAt||'').slice(0,10);
+    if(!endDay || endDay < from || endDay > to) return;
+    const fuelVal = eventConsumptionValue(e,'do')+eventConsumptionValue(e,'lo')+eventConsumptionValue(e,'fw');
+    if(!fuelVal) return;  // USD
+    // xác định mảng
+    let seg = 'OTHER';
+    if(e.projectId){
+      const proj = (S.projects||[]).find(p=>p.id===e.projectId);
+      if(proj && proj.segment) seg = proj.segment;
+    } else if(e.vesselId){
+      const ves = (S.vessels||[]).find(v=>v.id===e.vesselId);
+      if(ves) seg = (ves.type==='SERVICE') ? 'VESSEL_SERVICE' : 'VESSEL_TECH';
+    }
+    if(!data[seg]) seg = 'OTHER';
+    if(!data[seg]) return;
+    // matchCompany: event không gắn công ty trực tiếp → bỏ qua lọc công ty (gắn theo tàu/dự án)
+    data[seg].cost += bcqtToUsd(fuelVal,'USD');
   });
 
   // v1.83.0: Số liệu lịch sử — cộng khi checkbox bật + năm trong khoảng báo cáo
@@ -22902,8 +22934,10 @@ function vesselYearMetrics(vesselId,year){
   // Costs/revenue from APPROVED transactions only (BI)
   const txs=approvedTx().filter(t=>txVesselId(t)===vesselId && new Date(t.date).getFullYear()===year);
   const rev=txs.filter(t=>t.type==='REV').reduce((s,t)=>s+txAmt(t),0);
-  const opex=txs.filter(t=>t.type==='COST').reduce((s,t)=>s+txAmt(t),0);
-  const techCost=txs.filter(t=>t.type==='COST'&&isTechCat(t.category)).reduce((s,t)=>s+txAmt(t),0);
+  // v2.27.0: opex chỉ tính COST vào P&L — loại nhiên liệu mua (PO) và CapEx,
+  // vì nhiên liệu đã tính riêng từ events bên dưới (tránh tính 2 lần).
+  const opex=txs.filter(t=>t.type==='COST'&&t.inPL!==false).reduce((s,t)=>s+txAmt(t),0);
+  const techCost=txs.filter(t=>t.type==='COST'&&t.inPL!==false&&isTechCat(t.category)).reduce((s,t)=>s+txAmt(t),0);
   const vesselCost=opex-techCost;
 
   // Fuel from events (current data) and fuelByState breakdown
