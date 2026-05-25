@@ -2479,7 +2479,7 @@ body{min-height:100vh;background-image:radial-gradient(circle at 20% 0%,rgba(184
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='2.24.0';            // bumped on each release
+const APP_VERSION='2.26.0';            // bumped on each release
 
 /* v1.68.0: URL Apps Script của công ty — nhúng cứng để NV không cần nhập / không cần ?join=.
    Khi máy mới mở app, app tự dùng URL này kết nối cloud → vào thẳng Login.
@@ -4366,11 +4366,19 @@ const PRESET_ROLES={
   },
   ktt: {
     label:'KTT — Kế toán trưởng',
-    desc:'Tất cả tab (trừ Dashboard & BOD) + KT Kiểm + Duyệt L1 + L2 + Quản lý NV',
+    desc:'Tất cả tab (trừ Dashboard & BOD) + KT Kiểm + Duyệt L1 + Quản lý NV',
     tabs:['projects','vessels','catalog','receivables','payables','op_input',
           'vessel_expense','hr_expense','qn_expense','cashfund','banking','cashflow',
           'operations','inventory','fixed_assets','tools','nsnn'],
-    flags:{canCheckAcc:true,canApproveL1:true,canApproveL2:true,canManageUsers:true}
+    flags:{canCheckAcc:true,canApproveL1:true,canManageUsers:true}
+  },
+  gdtc: {
+    label:'GĐTC — Giám đốc Tài chính',
+    desc:'Duyệt mức 2 (phê duyệt cuối) + xem các tab tài chính & báo cáo',
+    tabs:['projects','vessels','catalog','receivables','payables',
+          'vessel_expense','hr_expense','qn_expense','cashfund','banking','cashflow',
+          'fixed_assets','tools','nsnn','reports'],
+    flags:{canApproveL2:true}
   },
   bod: {
     label:'BOD — Chỉ đọc Báo cáo',
@@ -5144,7 +5152,11 @@ function applyRolePreset(){
   }
   // KTT có canManageUsers → cảnh báo nếu người áp không phải admin
   if(key==='ktt' && !isAdmin()){
-    if(descEl) descEl.innerHTML='ℹ '+preset.desc+'<br><span style="color:var(--accent)">⚠ Cờ "Quản lý NV" và "Duyệt L2" chỉ admin mới lưu được.</span>';
+    if(descEl) descEl.innerHTML='ℹ '+preset.desc+'<br><span style="color:var(--accent)">⚠ Cờ "Quản lý NV" chỉ admin mới lưu được.</span>';
+  }
+  // GĐTC có canApproveL2 → cờ quyền cao, chỉ admin lưu được
+  if(key==='gdtc' && !isAdmin()){
+    if(descEl) descEl.innerHTML='ℹ '+preset.desc+'<br><span style="color:var(--accent)">⚠ Cờ "Duyệt L2" chỉ admin mới lưu được.</span>';
   }
   // BOD là cờ quyền cao → chỉ admin mới tạo/sửa được
   if(key==='bod' && !isAdmin()){
@@ -7261,6 +7273,7 @@ function wfApproveL2(r){
   r.approvedL2At=new Date().toISOString();
   try{ applyAdvanceToFund(r); }catch(e){console.warn('applyAdvanceToFund failed',e);}
   try{ applyAssetToTools(r); }catch(e){console.warn('applyAssetToTools failed',e);}
+  try{ applyDockToAsset(r); }catch(e){console.warn('applyDockToAsset failed',e);}
   try{ logAuditEvent('approve_l2',{recordId:r.id,partner:r.partner||r.desc,amount:r.amount,ccy:r.ccy}); }catch(e){}
   return true;
 }
@@ -7287,6 +7300,7 @@ function wfReturnToDraft(r){
   if(!isAdmin() && !canApproveL2()){toast('Cần quyền duyệt L2 hoặc admin','bad');return false;}
   try{ reverseAdvanceFromFund(r); }catch(e){console.warn('reverseAdvanceFromFund failed',e);}
   try{ reverseAssetFromTools(r); }catch(e){console.warn('reverseAssetFromTools failed',e);}
+  try{ reverseDockFromAsset(r); }catch(e){console.warn('reverseDockFromAsset failed',e);}
   r.status='draft';
   return true;
 }
@@ -8380,6 +8394,7 @@ const DEFAULT_EXPENSE_TYPES = [
   {id:'ET-PARTS',         code:'PARTS',         group:'VESSEL',   label:'Vật tư & phụ tùng',       icon:'🔩', isPO:false, hint:'Mua thẳng — ghi chi phí ngay khi phát sinh, không qua kho.'},
   {id:'ET-CCDC',          code:'CCDC',          group:'VESSEL',   label:'Mua CCDC',                icon:'🧰', isPO:false, isAsset:true, assetCategory:'TOOL',    hint:'AP duyệt xong → ghi chi phí ngay + tự thêm 1 món vào Sổ CCDC & MMTB (tab 09). Không phân bổ.'},
   {id:'ET-MMTB',          code:'MMTB',          group:'VESSEL',   label:'Mua MMTB',                icon:'⚙', isPO:false, isAsset:true, assetCategory:'MACHINE', hint:'AP duyệt xong → ghi chi phí ngay + tự thêm 1 món vào Sổ CCDC & MMTB (tab 09). Không phân bổ.'},
+  {id:'ET-DOCK',          code:'DOCK',          group:'VESSEL',   label:'Dock / Sửa chữa lớn',     icon:'🛠', isPO:false, isCapEx:true, hint:'KHÔNG ghi P&L. AP duyệt xong → cộng vào nguyên giá TSCĐ (tàu/nhà xưởng) được dock hoặc sửa chữa lớn.'},
   // CHI PHÍ TÀU THỰC
   {id:'ET-PORT',          code:'PORT',          group:'VESSEL',   label:'Cảng phí',                icon:'⚓', isPO:false},
   {id:'ET-AGENCY',        code:'AGENCY',        group:'VESSEL',   label:'Đại lý tàu',              icon:'🚢', isPO:false},
@@ -8513,6 +8528,22 @@ function expenseAssetCategory(typeCode){
   return (t && t.isAsset) ? (t.assetCategory||'TOOL') : '';
 }
 
+/* v2.25.0: Loại chi phí vốn hóa (CapEx) — Dock/Sửa chữa lớn.
+   KHÔNG ghi vào P&L; cộng vào nguyên giá TSCĐ. */
+function isExpenseCapEx(typeCode){
+  if(!typeCode) return false;
+  const t=getExpenseType(typeCode);
+  return t ? !!t.isCapEx : false;
+}
+
+/* v2.25.0: HÀM TRUNG TÂM — một khoản AP có được tính vào P&L không.
+   Tất cả báo cáo chi phí/P&L/BCQT/MMR phải lọc qua hàm này.
+   Hiện tại: loại CapEx (Dock/SCL) KHÔNG vào P&L. Mọi loại khác vào P&L. */
+function apCountsInPL(r){
+  if(!r) return false;
+  return !isExpenseCapEx(r.expenseType);
+}
+
 /* v2.21.0: AP loại Ứng quỹ được duyệt xong → cộng tiền vào quỹ + ghi sổ quỹ.
    Idempotent: cờ r._advanceApplied chống cộng trùng nếu gọi nhiều lần. */
 function applyAdvanceToFund(r){
@@ -8615,6 +8646,51 @@ function reverseAssetFromTools(r){
   S.tools=(S.tools||[]).filter(t=>t.id!==r._assetToolId);
   r._assetApplied=false;
   delete r._assetToolId;
+}
+
+/* v2.25.0: AP loại Dock/SCL được duyệt xong → cộng tiền vào nguyên giá TSCĐ.
+   Không vào P&L. Idempotent qua cờ r._dockApplied. */
+function applyDockToAsset(r){
+  if(!r || r._dockApplied) return;
+  if(r.status!=='approved') return;
+  if(!r.expenseType || !isExpenseCapEx(r.expenseType)) return;
+  if(!r.dockAssetId) return;
+  const fa=(S.fixedAssets||[]).find(a=>a.id===r.dockAssetId);
+  if(!fa) return;
+  // Quy đổi giá trị AP sang CCY của tài sản
+  const apCcy=r.ccy||'VND';
+  const faCcy=fa.ccy||'VND';
+  let amt=+r.amount||0;
+  if(apCcy!==faCcy){
+    const fx=S.fxRate||25000;
+    if(apCcy==='USD'&&faCcy==='VND') amt=amt*fx;
+    else if(apCcy==='VND'&&faCcy==='USD') amt=amt/fx;
+  }
+  amt=Math.round(amt*100)/100;
+  fa.originalCost=(+fa.originalCost||0)+amt;
+  fa.bookValue=(+fa.bookValue||0)+amt;
+  fa.history=fa.history||[];
+  fa.history.push({
+    date:r.issueDate||todayISO(),
+    type:'DOCK',
+    amount:amt, ccy:faCcy,
+    desc:`Dock/SCL — ${r.partner||''}${r.desc?(' · '+r.desc):''}`,
+    sourceApId:r.id,
+    by:actorName(), at:new Date().toISOString()
+  });
+  r._dockApplied=true;
+  r._dockAmount=amt;
+}
+function reverseDockFromAsset(r){
+  if(!r || !r._dockApplied) return;
+  const fa=(S.fixedAssets||[]).find(a=>a.id===r.dockAssetId);
+  if(fa){
+    fa.originalCost=(+fa.originalCost||0)-(+r._dockAmount||0);
+    fa.bookValue=(+fa.bookValue||0)-(+r._dockAmount||0);
+    fa.history=(fa.history||[]).filter(h=>!(h.type==='DOCK'&&h.sourceApId===r.id));
+  }
+  r._dockApplied=false;
+  delete r._dockAmount;
 }
 
 /* v1.43.0: Get list of fuel-type expense codes */
@@ -11370,6 +11446,7 @@ function approvedTx(){
       ccy:r.ccy||'USD',
       paid:arRemaining(r)<=0.0001,
       vesselId:r.vesselId||null,
+      isCapEx:isExpenseCapEx(r.expenseType),  // v2.25.0: Dock/SCL — không vào P&L
       _source:'ap'
     });
   });
@@ -17524,6 +17601,27 @@ function _arEditorBody(r,isPayable){
     `;
   }
 
+  // v2.25.0: Dock/SCL block — chọn TSCĐ để cộng nguyên giá (không vào P&L)
+  let dockBlock = '';
+  if(isPayable){
+    const isDockNow = r.expenseType && isExpenseCapEx(r.expenseType);
+    const dockAssetCur = r.dockAssetId || '';
+    const faList = (S.fixedAssets||[]).filter(a=>a.status!=='DISPOSED');
+    dockBlock = `
+      <div id="ar-dock-block" style="margin-top:14px;padding:12px 14px;background:rgba(168,124,42,.08);border-left:3px solid var(--gold);${isDockNow?'':'display:none'}">
+        <div style="font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--gold);font-weight:700;margin-bottom:8px">🛠 Dock / Sửa chữa lớn <span style="color:var(--bad);font-weight:400">(bắt buộc chọn TSCĐ)</span></div>
+        <div style="font-size:11px;color:var(--muted);font-style:italic;margin-bottom:8px">Khoản này <b>KHÔNG ghi vào P&amp;L</b>. Khi phải trả được duyệt xong, số tiền sẽ cộng vào nguyên giá của TSCĐ được chọn (tab 09 Tài sản). Khấu hao do admin tự điều chỉnh.</div>
+        <div class="field">
+          <label>TSCĐ được dock / sửa chữa lớn *</label>
+          <select id="ar-dock-asset" ${lockedAttr}>
+            <option value="">— ${faList.length?'Chọn tài sản (tàu / nhà xưởng...)':'Chưa có TSCĐ — tạo ở tab 09 Tài sản'} —</option>
+            ${faList.map(a=>`<option value="${a.id}" ${dockAssetCur===a.id?'selected':''}>${esc(a.code)} · ${esc(a.name)} (${a.ccy||'VND'})</option>`).join('')}
+          </select>
+        </div>
+      </div>
+    `;
+  }
+
   // Payment history with FX rate
   const paymentsHtml=(r.payments||[]).length
     ? `<table style="width:100%;font-size:11px;border-collapse:collapse;margin-top:6px">
@@ -17574,6 +17672,7 @@ function _arEditorBody(r,isPayable){
     ${fuelBlock}
     ${advanceBlock}
     ${assetBlock}
+    ${dockBlock}
 
     <div style="margin-top:14px;padding-top:10px;border-top:1px solid var(--rule)">
       <div style="font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);font-weight:600;margin-bottom:6px">Giá trị & VAT</div>
@@ -17640,6 +17739,11 @@ function arExpenseTypeChanged(){
   const assetBlk = document.getElementById('ar-asset-block');
   if(assetBlk){
     assetBlk.style.display = (code && expenseAssetCategory(code)) ? 'block' : 'none';
+  }
+  // v2.25.0: Dock/SCL block
+  const dockBlk = document.getElementById('ar-dock-block');
+  if(dockBlk){
+    dockBlk.style.display = (code && isExpenseCapEx(code)) ? 'block' : 'none';
   }
 }
 
@@ -18327,6 +18431,7 @@ function saveAr(kind,id){
   let fuelKind = null, fuelQty = null, fuelUnit = null, fuelUnitPrice = null;
   let advanceFundId = null;  // v2.21.0
   let assetDept = null, assetVesselId = null, assetAllocationMonths = null;  // v2.22.0
+  let dockAssetId = null;  // v2.25.0
   if(kind==='ap'){
     const etEl = document.getElementById('ar-expense-type');
     expenseType = etEl ? etEl.value : '';
@@ -18361,6 +18466,12 @@ function saveAr(kind,id){
       if(!assetDept){err.textContent='🧰 Chọn bộ phận giữ tài sản';return;}
       if(assetDept==='VESSEL' && !assetVesselId){err.textContent='🧰 Bộ phận là Tàu — chọn tàu cụ thể';return;}
     }
+    // v2.25.0: Dock/SCL — bắt buộc chọn TSCĐ
+    if(expenseType && isExpenseCapEx(expenseType)){
+      const dkEl = document.getElementById('ar-dock-asset');
+      dockAssetId = dkEl ? dkEl.value : '';
+      if(!dockAssetId){err.textContent='🛠 Chọn TSCĐ được dock / sửa chữa lớn';return;}
+    }
   }
 
   if(!partner){err.textContent='Nhập tên đối tác';return;}
@@ -18384,6 +18495,7 @@ function saveAr(kind,id){
       updates.assetDept = assetDept;  // v2.22.0
       updates.assetVesselId = assetVesselId;
       updates.assetAllocationMonths = assetAllocationMonths;
+      updates.dockAssetId = dockAssetId;  // v2.25.0
     }
     Object.assign(r, updates);
     touchRecord(r);  // v1.38.4: track for concurrency merge
@@ -18412,6 +18524,7 @@ function saveAr(kind,id){
       newRec.assetDept = assetDept;  // v2.22.0
       newRec.assetVesselId = assetVesselId;
       newRec.assetAllocationMonths = assetAllocationMonths;
+      newRec.dockAssetId = dockAssetId;  // v2.25.0
     }
     S[list].push(newRec);
   }
@@ -20736,12 +20849,14 @@ function bcqtAggregate(range){
     data[seg].arCount++;
   });
 
-  // AP — Cost (TẤT CẢ chi phí, kể cả PO tồn kho — theo yêu cầu Cường)
+  // AP — Cost (tất cả chi phí, kể cả PO tồn kho — theo yêu cầu Cường)
   (S.payables||[]).forEach(r => {
     if(!r.issueDate || r.issueDate < from || r.issueDate > to) return;
     if(!matchCompany(r)) return;
     const seg = r.segment || 'OTHER';
     if(!data[seg]) return;
+    // v2.25.0: loại chi phí vốn hóa (Dock/SCL) — KHÔNG vào P&L
+    if(!apCountsInPL(r)) return;
     // v1.49.0: KHÔNG loại trừ PO — tính tổng tất cả chi phí
     const amt = bcqtToUsd(r.amountNet || r.amount || 0, r.ccy);
     data[seg].cost += amt;
@@ -22683,6 +22798,7 @@ function renderCostBreakdown(){
       if(!r.issueDate || +r.issueDate.slice(0,4)!==year) return;
       if(seg && r.segment!==seg) return;
       if(isViewer() && !viewerCanSeeSegment(r.segment)) return;
+      if(!apCountsInPL(r)) return;  // v2.25.0: bỏ chi phí vốn hóa (Dock/SCL)
       const cat=r.costCategory||'(không phân loại)';
       const amt=+r.amountNet||+r.amount||0;
       const usdAmt=r.ccy==='VND'?amt/fx:amt;
