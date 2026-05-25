@@ -2515,7 +2515,7 @@ body{min-height:100vh;background-image:radial-gradient(circle at 20% 0%,rgba(184
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='2.38.0';            // bumped on each release
+const APP_VERSION='2.39.0';            // bumped on each release
 
 /* v1.68.0: URL Apps Script của công ty — nhúng cứng để NV không cần nhập / không cần ?join=.
    Khi máy mới mở app, app tự dùng URL này kết nối cloud → vào thẳng Login.
@@ -4479,7 +4479,8 @@ const ALL_DATA_FIELDS=[
   'transactions',
   'cashFunds','cashTxns',
   'departments','vendors','expenseTypes','revenueTypes',
-  'salaryFund','taxes'
+  'salaryFund','taxes',
+  'historicalData','lockedHistYears'
 ];
 
 /* Compute allowed fields for the current user (admin gets all). */
@@ -9210,6 +9211,7 @@ function defaultState(){
     revenueTypes:[],  // v1.30.4: admin-manageable. Auto-populated from DEFAULT_REVENUE_TYPES on admin login.
     adminChecklist:[],  // v1.78.0: checklist vận hành — [{id, text, period, done, doneAt, note}]
     historicalData:[],  // v1.83.0: số liệu lịch sử tổng hợp — [{id,year,kind,segment,vesselId,projectId,companyId,amount,ccy,note}]
+    lockedHistYears:[],  // v2.39.0: danh sách năm số liệu lịch sử đã KHÓA SỔ (admin khóa — không sửa/xóa được tới khi mở khóa)
     meta:{created:new Date().toISOString()}
   };
 }
@@ -20996,22 +20998,35 @@ function renderHistoricalBody(){
     return;
   }
   const segName=s=>SEGMENTS[s]?SEGMENTS[s].name:(s||'—');
-  let h='<table class="tbl" style="font-size:12px"><thead><tr>'+
+  // v2.39.0: bảng điều khiển khóa sổ theo năm
+  const years=[...new Set(list.map(r=>+r.year))].sort((a,b)=>b-a);
+  let lockBar='<div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px;align-items:center">'+
+    '<span style="font-size:11px;color:var(--muted)">🔒 Khóa sổ năm:</span>';
+  years.forEach(y=>{
+    const locked=isHistYearLocked(y);
+    lockBar+=locked
+      ? `<button class="btn-sec" style="font-size:11px;background:rgba(184,71,46,.12);border-color:var(--accent)" onclick="unlockHistYear(${y})" title="Năm ${y} đang khóa — bấm để mở khóa">🔒 ${y} (đã khóa) ✕</button>`
+      : `<button class="btn-sec" style="font-size:11px" onclick="lockHistYear(${y})" title="Khóa sổ năm ${y}">🔓 ${y}</button>`;
+  });
+  lockBar+='</div>';
+  let h=lockBar+'<table class="tbl" style="font-size:12px"><thead><tr>'+
     '<th>Năm</th><th>Loại</th><th>Mảng</th><th>Tàu</th><th>Dự án</th><th>Công ty</th><th class="r">Số tiền</th><th></th></tr></thead><tbody>';
   list.forEach(r=>{
     const proj=r.projectId?(S.projects||[]).find(p=>p.id===r.projectId):null;
     const isRev=r.kind==='revenue';
-    h+=`<tr>
-      <td><b>${r.year}</b></td>
+    const locked=isHistYearLocked(r.year);
+    h+=`<tr${locked?' style="background:rgba(184,71,46,.04)"':''}>
+      <td><b>${r.year}</b>${locked?' <span title="Đã khóa sổ">🔒</span>':''}</td>
       <td><span class="chip ${isRev?'chip-good':''}" style="font-size:10px">${isRev?'Doanh thu':'Chi phí'}</span></td>
       <td style="font-size:11px">${esc(segName(r.segment))}</td>
       <td style="font-size:11px;color:var(--muted)">${esc(anyVesselName(r.vesselId)||'—')}</td>
       <td style="font-size:11px;color:var(--muted)">${proj?esc(proj.code):'—'}</td>
       <td style="font-size:11px;color:var(--muted)">${esc(companyName(r.companyId))}</td>
       <td class="r num" style="font-weight:600;color:${isRev?'var(--good)':'var(--accent)'}">${fmt(r.amount,r.ccy)}</td>
-      <td><div class="row-actions">
-        <button class="icon-btn" title="Sửa" onclick="editHistoricalRow('${r.id}')">✎</button>
-        <button class="icon-btn danger" title="Xóa" onclick="deleteHistoricalRow('${r.id}')">✕</button>
+      <td><div class="row-actions">${locked
+        ? '<span style="font-size:11px;color:var(--muted)" title="Năm đã khóa sổ">🔒 đã khóa</span>'
+        : `<button class="icon-btn" title="Sửa" onclick="editHistoricalRow('${r.id}')">✎</button>
+        <button class="icon-btn danger" title="Xóa" onclick="deleteHistoricalRow('${r.id}')">✕</button>`}
       </div></td>
     </tr>`;
   });
@@ -21063,6 +21078,7 @@ function addHistoricalRow(){
 
 function editHistoricalRow(id){
   const r=(S.historicalData||[]).find(x=>x.id===id);
+  if(r && isHistYearLocked(r.year)){ toast(`🔒 Năm ${r.year} đã khóa sổ — mở khóa để sửa`,'bad'); return; }
   if(!r){ toast('Không tìm thấy','bad'); return; }
   openModal('Sửa số liệu lịch sử', _historicalForm(r),
     `<button class="btn-sec" onclick="openHistoricalData()">← Quay lại</button>
@@ -21075,6 +21091,7 @@ function _saveHistoricalRow(id){
   const amount=+document.getElementById('hd-amount').value||0;
   if(year<2000){ err.textContent='Nhập năm hợp lệ'; return; }
   if(amount<=0){ err.textContent='Số tiền phải > 0'; return; }
+  if(isHistYearLocked(year)){ err.textContent='🔒 Năm '+year+' đã khóa sổ — mở khóa để nhập/sửa số liệu năm này'; return; }
   _ensureHistorical();
   const rec={
     year, amount,
@@ -21099,10 +21116,39 @@ function _saveHistoricalRow(id){
   openHistoricalData();
 }
 
+/* ============ v2.39.0: KHÓA SỔ NĂM — số liệu lịch sử ============ */
+function _lockedHistYears(){ if(!S.lockedHistYears) S.lockedHistYears=[]; return S.lockedHistYears; }
+function isHistYearLocked(year){ return _lockedHistYears().includes(+year); }
+
+function lockHistYear(year){
+  if(!isAdmin()){ toast('Chỉ admin được khóa sổ','bad'); return; }
+  year=+year;
+  if(!year){ return; }
+  const n=(S.historicalData||[]).filter(r=>+r.year===year).length;
+  if(!confirm(`KHÓA SỔ năm ${year}?\n\n${n} dòng số liệu lịch sử của năm ${year} sẽ KHÔNG sửa/xóa được nữa (kể cả admin) cho tới khi mở khóa.`)) return;
+  if(!isHistYearLocked(year)) _lockedHistYears().push(year);
+  try{ logAuditEvent('lock_hist_year',{year}); }catch(e){}
+  saveState();
+  toast(`🔒 Đã khóa sổ năm ${year}`);
+  openHistoricalData();
+}
+
+function unlockHistYear(year){
+  if(!isAdmin()){ toast('Chỉ admin được mở khóa','bad'); return; }
+  year=+year;
+  if(!confirm(`MỞ KHÓA năm ${year}?\n\nSau khi mở, các dòng số liệu năm ${year} lại sửa/xóa được.`)) return;
+  S.lockedHistYears=_lockedHistYears().filter(y=>y!==year);
+  try{ logAuditEvent('unlock_hist_year',{year}); }catch(e){}
+  saveState();
+  toast(`🔓 Đã mở khóa năm ${year}`);
+  openHistoricalData();
+}
+
 function deleteHistoricalRow(id){
   if(!isAdmin()){toast('Chỉ admin được xóa số liệu lịch sử','bad');return;}
   const r=(S.historicalData||[]).find(x=>x.id===id);
   if(!r) return;
+  if(isHistYearLocked(r.year)){ toast(`🔒 Năm ${r.year} đã khóa sổ — mở khóa để xóa`,'bad'); return; }
   if(!confirm(`Xóa số liệu ${r.year} — ${r.kind==='revenue'?'Doanh thu':'Chi phí'}?`)) return;
   S.historicalData=S.historicalData.filter(x=>x.id!==id);
   saveState();
