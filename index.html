@@ -760,6 +760,42 @@ body{min-height:100vh;background-image:radial-gradient(circle at 20% 0%,rgba(184
     </div>
   </div>
 
+  <!-- v2.33.0: Kế hoạch Dock & Sửa chữa lớn -->
+  <div class="section">
+    <div class="section-head">
+      <div class="section-title"><span class="tag">🛠</span>Kế hoạch Dock &amp; Sửa chữa lớn</div>
+      <div style="font-size:11px;color:var(--muted);font-style:italic">Dự toán chi phí từng đợt Dock / SCL theo tàu, nhà xưởng — đối chiếu với chi thực tế để giám sát.</div>
+    </div>
+    <div class="section-body">
+      <div class="form-grid">
+        <div class="field"><label>Loại</label>
+          <select id="dock-kind" onchange="_dockAssetFill()">
+            <option value="DOCK">Dock (chu kỳ ~5 năm)</option>
+            <option value="SCL_VESSEL">Sửa chữa lớn — Tàu (chu kỳ ~2 năm)</option>
+            <option value="SCL_BUILDING">Sửa chữa lớn — Nhà xưởng / Công trình</option>
+          </select>
+        </div>
+        <div class="field" style="grid-column:span 2"><label>Tài sản (TSCĐ) <span style="color:var(--accent);font-size:10px">(chọn từ danh mục TSCĐ)</span></label>
+          <select id="dock-asset"><option value="">— Chọn tài sản —</option></select>
+          <div style="font-size:10px;color:var(--muted);font-style:italic;margin-top:2px">Tàu cho Dock/SCL tàu; nhà xưởng/công trình cho SCL nhà xưởng. Chưa có → thêm tại Tab 09 Tài sản.</div>
+        </div>
+        <div class="field"><label>Năm bắt đầu (DK)</label><input type="number" id="dock-year-from" value="2028" data-skip-format="1"></div>
+        <div class="field"><label>Năm kết thúc (DK)</label><input type="number" id="dock-year-to" value="2028" data-skip-format="1"></div>
+        <div class="field"><label>Dự toán chi phí (cả đợt)</label><input type="number" class="num" id="dock-budget" value="0"></div>
+        <div class="field"><label>CCY</label>
+          <select id="dock-ccy"><option>VND</option><option>USD</option></select>
+        </div>
+        <div class="field" style="grid-column:span 2"><label>Ghi chú</label><input type="text" id="dock-note" placeholder="VD: Dock định kỳ — thay tôn vỏ, sơn chống hà"></div>
+      </div>
+      <div class="form-actions">
+        <button class="btn-primary" onclick="addDockPlan()">+ Thêm đợt</button>
+        <button class="btn-sec" onclick="resetForm(['dock-budget','dock-note']);document.getElementById('dock-asset').value='';">Xóa form</button>
+        <span class="hint">Mỗi đợt = một lần Dock/SCL. Đợt gọn trong 1 năm: để năm bắt đầu = năm kết thúc. Đợt kéo dài qua năm: nhập khoảng (VD 2028→2029). Thực chi cộng tất cả phiếu Dock/SCL đã duyệt của tài sản trong khoảng năm đó.</span>
+      </div>
+      <div class="tbl-scroll" style="margin-top:14px"><table class="tbl" id="dock-plan-table"></table></div>
+    </div>
+  </div>
+
   <!-- v1.36: Hiệu suất theo MẢNG (moved from Dashboard) -->
   <div class="section">
     <div class="section-head">
@@ -2479,7 +2515,7 @@ body{min-height:100vh;background-image:radial-gradient(circle at 20% 0%,rgba(184
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='2.29.0';            // bumped on each release
+const APP_VERSION='2.34.0';            // bumped on each release
 
 /* v1.68.0: URL Apps Script của công ty — nhúng cứng để NV không cần nhập / không cần ?join=.
    Khi máy mới mở app, app tự dùng URL này kết nối cloud → vào thẳng Login.
@@ -7147,11 +7183,19 @@ function userAssignedOpVesselIds(){
 }
 function canEditVesselExpense(vesselId){
   if(CURRENT_ROLE==='admin') return true;
+  // v2.30.0/v2.32.0: KTT, NV KT và người duyệt nhập được chi phí MỌI tàu
+  if(CURRENT_USER && (CURRENT_USER.canManageUsers || CURRENT_USER.canCheckAcc)) return true;
+  if(typeof canApproveL1==='function' && canApproveL1()) return true;
+  if(typeof canApproveL2==='function' && canApproveL2()) return true;
   const allowed=userAssignedVesselIds();
   return allowed.includes(vesselId);
 }
 function canEditProjectExpense(projectId){
   if(CURRENT_ROLE==='admin') return true;
+  // v2.30.0/v2.32.0: KTT, NV KT và người duyệt nhập được chi phí MỌI dự án
+  if(CURRENT_USER && (CURRENT_USER.canManageUsers || CURRENT_USER.canCheckAcc)) return true;
+  if(typeof canApproveL1==='function' && canApproveL1()) return true;
+  if(typeof canApproveL2==='function' && canApproveL2()) return true;
   const allowed=userAssignedProjectIds();
   return allowed.includes(projectId);
 }
@@ -7201,8 +7245,9 @@ function wfSubmit(r, kind){
   r.submittedAt=new Date().toISOString();
   // Clear any previous rejection
   r.rejectedBy=''; r.rejectedAt=''; r.rejectReason=''; r.rejectedAtLevel=null;
-  // v1.63.0: AR full auto-approve for KTT (canApproveL2) or admin
-  if(kind==='ar' && (isAdmin() || canApproveL2())){
+  // v1.63.0: AR full auto-approve for KTT or admin
+  // v2.30.0: KTT nhận diện qua canManageUsers (sau khi bỏ cờ L2 khỏi KTT)
+  if(kind==='ar' && (isAdmin() || canApproveL2() || (CURRENT_USER && CURRENT_USER.canManageUsers))){
     r.status='approved';
     r.accCheckedBy=actorName()+' (tự động duyệt)';
     r.accCheckedAt=new Date().toISOString();
@@ -8456,6 +8501,12 @@ function archivedExpenseTypes(){
 /* v1.36: Migrate plans: ensure profit field (derive from revenue - cost if missing) */
 function migratePlans(){
   if(!Array.isArray(S.plans)) S.plans=[];
+  if(!Array.isArray(S.dockPlans)) S.dockPlans=[];  // v2.33.0: kế hoạch Dock/SCL
+  // v2.34.0: đợt Dock cũ chỉ có 'year' → chuyển sang yearFrom/yearTo
+  S.dockPlans.forEach(p=>{
+    if(p.yearFrom==null && p.year!=null){ p.yearFrom=p.year; p.yearTo=p.year; }
+    if(p.yearTo==null) p.yearTo=p.yearFrom;
+  });
   let changed=0;
   S.plans.forEach(p=>{
     if(typeof p.profit!=='number'){
@@ -9039,7 +9090,7 @@ try{
 
 function defaultState(){
   return {
-    plans:[], projects:[], vessels:[], onhires:[],
+    plans:[], dockPlans:[], projects:[], vessels:[], onhires:[],
     events:[],
     transactions:[],
     receivables:[],
@@ -9435,7 +9486,7 @@ async function doChangePassword(forced){
   }
 }
 
-function showAuditLog(){
+function showAuditLog(filterMode){
   if(!guardAction('view_audit', {})) return;
   const log=S.auditLog||[];
   const ACTION_LABELS={
@@ -9451,15 +9502,31 @@ function showAuditLog(){
     reject:'✗ Từ chối',
     sync_push:'↑ Push cloud',
     sync_pull:'↓ Pull cloud',
-    password_change:'🔑 Đổi mật khẩu',
     user_create:'+ Tạo NV',
     user_delete:'– Xóa NV',
     export_backup:'⬇ Export backup',
-    import_backup:'⬆ Import backup'
+    import_backup:'⬆ Import backup',
+    delete_ap:'🗑 Xóa phải trả',
+    delete_ar:'🗑 Xóa phải thu',
+    delete_fixed_asset:'🗑 Xóa TSCĐ',
+    delete_tool:'🗑 Xóa CCDC/MMTB',
+    loan_delete:'🗑 Xóa khoản vay',
+    loan_prepay_delete:'🗑 Xóa trả trước vay',
+    salary_fund_withdraw_delete:'🗑 Xóa rút quỹ lương'
   };
-  const recent=log.slice(-200).reverse();
+  // v2.32.0: các action thuộc nhóm "sửa/xóa" — để admin lọc riêng
+  const EDIT_DELETE_ACTIONS=['delete_ap','delete_ar','delete_fixed_asset','delete_tool',
+    'loan_delete','loan_prepay_delete','salary_fund_withdraw_delete','user_delete',
+    'reject','return_by_acc'];
+  let recent=log.slice(-200).reverse();
+  if(filterMode==='editdelete'){
+    recent=recent.filter(e=>EDIT_DELETE_ACTIONS.includes(e.action));
+  }
+  const filterBtn=filterMode==='editdelete'
+    ? `<button class="btn-sec" onclick="showAuditLog()" style="font-size:11px">Xem tất cả</button>`
+    : `<button class="btn-sec" onclick="showAuditLog('editdelete')" style="font-size:11px">🗑 Chỉ xem Sửa/Xóa</button>`;
   let body='<div style="max-height:60vh;overflow-y:auto"><table class="tbl" style="font-size:11px"><thead><tr><th>Thời gian</th><th>NV</th><th>Vai trò</th><th>Hành động</th><th>Chi tiết</th></tr></thead><tbody>';
-  if(!recent.length) body+='<tr><td class="empty" colspan="5">Chưa có sự kiện nào</td></tr>';
+  if(!recent.length) body+=`<tr><td class="empty" colspan="5">${filterMode==='editdelete'?'Chưa có thao tác sửa/xóa nào':'Chưa có sự kiện nào'}</td></tr>`;
   recent.forEach(e=>{
     const d=new Date(e.ts);
     const detail=e.detail?Object.entries(e.detail).map(([k,v])=>`${esc(k)}: ${esc(String(v))}`).join(', '):'';
@@ -9472,9 +9539,10 @@ function showAuditLog(){
     </tr>`;
   });
   body+='</tbody></table></div>';
-  if(log.length>200) body+=`<div style="font-size:11px;color:var(--muted);font-style:italic;margin-top:8px">Hiển thị 200 sự kiện gần nhất. Tổng: ${log.length}/500 (cũ hơn bị xóa FIFO).</div>`;
+  if(log.length>200) body+=`<div style="font-size:11px;color:var(--muted);font-style:italic;margin-top:8px">Hiển thị 200 sự kiện gần nhất. Tổng: ${log.length} (cũ hơn bị xóa FIFO).</div>`;
   openModal('📋 Audit Log · Nhật ký hoạt động', body,
-    `<button class="btn-sec" onclick="exportAuditLog()">⬇ Export CSV</button>
+    `${filterBtn}
+     <button class="btn-sec" onclick="exportAuditLog()">⬇ Export CSV</button>
      <button class="btn-sec" onclick="closeModal()">Đóng</button>`);
 }
 
@@ -10032,7 +10100,20 @@ function _catalogTabKeyword(tab){
 
 /* v1.95.0: quyền tạo/import master data — chỉ Admin + KTT (canApproveL2) */
 function canEditCatalog(){
-  return isAdmin() || (typeof canApproveL2==='function' && canApproveL2());
+  // v2.30.0: KTT vẫn sửa được danh mục sau khi bỏ cờ Duyệt L2.
+  // v2.32.0: mở thêm cho NV KT (canCheckAcc) — KT/KTT tạo/sửa được danh mục.
+  if(isAdmin()) return true;
+  if(CURRENT_USER && (CURRENT_USER.canManageUsers || CURRENT_USER.canCheckAcc)) return true;
+  if(typeof canApproveL2==='function' && canApproveL2()) return true;
+  if(typeof canApproveL1==='function' && canApproveL1()) return true;
+  return false;
+}
+
+/* v2.31.0: Quyền quản lý Ngân quỹ (quỹ TM, tài khoản NH, số dư NH, khoản vay).
+   v2.32.0: Admin, KTT (canManageUsers) và NV KT (canCheckAcc) được thêm/sửa. */
+function canEditTreasury(){
+  if(isAdmin()) return true;
+  return !!(CURRENT_USER && (CURRENT_USER.canManageUsers || CURRENT_USER.canCheckAcc));
 }
 
 function renderCatalog(){
@@ -11744,6 +11825,166 @@ function fillYearPickers(){
    PLAN
    ============================================================ */
 /* v1.36: Fill entity dropdown based on selected segment */
+/* ============================================================
+   v2.33.0: KẾ HOẠCH DOCK & SỬA CHỮA LỚN
+   Mỗi dòng = một đợt Dock/SCL. Đối chiếu dự toán vs chi thực tế
+   (chi phí loại ET-DOCK đã duyệt, gắn dockAssetId, theo năm issueDate).
+   ============================================================ */
+const DOCK_KIND_LABELS={
+  DOCK:'🛠 Dock',
+  SCL_VESSEL:'🔧 SCL — Tàu',
+  SCL_BUILDING:'🏭 SCL — Nhà xưởng'
+};
+
+/* Đổ danh sách TSCĐ vào dropdown tài sản — lọc theo loại đợt đã chọn */
+function _dockAssetFill(){
+  const kind=document.getElementById('dock-kind')?.value||'DOCK';
+  const sel=document.getElementById('dock-asset');
+  if(!sel) return;
+  const prev=sel.value;
+  let html='<option value="">— Chọn tài sản —</option>';
+  const assets=S.fixedAssets||[];
+  if(kind==='DOCK'||kind==='SCL_VESSEL'){
+    const vessels=assets.filter(a=>a.group==='VESSEL');
+    if(vessels.length){
+      html+='<optgroup label="⛵ Tàu (TSCĐ)">';
+      vessels.forEach(a=>{ html+=`<option value="${esc(a.id)}">⛵ ${esc(a.code)} · ${esc(a.name)}</option>`; });
+      html+='</optgroup>';
+    }
+  } else { // SCL_BUILDING
+    const blds=assets.filter(a=>a.group==='BUILDING'||a.group==='REAL_ESTATE');
+    if(blds.length){
+      html+='<optgroup label="🏭 Nhà xưởng / Công trình (TSCĐ)">';
+      blds.forEach(a=>{ html+=`<option value="${esc(a.id)}">🏭 ${esc(a.code)} · ${esc(a.name)}</option>`; });
+      html+='</optgroup>';
+    }
+  }
+  sel.innerHTML=html;
+  if(prev) sel.value=prev;
+}
+
+/* Tổng chi thực tế ET-DOCK đã duyệt của 1 tài sản trong khoảng năm [yearFrom..yearTo] */
+function dockActualSpent(assetId, yearFrom, yearTo){
+  let sumByCcy={};
+  const yf=+yearFrom, yt=+yearTo;
+  (S.payables||[]).forEach(r=>{
+    if(r.status!=='approved') return;
+    if(!r.expenseType || !isExpenseCapEx(r.expenseType)) return;
+    if(r.dockAssetId!==assetId) return;
+    const d=r.issueDate||r.createdAt||'';
+    const yr=parseInt(String(d).slice(0,4),10);
+    if(isNaN(yr) || yr<yf || yr>yt) return;
+    const ccy=r.ccy||'USD';
+    sumByCcy[ccy]=(sumByCcy[ccy]||0)+(+r.amount||0);
+  });
+  return sumByCcy;  // {USD:.., VND:..}
+}
+
+function addDockPlan(){
+  if(!canEditCatalog()){toast('Chỉ Admin / Kế toán / KTT','bad');return;}
+  const kind=document.getElementById('dock-kind').value;
+  const assetId=document.getElementById('dock-asset').value;
+  let yearFrom=+document.getElementById('dock-year-from').value||0;
+  let yearTo=+document.getElementById('dock-year-to').value||0;
+  const budget=+document.getElementById('dock-budget').value||0;
+  const ccy=document.getElementById('dock-ccy').value;
+  const note=document.getElementById('dock-note').value.trim();
+  if(!assetId){toast('Chọn tài sản','bad');return;}
+  if(!yearFrom){toast('Nhập năm bắt đầu','bad');return;}
+  if(!yearTo) yearTo=yearFrom;
+  if(yearTo<yearFrom){toast('Năm kết thúc phải ≥ năm bắt đầu','bad');return;}
+  const asset=(S.fixedAssets||[]).find(a=>a.id===assetId);
+  const dup=(S.dockPlans||[]).find(p=>p.assetId===assetId && p.yearFrom===yearFrom && p.kind===kind);
+  if(dup){toast('Đã có đợt cùng loại cho tài sản này bắt đầu năm '+yearFrom+'. Hãy sửa dòng cũ.','bad');return;}
+  S.dockPlans.push({
+    id:uid(), kind, assetId,
+    assetName:asset?`${asset.code} · ${asset.name}`:'(không rõ)',
+    yearFrom, yearTo, budget, ccy, note,
+    createdBy:actorName(), createdAt:new Date().toISOString()
+  });
+  saveState();
+  resetForm(['dock-budget','dock-note']);
+  document.getElementById('dock-asset').value='';
+  toast('Đã thêm đợt Dock/SCL'); renderAll();
+}
+
+function delDockPlan(id){
+  if(!isAdmin()){toast('Chỉ admin mới xóa được đợt kế hoạch','bad');return;}
+  const p=(S.dockPlans||[]).find(x=>x.id===id);if(!p)return;
+  const yrTxt=p.yearFrom===p.yearTo?String(p.yearFrom):`${p.yearFrom}–${p.yearTo}`;
+  confirmDelete('đợt kế hoạch Dock/SCL này',
+    `${DOCK_KIND_LABELS[p.kind]||p.kind} · ${esc(p.assetName)}<br>Năm ${yrTxt} · Dự toán ${fmt(p.budget,p.ccy)}`,
+    ()=>{
+      try{ logAuditEvent('delete_dock_plan',{assetName:p.assetName,year:yrTxt,budget:p.budget,ccy:p.ccy,actor:actorName()}); }catch(e){}
+      S.dockPlans=S.dockPlans.filter(x=>x.id!==id);saveState();toast('Đã xóa');renderAll();
+    });
+}
+
+function editDockPlan(id){
+  if(!canEditCatalog()){toast('Chỉ Admin / Kế toán / KTT','bad');return;}
+  const p=(S.dockPlans||[]).find(x=>x.id===id);if(!p)return;
+  openEditModal('Sửa đợt Dock/SCL',[
+    {key:'kind',label:'Loại',type:'select',options:Object.keys(DOCK_KIND_LABELS).map(k=>({v:k,t:DOCK_KIND_LABELS[k]}))},
+    {key:'yearFrom',label:'Năm bắt đầu (DK)',type:'number'},
+    {key:'yearTo',label:'Năm kết thúc (DK)',type:'number'},
+    {key:'budget',label:'Dự toán chi phí (cả đợt)',type:'number'},
+    {key:'ccy',label:'CCY',type:'select',options:[{v:'VND',t:'VND'},{v:'USD',t:'USD'}]},
+    {key:'note',label:'Ghi chú',type:'text'}
+  ],p,(d)=>{
+    if(+d.yearTo<+d.yearFrom) d.yearTo=d.yearFrom;
+    Object.assign(p,d);
+    saveState();
+  });
+}
+
+function renderDockPlanList(){
+  const tbl=document.getElementById('dock-plan-table');
+  if(!tbl) return;
+  const rows=(S.dockPlans||[]).slice().sort((a,b)=>(a.yearFrom-b.yearFrom)||(a.kind<b.kind?-1:1));
+  if(!rows.length){
+    tbl.innerHTML='<tr><td class="empty">Chưa có đợt Dock/SCL nào — thêm ở form phía trên</td></tr>';
+    return;
+  }
+  const thisYear=new Date().getFullYear();
+  let html='<thead><tr><th>Loại</th><th>Tài sản</th><th class="c">Năm DK</th>'
+    +'<th class="r">Dự toán</th><th class="r">Thực chi</th><th class="r">Chênh lệch</th>'
+    +'<th>Trạng thái</th><th>Ghi chú</th><th></th></tr></thead><tbody>';
+  rows.forEach(p=>{
+    const yf=p.yearFrom, yt=p.yearTo||p.yearFrom;
+    const yrTxt=yf===yt?String(yf):`${yf}–${yt}`;
+    const spent=dockActualSpent(p.assetId,yf,yt);
+    const sameCcy=spent[p.ccy]||0;
+    const otherCcy=Object.keys(spent).filter(c=>c!==p.ccy && spent[c]>0);
+    const diff=sameCcy-(p.budget||0);
+    let statusTxt, statusColor;
+    if(yf>thisYear){ statusTxt='Chưa tới hạn'; statusColor='var(--muted)'; }
+    else if(thisYear>=yf && thisYear<=yt){ statusTxt='Đang trong kỳ'; statusColor='var(--ink)'; }
+    else { statusTxt='Đã qua'; statusColor='var(--muted)'; }
+    let diffTxt, diffColor;
+    if(sameCcy===0){ diffTxt='— chưa có chi'; diffColor='var(--muted)'; }
+    else if(diff>0){ diffTxt='▲ Vượt '+fmt(diff,p.ccy); diffColor='var(--bad)'; }
+    else if(diff<0){ diffTxt='▼ Dưới '+fmt(-diff,p.ccy); diffColor='var(--good)'; }
+    else { diffTxt='= Khớp'; diffColor='var(--good)'; }
+    const overBudget=sameCcy>0 && diff>0;
+    html+=`<tr${overBudget?' style="background:rgba(184,71,46,.06)"':''}>
+      <td>${DOCK_KIND_LABELS[p.kind]||esc(p.kind)}</td>
+      <td>${esc(p.assetName)}</td>
+      <td class="c">${yrTxt}</td>
+      <td class="r">${fmt(p.budget,p.ccy)}</td>
+      <td class="r">${sameCcy>0?fmt(sameCcy,p.ccy):'—'}${otherCcy.length?`<br><span style="font-size:9px;color:var(--muted)">+ ${otherCcy.map(c=>fmt(spent[c],c)).join(', ')}</span>`:''}</td>
+      <td class="r" style="color:${diffColor};font-weight:600">${diffTxt}</td>
+      <td><span style="color:${statusColor};font-size:11px">${statusTxt}</span></td>
+      <td style="font-size:10px;color:var(--muted)">${esc(p.note||'')}</td>
+      <td><div class="row-actions">
+        <button class="icon-btn" title="Sửa" onclick="editDockPlan('${p.id}')">✎</button>
+        ${isAdmin()?`<button class="icon-btn danger" title="Xóa" onclick="delDockPlan('${p.id}')">✕</button>`:''}
+      </div></td>
+    </tr>`;
+  });
+  html+='</tbody>';
+  tbl.innerHTML=html;
+}
+
 function _planEntityFill(){
   const seg=document.getElementById('plan-segment').value;
   const sel=document.getElementById('plan-entity');
@@ -13833,6 +14074,7 @@ function deleteFixedAsset(id){
   confirmDelete('TSCĐ này', `<b>${esc(a.code)}</b> · ${esc(a.name)}<br>Nguyên giá: ${fmtFull(a.originalCost,a.ccy)}<br>${(a.history||[]).length?`⚠ Có ${a.history.length} lịch sử ghi nhận`:'Không có lịch sử'}${vesselWarn}`,
     ()=>{
       if(a.group==='VESSEL' && a.vesselId) unlinkVesselFromAsset(a);
+      try{ logAuditEvent('delete_fixed_asset',{code:a.code,name:a.name,originalCost:a.originalCost,ccy:a.ccy,actor:actorName()}); }catch(e){}
       S.fixedAssets=S.fixedAssets.filter(x=>x.id!==id);
       saveState();toast('Đã xóa');renderAll();
     });
@@ -14240,7 +14482,10 @@ function deleteTool(id){
     }
   }
   confirmDelete('CCDC/MMTB này', `<b>${esc(a.code)}</b> · ${esc(a.name)}<br>Nguyên giá: ${fmtFull(a.originalCost,a.ccy)}<br>${(a.history||[]).length?`⚠ Có ${a.history.length} lịch sử`:'Không có lịch sử'}`,
-    ()=>{S.tools=S.tools.filter(x=>x.id!==id);saveState();toast('Đã xóa');renderAll();});
+    ()=>{
+      try{ logAuditEvent('delete_tool',{code:a.code,name:a.name,originalCost:a.originalCost,ccy:a.ccy,actor:actorName()}); }catch(e){}
+      S.tools=S.tools.filter(x=>x.id!==id);saveState();toast('Đã xóa');renderAll();
+    });
 }
 
 function editTool(id){
@@ -15497,11 +15742,11 @@ function cashFundBalance(fundId){
 }
 
 function addCashFund(){
-  if(!isAdmin()){toast('Chỉ admin','bad');return;}
+  if(!canEditTreasury()){toast('Chỉ Admin / Kế toán trưởng','bad');return;}
   _cashFundModal(null);
 }
 function editCashFund(id){
-  if(!isAdmin()){toast('Chỉ admin','bad');return;}
+  if(!canEditTreasury()){toast('Chỉ Admin / Kế toán trưởng','bad');return;}
   const f=(S.cashFunds||[]).find(x=>x.id===id);
   if(!f){toast('Không tìm thấy','bad');return;}
   _cashFundModal(f);
@@ -16136,11 +16381,11 @@ function loanApplyPrepay(loan, prepayId){
 
 /* ===== BANK ACCOUNT CRUD ===== */
 function addBankAccount(){
-  if(!isAdmin()){toast('Chỉ admin','bad');return;}
+  if(!canEditTreasury()){toast('Chỉ Admin / Kế toán trưởng','bad');return;}
   _bankAccountModal(null);
 }
 function editBankAccount(id){
-  if(!isAdmin()){toast('Chỉ admin','bad');return;}
+  if(!canEditTreasury()){toast('Chỉ Admin / Kế toán trưởng','bad');return;}
   const a=(S.bankAccounts||[]).find(x=>x.id===id);
   if(!a){toast('Không tìm thấy','bad');return;}
   _bankAccountModal(a);
@@ -16242,7 +16487,7 @@ function deleteBankAccount(id){
 
 /* ===== BANK SNAPSHOT ===== */
 function addBankSnapshot(prefAccountId){
-  if(!isAdmin()){toast('Chỉ admin','bad');return;}
+  if(!canEditTreasury()){toast('Chỉ Admin / Kế toán trưởng','bad');return;}
   const accounts=(S.bankAccounts||[]).filter(a=>a.isActive!==false);
   if(!accounts.length){toast('Chưa có TK nào — thêm TK trước','bad');return;}
   const body=`
@@ -16327,11 +16572,11 @@ function _deleteBankSnapshot(id){
 
 /* ===== LOAN CRUD ===== */
 function addLoan(){
-  if(!isAdmin()){toast('Chỉ admin','bad');return;}
+  if(!canEditTreasury()){toast('Chỉ Admin / Kế toán trưởng','bad');return;}
   _loanModal(null);
 }
 function editLoan(id){
-  if(!isAdmin()){toast('Chỉ admin','bad');return;}
+  if(!canEditTreasury()){toast('Chỉ Admin / Kế toán trưởng','bad');return;}
   const l=(S.loans||[]).find(x=>x.id===id);
   if(!l){toast('Không tìm thấy','bad');return;}
   _loanModal(l);
@@ -16609,7 +16854,7 @@ function viewLoanSchedule(id){
 
 /* ===== PREPAY CRUD ===== */
 function loanAddPrepay(loanId){
-  if(!isAdmin()){toast('Chỉ admin','bad');return;}
+  if(!canEditTreasury()){toast('Chỉ Admin / Kế toán trưởng','bad');return;}
   const l=(S.loans||[]).find(x=>x.id===loanId);
   if(!l){toast('Không tìm thấy','bad');return;}
   if(l.loanType==='short'){toast('Trả trước hạn chỉ áp dụng vay trung-dài hạn','bad');return;}
@@ -16733,7 +16978,7 @@ function loanDeletePrepay(loanId, ppId){
   renderBanking();
 }
 function _loanMarkPaid(loanId, period){
-  if(!isAdmin()){toast('Chỉ admin','bad');return;}
+  if(!canEditTreasury()){toast('Chỉ Admin / Kế toán trưởng','bad');return;}
   const l=(S.loans||[]).find(x=>x.id===loanId);
   if(!l)return;
   const p=(l.paymentSchedule||[]).find(x=>x.period===period);
@@ -16758,7 +17003,7 @@ function _loanMarkPaid(loanId, period){
   viewLoanSchedule(loanId);  // refresh modal
 }
 function _loanUnmarkPaid(loanId, period){
-  if(!isAdmin()){toast('Chỉ admin','bad');return;}
+  if(!canEditTreasury()){toast('Chỉ Admin / Kế toán trưởng','bad');return;}
   const l=(S.loans||[]).find(x=>x.id===loanId);
   if(!l)return;
   const p=(l.paymentSchedule||[]).find(x=>x.period===period);
@@ -18686,7 +18931,8 @@ function _arPayAmountInCcy(p, recCcy, accCcy){
    Trả từng phần thì dùng nút $ (addArPayment) như cũ. */
 function arQuickReceive(id){
   // Chỉ KTT / Admin được xác nhận thu
-  if(!isAdmin() && !canApproveL2()){
+  // v2.30.0: KTT nhận diện qua canManageUsers (sau khi bỏ cờ L2 khỏi KTT)
+  if(!isAdmin() && !canApproveL2() && !(CURRENT_USER && CURRENT_USER.canManageUsers)){
     toast('Chỉ Kế toán trưởng (KTT) hoặc Admin được xác nhận đã nhận thanh toán','bad');
     return;
   }
@@ -18804,7 +19050,12 @@ function deleteAr(kind,id){
   const pd=arPaidTotal(r);
   const detail=`<b>${esc(r.partner)}</b> · ${fmtFull(r.amount,r.ccy)}${pd>0?'<br><b style="color:var(--bad)">Cảnh báo:</b> Đã có '+r.payments.length+' lần TT ('+fmtFull(pd,r.ccy)+')':''}`;
   confirmDialog('Xóa khoản '+(kind==='ap'?'phải trả':'phải thu')+'?',detail,null,
-    ()=>{S[list]=S[list].filter(x=>x.id!==id);saveState();toast('Đã xóa');renderAll();});
+    ()=>{
+      try{ logAuditEvent(kind==='ap'?'delete_ap':'delete_ar',
+        {recordId:r.id, partner:r.partner||'', amount:r.amount||0, ccy:r.ccy||'',
+         desc:r.desc||'', issueDate:r.issueDate||'', actor:actorName()}); }catch(e){}
+      S[list]=S[list].filter(x=>x.id!==id);saveState();toast('Đã xóa');renderAll();
+    });
 }
 
 /* ============================================================
@@ -27190,6 +27441,8 @@ function renderAll(opts){
 
   maybe('dashboard', renderDashboard);
   maybe('plan', renderPlanList);
+  maybe('plan', renderDockPlanList);
+  maybe('plan', _dockAssetFill);
   maybe('projects', renderProjects);
   if(canAccessTab('vessels') && (renderAllTabs || activePageId==='vessels')){
     renderVessels(); renderEvents(); renderOnhire();
