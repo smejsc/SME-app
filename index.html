@@ -2515,7 +2515,7 @@ body{min-height:100vh;background-image:radial-gradient(circle at 20% 0%,rgba(184
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='2.44.0';            // bumped on each release
+const APP_VERSION='2.46.0';            // bumped on each release
 
 /* v1.68.0: URL Apps Script của công ty — nhúng cứng để NV không cần nhập / không cần ?join=.
    Khi máy mới mở app, app tự dùng URL này kết nối cloud → vào thẳng Login.
@@ -7390,11 +7390,18 @@ function wfReturnToDraftByAcc(r, reason){
 
 function wfApproveL1(r){
   if(!canApproveL1()){toast('Không có quyền duyệt L1','bad');return false;}
-  // v1.35.1: SOD strict — admin bypass, mọi user khác KHÔNG tự duyệt bút toán mình tạo
-  if(!isAdmin() && r.createdBy && r.createdBy === actorName()){
+  // v1.35.1: SOD strict — admin bypass, mọi user khác KHÔNG tự duyệt bút toán mình tạo.
+  // v2.46.0: KTT (canManageUsers) ĐƯỢC tự duyệt L1 bút toán mình tạo — vì còn L2
+  //          kiểm soát độc lập phía sau. SOD ở cấp L2 vẫn giữ tuyệt đối (xem wfApproveL2).
+  const _isKTT = CURRENT_USER && CURRENT_USER.canManageUsers;
+  if(!isAdmin() && !_isKTT && r.createdBy && r.createdBy === actorName()){
     toast('🔒 SOD: không tự duyệt bút toán mình tạo. Nhờ admin (Cường) duyệt thay.','bad');
     try{ logAuditEvent('self_approval_blocked',{recordId:r.id,level:1,actor:actorName()}); }catch(e){}
     return false;
+  }
+  // v2.46.0: ghi nhận khi KTT tự duyệt L1 phiếu mình tạo — để soát xét sau
+  if(!isAdmin() && _isKTT && r.createdBy && r.createdBy === actorName()){
+    try{ logAuditEvent('ktt_self_approve_l1',{recordId:r.id,partner:r.partner||r.desc,amount:r.amount,ccy:r.ccy,actor:actorName()}); }catch(e){}
   }
   r.status='pending_l2';
   r.approvedL1By=actorName();
@@ -10277,10 +10284,14 @@ function canEditCatalog(){
 }
 
 /* v2.31.0: Quyền quản lý Ngân quỹ (quỹ TM, tài khoản NH, số dư NH, khoản vay).
-   v2.32.0: Admin, KTT (canManageUsers) và NV KT (canCheckAcc) được thêm/sửa. */
+   v2.32.0: Admin, KTT (canManageUsers) và NV KT (canCheckAcc) được thêm/sửa.
+   v2.45.0: thống nhất với canEditCatalog — người duyệt L1/L2 cũng sửa được. */
 function canEditTreasury(){
   if(isAdmin()) return true;
-  return !!(CURRENT_USER && (CURRENT_USER.canManageUsers || CURRENT_USER.canCheckAcc));
+  if(CURRENT_USER && (CURRENT_USER.canManageUsers || CURRENT_USER.canCheckAcc)) return true;
+  if(typeof canApproveL2==='function' && canApproveL2()) return true;
+  if(typeof canApproveL1==='function' && canApproveL1()) return true;
+  return false;
 }
 
 function renderCatalog(){
