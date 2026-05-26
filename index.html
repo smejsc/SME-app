@@ -2515,7 +2515,7 @@ body{min-height:100vh;background-image:radial-gradient(circle at 20% 0%,rgba(184
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='2.43.0';            // bumped on each release
+const APP_VERSION='2.44.0';            // bumped on each release
 
 /* v1.68.0: URL Apps Script của công ty — nhúng cứng để NV không cần nhập / không cần ?join=.
    Khi máy mới mở app, app tự dùng URL này kết nối cloud → vào thẳng Login.
@@ -3332,6 +3332,37 @@ async function gzipDecompress(b64){
   return text;
 }
 
+/* v2.44.0: fetch có giới hạn thời gian chờ — tránh treo vô hạn khi
+   Apps Script không phản hồi hoặc mạng "nửa sống nửa chết". */
+async function fetchWithTimeout(url, options, timeoutMs){
+  timeoutMs=timeoutMs||30000;  // mặc định 30 giây
+  const ctrl=new AbortController();
+  const t=setTimeout(()=>ctrl.abort(), timeoutMs);
+  try{
+    const res=await fetch(url, Object.assign({}, options||{}, {signal:ctrl.signal}));
+    return res;
+  }catch(e){
+    if(e.name==='AbortError'){
+      throw new Error('Cloud không phản hồi sau '+(timeoutMs/1000)+'s — thử lại sau');
+    }
+    throw e;
+  }finally{
+    clearTimeout(t);
+  }
+}
+
+/* v2.44.0: đọc JSON an toàn — nếu cloud trả về không phải JSON
+   (vd trang lỗi HTML của Google), báo lỗi rõ thay vì lỗi khó hiểu. */
+async function safeJson(res){
+  const text=await res.text();
+  try{
+    return JSON.parse(text);
+  }catch(e){
+    const snippet=(text||'').slice(0,80).replace(/\s+/g,' ');
+    throw new Error('Cloud trả về dữ liệu không hợp lệ (không phải JSON). Có thể Apps Script đang lỗi hoặc quá tải. Nội dung: '+snippet);
+  }
+}
+
 /* v1.57.0: Decode cloud response — handles both compressed (gz:true) and legacy formats */
 async function decodeCloudPayload(responseData){
   if(responseData.gz && responseData.payload_gz){
@@ -3687,8 +3718,12 @@ async function selfWrapInCloudCfg(userName, password){
     // Pull existing cloud cfg
     const res=await fetch(cfg.scriptUrl+'?action=load&key=auth', {method:'GET'});
     const data=await res.json();
-    if(!data.ok || !data.payload) return;  // No cfg on cloud yet
-    const payload=data.payload;
+    if(!data.ok) return;
+    // v2.44.0: cfg auth có thể ở dạng nén (payload_gz) — dùng decodeCloudPayload
+    // để đọc được cả 2 dạng. Trước đây chỉ đọc data.payload → bỏ sót cfg nén
+    // → không tạo được wrap cho NV (một nguyên nhân lỗi "không tìm thấy wrap").
+    const payload=await decodeCloudPayload(data);
+    if(!payload) return;  // No cfg on cloud yet
     if(payload.v!==2 || !Array.isArray(payload.wraps)) return;  // Wrong schema
     // Check if wrap already exists with valid unwrap
     const existing=payload.wraps.find(w=>w.name.toLowerCase()===userName.toLowerCase());
@@ -8288,8 +8323,8 @@ async function cloudSync(mode){
   updateSyncStatus('syncing');
   try{
     if(mode==='pull'){
-      const res=await fetch(cfg.scriptUrl+'?action=load&key=data',{method:'GET'});
-      const data=await res.json();
+      const res=await fetchWithTimeout(cfg.scriptUrl+'?action=load&key=data',{method:'GET'});
+      const data=await safeJson(res);
       if(!data.ok){updateSyncStatus('error',data.error||'Lỗi');return;}
       // v1.57.0: Handle compressed payload (gz:true)
       let payloadObj;
@@ -8339,8 +8374,8 @@ async function cloudSync(mode){
         // v1.38.4: Admin also merges by ID to preserve NV work pushed since admin last pulled
         // This prevents admin from accidentally overwriting NV's records they didn't know about
         try{
-          const res0=await fetch(cfg.scriptUrl+'?action=load&key=data',{method:'GET'});
-          const data0=await res0.json();
+          const res0=await fetchWithTimeout(cfg.scriptUrl+'?action=load&key=data',{method:'GET'});
+          const data0=await safeJson(res0);
           let cloudFull={};
           // v1.57.0: Handle compressed payload
           if(data0.ok){
@@ -8371,9 +8406,19 @@ async function cloudSync(mode){
           // Admin merge fails → fall back to direct push (preserve old behavior)
           const detail=mergeErr.message||String(mergeErr);
           console.warn('[sync admin merge] failed, falling back to direct push:', detail);
-          if(/network|fetch|connection|failed to fetch/i.test(detail) || !navigator.onLine){
+          if(/network|fetch|connection|failed to fetch|không phản hồi|không hợp lệ/i.test(detail) || !navigator.onLine){
             updateSyncStatus('error','Không kết nối được cloud');
-            toast('Mạng yếu — thử lại sau','bad');
+            toast('Mạng yếu hoặc cloud lỗi — thử lại sau','bad');
+            return;
+          }
+          // v2.44.0: trước khi push thẳng (bỏ qua merge), kiểm tra S có vẻ đầy đủ không.
+          // Nếu S trống bất thường (vd admin mới đăng nhập chưa pull xong) → KHÔNG push,
+          // tránh đẩy bản thiếu đè lên cloud.
+          const _cnt=(S.payables||[]).length+(S.receivables||[]).length+(S.vessels||[]).length
+                    +(S.fixedAssets||[]).length+(S.companies||[]).length+(S.projects||[]).length;
+          if(_cnt===0){
+            updateSyncStatus('error','Dữ liệu máy trống — không đẩy đè cloud');
+            toast('⚠ Không sync: dữ liệu trên máy đang trống. Hãy Pull từ cloud trước, hoặc liên hệ admin.','bad');
             return;
           }
           // Cloud empty or other error → push direct
@@ -8383,8 +8428,8 @@ async function cloudSync(mode){
         // User: must merge with cloud to avoid overwriting fields they don't have permission for
         // v1.38.4: Use record-level mergeByID to preserve changes from other NVs working in parallel
         try{
-          const res0=await fetch(cfg.scriptUrl+'?action=load&key=data',{method:'GET'});
-          const data0=await res0.json();
+          const res0=await fetchWithTimeout(cfg.scriptUrl+'?action=load&key=data',{method:'GET'});
+          const data0=await safeJson(res0);
           let cloudFull={};
           // v1.57.0: Handle compressed payload
           if(data0.ok){
@@ -8466,12 +8511,12 @@ async function cloudSync(mode){
         toast(`Dữ liệu vẫn quá lớn sau khi nén (${sizeKB}KB) — Liên hệ admin/dev`, 'bad');
         return;
       }
-      const res=await fetch(cfg.scriptUrl,{
+      const res=await fetchWithTimeout(cfg.scriptUrl,{
         method:'POST',
         headers:{'Content-Type':'text/plain'},
         body:finalBody
       });
-      const data=await res.json();
+      const data=await safeJson(res);
       if(!data.ok){updateSyncStatus('error',data.error||'Lỗi');toast('Sync thất bại','bad');return;}
       cfg.lastSync=new Date().toISOString();
       setAuthConfig(cfg);
