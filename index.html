@@ -2515,7 +2515,7 @@ body{min-height:100vh;background-image:radial-gradient(circle at 20% 0%,rgba(184
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='2.39.0';            // bumped on each release
+const APP_VERSION='2.41.0';            // bumped on each release
 
 /* v1.68.0: URL Apps Script của công ty — nhúng cứng để NV không cần nhập / không cần ?join=.
    Khi máy mới mở app, app tự dùng URL này kết nối cloud → vào thẳng Login.
@@ -2654,6 +2654,34 @@ function versionGT(a,b){
     if(x<y) return false;
   }
   return false;
+}
+
+/* v2.41.0: Tự kiểm tra cập nhật — điều tiết để không gọi quá dày.
+   Chỉ kiểm tra nếu lần trước đã quá 5 phút. */
+let _lastUpdateCheck=0;
+function checkForUpdateThrottled(minGapMs){
+  minGapMs=minGapMs||300000; // mặc định 5 phút
+  const now=Date.now();
+  if(now-_lastUpdateCheck<minGapMs) return;
+  _lastUpdateCheck=now;
+  try{ checkForUpdate(); }catch(e){}
+}
+
+/* v2.41.0: Kích hoạt tự cập nhật — định kỳ 20 phút + khi cửa sổ được focus lại.
+   Nhờ vậy NV để app mở cả ngày vẫn tự nhận bản mới, không cần đăng xuất/nhắc nhở. */
+let _autoUpdateStarted=false;
+function startAutoUpdateChecks(){
+  if(_autoUpdateStarted) return;
+  _autoUpdateStarted=true;
+  _lastUpdateCheck=Date.now(); // checkForUpdate lúc đăng nhập vừa chạy rồi
+  // Định kỳ mỗi 20 phút
+  setInterval(()=>{ checkForUpdateThrottled(0); }, 1200000);
+  // Khi NV chuyển tab khác rồi quay lại app
+  document.addEventListener('visibilitychange', ()=>{
+    if(document.visibilityState==='visible') checkForUpdateThrottled();
+  });
+  // Khi cửa sổ được focus lại
+  window.addEventListener('focus', ()=>{ checkForUpdateThrottled(); });
 }
 
 async function sha256Hex(s){
@@ -4208,10 +4236,11 @@ async function authAction(){
       // Mark that we just logged in — block auto-push for next 5s so pull completes cleanly
       _suppressAutoSync=true;
       setTimeout(()=>{ _suppressAutoSync=false; }, 5000);
-      setTimeout(()=>cloudSync('pull').then(()=>{ presenceStart(); }),300);
+      setTimeout(()=>cloudSync('pull').then(()=>{ presenceStart(); try{ if(pruneDeletedIds(120)>0) saveState(); }catch(e){} }),300);
     }
     // Check for app update silently — auto-reload if new version available
     setTimeout(()=>checkForUpdate(),1500);
+    startAutoUpdateChecks();
   }catch(e){err.textContent='Lỗi xác thực: '+e.message;}
 }
 
@@ -4468,7 +4497,7 @@ const TAB_TO_FIELDS={
    IMPORTANT v1.39.1: bankAccounts/bankSnapshots/loans REMOVED from shared — chỉ user có quyền tab 'banking' mới load. */
 // v1.57.0: auditLog REMOVED from shared sync — stays local only (admin trên 1 máy chính)
 // Trade-off: nếu admin đăng nhập máy khác → audit log empty. Đổi lại: giảm payload size.
-const SHARED_FIELDS=['fxRate','displayCcy','companyInfo','meta','presence','vesselExpenseCats','omProjectExpenseCats','hrExpenseCats','qnExpenseCats','departments','vendors','expenseTypes','revenueTypes','companies'];
+const SHARED_FIELDS=['fxRate','displayCcy','companyInfo','meta','presence','vesselExpenseCats','omProjectExpenseCats','hrExpenseCats','qnExpenseCats','departments','vendors','expenseTypes','revenueTypes','companies','deletedIds'];
 /* All possible data fields (used by admin or for save-merge) */
 const ALL_DATA_FIELDS=[
   'plans','projects','vessels','onhires','events',
@@ -4480,7 +4509,7 @@ const ALL_DATA_FIELDS=[
   'cashFunds','cashTxns',
   'departments','vendors','expenseTypes','revenueTypes',
   'salaryFund','taxes',
-  'historicalData','lockedHistYears'
+  'historicalData','lockedHistYears','deletedIds'
 ];
 
 /* Compute allowed fields for the current user (admin gets all). */
@@ -9212,6 +9241,7 @@ function defaultState(){
     adminChecklist:[],  // v1.78.0: checklist vận hành — [{id, text, period, done, doneAt, note}]
     historicalData:[],  // v1.83.0: số liệu lịch sử tổng hợp — [{id,year,kind,segment,vesselId,projectId,companyId,amount,ccy,note}]
     lockedHistYears:[],  // v2.39.0: danh sách năm số liệu lịch sử đã KHÓA SỔ (admin khóa — không sửa/xóa được tới khi mở khóa)
+    deletedIds:[],  // v2.40.0: danh sách ID đã xóa (tombstone) — [{id,at}] — chống bản ghi hồi sinh qua sync
     meta:{created:new Date().toISOString()}
   };
 }
@@ -9247,7 +9277,7 @@ function _recordTimestamp(r){
 // - Local records absent in cloud → keep local (mới thêm bởi NV này)
 // - Cả 2 cùng có → lấy bản có updatedAt mới nhất (last-write-wins ở mức RECORD, không phải array)
 // Returns: {merged, conflicts: [{id, cloudUpdatedAt, localUpdatedAt}]}
-function mergeByID(cloudArr, localArr, idField){
+function mergeByID(cloudArr, localArr, idField, skipTombstone){
   cloudArr=Array.isArray(cloudArr)?cloudArr:[];
   localArr=Array.isArray(localArr)?localArr:[];
   idField=idField||'id';
@@ -9286,11 +9316,52 @@ function mergeByID(cloudArr, localArr, idField){
   });
   // Build merged array preserving local order for local-origin, cloud order for cloud-origin
   // Simpler: just use Object.values
-  const merged=Object.values(byId).map(x=>x.rec);
+  // v2.40.0: loại bỏ bản ghi có ID đã bị xóa (tombstone) — chống "hồi sinh" qua sync.
+  // skipTombstone=true khi đang merge CHÍNH mảng deletedIds (nếu không nó tự xóa chính nó).
+  let merged=Object.values(byId).map(x=>x.rec);
+  if(!skipTombstone){
+    const tomb=deletedIdSet();
+    merged=merged.filter(r=>!tomb.has(String(r[idField])));
+  }
   return {merged, conflicts};
 }
 
 // Smart merge an entire state object (for cloud sync push)
+/* ============================================================
+   v2.40.0: TOMBSTONE — chống bản ghi "hồi sinh" sau khi xóa.
+   Khi xóa bản ghi, ghi ID vào S.deletedIds. Khi sync, mergeByID
+   loại bỏ mọi bản ghi có ID nằm trong deletedIds.
+   ============================================================ */
+function _deletedIds(){ if(!Array.isArray(S.deletedIds)) S.deletedIds=[]; return S.deletedIds; }
+
+// Đánh dấu 1 hoặc nhiều ID là đã xóa. Gọi trong các hàm xóa, TRƯỚC saveState().
+function markDeleted(ids){
+  const arr=Array.isArray(ids)?ids:[ids];
+  const list=_deletedIds();
+  const now=new Date().toISOString();
+  arr.forEach(id=>{
+    if(id==null||id==='') return;
+    if(!list.some(d=>d.id===id)) list.push({id:String(id), at:now});
+  });
+}
+
+// Tập hợp ID đã xóa (để mergeByID tra cứu nhanh)
+function deletedIdSet(){
+  return new Set(_deletedIds().map(d=>d.id));
+}
+
+// Dọn bia mộ cũ hơn N ngày (mặc định 120) — tới lúc đó mọi máy đã đồng bộ xong.
+function pruneDeletedIds(days){
+  days=days||120;
+  const cutoff=Date.now()-days*86400000;
+  const before=_deletedIds().length;
+  S.deletedIds=_deletedIds().filter(d=>{
+    const t=Date.parse(d.at||'');
+    return !t || t>=cutoff;  // giữ nếu không parse được ngày, hoặc còn trong hạn
+  });
+  return before-S.deletedIds.length;
+}
+
 // fields: array of state keys to merge (allowed for this user)
 // Returns: {merged: full state, conflictReport: {field: [conflicts]}}
 function mergeStateByFields(cloudFull, localFull, fields){
@@ -9311,7 +9382,8 @@ function mergeStateByFields(cloudFull, localFull, fields){
     }
     // Only merge arrays of objects (records). For other types, last-write-wins (local).
     if(Array.isArray(localFull[f]) && localFull[f].length>0 && typeof localFull[f][0]==='object' && localFull[f][0]!==null && 'id' in localFull[f][0]){
-      const {merged:mArr, conflicts}=mergeByID(cloudFull[f], localFull[f], 'id');
+      // v2.40.0: khi merge chính mảng deletedIds, KHÔNG áp bộ lọc tombstone (tránh nó tự xóa chính nó)
+      const {merged:mArr, conflicts}=mergeByID(cloudFull[f], localFull[f], 'id', f==='deletedIds');
       merged[f]=mArr;
       if(conflicts.length>0) conflictReport[f]=conflicts;
     } else {
@@ -9617,6 +9689,7 @@ function deleteDepartment(id){
   }
   if(!confirm(`Xóa phòng/ban "${d.code} · ${d.name}"?`)) return;
   S.departments=S.departments.filter(x=>x.id!==id);
+  markDeleted(id);
   saveState();
   toast('Đã xóa phòng/ban');
   closeModal();
@@ -9866,6 +9939,7 @@ function hardDeleteExpenseType(id){
   }
   if(!confirm(`Xóa hẳn loại "${t.label}" (${t.code})? KHÔNG thể khôi phục.`)) return;
   S.expenseTypes=S.expenseTypes.filter(x=>x.id!==id);
+  markDeleted(id);
   saveState();
   toast('Đã xóa hẳn: '+t.code);
   closeModal();
@@ -10068,6 +10142,7 @@ function hardDeleteRevenueType(id){
   }
   if(!confirm(`Xóa hẳn loại "${t.label}" (${t.code})? KHÔNG thể khôi phục.`)) return;
   S.revenueTypes=S.revenueTypes.filter(x=>x.id!==id);
+  markDeleted(id);
   saveState();
   toast('Đã xóa hẳn: '+t.code);
   closeModal();
@@ -10758,6 +10833,7 @@ function deleteCompany(id){
   if(c.isParent){ toast('Không thể xóa công ty mẹ','bad'); return; }
   if(!confirm(`Xóa công ty "${c.name}"?\n\nLưu ý: các bút toán đã gắn công ty này sẽ cần gán lại (từ v1.74.0).`)) return;
   S.companies = S.companies.filter(x=>x.id!==id);
+  markDeleted(id);
   saveState();
   toast('✓ Đã xóa công ty: '+c.name);
   renderCatalog();
@@ -10890,6 +10966,7 @@ function deleteVendor(id){
   }
   if(!confirm(`Xóa NCC "${v.name}"?`)) return;
   S.vendors = S.vendors.filter(x=>x.id!==id);
+  markDeleted(id);
   saveState();
   toast('Đã xóa NCC');
   renderCatalog();
@@ -11929,7 +12006,7 @@ function delDockPlan(id){
     `${DOCK_KIND_LABELS[p.kind]||p.kind} · ${esc(p.assetName)}<br>Năm ${yrTxt} · Dự toán ${fmt(p.budget,p.ccy)}`,
     ()=>{
       try{ logAuditEvent('delete_dock_plan',{assetName:p.assetName,year:yrTxt,budget:p.budget,ccy:p.ccy,actor:actorName()}); }catch(e){}
-      S.dockPlans=S.dockPlans.filter(x=>x.id!==id);saveState();toast('Đã xóa');renderAll();
+      S.dockPlans=S.dockPlans.filter(x=>x.id!==id);markDeleted(id);saveState();toast('Đã xóa');renderAll();
     });
 }
 
@@ -12087,7 +12164,7 @@ function delPlan(id){
   const p=S.plans.find(x=>x.id===id);if(!p)return;
   confirmDelete('dòng kế hoạch này',
     `${SEGMENTS[p.segment].name} · ${esc(p.name||_planEntityName(p.entityRef))}<br>Năm ${p.year} · DT KH ${fmt(p.revenue,p.ccy)} · LN KH ${fmt(p.profit||0,p.ccy)}`,
-    ()=>{S.plans=S.plans.filter(x=>x.id!==id);saveState();toast('Đã xóa');renderAll();});
+    ()=>{S.plans=S.plans.filter(x=>x.id!==id);markDeleted(id);saveState();toast('Đã xóa');renderAll();});
 }
 function editPlan(id){
   const p=S.plans.find(x=>x.id===id);if(!p)return;
@@ -12273,7 +12350,7 @@ function delProject(id){
   const linked=S.transactions.filter(t=>t.projectId===id).length;
   confirmDelete('dự án này',
     `${esc(p.code)} · ${esc(p.name)}<br>${esc(p.client) || ''} · ${SEGMENTS[p.segment].name}<br>${linked?`<b style="color:var(--bad)">⚠ ${linked} bút toán đang liên kết</b> sẽ bị mất tham chiếu (vẫn giữ trong sổ).`:'Không có bút toán liên kết.'}`,
-    ()=>{S.projects=S.projects.filter(x=>x.id!==id);saveState();toast('Đã xóa dự án');renderAll();});
+    ()=>{S.projects=S.projects.filter(x=>x.id!==id);markDeleted(id);saveState();toast('Đã xóa dự án');renderAll();});
 }
 function editProject(id){
   const p=S.projects.find(x=>x.id===id);if(!p)return;
@@ -12369,7 +12446,7 @@ function delVessel(id){
   const oh=S.onhires.filter(o=>o.vesselId===id).length;
   confirmDelete('tàu này',
     `${esc(v.name)} · ${v.type==='SERVICE'?'Tàu dịch vụ':'Tàu kỹ thuật'} · IMO ${esc(v.imo) || '—'}<br>${oh?`<b style="color:var(--bad)">⚠ ${oh} bản ghi onhire</b> cũng sẽ bị xóa kèm.`:'Không có bản ghi onhire.'}`,
-    ()=>{S.vessels=S.vessels.filter(x=>x.id!==id);S.onhires=S.onhires.filter(o=>o.vesselId!==id);saveState();toast('Đã xóa tàu');renderAll();});
+    ()=>{const ohIds=S.onhires.filter(o=>o.vesselId===id).map(o=>o.id);S.vessels=S.vessels.filter(x=>x.id!==id);S.onhires=S.onhires.filter(o=>o.vesselId!==id);markDeleted([id,...ohIds]);saveState();toast('Đã xóa tàu');renderAll();});
 }
 function editVessel(id){
   const v=S.vessels.find(x=>x.id===id);if(!v)return;
@@ -12870,6 +12947,7 @@ function deleteEvent(eid){
   const e=S.events.find(x=>x.id===eid);if(!e)return;
   if(!confirm('Xóa đoạn '+evtType(e.type).label+' ('+fmtDateTime(e.startAt)+')?')) return;
   S.events=S.events.filter(x=>x.id!==eid);
+  markDeleted(eid);
   syncEventsToOnhires();
   saveState();closeModal();toast('Đã xóa');renderAll();
 }
@@ -13137,7 +13215,7 @@ function delTx(id){
   const p=S.projects.find(p=>p.id===t.projectId);
   confirmDelete('bút toán này',
     `${t.date} · ${t.type==='REV'?'Doanh thu':'Chi phí'} · ${esc(t.category) || ''}<br>${p?p.code+' · ':''}${esc(t.desc) || '—'}<br><b>${fmtFull(t.amount,t.ccy)}</b> · ${t.paid?'Đã TT':'Chưa TT'}`,
-    ()=>{S.transactions=S.transactions.filter(x=>x.id!==id);saveState();toast('Đã xóa bút toán');renderAll();});
+    ()=>{S.transactions=S.transactions.filter(x=>x.id!==id);markDeleted(id);saveState();toast('Đã xóa bút toán');renderAll();});
 }
 function editTx(id){
   const t=S.transactions.find(x=>x.id===id);if(!t)return;
@@ -14089,6 +14167,7 @@ function deleteFixedAsset(id){
       if(a.group==='VESSEL' && a.vesselId) unlinkVesselFromAsset(a);
       try{ logAuditEvent('delete_fixed_asset',{code:a.code,name:a.name,originalCost:a.originalCost,ccy:a.ccy,actor:actorName()}); }catch(e){}
       S.fixedAssets=S.fixedAssets.filter(x=>x.id!==id);
+      markDeleted(id);
       saveState();toast('Đã xóa');renderAll();
     });
 }
@@ -14147,6 +14226,7 @@ function unlinkVesselFromAsset(asset){
     return false;
   }
   S.vessels=(S.vessels||[]).filter(x=>x.id!==vid);
+  markDeleted(vid);
   delete asset.vesselId;
   return true;
 }
@@ -14497,7 +14577,7 @@ function deleteTool(id){
   confirmDelete('CCDC/MMTB này', `<b>${esc(a.code)}</b> · ${esc(a.name)}<br>Nguyên giá: ${fmtFull(a.originalCost,a.ccy)}<br>${(a.history||[]).length?`⚠ Có ${a.history.length} lịch sử`:'Không có lịch sử'}`,
     ()=>{
       try{ logAuditEvent('delete_tool',{code:a.code,name:a.name,originalCost:a.originalCost,ccy:a.ccy,actor:actorName()}); }catch(e){}
-      S.tools=S.tools.filter(x=>x.id!==id);saveState();toast('Đã xóa');renderAll();
+      S.tools=S.tools.filter(x=>x.id!==id);markDeleted(id);saveState();toast('Đã xóa');renderAll();
     });
 }
 
@@ -16488,11 +16568,13 @@ function deleteBankAccount(id){
   const snapCount=(S.bankSnapshots||[]).filter(s=>s.bankAccountId===id).length;
   if(snapCount>0){
     if(!confirm(`Xóa TK "${a.accountName}" (${a.accountNo})?\n${snapCount} snapshot số dư cũng sẽ bị xóa. Không thể khôi phục.`)) return;
+    markDeleted((S.bankSnapshots||[]).filter(s=>s.bankAccountId===id).map(s=>s.id));
     S.bankSnapshots=(S.bankSnapshots||[]).filter(s=>s.bankAccountId!==id);
   } else {
     if(!confirm(`Xóa TK "${a.accountName}" (${a.accountNo})?`)) return;
   }
   S.bankAccounts=S.bankAccounts.filter(x=>x.id!==id);
+  markDeleted(id);
   saveState();
   toast('Đã xóa TK');
   renderBanking();
@@ -16577,6 +16659,7 @@ function _deleteBankSnapshot(id){
   if(!isAdmin()){toast('Chỉ admin','bad');return;}
   if(!confirm('Xóa snapshot này?'))return;
   S.bankSnapshots=(S.bankSnapshots||[]).filter(s=>s.id!==id);
+  markDeleted(id);
   saveState();
   toast('Đã xóa');
   closeModal();
@@ -16753,8 +16836,10 @@ function deleteLoan(id){
     : '';
   if(!confirm(`Xóa món vay "${l.contractNo||l.bankName}"?\nLịch trả nợ và các kỳ đã đánh dấu trả cũng sẽ bị xóa.${linkedMsg}`))return;
   S.loans=S.loans.filter(x=>x.id!==id);
+  markDeleted(id);
   // Remove linked APs
   if(linkedAPs.length>0){
+    markDeleted(linkedAPs.map(p=>p.id));
     S.payables=(S.payables||[]).filter(p=>p.linkedLoanId!==id);
   }
   try{logAuditEvent('loan_delete',{loanId:id,linkedApsRemoved:linkedAPs.length});}catch(e){}
@@ -19067,7 +19152,7 @@ function deleteAr(kind,id){
       try{ logAuditEvent(kind==='ap'?'delete_ap':'delete_ar',
         {recordId:r.id, partner:r.partner||'', amount:r.amount||0, ccy:r.ccy||'',
          desc:r.desc||'', issueDate:r.issueDate||'', actor:actorName()}); }catch(e){}
-      S[list]=S[list].filter(x=>x.id!==id);saveState();toast('Đã xóa');renderAll();
+      S[list]=S[list].filter(x=>x.id!==id);markDeleted(id);saveState();toast('Đã xóa');renderAll();
     });
 }
 
@@ -19163,7 +19248,7 @@ function delOpVessel(id){
   const tx=S.opTransactions.filter(t=>t.vesselId===id).length;
   confirmDelete('tàu quản lý này',
     `${esc(v.name)} · ${esc(v.owner) || '—'}<br>Số dư hiện tại: ${fmt(opBalance(id),v.ccy)}<br>${tx?`<b style="color:var(--bad)">⚠ ${tx} bút toán thu/chi hộ</b> cũng bị xóa kèm.`:''}`,
-    ()=>{S.opVessels=S.opVessels.filter(x=>x.id!==id);S.opTransactions=S.opTransactions.filter(t=>t.vesselId!==id);saveState();toast('Đã xóa');renderAll();});
+    ()=>{const txIds=S.opTransactions.filter(t=>t.vesselId===id).map(t=>t.id);S.opVessels=S.opVessels.filter(x=>x.id!==id);S.opTransactions=S.opTransactions.filter(t=>t.vesselId!==id);markDeleted([id,...txIds]);saveState();toast('Đã xóa');renderAll();});
 }
 function editOpVessel(id){
   const v=S.opVessels.find(x=>x.id===id);if(!v)return;
@@ -19375,7 +19460,7 @@ function delOpTx(id){
   const v=S.opVessels.find(v=>v.id===t.vesselId);
   confirmDelete('bút toán thu/chi hộ',
     `${t.date} · ${v?v.name:'?'} · ${t.type==='IN'?'Thu hộ':'Chi hộ'}<br>${esc(t.desc) || '—'}<br><b>${fmtFull(t.amount,v?v.ccy:'VND')}</b>`,
-    ()=>{S.opTransactions=S.opTransactions.filter(x=>x.id!==id);saveState();toast('Đã xóa');renderAll();});
+    ()=>{S.opTransactions=S.opTransactions.filter(x=>x.id!==id);markDeleted(id);saveState();toast('Đã xóa');renderAll();});
 }
 function editOpTx(id){
   const t=S.opTransactions.find(x=>x.id===id);if(!t)return;
@@ -20582,11 +20667,13 @@ function deleteWarehouse(id){
   const n=(S.invMovements||[]).filter(m=>m.warehouseId===id).length;
   if(n>0){
     if(!confirm(`Xóa kho "${w.name}"?\n${n} bản ghi tồn kho gắn vào kho này cũng sẽ bị xóa. Không thể khôi phục.`)) return;
+    markDeleted((S.invMovements||[]).filter(m=>m.warehouseId===id).map(m=>m.id));
     S.invMovements=(S.invMovements||[]).filter(m=>m.warehouseId!==id);
   } else {
     if(!confirm(`Xóa kho "${w.name}"?`))return;
   }
   S.warehouses=S.warehouses.filter(x=>x.id!==id);
+  markDeleted(id);
   saveState();toast('Đã xóa');renderAll();
 }
 
@@ -20771,6 +20858,7 @@ function deleteInvMovement(id){
   const w=S.warehouses.find(x=>x.id===m.warehouseId);
   if(!confirm(`Xóa bản ghi ${w?w.name:'?'} · ${esc(m.itemName)} · ${m.month}?`))return;
   S.invMovements=S.invMovements.filter(x=>x.id!==id);
+  markDeleted(id);
   saveState();renderAll();toast('Đã xóa');
 }
 
@@ -21151,6 +21239,7 @@ function deleteHistoricalRow(id){
   if(isHistYearLocked(r.year)){ toast(`🔒 Năm ${r.year} đã khóa sổ — mở khóa để xóa`,'bad'); return; }
   if(!confirm(`Xóa số liệu ${r.year} — ${r.kind==='revenue'?'Doanh thu':'Chi phí'}?`)) return;
   S.historicalData=S.historicalData.filter(x=>x.id!==id);
+  markDeleted(id);
   saveState();
   renderHistoricalBody();
 }
@@ -25398,6 +25487,7 @@ function deleteChecklistItem(id){
   if(!it) return;
   if(!confirm(`Xóa đầu việc "${it.text}"?`)) return;
   S.adminChecklist=S.adminChecklist.filter(x=>x.id!==id);
+  markDeleted(id);
   saveState();
   renderChecklistBody();
 }
