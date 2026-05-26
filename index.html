@@ -2182,6 +2182,7 @@ body{min-height:100vh;background-image:radial-gradient(circle at 20% 0%,rgba(184
     </div>
     <div class="section-body">
       <div class="rep-guide"><span><b>Cách đọc:</b> Năm mảng quan trọng nhất dành cho chủ công ty, tóm tắt ngắn gọn. Bấm "Xem chi tiết" ở mỗi mảng để mở báo cáo đầy đủ tương ứng ở phần C bên dưới.</span></div>
+      <div id="bcqt-exec-hist-note" class="rep-guide" style="display:none;background:rgba(184,71,46,.06);border-color:var(--accent)"><span>📊 <b>Lưu ý về số liệu lịch sử:</b> Các chỉ số ở mục "Chỉ số tổng quan" này (dòng tiền, công nợ, top đối tác, hiệu suất tàu) <b>chỉ tính từ bút toán chi tiết trong app</b> — KHÔNG gồm số liệu lịch sử năm cũ, vì số liệu lịch sử là số tổng hợp không có chi tiết từng giao dịch. Để xem số liệu đã gồm năm cũ, mở các mục C, E bên dưới (đã hỗ trợ).</span></div>
       <div id="bcqt-exec-blocks" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:14px"></div>
     </div>
   </div>
@@ -2515,7 +2516,7 @@ body{min-height:100vh;background-image:radial-gradient(circle at 20% 0%,rgba(184
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='2.53.0';            // bumped on each release
+const APP_VERSION='2.55.0';            // bumped on each release
 
 /* v1.68.0: URL Apps Script của công ty — nhúng cứng để NV không cần nhập / không cần ?join=.
    Khi máy mới mở app, app tự dùng URL này kết nối cloud → vào thẳng Login.
@@ -21235,11 +21236,20 @@ function histIncludeOn(){
   return canSee && !!(document.getElementById('bcqt-include-hist')||{}).checked;
 }
 function histSums(filterFn){
-  const out={revenue:0, cost:0};
+  const out={revenue:0, cost:0, usedCurrentFx:false};
   if(!histIncludeOn()) return out;
+  const curFx=+S.fxRate||25000;
   (S.historicalData||[]).forEach(r=>{
     if(filterFn && !filterFn(r)) return;
-    const amt=bcqtToUsd(r.amount||0, r.ccy);
+    let amt;
+    if(r.ccy==='VND'){
+      // v2.55.0: quy đổi bằng tỷ giá NĂM của bản ghi; nếu thiếu → fallback tỷ giá hiện tại
+      const fx=(+r.fxRate>0)?+r.fxRate:curFx;
+      if(!(+r.fxRate>0)) out.usedCurrentFx=true;
+      amt=(+r.amount||0)/fx;
+    } else {
+      amt=(+r.amount||0);  // USD hoặc khác → giữ nguyên
+    }
     if(r.kind==='revenue') out.revenue+=amt;
     else out.cost+=amt;
   });
@@ -21290,11 +21300,18 @@ function renderHistoricalBody(){
   });
   lockBar+='</div>';
   let h=lockBar+'<table class="tbl" style="font-size:12px"><thead><tr>'+
-    '<th>Năm</th><th>Loại</th><th>Mảng</th><th>Tàu</th><th>Dự án</th><th>Công ty</th><th class="r">Số tiền</th><th></th></tr></thead><tbody>';
+    '<th>Năm</th><th>Loại</th><th>Mảng</th><th>Tàu</th><th>Dự án</th><th>Công ty</th><th class="r">Số tiền</th><th class="r">Tỷ giá</th><th></th></tr></thead><tbody>';
   list.forEach(r=>{
     const proj=r.projectId?(S.projects||[]).find(p=>p.id===r.projectId):null;
     const isRev=r.kind==='revenue';
     const locked=isHistYearLocked(r.year);
+    // v2.55.0: tỷ giá năm — cảnh báo nếu là VND mà chưa có tỷ giá
+    const needFx=(r.ccy==='VND');
+    const fxCell=needFx
+      ? (+r.fxRate>0
+          ? `<span style="font-family:var(--font-mono)">${(+r.fxRate).toLocaleString('vi-VN')}</span>`
+          : '<span style="color:var(--bad);font-size:11px" title="Chưa có tỷ giá — báo cáo sẽ dùng tỷ giá hiện tại">⚠ thiếu</span>')
+      : '<span style="color:var(--muted)">—</span>';
     h+=`<tr${locked?' style="background:rgba(184,71,46,.04)"':''}>
       <td><b>${r.year}</b>${locked?' <span title="Đã khóa sổ">🔒</span>':''}</td>
       <td><span class="chip ${isRev?'chip-good':''}" style="font-size:10px">${isRev?'Doanh thu':'Chi phí'}</span></td>
@@ -21303,6 +21320,7 @@ function renderHistoricalBody(){
       <td style="font-size:11px;color:var(--muted)">${proj?esc(proj.code):'—'}</td>
       <td style="font-size:11px;color:var(--muted)">${esc(companyName(r.companyId))}</td>
       <td class="r num" style="font-weight:600;color:${isRev?'var(--good)':'var(--accent)'}">${fmt(r.amount,r.ccy)}</td>
+      <td class="r">${fxCell}</td>
       <td><div class="row-actions">${locked
         ? '<span style="font-size:11px;color:var(--muted)" title="Năm đã khóa sổ">🔒 đã khóa</span>'
         : `<button class="icon-btn" title="Sửa" onclick="editHistoricalRow('${r.id}')">✎</button>
@@ -21344,6 +21362,11 @@ function _historicalForm(r){
         <div class="field"><label>Số tiền *</label><input type="number" id="hd-amount" value="${r.amount||0}"></div>
         <div class="field"><label>CCY</label><select id="hd-ccy"><option ${r.ccy==='VND'?'selected':''}>VND</option><option ${r.ccy==='USD'?'selected':''}>USD</option></select></div>
       </div>
+      <div class="field">
+        <label>Tỷ giá bình quân năm này (VND/USD)</label>
+        <input type="number" id="hd-fxrate" value="${r.fxRate||''}" placeholder="VD năm 2024: 24500 — chỉ cần khi số tiền nhập bằng VND">
+        <div style="font-size:11px;color:var(--muted);margin-top:3px">Dùng để quy đổi số liệu năm cũ sang USD theo đúng tỷ giá của năm đó. Bỏ trống nếu số tiền nhập bằng USD.</div>
+      </div>
       <div class="field"><label>Ghi chú</label><input type="text" id="hd-note" value="${(r.note||'').replace(/"/g,'&quot;')}" placeholder="Tùy chọn"></div>
       <div id="hd-err" style="color:var(--bad);font-size:12px"></div>
     </div>
@@ -21381,6 +21404,7 @@ function _saveHistoricalRow(id){
     projectId:document.getElementById('hd-project').value||'',
     companyId:document.getElementById('hd-company').value||getParentCompanyId(),
     ccy:document.getElementById('hd-ccy').value,
+    fxRate:+document.getElementById('hd-fxrate').value||0,  // v2.55.0: tỷ giá năm của bản ghi
     note:document.getElementById('hd-note').value.trim()
   };
   if(id){
@@ -21501,12 +21525,20 @@ function bcqtAggregate(range){
   const includeHist = canSeeHist && !!(document.getElementById('bcqt-include-hist')||{}).checked;
   if(includeHist){
     const fromY = +from.slice(0,4), toY = +to.slice(0,4);
+    const curFx = +S.fxRate || 25000;
     (S.historicalData||[]).forEach(r => {
       if(r.year < fromY || r.year > toY) return;
       if(!matchCompany(r)) return;
       const seg = r.segment || 'OTHER';
       if(!data[seg]) return;
-      const amt = bcqtToUsd(r.amount || 0, r.ccy);
+      // v2.55.0: quy đổi bằng tỷ giá NĂM của bản ghi (fallback tỷ giá hiện tại nếu thiếu)
+      let amt;
+      if(r.ccy==='VND'){
+        const fx=(+r.fxRate>0)?+r.fxRate:curFx;
+        amt=(+r.amount||0)/fx;
+      } else {
+        amt=(+r.amount||0);
+      }
       if(r.kind==='revenue') data[seg].revenue += amt;
       else data[seg].cost += amt;
     });
@@ -21964,6 +21996,9 @@ function renderBcqtExecBlocks(range, data){
       <a class="exec-block-link" onclick="bcqtOpenAccordion('vessel_drill')">⮟ Drilldown theo tàu (B)</a>
     </div>
   `;
+  // v2.53.1: hiện ghi chú giải thích khi checkbox "Gồm số liệu lịch sử" bật
+  const _histNote=document.getElementById('bcqt-exec-hist-note');
+  if(_histNote) _histNote.style.display = histIncludeOn() ? '' : 'none';
 }
 
 /* v1.50.0: Toggle accordion — lazy render report when first opened */
@@ -22099,7 +22134,13 @@ function fillReportVesselPicker(){
    ============================================================ */
 function renderTrendChart(){
   const metric=document.getElementById('rep-trend-metric').value;
-  const ys=years();
+  let ys=years();
+  // v2.53.1: khi bật "Gồm số liệu lịch sử", bổ sung các năm chỉ có trong historicalData
+  if(histIncludeOn()){
+    const yset=new Set(ys);
+    (S.historicalData||[]).forEach(h=>{ if(h.year) yset.add(+h.year); });
+    ys=[...yset].sort();
+  }
   const container=document.getElementById('rep-trend-chart');
   if(ys.length<1){container.innerHTML='<div class="empty">Chưa có dữ liệu</div>';return;}
 
@@ -22116,8 +22157,11 @@ function renderTrendChart(){
   const series=segKeys.map(seg=>{
     const points=ys.map(y=>{
       const tx=viewerScopeTx().filter(t=>new Date(t.date).getFullYear()===y && t.segment===seg);
-      const rev=tx.filter(t=>t.type==='REV').reduce((s,t)=>s+txAmt(t),0);
-      const cost=tx.filter(t=>t.type==='COST').reduce((s,t)=>s+txAmt(t),0);
+      let rev=tx.filter(t=>t.type==='REV').reduce((s,t)=>s+txAmt(t),0);
+      let cost=tx.filter(t=>t.type==='COST').reduce((s,t)=>s+txAmt(t),0);
+      // v2.53.1: cộng số liệu lịch sử của năm × mảng này (khi checkbox bật)
+      const hh=histSums(h=>+h.year===y && (h.segment||'OTHER')===seg);
+      rev+=hh.revenue; cost+=hh.cost;
       let v;
       if(metric==='REV') v=rev;
       else if(metric==='COST') v=cost;
@@ -22231,8 +22275,13 @@ function renderVesselDrilldown(){
     const p=S.projects.find(p=>p.id===t.projectId);
     return p&&p.vesselId===vid;
   });
-  const totRev=allTxs.filter(t=>t.type==='REV').reduce((s,t)=>s+txAmt(t),0);
-  const totCost=allTxs.filter(t=>t.type==='COST').reduce((s,t)=>s+txAmt(t),0);
+  const totRevTx=allTxs.filter(t=>t.type==='REV').reduce((s,t)=>s+txAmt(t),0);
+  const totCostTx=allTxs.filter(t=>t.type==='COST').reduce((s,t)=>s+txAmt(t),0);
+  // v2.53.1: cộng số liệu lịch sử của tàu này (khi checkbox "Gồm số liệu lịch sử" bật)
+  const histV=histSums(h=>h.vesselId===vid);
+  const totRev=totRevTx+histV.revenue;
+  const totCost=totCostTx+histV.cost;
+  const hasHistV=(histV.revenue>0||histV.cost>0);
   const totFuel=allTxs.filter(t=>t.type==='COST'&&FUEL_CAT_NAMES.includes(t.category)).reduce((s,t)=>s+txAmt(t),0);
   const totOpex=totCost-totFuel;
   // Onhire across all years for this vessel
@@ -22250,7 +22299,8 @@ function renderVesselDrilldown(){
       <div class="kpi"><div class="kpi-label">Tổng DT (tất cả năm)</div><div class="kpi-value">${fmt(totRev)}</div><div class="kpi-sub">${projects.length} dự án · ${allTxs.length} bút toán</div></div>
       <div class="kpi"><div class="kpi-label">Margin tích lũy</div><div class="kpi-value" style="color:${totRev-totCost>=0?'var(--good)':'var(--bad)'}">${fmt(totRev-totCost)}</div><div class="kpi-sub">${totRev?((totRev-totCost)/totRev*100).toFixed(1)+'%':'—'}</div></div>
       <div class="kpi"><div class="kpi-label">Đơn giá BQ</div><div class="kpi-value">${fmt(avgSell)}</div><div class="kpi-sub">Opex/On ${fmt(avgOpex)} · Fuel/On ${fmt(avgFuel)}</div></div>
-    </div>`;
+    </div>
+    ${hasHistV?`<div class="rep-guide" style="background:rgba(184,71,46,.06);border-color:var(--accent);margin-bottom:14px"><span>📊 <b>Đã gồm số liệu lịch sử:</b> Tổng DT/Margin của tàu đã cộng số liệu năm cũ (DT ${fmt(histV.revenue)} · CP ${fmt(histV.cost)}). Các bảng dự án chi tiết bên dưới chỉ tính từ bút toán trong app.</span></div>`:''}`;
 
   // Days breakdown
   html+=`<div class="section" style="margin-bottom:18px;background:var(--paper-2);border-color:var(--paper-3)">
@@ -22605,7 +22655,7 @@ function renderProjectPnL(){
         <div style="font-family:var(--font-mono);font-size:12px;color:${margin>=0?'var(--good)':'var(--bad)'}">${marginPct.toFixed(1)}%</div>
       </div>
     </div>
-    ${hasHist?`<div class="rep-guide" style="background:rgba(184,71,46,.06);border-color:var(--accent)"><span>📊 <b>Đã gồm số liệu lịch sử:</b> 3 ô tổng phía trên đã cộng số liệu năm cũ của dự án (DT ${fmt(hist.revenue)} · CP ${fmt(hist.cost)}). Lưu ý: 2 bảng bên dưới (Theo tháng, Chi phí theo loại) <b>chỉ tính từ bút toán chi tiết trong app</b> — số liệu lịch sử là số tổng hợp, không có chi tiết tháng/loại nên không hiển thị ở 2 bảng đó.</span></div>`:''}`;
+    ${hasHist?`<div class="rep-guide" style="background:rgba(184,71,46,.06);border-color:var(--accent)"><span>📊 <b>Đã gồm số liệu lịch sử:</b> 3 ô tổng phía trên đã cộng số liệu năm cũ của dự án (DT ${fmt(hist.revenue)} · CP ${fmt(hist.cost)}). Số liệu lịch sử bằng VND được quy đổi sang USD theo <b>tỷ giá của năm đó</b> (khai báo trong "Số liệu lịch sử")${hist.usedCurrentFx?' — <b style="color:var(--bad)">⚠ một số bản ghi chưa khai báo tỷ giá, đang tạm dùng tỷ giá hiện tại</b>':''}. Lưu ý: 2 bảng bên dưới (Theo tháng, Chi phí theo loại) chỉ tính từ bút toán chi tiết trong app.</span></div>`:''}`;
 
   // Monthly breakdown table
   html+=`<div style="display:grid;grid-template-columns:1fr 1fr;gap:18px">`;
