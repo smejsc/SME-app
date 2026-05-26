@@ -577,7 +577,7 @@ body{min-height:100vh;background-image:radial-gradient(circle at 20% 0%,rgba(184
         <div id="presence-list"></div>
       </div>
     </div>
-    <button class="btn btn-ghost" onclick="cloudSync()" id="sync-btn" title="Đồng bộ lên cloud">↻ Sync</button>
+    <button class="btn btn-ghost" onclick="cloudSync(null,{interactive:true})" id="sync-btn" title="Đồng bộ lên cloud">↻ Sync</button>
     <div class="fx-block">
       <label class="fx-label">FX <span style="opacity:.55">VND/USD</span></label>
       <input type="number" id="fx-rate" class="fx-input" placeholder="25000" data-skip-format="1">
@@ -2515,7 +2515,7 @@ body{min-height:100vh;background-image:radial-gradient(circle at 20% 0%,rgba(184
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='2.48.0';            // bumped on each release
+const APP_VERSION='2.49.0';            // bumped on each release
 
 /* v1.68.0: URL Apps Script của công ty — nhúng cứng để NV không cần nhập / không cần ?join=.
    Khi máy mới mở app, app tự dùng URL này kết nối cloud → vào thẳng Login.
@@ -8318,7 +8318,9 @@ function updateSyncStatus(state,note){
   else if(state==='synced'){ _syncPendingPush=false; }
 }
 
-async function cloudSync(mode){
+async function cloudSync(mode, opts){
+  opts=opts||{};
+  const _interactive=!!opts.interactive;  // true khi do người bấm nút Sync
   const cfg=getAuthConfig();
   if(!cfg||!cfg.scriptUrl){
     toast('Chưa cấu hình Apps Script URL. Vào "Cài đặt" để cài.','bad');
@@ -8376,6 +8378,29 @@ async function cloudSync(mode){
       try{ updateBackupBanner(); }catch(e){}
     } else {
       // PUSH
+      // v2.49.0: Kiểm ngầm — nếu máy đang trống bất thường, không đẩy bản trống đè cloud.
+      // - Khi người bấm nút Sync (interactive): hỏi lại để người quyết.
+      // - Khi auto-sync (không interactive): âm thầm bỏ qua push, không hỏi.
+      if(_stateLooksEmpty(S)){
+        if(_interactive){
+          const ok=confirm('⚠ CẢNH BÁO: Dữ liệu trên máy này đang TRỐNG hoặc rất ít '
+            +'(0 công ty / 0 công nợ / 0 tàu).\n\n'
+            +'Nếu bạn đồng bộ lúc này, bản trống có thể ghi đè dữ liệu trên đám mây.\n\n'
+            +'• Nếu máy vừa mới đăng nhập chưa tải xong → bấm HỦY, đợi một lát rồi thử lại.\n'
+            +'• Nếu bạn chắc chắn máy này có dữ liệu đúng → mới bấm OK.\n\n'
+            +'Bạn có chắc muốn tiếp tục đồng bộ?');
+          if(!ok){
+            updateSyncStatus('idle');
+            toast('Đã hủy đồng bộ — kiểm tra lại dữ liệu trên máy','warn');
+            return;
+          }
+        } else {
+          // auto-sync: máy trống → không đẩy, giữ nguyên, chờ lần sau
+          updateSyncStatus('idle');
+          console.warn('[sync] auto-push bỏ qua: state trống bất thường');
+          return;
+        }
+      }
       let toEncrypt;
       if(CURRENT_ROLE==='admin'){
         // v1.38.4: Admin also merges by ID to preserve NV work pushed since admin last pulled
@@ -9450,6 +9475,22 @@ function pruneDeletedIds(days){
 
 // fields: array of state keys to merge (allowed for this user)
 // Returns: {merged: full state, conflictReport: {field: [conflicts]}}
+/* v2.49.0: Kiểm tra ngầm — state có "trống bất thường" không.
+   Dùng trước khi PUSH để tránh đẩy bản trống đè cloud.
+   Trống = không có công ty NÀO và không có công nợ/tàu/tài sản nào.
+   (Công ty là dữ liệu nền tảng — một hệ thống đang vận hành luôn có ít nhất 1 công ty.) */
+function _stateLooksEmpty(s){
+  if(!s) return true;
+  const co=(s.companies||[]).length;
+  const ap=(s.payables||[]).length;
+  const ar=(s.receivables||[]).length;
+  const ve=(s.vessels||[]).length;
+  const fa=(s.fixedAssets||[]).length;
+  const pr=(s.projects||[]).length;
+  // Trống nếu KHÔNG có công ty VÀ tổng mọi dữ liệu nghiệp vụ chính = 0
+  return co===0 && (ap+ar+ve+fa+pr)===0;
+}
+
 function mergeStateByFields(cloudFull, localFull, fields){
   const merged=Object.assign({},cloudFull);  // start from cloud
   const conflictReport={};
