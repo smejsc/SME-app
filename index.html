@@ -2234,7 +2234,7 @@ body{min-height:100vh;background-image:radial-gradient(circle at 20% 0%,rgba(184
           <summary><b>C. Margin theo dự án</b> <span style="color:var(--muted);font-size:11px">— Lợi nhuận từng dự án</span></summary>
           <div class="rep-acc-body">
             <div class="rep-guide"><span><b>Cách đọc:</b> Margin % = lợi nhuận chia doanh thu của từng dự án. Margin càng cao, dự án càng hiệu quả. Margin âm là dự án lỗ. Dùng để so sánh dự án nào đáng làm tiếp, dự án nào cần xem lại.</span></div>
-            <div id="rep-margin"></div>
+            <div class="tbl-scroll"><table class="tbl" id="rep-margin"></table></div>
           </div>
         </details>
 
@@ -2243,7 +2243,7 @@ body{min-height:100vh;background-image:radial-gradient(circle at 20% 0%,rgba(184
           <summary><b>D. Hiệu suất tàu</b> <span style="color:var(--muted);font-size:11px">— Onhire / Offhire / Standby / Dock</span></summary>
           <div class="rep-acc-body">
             <div class="rep-guide"><span><b>Cách đọc:</b> Số ngày mỗi tàu ở từng trạng thái — Onhire (đang cho thuê, tạo doanh thu), Offhire (rảnh, không doanh thu), Standby (chờ việc), Dock (sửa chữa/lên đà). Tỷ lệ Onhire càng cao càng tốt; nhiều ngày Off/Standby là tàu đang nhàn rỗi.</span></div>
-            <div id="rep-util"></div>
+            <div class="tbl-scroll"><table class="tbl" id="rep-util"></table></div>
           </div>
         </details>
 
@@ -2515,7 +2515,7 @@ body{min-height:100vh;background-image:radial-gradient(circle at 20% 0%,rgba(184
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='2.50.0';            // bumped on each release
+const APP_VERSION='2.53.0';            // bumped on each release
 
 /* v1.68.0: URL Apps Script của công ty — nhúng cứng để NV không cần nhập / không cần ?join=.
    Khi máy mới mở app, app tự dùng URL này kết nối cloud → vào thẳng Login.
@@ -11676,13 +11676,16 @@ function migrateVendorsFromAR(){
 }
 
 function fmt(n,sourceCcy){
-  // n is in sourceCcy; convert to display ccy then format with full digits + thousand separators
+  // n is in sourceCcy; convert to display ccy then format with thousand separators
   if(sourceCcy!==undefined) n=toDisplay(n,sourceCcy);
   if(n==null||isNaN(n)) return '—';
   const ccy=displayCcy();
   const neg=n<0;
-  const abs=Math.abs(Math.round(n));
-  const formatted=abs.toLocaleString(ccy==='USD'?'en-US':'vi-VN');
+  const abs=Math.abs(n);
+  // v2.51.0: USD/EUR hiển thị 2 số thập phân (có cent); VND làm tròn số nguyên (không có hào).
+  const isMinor=(ccy==='USD'||ccy==='EUR');
+  const formatted=abs.toLocaleString(isMinor?'en-US':'vi-VN',
+    isMinor?{minimumFractionDigits:2,maximumFractionDigits:2}:{maximumFractionDigits:0});
   if(ccy==='USD') return (neg?'-':'')+'$'+formatted;
   return (neg?'-':'')+formatted+'₫';
 }
@@ -11693,15 +11696,21 @@ function fmt(n,sourceCcy){
 function fmtCcy(n, ccy){
   if(n==null||isNaN(n)) return '—';
   const neg=n<0;
-  const abs=Math.abs(Math.round(n));
-  const formatted=abs.toLocaleString(ccy==='USD'||ccy==='EUR'?'en-US':'vi-VN');
+  const abs=Math.abs(n);
+  // v2.51.0: USD/EUR hiển thị 2 số thập phân; VND làm tròn số nguyên.
+  const isMinor=(ccy==='USD'||ccy==='EUR');
+  const formatted=abs.toLocaleString(isMinor?'en-US':'vi-VN',
+    isMinor?{minimumFractionDigits:2,maximumFractionDigits:2}:{maximumFractionDigits:0});
   return (neg?'-':'')+formatted+' '+(ccy||'');
 }
 function fmtFull(n,sourceCcy){
   if(sourceCcy!==undefined) n=toDisplay(n,sourceCcy);
   if(n==null||isNaN(n)) return '—';
   const ccy=displayCcy();
-  const s=Math.abs(n).toLocaleString(ccy==='USD'?'en-US':'vi-VN',{maximumFractionDigits:0});
+  // v2.51.0: USD/EUR 2 số thập phân; VND số nguyên.
+  const isMinor=(ccy==='USD'||ccy==='EUR');
+  const s=Math.abs(n).toLocaleString(isMinor?'en-US':'vi-VN',
+    isMinor?{minimumFractionDigits:2,maximumFractionDigits:2}:{maximumFractionDigits:0});
   return (n<0?'-':'')+(ccy==='USD'?'$'+s:s+'₫');
 }
 function pct(n){if(n==null||isNaN(n)) return '—';return (n*100).toFixed(1)+'%';}
@@ -21217,6 +21226,26 @@ function bcqtToUsd(amount, ccy){
   return (+amount || 0);  // USD or unknown → assume USD
 }
 
+/* v2.53.0: Helper dùng chung cho Báo cáo — cộng số liệu lịch sử (năm cũ).
+   filterFn(record) → true nếu bản ghi lịch sử khớp tiêu chí (năm, dự án, tàu...).
+   Trả về {revenue, cost} đã quy đổi USD. Mọi mục báo cáo dùng chung helper này
+   để tính nhất quán. Nếu checkbox "Gồm số liệu lịch sử" tắt → trả về 0/0. */
+function histIncludeOn(){
+  const canSee = isAdmin() || (CURRENT_USER && CURRENT_USER.isBOD) || isViewer();
+  return canSee && !!(document.getElementById('bcqt-include-hist')||{}).checked;
+}
+function histSums(filterFn){
+  const out={revenue:0, cost:0};
+  if(!histIncludeOn()) return out;
+  (S.historicalData||[]).forEach(r=>{
+    if(filterFn && !filterFn(r)) return;
+    const amt=bcqtToUsd(r.amount||0, r.ccy);
+    if(r.kind==='revenue') out.revenue+=amt;
+    else out.cost+=amt;
+  });
+  return out;
+}
+
 /* ===== v1.83.0: SỐ LIỆU LỊCH SỬ (năm cũ — tổng hợp) ===== */
 function _ensureHistorical(){ if(!S.historicalData) S.historicalData=[]; }
 
@@ -22369,10 +22398,13 @@ function renderProjectMarginTable(){
   const projRev=pid=>txAll.filter(t=>t.projectId===pid&&t.type==='REV').reduce((s,t)=>s+txAmt(t),0);
   const projCost=pid=>txAll.filter(t=>t.projectId===pid&&t.type==='COST').reduce((s,t)=>s+txAmt(t),0);
   projects.forEach(p=>{
-    const r=projRev(p.id),c=projCost(p.id);
+    // v2.53.0: cộng số liệu lịch sử của dự án (khi checkbox "Gồm số liệu lịch sử" bật)
+    const hist=histSums(h=>h.projectId===p.id);
+    const r=projRev(p.id)+hist.revenue, c=projCost(p.id)+hist.cost;
+    const hasH=(hist.revenue>0||hist.cost>0);
     const v=p.vesselId?S.vessels.find(v=>v.id===p.vesselId):null;
     h3+=`<tr>
-      <td class="mono">${esc(p.code)}</td>
+      <td class="mono">${esc(p.code)}${hasH?' <span title="Đã gồm số liệu lịch sử" style="color:var(--accent);font-size:10px">📊</span>':''}</td>
       <td>${esc(p.name)}</td>
       <td>${segmentChip(p.segment)}</td>
       <td>${v?v.name:'<span style="color:var(--muted)">—</span>'}</td>
@@ -22511,8 +22543,13 @@ function renderProjectPnL(){
   const revTx=txAll.filter(t=>t.type==='REV');
   const costTx=txAll.filter(t=>t.type==='COST');
 
-  const totRev=revTx.reduce((s,t)=>s+txAmt(t),0);
-  const totCost=costTx.reduce((s,t)=>s+txAmt(t),0);
+  const totRevTx=revTx.reduce((s,t)=>s+txAmt(t),0);
+  const totCostTx=costTx.reduce((s,t)=>s+txAmt(t),0);
+  // v2.53.0: cộng số liệu lịch sử của dự án này (khi checkbox "Gồm số liệu lịch sử" bật)
+  const hist=histSums(r=>r.projectId===pid);
+  const totRev=totRevTx+hist.revenue;
+  const totCost=totCostTx+hist.cost;
+  const hasHist=(hist.revenue>0||hist.cost>0);
   const margin=totRev-totCost;
   const marginPct=totRev?(margin/totRev*100):0;
 
@@ -22567,7 +22604,8 @@ function renderProjectPnL(){
         <div style="font-family:var(--font-display);font-size:20px;font-weight:700;color:${margin>=0?'var(--good)':'var(--bad)'};margin-top:4px">${fmt(margin,p.ccy)}</div>
         <div style="font-family:var(--font-mono);font-size:12px;color:${margin>=0?'var(--good)':'var(--bad)'}">${marginPct.toFixed(1)}%</div>
       </div>
-    </div>`;
+    </div>
+    ${hasHist?`<div class="rep-guide" style="background:rgba(184,71,46,.06);border-color:var(--accent)"><span>📊 <b>Đã gồm số liệu lịch sử:</b> 3 ô tổng phía trên đã cộng số liệu năm cũ của dự án (DT ${fmt(hist.revenue)} · CP ${fmt(hist.cost)}). Lưu ý: 2 bảng bên dưới (Theo tháng, Chi phí theo loại) <b>chỉ tính từ bút toán chi tiết trong app</b> — số liệu lịch sử là số tổng hợp, không có chi tiết tháng/loại nên không hiển thị ở 2 bảng đó.</span></div>`:''}`;
 
   // Monthly breakdown table
   html+=`<div style="display:grid;grid-template-columns:1fr 1fr;gap:18px">`;
