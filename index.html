@@ -2517,7 +2517,7 @@ body{min-height:100vh;background-image:radial-gradient(circle at 20% 0%,rgba(184
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='2.63.0';            // bumped on each release
+const APP_VERSION='2.64.0';            // bumped on each release
 
 /* v2.62.0: Token xác thực backend — PHẢI khớp API_TOKEN trong Apps Script (Code.gs).
    Mọi request tới Apps Script tự động được gắn token qua lớp bọc fetch bên dưới.
@@ -2705,7 +2705,7 @@ function startNetworkAutoSync(){
     setTimeout(()=>{
       if(_syncPendingPush && navigator.onLine && CRYPTO_KEY){
         toast('🌐 Mạng đã kết nối lại — đang đồng bộ...','good');
-        try{ cloudSync('push'); }catch(e){}
+        try{ cloudSync('push'); }catch(e){ console.error('[autosync] push lỗi:', e); }
       }
     }, 2000);
   });
@@ -4047,7 +4047,7 @@ async function forceLogoutSession(){
   try{ logAuditEvent('session_expired',{maxHours:8}); saveState(); }catch(e){}
   try{ presenceCleanup(); }catch(e){}
   if(CRYPTO_KEY){
-    try{ await cloudSync('push'); }catch(e){}
+    try{ await cloudSync('push'); }catch(e){ console.error('[sync] push lỗi:', e); }
   }
   CRYPTO_KEY=null;
   CURRENT_ROLE=null;
@@ -8313,8 +8313,24 @@ document.addEventListener('keydown',e=>{
    ============================================================ */
 async function saveStateEncrypted(){
   if(!CRYPTO_KEY) return;
-  const payload=await encryptJSON(S);
-  localStorage.setItem(STORE_KEY,JSON.stringify(payload));
+  try{
+    const payload=await encryptJSON(S);
+    localStorage.setItem(STORE_KEY,JSON.stringify(payload));
+  }catch(e){
+    // v2.64.0: localStorage có thể đầy (quota) hoặc lỗi mã hóa.
+    // KHÔNG nuốt lỗi im lặng — báo rõ để NV biết dữ liệu CHƯA được lưu.
+    console.error('[saveStateEncrypted] LƯU THẤT BẠI:', e);
+    const isQuota = e && (e.name==='QuotaExceededError'
+      || /quota|exceeded|storage/i.test(e.message||''));
+    try{
+      if(isQuota){
+        toast('⚠ Bộ nhớ trình duyệt đầy — KHÔNG lưu được! Hãy đồng bộ lên cloud ngay rồi liên hệ admin.','bad');
+      } else {
+        toast('⚠ Lưu dữ liệu thất bại: '+(e.message||e)+' — dữ liệu có thể chưa được ghi.','bad');
+      }
+    }catch(_){}
+    throw e;  // ném tiếp để nơi gọi (có await) biết mà xử lý
+  }
 }
 async function loadEncryptedLocal(){
   try{
@@ -9580,11 +9596,19 @@ function mergeStateByFields(cloudFull, localFull, fields){
 function saveState(){
   // If crypto key available, save encrypted; else fall back to plain (during setup before login)
   if(CRYPTO_KEY){
-    saveStateEncrypted();
+    // v2.64.0: saveStateEncrypted là async + có thể throw (quota đầy).
+    // Bắt lỗi ở đây để không thành unhandled rejection; toast đã báo NV bên trong.
+    saveStateEncrypted().catch(e=>{ console.error('[saveState] lưu mã hóa thất bại:', e); });
     // Auto-sync after each save (debounced)
     scheduleAutoSync();
   } else {
-    localStorage.setItem(STORE_KEY,JSON.stringify(S));
+    try{
+      localStorage.setItem(STORE_KEY,JSON.stringify(S));
+    }catch(e){
+      // v2.64.0: nhánh lưu thô (trước khi login) — cũng có thể quota đầy
+      console.error('[saveState] lưu thô thất bại:', e);
+      try{ toast('⚠ Không lưu được dữ liệu (bộ nhớ trình duyệt đầy?) — '+(e.message||e),'bad'); }catch(_){}
+    }
   }
 }
 
@@ -9641,7 +9665,7 @@ function resetIdleTimer(){
     try{ presenceCleanup(); }catch(e){}
     clearInterval(_presenceTimer);
     if(CRYPTO_KEY){
-      try{ await cloudSync('push'); }catch(e){}
+      try{ await cloudSync('push'); }catch(e){ console.error('[sync] push lỗi:', e); }
     }
     CRYPTO_KEY=null;
     CURRENT_ROLE=null;
