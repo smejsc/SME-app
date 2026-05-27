@@ -2517,7 +2517,40 @@ body{min-height:100vh;background-image:radial-gradient(circle at 20% 0%,rgba(184
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='2.61.0';            // bumped on each release
+const APP_VERSION='2.63.0';            // bumped on each release
+
+/* v2.62.0: Token xác thực backend — PHẢI khớp API_TOKEN trong Apps Script (Code.gs).
+   Mọi request tới Apps Script tự động được gắn token qua lớp bọc fetch bên dưới.
+   Nếu đổi token: phải đổi ở CẢ index.html và Code.gs cùng lúc. */
+const API_TOKEN='SME-Mxb0S7xMNU19euOtsBi3k6OrpZ0gwNvFaOulC0JM';
+
+/* v2.62.0: Bọc fetch gốc — tự chèn token vào MỌI request tới script.google.com,
+   bất kể gọi từ đâu trong app. GET → thêm &token= vào URL; POST → thêm "token"
+   vào body JSON. Request tới nơi khác (CDN, fonts...) không bị đụng tới. */
+(function(){
+  const _origFetch = window.fetch.bind(window);
+  function _isAppsScript(u){
+    try{ return typeof u==='string' && u.indexOf('script.google.com')!==-1; }
+    catch(e){ return false; }
+  }
+  window.fetch = function(url, options){
+    if(_isAppsScript(url)){
+      // GET (hoặc không có body): gắn token vào query string
+      url += (url.indexOf('?')!==-1 ? '&' : '?') + 'token=' + encodeURIComponent(API_TOKEN);
+      // POST có body JSON: chèn token vào trong object
+      if(options && options.body && typeof options.body==='string'){
+        try{
+          const obj=JSON.parse(options.body);
+          if(obj && typeof obj==='object' && !Array.isArray(obj)){
+            obj.token=API_TOKEN;
+            options=Object.assign({}, options, {body:JSON.stringify(obj)});
+          }
+        }catch(e){ /* body không phải JSON → để nguyên */ }
+      }
+    }
+    return _origFetch(url, options);
+  };
+})();
 
 /* v1.68.0: URL Apps Script của công ty — nhúng cứng để NV không cần nhập / không cần ?join=.
    Khi máy mới mở app, app tự dùng URL này kết nối cloud → vào thẳng Login.
@@ -8545,12 +8578,14 @@ async function cloudSync(mode, opts){
         finalSize = finalBody.length;
       }
 
-      // Size guard with relaxed limit since we now compress
-      if(finalSize > 80*1024){
+      // v2.62.0: backend (Apps Script v1.64.0+) hỗ trợ chia nhỏ dữ liệu (chunking)
+      // nên không còn giới hạn 1 ô 50KB. Nới guard lên 400KB — vẫn dưới giới hạn
+      // POST của Apps Script, chỉ để chặn trường hợp dữ liệu phình bất thường.
+      if(finalSize > 400*1024){
         const sizeKB = Math.round(finalSize/1024);
         console.error('[sync push] payload too large after compression:', sizeKB, 'KB');
         updateSyncStatus('error', `Payload quá lớn (${sizeKB}KB sau nén)`);
-        toast(`Dữ liệu vẫn quá lớn sau khi nén (${sizeKB}KB) — Liên hệ admin/dev`, 'bad');
+        toast(`Dữ liệu quá lớn bất thường (${sizeKB}KB) — Liên hệ admin/dev`, 'bad');
         return;
       }
       const res=await fetchWithTimeout(cfg.scriptUrl,{
