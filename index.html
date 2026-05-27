@@ -1520,6 +1520,32 @@ body{min-height:100vh;background-image:radial-gradient(circle at 20% 0%,rgba(184
       <div class="section-title">Tín dụng &amp; Vay</div>
       <button class="btn-sec" onclick="addLoan()" style="font-size:11px">+ Món vay mới</button>
     </div>
+    <!-- v2.65.0: Bộ lọc khoản vay — giúp tìm nhanh khi có nhiều món vay -->
+    <div id="loan-filter-bar" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;background:rgba(0,0,0,.02);border:1px solid var(--rule);padding:8px 12px;margin-bottom:10px;font-size:12px">
+      <span style="color:var(--muted);font-weight:600">Lọc:</span>
+      <label style="display:flex;align-items:center;gap:5px">
+        Ngân hàng
+        <select id="loan-filter-bank" onchange="renderBanking()" style="font-size:12px;padding:3px 6px">
+          <option value="">— Tất cả —</option>
+        </select>
+      </label>
+      <label style="display:flex;align-items:center;gap:5px">
+        Trạng thái
+        <select id="loan-filter-status" onchange="renderBanking()" style="font-size:12px;padding:3px 6px">
+          <option value="">— Tất cả —</option>
+          <option value="active">Đang vay</option>
+          <option value="overdue">Quá hạn</option>
+          <option value="closed">Đã tất toán</option>
+        </select>
+      </label>
+      <label style="display:flex;align-items:center;gap:5px">
+        Tìm
+        <input type="text" id="loan-filter-text" oninput="renderBanking()" placeholder="Số HĐ / tên NH"
+          style="font-size:12px;padding:3px 6px;width:150px">
+      </label>
+      <button class="btn-sec" onclick="loanFilterReset()" style="font-size:11px">Xóa lọc</button>
+      <span id="loan-filter-count" style="color:var(--muted);margin-left:auto"></span>
+    </div>
     <div id="loans-list"></div>
   </div>
 </section>
@@ -2517,7 +2543,7 @@ body{min-height:100vh;background-image:radial-gradient(circle at 20% 0%,rgba(184
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='2.64.0';            // bumped on each release
+const APP_VERSION='2.68.0';            // bumped on each release
 
 /* v2.62.0: Token xác thực backend — PHẢI khớp API_TOKEN trong Apps Script (Code.gs).
    Mọi request tới Apps Script tự động được gắn token qua lớp bọc fetch bên dưới.
@@ -12424,7 +12450,10 @@ function renderPlanList(){
     rows.forEach(p=>{
       const profit = (typeof p.profit==='number') ? p.profit : (p.revenue - (p.cost||0));
       const marginPct = p.revenue ? ((profit/p.revenue)*100) : 0;
-      totRev+=p.revenue; totProfit+=profit;
+      // v2.68.0: cộng tổng phải quy đổi về đơn vị màn hình trước (toDisplay),
+      // không cộng thẳng giá trị gốc của nhiều loại tiền khác nhau.
+      totRev    += toDisplay(p.revenue, p.ccy);
+      totProfit += toDisplay(profit,    p.ccy);
       const entityLabel = p.entityRef ? _planEntityName(p.entityRef) : esc(p.name||'(legacy)');
       html+=`<tr>
         <td>${segmentChip(p.segment)}</td>
@@ -12464,7 +12493,8 @@ function _renderPlanPerf(yr){
   if(segEl){
     let segHtml=`<thead><tr><th>Mảng</th><th class="r">KH Doanh thu</th><th class="r">DT Thực hiện</th><th class="r">% KH</th><th class="r">CP Thực hiện</th><th class="r">Margin</th><th class="r">Margin %</th><th>Tiến độ</th></tr></thead><tbody>`;
     Object.keys(SEGMENTS).forEach(seg=>{
-      const planR=S.plans.filter(p=>p.year===yr&&p.segment===seg).reduce((s,p)=>s+p.revenue,0);
+      // v2.68.0: KH Doanh thu phải quy đổi về đơn vị màn hình (toDisplay) trước khi cộng
+      const planR=S.plans.filter(p=>p.year===yr&&p.segment===seg).reduce((s,p)=>s+toDisplay(p.revenue,p.ccy),0);
       const actR=txs.filter(t=>t.type==='REV'&&t.segment===seg).reduce((s,t)=>s+txAmt(t),0);
       const actC=txs.filter(t=>t.type==='COST'&&t.segment===seg).reduce((s,t)=>s+txAmt(t),0);
       const m=actR-actC;
@@ -12494,8 +12524,10 @@ function _renderPlanPerf(yr){
       if(!entityMap[p.entityRef]){
         entityMap[p.entityRef]={planRev:0, planProfit:0, actRev:0, actCost:0, ccy:p.ccy, segment:p.segment};
       }
-      entityMap[p.entityRef].planRev += (+p.revenue||0);
-      entityMap[p.entityRef].planProfit += (typeof p.profit==='number'?p.profit:(p.revenue-(p.cost||0)));
+      // v2.68.0: quy đổi về đơn vị màn hình trước khi cộng (toDisplay)
+      entityMap[p.entityRef].planRev += toDisplay(+p.revenue||0, p.ccy);
+      entityMap[p.entityRef].planProfit += toDisplay(
+        (typeof p.profit==='number'?p.profit:(p.revenue-(p.cost||0))), p.ccy);
     });
     // Map actual revenue/cost to entities
     // VESSEL: match by vesselId; PROJECT: match by projectId
@@ -15458,7 +15490,18 @@ function _renderSfContribute(){
   const done=arApproved.filter(r=>sfContributionForAr(r.id));
   const cfg=S.salaryFund.config;
 
+  // v2.66.0: Ô số dư đầu kỳ — hiển thị + nút nhập/sửa
+  const _open=sfOpeningContribution();
+  const _openText = _open
+    ? ((+_open.amount||0).toLocaleString()+' '+esc(_open.ccy||'VND'))
+    : '<span style="color:var(--muted)">chưa nhập</span>';
   let html='';
+  html+=`<div style="display:flex;align-items:center;gap:12px;background:rgba(0,0,0,.02);border:1px solid var(--rule);padding:10px 14px;margin-bottom:14px;font-size:12px">
+    <span style="font-weight:600;color:var(--muted)">Số dư đầu kỳ:</span>
+    <span style="font-family:var(--font-mono);font-weight:600">${_openText}</span>
+    ${isAdmin()?`<button class="btn-sec" onclick="sfSetOpeningBalance()" style="font-size:11px;margin-left:auto">${_open?'Sửa':'+ Nhập số dư đầu kỳ'}</button>`:''}
+  </div>`;
+
   if(pending.length===0){
     html+='<div style="padding:20px;text-align:center;color:var(--muted);background:var(--paper);border:1px dashed var(--rule)">Không có DT nào chờ trích quỹ.</div>';
   } else {
@@ -15606,6 +15649,54 @@ function sfContributeOne(arId){
   try{logAuditEvent('salary_fund_contribute',{arId,amount,ccy:r.ccy,rate});}catch(e){}
   saveState();
   toast(`💰 Đã trích ${amount.toLocaleString()} ${r.ccy} vào quỹ`);
+  renderSalaryFund();
+}
+
+/* v2.66.0: Số dư đầu kỳ Quỹ tiền lương.
+   Lưu thành 1 dòng "contribution" đặc biệt có cờ isOpening:true — số dư tự cộng
+   đúng theo cơ chế sẵn có (tổng contributions − tổng withdrawals), không phải
+   sửa công thức. Mỗi quỹ chỉ có 1 dòng số dư đầu kỳ; nhập lại sẽ thay dòng cũ. */
+function sfOpeningContribution(){
+  _sfInit();
+  return S.salaryFund.contributions.find(c=>c.isOpening===true) || null;
+}
+function sfSetOpeningBalance(){
+  if(!isAdmin()){toast('Chỉ admin mới nhập được số dư đầu kỳ','bad');return;}
+  _sfInit();
+  const existing=sfOpeningContribution();
+  const curAmt=existing?(+existing.amount||0):0;
+  const curCcy=existing?(existing.ccy||'VND'):'VND';
+  const input=prompt(
+    'SỐ DƯ ĐẦU KỲ — QUỸ TIỀN LƯƠNG\n\n'+
+    'Nhập số dư quỹ có sẵn từ trước (đầu năm), chỉ số thuần, không dấu phẩy.\n'+
+    'Để trống hoặc 0 nếu không có số dư đầu kỳ.\n\n'+
+    (existing?('Hiện đang ghi: '+curAmt.toLocaleString()+' '+curCcy):''),
+    curAmt? String(curAmt):''
+  );
+  if(input===null) return;  // bấm Cancel
+  const amount=Math.round(Number(String(input).replace(/[,\s]/g,''))||0);
+  if(isNaN(amount)||amount<0){toast('Số tiền không hợp lệ','bad');return;}
+  // Xóa dòng số dư đầu kỳ cũ (nếu có) rồi tạo lại
+  S.salaryFund.contributions=S.salaryFund.contributions.filter(c=>c.isOpening!==true);
+  if(amount>0){
+    const rec={
+      id:'SF-OPEN-'+uid().slice(-6),
+      isOpening:true,
+      sourceArId:null,
+      amount,
+      ccy:curCcy,
+      baseAmount:amount,
+      ratePercent:0,
+      contributedAt:(new Date().getFullYear())+'-01-01T00:00:00.000Z',
+      note:'Số dư đầu kỳ (quỹ có sẵn từ trước)',
+      addedBy:actorName()
+    };
+    touchRecord(rec);
+    S.salaryFund.contributions.push(rec);
+  }
+  try{logAuditEvent('salary_fund_opening_balance',{amount,ccy:curCcy});}catch(e){}
+  saveState();
+  toast(amount>0?('Đã ghi số dư đầu kỳ: '+amount.toLocaleString()+' '+curCcy):'Đã xóa số dư đầu kỳ');
   renderSalaryFund();
 }
 
@@ -16377,8 +16468,42 @@ function renderBanking(){
     if(loans.length===0){
       loanBox.innerHTML = '<div style="padding:30px;text-align:center;color:var(--muted);background:var(--paper);border:1px dashed var(--rule)">Chưa có món vay nào. Bấm <b>+ Món vay mới</b> để thêm.</div>';
     } else {
+      // v2.65.0: Đổ danh sách ngân hàng vào dropdown lọc (giữ lựa chọn hiện tại)
+      const bankSel = document.getElementById('loan-filter-bank');
+      if(bankSel){
+        const banks = [...new Set(loans.map(l=>l.bankName||'(Chưa rõ NH)'))].sort();
+        const prevBank = bankSel.value;
+        bankSel.innerHTML = '<option value="">— Tất cả —</option>'
+          + banks.map(b=>`<option value="${esc(b)}">${esc(b)}</option>`).join('');
+        if(banks.includes(prevBank)) bankSel.value = prevBank;
+      }
+      // v2.65.0: Đọc tiêu chí lọc
+      const fBank   = (document.getElementById('loan-filter-bank')||{}).value || '';
+      const fStatus = (document.getElementById('loan-filter-status')||{}).value || '';
+      const fText   = ((document.getElementById('loan-filter-text')||{}).value || '').toLowerCase().trim();
+      // v2.65.0: Lọc danh sách khoản vay theo tiêu chí
+      const loansFiltered = loans.filter(l=>{
+        if(fBank && (l.bankName||'(Chưa rõ NH)') !== fBank) return false;
+        if(fStatus){
+          const st = l.status==='closed' ? 'closed'
+                   : l.status==='overdue' ? 'overdue' : 'active';
+          if(st !== fStatus) return false;
+        }
+        if(fText){
+          const hay = ((l.bankName||'')+' '+(l.contractNo||'')).toLowerCase();
+          if(!hay.includes(fText)) return false;
+        }
+        return true;
+      });
+      // v2.65.0: Cập nhật bộ đếm kết quả
+      const cntEl = document.getElementById('loan-filter-count');
+      if(cntEl){
+        cntEl.textContent = (fBank||fStatus||fText)
+          ? `Hiển thị ${loansFiltered.length}/${loans.length} khoản vay`
+          : `${loans.length} khoản vay`;
+      }
       const byType={short:[], medium:[], long:[]};
-      loans.forEach(l=>{
+      loansFiltered.forEach(l=>{
         const t = l.loanType||'short';
         (byType[t]||byType.short).push(l);
       });
@@ -16449,9 +16574,22 @@ function renderBanking(){
             </div>`;
         });
       });
+      // v2.65.0: thông báo khi lọc không ra kết quả nào
+      if(!html && loans.length>0){
+        html = '<div style="padding:24px;text-align:center;color:var(--muted);background:var(--paper);border:1px dashed var(--rule)">'
+             + 'Không có khoản vay nào khớp bộ lọc. Bấm <b>Xóa lọc</b> để xem lại tất cả.</div>';
+      }
       loanBox.innerHTML = html;
     }
   }
+}
+
+/* v2.65.0: Xóa toàn bộ bộ lọc khoản vay, hiển thị lại tất cả */
+function loanFilterReset(){
+  const b=document.getElementById('loan-filter-bank');   if(b) b.value='';
+  const s=document.getElementById('loan-filter-status'); if(s) s.value='';
+  const t=document.getElementById('loan-filter-text');   if(t) t.value='';
+  renderBanking();
 }
 
 /* Compute remaining principal of a loan */
@@ -19408,7 +19546,16 @@ function deleteAr(kind,id){
    BANK ACCOUNTS
    ============================================================ */
 function totalBankInDisplay(){
-  return (S.bankAccounts||[]).reduce((s,a)=>s+toDisplay(+a.balance||0, a.ccy||'USD'), 0);
+  // v2.67.0: số dư tài khoản nằm ở bankSnapshots (ảnh chụp số dư theo ngày),
+  // KHÔNG ở a.balance. Trước đây Dashboard đọc nhầm a.balance → luôn ra 0.
+  // Đọc đúng qua bankLatestSnapshot, và chỉ tính tài khoản đang dùng (như tab Ngân quỹ).
+  return (S.bankAccounts||[])
+    .filter(a=>a.isActive!==false)
+    .reduce((s,a)=>{
+      const snap=bankLatestSnapshot(a.id);
+      const bal=snap?(+snap.balance||0):0;
+      return s+toDisplay(bal, a.ccy||'USD');
+    }, 0);
 }
 
 function renderBankAccounts(){
@@ -20701,7 +20848,13 @@ function renderDashboard(){
   const statusColor=statusOk?'var(--good)':'var(--bad)';
   let bankSub='Quản lý ở tab Công nợ';
   if(accs.length){
-    bankSub=accs.length+' tài khoản · '+accs.map(a=>(a.name||'?')+' '+fmt(toDisplay(+a.balance||0,a.ccy||'USD'))).slice(0,2).join(' · ')+(accs.length>2?` +${accs.length-2}`:'');
+    // v2.67.0: đọc số dư từ snapshot, dùng bankName (không phải name)
+    const activeAccs=accs.filter(a=>a.isActive!==false);
+    bankSub=activeAccs.length+' tài khoản · '+activeAccs.map(a=>{
+      const snap=bankLatestSnapshot(a.id);
+      const bal=snap?(+snap.balance||0):0;
+      return (a.bankName||a.name||'?')+' '+fmt(toDisplay(bal,a.ccy||'USD'));
+    }).slice(0,2).join(' · ')+(activeAccs.length>2?` +${activeAccs.length-2}`:'');
   } else if(S.bankBalance){
     bankSub='Gốc: '+(+S.bankBalance||0).toLocaleString()+' '+(S.bankBalanceCcy||'USD');
   }
