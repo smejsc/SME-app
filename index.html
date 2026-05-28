@@ -2589,7 +2589,7 @@ body{min-height:100vh;background-image:radial-gradient(circle at 20% 0%,rgba(184
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='2.75.1';            // bumped on each release
+const APP_VERSION='2.76.0';            // bumped on each release
 
 /* v2.62.0: Token xác thực backend — PHẢI khớp API_TOKEN trong Apps Script (Code.gs).
    Mọi request tới Apps Script tự động được gắn token qua lớp bọc fetch bên dưới.
@@ -8665,6 +8665,25 @@ async function cloudSync(mode, opts){
               cloudFull=await decryptJSON(decodedPayload);
             }
           }
+          // v2.76.0: CẢNH BÁO SỤT GIẢM — nếu local ít hơn cloud >50% (mà cloud có nhiều dữ liệu),
+          // rất có thể máy này bị thiếu/chưa pull xong. Hỏi xác nhận trước khi push đè.
+          try{
+            const localCnt=_stateRecordCount(S);
+            const cloudCnt=_stateRecordCount(cloudFull);
+            if(cloudCnt>=10 && localCnt < cloudCnt*0.5){
+              const msg='⚠ CẢNH BÁO MẤT DỮ LIỆU\n\n'
+                +'Máy này có '+localCnt+' bản ghi, nhưng trên đám mây có '+cloudCnt+' bản ghi.\n\n'
+                +'Nếu đồng bộ bây giờ, dữ liệu trên đám mây có thể bị giảm xuống còn '+localCnt+' (mất ~'+(cloudCnt-localCnt)+' bản ghi).\n\n'
+                +'• Nếu máy chưa tải xong dữ liệu → bấm HỦY, đăng nhập lại để kéo về.\n'
+                +'• Chỉ bấm OK nếu bạn CHẮC CHẮN đã xóa bớt dữ liệu có chủ đích.\n\n'
+                +'Tiếp tục đồng bộ?';
+              if(!confirm(msg)){
+                updateSyncStatus('idle');
+                toast('Đã hủy đồng bộ — kiểm tra lại dữ liệu (đăng nhập lại để kéo về)','warn');
+                return;
+              }
+            }
+          }catch(cmpErr){ console.warn('[sync drop-guard]', cmpErr&&cmpErr.message); }
           // For admin: merge ALL record-array fields (admin owns everything)
           const adminMergeFields=ALL_DATA_FIELDS;
           const {merged, conflictReport}=mergeStateByFields(
@@ -9741,6 +9760,13 @@ function _stateLooksEmpty(s){
   const pr=(s.projects||[]).length;
   // Trống nếu KHÔNG có công ty VÀ tổng mọi dữ liệu nghiệp vụ chính = 0
   return co===0 && (ap+ar+ve+fa+pr)===0;
+}
+/* v2.76.0: tổng số bản ghi nghiệp vụ chính — để so sánh local vs cloud trước khi push. */
+function _stateRecordCount(s){
+  if(!s) return 0;
+  return (s.payables||[]).length+(s.receivables||[]).length+(s.vessels||[]).length
+        +(s.fixedAssets||[]).length+(s.companies||[]).length+(s.projects||[]).length
+        +(s.transactions||[]).length+(s.opTransactions||[]).length;
 }
 
 function mergeStateByFields(cloudFull, localFull, fields){
@@ -11994,6 +12020,15 @@ function toDisplay(amount,sourceCcy){
   if(src==='USD'&&dst==='VND') return amount*fxRate();
   if(src==='VND'&&dst==='USD') return amount/fxRate();
   return amount;
+}
+/* v2.75.2: Quy đổi CỨNG về USD — không phụ thuộc displayCcy (nút USD/VND).
+   USD giữ nguyên; VND chia tỷ giá; ngoại tệ khác (SGD/EUR...) chưa có tỷ giá riêng → trả null. */
+function _toUsdFixed(amount, sourceCcy){
+  if(amount==null||isNaN(amount)) return 0;
+  const src=(sourceCcy||'USD').toUpperCase();
+  if(src==='USD') return amount;
+  if(src==='VND') return amount/fxRate();
+  return null;
 }
 /* HTML escape — XSS protection.
    Use whenever interpolating user-controlled strings into innerHTML/template literals.
@@ -21650,20 +21685,28 @@ function _quickViewData(){
   const ar=filterBODRecords(S.receivables||[]);
   const ap=filterBODRecords(S.payables||[]);
   function summarize(list){
-    const out={items:[], totalUsd:0, soon30Usd:0, overdueUsd:0};
+    const out={items:[], totalUsd:0, soon30Usd:0, overdueUsd:0, otherCcy:{}};
     list.forEach(r=>{
       const rem=arRemaining(r);
       if(rem<=0.0001) return;
-      const remUsd=toDisplay(rem, r.ccy||'USD');
-      out.totalUsd+=remUsd;
+      const ccy=(r.ccy||'USD').toUpperCase();
+      const remUsd=_toUsdFixed(rem, ccy);
+      if(remUsd===null){
+        // ngoại tệ chưa có tỷ giá (SGD/EUR...) → gom riêng theo ccy, không cộng vào USD
+        out.otherCcy[ccy]=(out.otherCcy[ccy]||0)+rem;
+      } else {
+        out.totalUsd+=remUsd;
+      }
       const st=arStatus(r);
       let ageDays=null;
       if(r.dueDate){
         ageDays=Math.ceil((new Date(today)-new Date(r.dueDate))/86400000);
-        if(r.dueDate<today) out.overdueUsd+=remUsd;
-        if(r.dueDate<=in30ISO) out.soon30Usd+=remUsd;
+        if(remUsd!==null){
+          if(r.dueDate<today) out.overdueUsd+=remUsd;
+          if(r.dueDate<=in30ISO) out.soon30Usd+=remUsd;
+        }
       }
-      out.items.push({partner:r.partner||'—', desc:r.desc||'', rem, remUsd, ccy:r.ccy||'USD',
+      out.items.push({partner:r.partner||'—', desc:r.desc||'', rem, remUsd, ccy,
         dueDate:r.dueDate||'', invoiceNo:r.invoiceNo||'', stKey:st.key, stLabel:st.label, ageDays});
     });
     out.items.sort((a,b)=>((a.dueDate||'9999').localeCompare(b.dueDate||'9999')));
@@ -21692,6 +21735,11 @@ function openQuickView(){
     }).join('');
   };
   const fmtU=(n)=>fmtCcy(n,'USD');
+  const otherCcyTxt=(o)=>{
+    const ks=Object.keys(o||{}).filter(k=>Math.abs(o[k])>0.0001);
+    if(!ks.length) return '';
+    return ' + '+ks.map(k=>fmtCcy(o[k],k)).join(' + ');
+  };
   const duKienRong = d.ar.soon30Usd - d.ap.soon30Usd;
   const body=`
     <div style="display:flex;flex-direction:column;gap:14px">
@@ -21703,7 +21751,7 @@ function openQuickView(){
       <details style="padding:12px 14px;border:1px solid var(--rule);border-radius:6px">
         <summary style="cursor:pointer;display:flex;justify-content:space-between;align-items:center">
           <span style="font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:#2d6a6a;font-weight:700">📥 Phải thu còn lại</span>
-          <b style="color:#2d6a6a">${fmtU(d.ar.totalUsd)}</b>
+          <b style="color:#2d6a6a">${fmtU(d.ar.totalUsd)}${otherCcyTxt(d.ar.otherCcy)}</b>
         </summary>
         <div style="font-size:11px;color:var(--muted);margin:8px 0 4px">Tới hạn ≤30 ngày: <b>${fmtU(d.ar.soon30Usd)}</b> · Quá hạn: <b style="color:var(--bad)">${fmtU(d.ar.overdueUsd)}</b></div>
         ${detailRows(d.ar)}
@@ -21711,7 +21759,7 @@ function openQuickView(){
       <details style="padding:12px 14px;border:1px solid var(--rule);border-radius:6px">
         <summary style="cursor:pointer;display:flex;justify-content:space-between;align-items:center">
           <span style="font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--bad);font-weight:700">📤 Phải trả còn lại</span>
-          <b style="color:var(--bad)">${fmtU(d.ap.totalUsd)}</b>
+          <b style="color:var(--bad)">${fmtU(d.ap.totalUsd)}${otherCcyTxt(d.ap.otherCcy)}</b>
         </summary>
         <div style="font-size:11px;color:var(--muted);margin:8px 0 4px">Tới hạn ≤30 ngày: <b>${fmtU(d.ap.soon30Usd)}</b> · Quá hạn: <b style="color:var(--bad)">${fmtU(d.ap.overdueUsd)}</b></div>
         ${detailRows(d.ap)}
@@ -26343,23 +26391,29 @@ async function autoExportWeeklyBackup(){
   if(!cfg) return;
   if(cfg.autoBackupEnabled === false) return;  // disabled by user
 
+  // v2.76.0: KHÔNG backup khi máy đang trống/chưa pull xong — tránh tạo file .json rỗng vô dụng
+  // (và tránh nhắc nhầm ngay sau khi đăng nhập trên máy chưa tải dữ liệu).
+  if(_stateLooksEmpty(S)){
+    console.warn('[auto-backup] bỏ qua: dữ liệu đang trống/chưa tải xong');
+    return;
+  }
+
   const now = new Date();
-  const dayOfWeek = now.getDay();
   const lastBak = cfg.lastBackup ? new Date(cfg.lastBackup).getTime() : 0;
   const daysSinceBak = lastBak ? Math.floor((Date.now() - lastBak) / 86400000) : 999;
-  const isMonday = dayOfWeek === 1;
-  const overdue = daysSinceBak >= 7;
+  // v2.76.0: nhắc backup HẰNG NGÀY (trước đây hằng tuần) để luôn có bản cứu hộ mới
+  const overdue = daysSinceBak >= 1;
 
-  if(!isMonday && !overdue) return;
+  if(!overdue) return;
 
   const lastAutoBak = cfg.lastAutoBackup ? new Date(cfg.lastAutoBackup).toISOString().slice(0,10) : '';
   const today = now.toISOString().slice(0,10);
   if(lastAutoBak === today) return;  // already prompted today
 
   const confirmed = confirm(
-    `🔔 Backup tự động hàng tuần\n\n` +
+    `🔔 Backup dữ liệu (hằng ngày)\n\n` +
     `Đã ${daysSinceBak === 999 ? 'CHƯA BAO GIỜ' : daysSinceBak + ' ngày'} không backup file .json.\n\n` +
-    `Bấm OK để auto-download backup ngay.\n` +
+    `Bấm OK để tải file backup ngay (khuyến nghị giữ vài bản gần nhất).\n` +
     `(Có thể tắt trong ⚙ Cài đặt nếu không muốn nhắc.)`
   );
 
