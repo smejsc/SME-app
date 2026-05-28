@@ -2561,7 +2561,7 @@ body{min-height:100vh;background-image:radial-gradient(circle at 20% 0%,rgba(184
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='2.71.6';            // bumped on each release
+const APP_VERSION='2.72.1';            // bumped on each release
 
 /* v2.62.0: Token xác thực backend — PHẢI khớp API_TOKEN trong Apps Script (Code.gs).
    Mọi request tới Apps Script tự động được gắn token qua lớp bọc fetch bên dưới.
@@ -8547,6 +8547,24 @@ async function cloudSync(mode, opts){
       const filteredCloud=filterStateForUser(Object.assign(defaultState(),decoded));
       // v1.57.0: Preserve local audit log when pulling (not synced anymore)
       const localAuditLog = S.auditLog || [];
+      // v2.72.0: gộp presence (cloud + local) để pull không xóa dấu online của chính máy này
+      // lẫn của máy khác — mỗi user giữ lastSeen mới nhất.
+      const mergedPresence={};
+      try{
+        const localPres=S.presence||{}, cloudPres=filteredCloud.presence||{};
+        Object.assign(mergedPresence, cloudPres);
+        Object.entries(localPres).forEach(([u,info])=>{
+          const cur=mergedPresence[u];
+          const lt=info&&info.lastSeen?new Date(info.lastSeen).getTime():0;
+          const ct=cur&&cur.lastSeen?new Date(cur.lastSeen).getTime():0;
+          if(lt>=ct) mergedPresence[u]=info;
+        });
+        const cutoff=Date.now()-600000;
+        Object.keys(mergedPresence).forEach(u=>{
+          const ls=mergedPresence[u]&&mergedPresence[u].lastSeen?new Date(mergedPresence[u].lastSeen).getTime():0;
+          if(ls<cutoff) delete mergedPresence[u];
+        });
+      }catch(e){ console.warn('[pull presence merge]', e&&e.message); }
       // Confirm overwrite if local has more (admin only — users always pull-merge silently)
       if(CURRENT_ROLE==='admin' && S.transactions && S.transactions.length>0 && S.transactions.length>(decoded.transactions||[]).length){
         if(!confirm(`Local có ${S.transactions.length} bút toán, cloud có ${(decoded.transactions||[]).length}. Vẫn ghi đè local bằng cloud?`)){
@@ -8555,6 +8573,7 @@ async function cloudSync(mode, opts){
       }
       S=filteredCloud;
       S.auditLog = localAuditLog;  // restore local audit log
+      S.presence = mergedPresence; // v2.72.0: giữ presence đã gộp
       await saveStateEncrypted();
       renderAll({fromSync:true});
       cfg.lastSync=new Date().toISOString();
@@ -9713,6 +9732,25 @@ function mergeStateByFields(cloudFull, localFull, fields){
         if((lv===undefined || lv===null || lv==='') && cv){ co[k]=cv; }
       });
       merged[f]=co;
+    } else if(f==='presence' && localFull[f] && typeof localFull[f]==='object'
+              && cloudFull[f] && typeof cloudFull[f]==='object'){
+      // v2.72.0: presence là object {username:{lastSeen,...}}. Phải GỘP theo từng user,
+      // mỗi user giữ bản có lastSeen MỚI NHẤT. Trước đây rơi vào "local đè cloud" nên mỗi
+      // máy push đè mất dấu online của máy khác → chỉ thấy 1 người. Nay các máy không xóa nhau.
+      const pres=Object.assign({}, cloudFull[f]);
+      Object.entries(localFull[f]).forEach(([user,info])=>{
+        const cur=pres[user];
+        const lt=info&&info.lastSeen?new Date(info.lastSeen).getTime():0;
+        const ct=cur&&cur.lastSeen?new Date(cur.lastSeen).getTime():0;
+        if(lt>=ct) pres[user]=info;   // bản local mới hơn (hoặc bằng) → dùng local
+      });
+      // Dọn các dấu quá cũ (>10 phút) để object không phình mãi
+      const cutoff=Date.now()-600000;
+      Object.keys(pres).forEach(user=>{
+        const ls=pres[user]&&pres[user].lastSeen?new Date(pres[user].lastSeen).getTime():0;
+        if(ls<cutoff) delete pres[user];
+      });
+      merged[f]=pres;
     } else {
       // Non-record-array field (scalar, config, etc) → local overrides
       merged[f]=localFull[f];
@@ -11479,6 +11517,24 @@ function presenceHeartbeat(){
   };
   saveState();
   renderPresenceUI();
+  // v2.72.0: đẩy dấu online của mình lên cloud NGAY (merge giữ dấu người khác) để máy khác
+  // thấy mình đang online, không phải chờ auto-sync gộp/trễ.
+  try{
+    const cfg=getAuthConfig();
+    if(cfg && cfg.scriptUrl) cloudSync('push').catch(()=>{});
+  }catch(e){}
+}
+
+/* v2.72.0: Lấy số liệu online THỰC TẾ tại thời điểm xem — pull dấu mới nhất của mọi máy về,
+   rồi render. Gọi khi mở popup "đang online". */
+function presenceSyncNow(){
+  presenceHeartbeat();  // cập nhật dấu của mình + push
+  try{
+    const cfg=getAuthConfig();
+    if(cfg && cfg.scriptUrl){
+      cloudSync('pull').then(()=>{ try{ renderPresenceUI(); }catch(e){} }).catch(()=>{});
+    }
+  }catch(e){}
 }
 
 /* Detect device/OS/browser info for active sessions display */
@@ -11604,7 +11660,13 @@ function togglePresencePopup(e){
   if(e) e.stopPropagation();
   const pop=document.getElementById('presence-pop');
   if(!pop) return;
-  pop.style.display = pop.style.display==='none' ? 'block' : 'none';
+  const opening = pop.style.display==='none';
+  pop.style.display = opening ? 'block' : 'none';
+  // v2.72.0: khi MỞ → đồng bộ ngay để hiện số NV đang online thực tế tại thời điểm xem
+  if(opening){
+    const list=document.getElementById('presence-list');
+    try{ presenceSyncNow(); }catch(err){}
+  }
 }
 
 // Click outside to close
@@ -18556,7 +18618,7 @@ function _arEditorBody(r,isPayable){
             <td class="r num" style="font-size:11px">${(+p.amount||0).toLocaleString('vi-VN')}</td>
             <td class="r mono" style="font-size:11px;color:var(--muted)">${fxR?fxR.toLocaleString('vi-VN'):'—'}</td>
             <td class="r mono" style="font-size:11px;color:var(--muted)">${typeof inVnd==='number'?inVnd.toLocaleString('vi-VN'):'—'}</td>
-            <td style="font-size:11px;color:var(--muted)">${bankAcc?esc(bankAcc.name):(p.method==='cash'?'💵 Tiền mặt':'—')}</td>
+            <td style="font-size:11px;color:var(--muted)">${bankAcc?esc(bankAcc.name):(p.method==='cash'?'💵 Tiền mặt':(p.method==='offset'?'🔄 Cấn trừ quỹ':'—'))}</td>
             <td style="font-size:11px;color:var(--muted)">${p.note||'—'}</td>
             <td>${locked?'':`<button class="icon-btn danger" title="Xóa lần TT này" onclick="removeArPayment('${isPayable?'ap':'ar'}','${r.id}',${i})">✕</button>`}</td>
           </tr>`;
@@ -19956,8 +20018,8 @@ function openMgmtFeeModal(vid){
     </div>
     <div class="form-grid" style="grid-template-columns:1fr 1fr">
       <div class="field"><label>Kỳ phí (mô tả)</label><input type="text" id="mf-period" value="Phí QL đến T${String(now.getMonth()+1).padStart(2,'0')}/${now.getFullYear()}"></div>
-      <div class="field"><label>Ngày phát hành</label><input type="date" id="mf-date" value="${now.toISOString().slice(0,10)}"></div>
-      <div class="field"><label>Số tiền (chưa VAT) ${esc(v.ccy)}</label><input type="number" id="mf-amount" step="any" value="${Math.round(suggest*100)/100}" oninput="mfRecalc()"></div>
+      <div class="field"><label>Ngày phát hành</label><input type="date" id="mf-date" value="${todayISO()}"></div>
+      <div class="field"><label>Số tiền (chưa VAT) ${esc(v.ccy)}</label><input type="number" id="mf-amount" step="any" value="${suggest>0?(Math.round(suggest*100)/100):''}" placeholder="${suggest>0?'':'Nhập số tiền phí QL'}" oninput="mfRecalc()"></div>
       <div class="field"><label>Thuế suất %</label>
         <select id="mf-vat" onchange="mfRecalc()">
           <option value="0">0%</option><option value="5">5%</option><option value="8">8%</option><option value="10" selected>10%</option>
@@ -19990,18 +20052,23 @@ function mfRecalc(){
 function issueMgmtFee(vid){
   if(!(isAdmin()||canApproveL1()||canApproveL2())){ toast('Không có quyền phát hành phí QL','bad'); return; }
   const v=(S.opVessels||[]).find(x=>x.id===vid); if(!v) return;
-  const net=+(document.getElementById('mf-amount')||{}).value||0;
-  if(net<=0){ toast('Số tiền phí QL phải > 0','bad'); return; }
+  // v2.71.7: ô là type=number → value luôn là chuỗi số chuẩn (. là thập phân, không có
+  // phân cách nghìn). Chỉ cần parseFloat. Bắt trường hợp rỗng để báo lỗi rõ thay vì lưu 0.
+  const amtEl=document.getElementById('mf-amount');
+  if(!amtEl){ toast('Lỗi giao diện — đóng và mở lại modal','bad'); return; }
+  const net=parseFloat(String(amtEl.value||'').trim())||0;
+  if(net<=0){ toast('Nhập số tiền phí QL (> 0) trước khi phát hành','bad'); amtEl.focus(); return; }
   const pct=+(document.getElementById('mf-vat')||{}).value||0;
   const vat=Math.round(net*pct/100*100)/100;
   const gross=net+vat;
   const date=(document.getElementById('mf-date')||{}).value||todayISO();
-  const period=(document.getElementById('mf-period')||{}).value.trim();
-  const invoiceNo=(document.getElementById('mf-invoice')||{}).value.trim();
-  const deduct=(document.getElementById('mf-deduct')||{}).checked;
+  const period=((document.getElementById('mf-period')||{}).value||'').trim();
+  const invoiceNo=((document.getElementById('mf-invoice')||{}).value||'').trim();
+  const deduct=!!(document.getElementById('mf-deduct')||{}).checked;
   const ccy=v.ccy||'VND';
   const feeId=uid();
 
+  try{
   // (1) Phải thu — mảng VESSEL_MGMT (doanh thu phí QL, lên báo cáo theo mảng)
   if(!S.receivables) S.receivables=[];
   const arRec={
@@ -20038,7 +20105,19 @@ function issueMgmtFee(vid){
       createdBy:actorName(), createdByDept:getActorDeptName(),
       createdAt:new Date().toISOString(), updatedAt:new Date().toISOString()
     });
+    // v2.71.9: cấn trừ quỹ = ĐÃ THU bằng tiền chủ tàu ứng → đánh dấu RP đã thu đủ,
+    // KHÔNG qua ngân hàng (không cộng số dư bank), tránh thu trùng + sai báo cáo công nợ.
+    arRec.payments.push({
+      date, amount:gross,
+      fxRate: ccy==='USD' ? (+S.fxRate||0) : 0,
+      note:'Cấn trừ vào tiền chủ tàu ứng (quỹ thu/chi hộ)',
+      method:'offset',  // phương thức riêng: cấn trừ, không phải bank/cash
+      recordedBy:actorName(), recordedAt:new Date().toISOString(),
+      _mgmtFeeOffset:true
+    });
   }
+  // Nếu KHÔNG cấn trừ → RP để chờ thu; khi chủ tàu chuyển khoản, KT ghi nhận thanh toán
+  // qua tab Công nợ như bình thường (cộng số dư ngân hàng).
 
   // (3) Lưu record phí QL để theo dõi đã phát hành
   if(!S.opMgmtFees) S.opMgmtFees=[];
@@ -20053,6 +20132,10 @@ function issueMgmtFee(vid){
   closeModal();
   renderAll();
   toast('Đã phát hành phí QL '+fmt(gross,ccy)+(deduct?' · đã cấn trừ quỹ':''),'good');
+  }catch(err){
+    console.error('[issueMgmtFee] lỗi:', err);
+    toast('Lỗi khi phát hành phí QL: '+(err&&err.message||err),'bad');
+  }
 }
 function deleteMgmtFee(feeId){
   if(!(isAdmin()||canApproveL2())){ toast('Chỉ Admin/KTT được hủy phí QL','bad'); return; }
@@ -26838,6 +26921,7 @@ function openExcelImport(){
       <div style="font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);font-weight:600;margin-bottom:6px">↩ Gỡ lô import nhầm</div>
       <div id="xls-last-batch-info"></div>
       <div id="xls-dedupe-info" style="margin-top:10px;padding-top:10px;border-top:1px dashed var(--rule)"></div>
+      <div id="xls-ap-dedupe-info" style="margin-top:10px;padding-top:10px;border-top:1px dashed var(--rule)"></div>
     </div>
   `;
   openModal('📥 Import Excel hàng loạt', body, '<button class="btn-sec" onclick="closeModal()">Đóng</button>');
@@ -27352,6 +27436,7 @@ function excelConfirmImport(){
   // v2.71.3: mỗi LƯỢT import có 1 mã lô DUY NHẤT (kèm giờ + mã ngẫu nhiên), không gộp
   // theo ngày nữa — để "Xóa lô gần nhất" không xóa nhầm lô khác cùng ngày.
   const IMPORT_BATCH_ID = 'IMP-' + new Date().toISOString().replace(/[:.]/g,'-') + '-' + Math.random().toString(36).slice(2,6);
+  const _apImportSeen = new Set();  // v2.72.1: theo dõi HĐ AP đã tạo trong lượt này (chặn trùng nội bộ file)
 
   let created=0;
   let warnings=[];
@@ -27937,6 +28022,27 @@ function excelConfirmImport(){
       delete record.expenseType; delete record.costCategory;
       S.receivables.push(record);
     } else {
+      // v2.72.1: lọc trùng AP lúc import — cùng số HĐ + NCC + số tiền với khoản ĐÃ CÓ → bỏ qua, cảnh báo.
+      const invK=(record.invoiceNo||'').trim().toLowerCase();
+      if(invK){
+        const dupKey=invK+'||'+(record.partner||'').trim().toLowerCase()+'||'+(+record.amount||0);
+        // trùng với dữ liệu đã có trong app
+        const dupExisting=(S.payables||[]).find(r=>
+          (r.invoiceNo||'').trim().toLowerCase()===invK &&
+          (r.partner||'').trim().toLowerCase()===(record.partner||'').trim().toLowerCase() &&
+          (+r.amount||0)===(+record.amount||0)
+        );
+        if(dupExisting){
+          warnings.push(`Bỏ qua (đã có): HĐ "${record.invoiceNo}" · ${record.partner||''} · ${fmt(record.amount,record.ccy)} — đã tồn tại trong Phải trả`);
+          return;
+        }
+        // trùng với dòng khác TRONG CHÍNH FILE này
+        if(_apImportSeen.has(dupKey)){
+          warnings.push(`Bỏ qua (trùng trong file): HĐ "${record.invoiceNo}" · ${record.partner||''} · ${fmt(record.amount,record.ccy)}`);
+          return;
+        }
+        _apImportSeen.add(dupKey);
+      }
       S.payables.push(record);
     }
     created++;
@@ -28020,6 +28126,7 @@ function deleteLastImportBatch(){
 /* Hiển thị thông tin lô import gần nhất + nút xóa trong modal Import Excel */
 function renderExcelImportInfo(){
   renderOpDedupeInfo();  // v2.71.3: luôn render phần dọn trùng (kể cả khi chưa có lô gần nhất)
+  try{ renderApDedupeInfo(); }catch(e){}  // v2.72.1: rà công nợ phải trả trùng
   const el=document.getElementById('xls-last-batch-info');
   if(!el) return;
   const b=S.lastImportBatch;
@@ -28080,47 +28187,138 @@ function dedupeOpTransactions(){
   if(!isAdmin() && !canApproveL1() && !canApproveL2()){
     toast('Chỉ Admin / người duyệt được dọn trùng','bad'); return;
   }
-  const arr = Array.isArray(S.opTransactions) ? S.opTransactions : [];
-  if(!arr.length){ toast('Chưa có bút toán Thu/Chi hộ nào','warn'); return; }
-  // Gom theo khóa trùng
+  const all = Array.isArray(S.opTransactions) ? S.opTransactions : [];
+  if(!all.length){ toast('Chưa có bút toán Thu/Chi hộ nào','warn'); return; }
+  // v2.71.8: CHỈ xét bút toán IMPORT (có _importedFromExcel). Bút toán NHẬP TAY không bao
+  // giờ bị đụng — tránh xóa nhầm hai khoản thật giống nhau do NV nhập tay hằng ngày.
+  const imported = all.filter(t=>t && t._importedFromExcel===true);
+  if(!imported.length){ toast('Không có bút toán import nào để rà trùng','good'); return; }
+  // Gom theo khóa trùng — chỉ trong tập import
   const groups={};
-  arr.forEach(t=>{ const k=_opDupKey(t); (groups[k]=groups[k]||[]).push(t); });
-  // Xác định bản dư (mỗi nhóm >1 → giữ bản cũ nhất, còn lại là dư)
+  imported.forEach(t=>{ const k=_opDupKey(t); (groups[k]=groups[k]||[]).push(t); });
   const victims=[];
   Object.values(groups).forEach(g=>{
     if(g.length<=1) return;
-    // sắp theo createdAt tăng dần; giữ phần tử đầu (cũ nhất), xóa phần còn lại
     g.sort((a,b)=>String(a.createdAt||'').localeCompare(String(b.createdAt||'')));
-    for(let i=1;i<g.length;i++) victims.push(g[i]);
+    for(let i=1;i<g.length;i++) victims.push(g[i]);  // giữ bản import cũ nhất, xóa phần dư
   });
-  if(!victims.length){ toast('Không tìm thấy bút toán Thu/Chi hộ trùng','good'); return; }
-  // Cảnh báo nếu có bản trùng ĐÃ xác nhận thanh toán (xóa vẫn được nhưng cho người biết)
+  if(!victims.length){ toast('Không tìm thấy bút toán import trùng','good'); return; }
   const paidCount = victims.filter(v=>v.paid).length;
   confirmDelete(
-    `${victims.length} bút toán Thu/Chi hộ TRÙNG`,
-    `Tìm thấy <b>${victims.length}</b> bản ghi trùng lặp (giữ lại 1 bản gốc cho mỗi nhóm).`
+    `${victims.length} bút toán Thu/Chi hộ TRÙNG (chỉ từ import)`,
+    `Tìm thấy <b>${victims.length}</b> bản ghi trùng lặp <b>trong dữ liệu import</b> (giữ lại 1 bản gốc cho mỗi nhóm).`
     + (paidCount>0?`<br><span style="color:var(--warn)">⚠ Trong đó ${paidCount} bản trùng đã đánh dấu "đã thanh toán" — vẫn sẽ xóa bản dư.</span>`:'')
-    + `<br><br>Chỉ xóa các bản <b>giống hệt nhau</b> (cùng ngày, tàu, loại, số tiền, NCC, số HĐ, diễn giải). Bản gốc và mọi bút toán khác giữ nguyên.`,
+    + `<br><br>✓ <b>Bút toán nhập tay được giữ nguyên</b>, không bị đụng tới.<br>Chỉ xóa các bản import <b>giống hệt nhau</b> (cùng ngày, tàu, loại, số tiền, NCC, số HĐ, diễn giải).`,
     ()=>{
       const ids=victims.map(v=>v.id).filter(Boolean);
       const idSet=new Set(ids);
-      S.opTransactions = arr.filter(t=>!idSet.has(t.id));
+      S.opTransactions = all.filter(t=>!idSet.has(t.id));
       try{ markDeleted(ids); }catch(e){ console.warn('[dedupeOp] markDeleted:', e&&e.message); }
       saveState();
       try{ logAuditEvent('op_dedupe',{removed:victims.length}); }catch(e){}
       renderAll();
       try{ renderExcelImportInfo(); }catch(e){}
-      toast(`Đã xóa ${victims.length} bút toán Thu/Chi hộ trùng`,'good');
+      toast(`Đã xóa ${victims.length} bút toán import trùng`,'good');
     }
   );
 }
 
-/* Đếm nhanh số bút toán Thu/Chi hộ trùng (để hiện trên nút) */
+/* Đếm nhanh số bút toán Thu/Chi hộ trùng — CHỈ trong tập IMPORT (bảo vệ bút toán nhập tay) */
 function _countOpDupes(){
-  const arr=Array.isArray(S.opTransactions)?S.opTransactions:[];
+  const all=Array.isArray(S.opTransactions)?S.opTransactions:[];
+  const imported=all.filter(t=>t && t._importedFromExcel===true);
   const seen={}; let dup=0;
-  arr.forEach(t=>{ const k=_opDupKey(t); if(seen[k]) dup++; else seen[k]=1; });
+  imported.forEach(t=>{ const k=_opDupKey(t); if(seen[k]) dup++; else seen[k]=1; });
   return dup;
+}
+
+/* v2.72.1: Khóa nhận diện AP (Phải trả) trùng = Số HĐ + NCC + số tiền (chặt nhất).
+   Trả null nếu KHÔNG có số hóa đơn → không xét trùng (tránh nhận nhầm 2 khoản thật chưa có HĐ). */
+function _apDupKey(r){
+  const inv=(r.invoiceNo||'').trim().toLowerCase();
+  if(!inv) return null;  // không có số HĐ → bỏ qua, không coi là trùng
+  const partner=(r.partner||'').trim().toLowerCase();
+  const amt=(+r.amount||0);
+  return inv+'||'+partner+'||'+amt;
+}
+/* Gom các nhóm AP trùng (mỗi nhóm >1 bản cùng khóa). Trả mảng nhóm. */
+function _apDupeGroups(){
+  const all=Array.isArray(S.payables)?S.payables:[];
+  const groups={};
+  all.forEach(r=>{ const k=_apDupKey(r); if(!k) return; (groups[k]=groups[k]||[]).push(r); });
+  return Object.values(groups).filter(g=>g.length>1);
+}
+/* Đếm số bản AP dư (tổng trùng − số nhóm) để hiện trên nút */
+function _countApDupes(){
+  return _apDupeGroups().reduce((s,g)=>s+(g.length-1),0);
+}
+/* Rà & xử lý AP trùng: liệt kê từng nhóm, KT chọn giữ bản nào / xóa bản nào.
+   Cảnh báo rõ nếu bản trùng đã có thanh toán hoặc đã duyệt. */
+function dedupePayables(){
+  if(!isAdmin() && !canApproveL1() && !canApproveL2()){
+    toast('Chỉ Admin / người duyệt được rà trùng công nợ','bad'); return;
+  }
+  const groups=_apDupeGroups();
+  if(!groups.length){ toast('Không tìm thấy công nợ phải trả trùng (theo số HĐ)','good'); return; }
+  // Dựng bảng liệt kê từng nhóm với checkbox chọn bản để xóa (mặc định tick các bản dư, giữ bản cũ nhất)
+  let rows='';
+  let gi=0;
+  groups.forEach(g=>{
+    gi++;
+    g.sort((a,b)=>String(a.createdAt||'').localeCompare(String(b.createdAt||'')));
+    rows+=`<tr style="background:rgba(28,58,92,.05)"><td colspan="6" style="font-weight:600;padding:6px 8px">Nhóm ${gi}: HĐ ${esc(g[0].invoiceNo||'')} · ${esc(g[0].partner||'')} · ${fmt(g[0].amount,g[0].ccy)} — ${g.length} bản</td></tr>`;
+    g.forEach((r,idx)=>{
+      const paid=(r.payments||[]).reduce((s,p)=>s+(+p.amount||0),0);
+      const wfTxt=(r.status==='approved')?'<span style="color:var(--good)">đã duyệt</span>':(r.status||'nháp');
+      const warn=(paid>0||r.status==='approved');
+      const keepDefault=idx===0;  // giữ bản cũ nhất mặc định
+      rows+=`<tr style="border-bottom:1px solid rgba(0,0,0,.05)">
+        <td style="padding:4px 8px"><input type="checkbox" class="ap-dup-del" data-id="${r.id}" ${keepDefault?'':'checked'}></td>
+        <td style="font-size:11px">${idx===0?'<b style="color:var(--good)">GIỮ (gốc)</b>':'bản dư'}</td>
+        <td style="font-size:11px">${esc((r.desc||'').slice(0,40))}</td>
+        <td style="font-size:11px;font-family:var(--font-mono)">${esc(r.issueDate||'')}</td>
+        <td style="font-size:11px">${esc(r.createdBy||r.addedBy||'')}</td>
+        <td style="font-size:11px">${wfTxt}${paid>0?` · <span style="color:var(--warn)">đã TT ${fmt(paid,r.ccy)}</span>`:''}</td>
+      </tr>`;
+    });
+  });
+  const anyWarn=groups.some(g=>g.some(r=>(r.payments||[]).length>0||r.status==='approved'));
+  const body=`
+    <div style="font-size:12px;color:var(--muted);margin-bottom:10px">Tick các bản <b>dư</b> để xóa (mặc định giữ bản tạo sớm nhất mỗi nhóm). Trùng = cùng <b>số HĐ + NCC + số tiền</b>.</div>
+    ${anyWarn?'<div style="font-size:11px;color:var(--warn);margin-bottom:8px;padding:6px 10px;background:rgba(196,138,57,.08);border-left:3px solid var(--warn)">⚠ Một số bản trùng đã có thanh toán hoặc đã duyệt. Cân nhắc kỹ trước khi xóa — xóa sẽ mất cả lịch sử thanh toán của bản đó.</div>':''}
+    <div class="tbl-scroll" style="max-height:50vh"><table class="tbl" style="font-size:12px"><thead><tr><th>Xóa</th><th>Vai trò</th><th>Diễn giải</th><th>Ngày HĐ</th><th>Người nhập</th><th>Trạng thái</th></tr></thead><tbody>${rows}</tbody></table></div>
+  `;
+  const foot=`<button class="btn-sec" onclick="closeModal()">Hủy</button>
+              <button class="btn-primary" style="background:var(--bad)" onclick="_doDedupePayables()">🗑 Xóa các bản đã tick</button>`;
+  openModal(`Rà công nợ phải trả trùng · ${groups.length} nhóm`, body, foot);
+}
+function _doDedupePayables(){
+  const checks=Array.from(document.querySelectorAll('.ap-dup-del:checked'));
+  const ids=checks.map(c=>c.getAttribute('data-id')).filter(Boolean);
+  if(!ids.length){ toast('Chưa tick bản nào để xóa','warn'); return; }
+  const idSet=new Set(ids);
+  S.payables=(S.payables||[]).filter(r=>!idSet.has(r.id));
+  try{ markDeleted(ids); }catch(e){ console.warn('[dedupeAP] markDeleted:', e&&e.message); }
+  saveState();
+  try{ logAuditEvent('ap_dedupe',{removed:ids.length}); }catch(e){}
+  closeModal(); renderAll();
+  try{ renderApDedupeInfo(); }catch(e){}
+  toast(`Đã xóa ${ids.length} công nợ phải trả trùng`,'good');
+}
+/* Render khu rà AP trùng trong modal Import (song song với dọn Thu/Chi hộ) */
+function renderApDedupeInfo(){
+  const el=document.getElementById('xls-ap-dedupe-info');
+  if(!el) return;
+  const canDel=isAdmin()||canApproveL1()||canApproveL2();
+  const n=_countApDupes();
+  el.innerHTML=`
+    <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap">
+      <div style="font-size:12px;line-height:1.5">
+        <b>Rà công nợ Phải trả trùng</b><br>
+        <span style="color:${n>0?'var(--bad)':'var(--muted)'};font-size:11px">${n>0?('Phát hiện '+n+' bản phải trả trùng theo số HĐ'):'Không phát hiện trùng (theo số HĐ)'}</span>
+      </div>
+      ${n>0 && canDel ? `<button class="btn-sec" style="color:var(--bad);border-color:var(--bad);white-space:nowrap" onclick="dedupePayables()">🔍 Xem & xử lý ${n} bản</button>`:''}
+    </div>`;
 }
 
 /* ===== EXPORT MODAL ===== */
