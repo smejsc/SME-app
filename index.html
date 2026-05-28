@@ -1699,6 +1699,7 @@ body{min-height:100vh;background-image:radial-gradient(circle at 20% 0%,rgba(184
         <div class="field"><label>CCY</label><select id="op-ccy"><option>VND</option><option>USD</option></select></div>
         <div class="field"><label>Số dư tối thiểu</label><input type="number" class="num" id="op-min" step="any" value="0"></div>
         <div class="field"><label>Phí QL / tháng</label><input type="number" class="num" id="op-fee" step="any" value="0"></div>
+        <div class="field"><label>Ngày bắt đầu QL <span style="color:var(--muted);text-transform:none;font-weight:400;font-size:10px">(để tính phí lũy kế)</span></label><input type="date" id="op-managed-since"></div>
       </div>
       <div class="form-actions">
         <button class="btn-primary" onclick="addOpVessel()">+ Thêm tàu QL</button>
@@ -2560,7 +2561,7 @@ body{min-height:100vh;background-image:radial-gradient(circle at 20% 0%,rgba(184
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='2.71.3';            // bumped on each release
+const APP_VERSION='2.71.6';            // bumped on each release
 
 /* v2.62.0: Token xác thực backend — PHẢI khớp API_TOKEN trong Apps Script (Code.gs).
    Mọi request tới Apps Script tự động được gắn token qua lớp bọc fetch bên dưới.
@@ -4719,7 +4720,7 @@ const SHARED_FIELDS=['fxRate','displayCcy','companyInfo','meta','presence','vess
 const ALL_DATA_FIELDS=[
   'plans','projects','vessels','onhires','events',
   'receivables','payables','bankAccounts','bankSnapshots','loans','bankBalance','bankBalanceCcy',
-  'opVessels','opTransactions','invGroups','invMovements','warehouses',
+  'opVessels','opTransactions','opMgmtFees','invGroups','invMovements','warehouses',
   'vesselExpenseCats','omProjectExpenseCats','hrExpenseCats','qnExpenseCats',
   'fixedAssets','tools',
   'transactions',
@@ -9429,7 +9430,7 @@ function defaultState(){
     warehouses:[],    // v1.38: [{id, code, name, type:'VESSEL'|'OFFICE'|'BRANCH'|'OTHER', vesselId, location, isActive, note, createdAt, createdBy}]
     fixedAssets:[],   // TSCĐ
     tools:[],         // CCDC + MMTB
-    opVessels:[], opTransactions:[],
+    opVessels:[], opTransactions:[], opMgmtFees:[],  // v2.71.5: kỳ phí QL đã phát hành
     bankAccounts:[],     // [{id, bankName, branch, accountNo, accountName, ccy, isActive, note, createdAt}]
     bankSnapshots:[],    // v1.31: [{id, bankAccountId, date, balance, note, createdBy, createdAt}]
     loans:[],            // v1.31: [{id, bankName, loanType, contractNo, principal, ccy, interestRate, startDate, endDate, termMonths, repayMethod, paymentSchedule:[], status, note, createdBy, createdAt}]
@@ -19799,12 +19800,14 @@ function addOpVessel(){
     ccy:document.getElementById('op-ccy').value,
     min:+document.getElementById('op-min').value||0,
     fee:+document.getElementById('op-fee').value||0,
+    managedSince:(document.getElementById('op-managed-since')||{}).value||'',  // v2.71.5
     createdAt:new Date().toISOString(), updatedAt:new Date().toISOString()  // v2.61.0: timestamp cho sync
   });
   saveState();
   ['op-vessel','op-owner'].forEach(i=>document.getElementById(i).value='');
   document.getElementById('op-min').value=0;
   document.getElementById('op-fee').value=0;
+  const ms=document.getElementById('op-managed-since'); if(ms) ms.value='';
   toast('Đã thêm tàu QL'); renderAll();
 }
 function delOpVessel(id){
@@ -19822,7 +19825,8 @@ function editOpVessel(id){
     {key:'owner',label:'Chủ tàu'},
     {key:'ccy',label:'CCY',type:'select',options:[{v:'VND',t:'VND'},{v:'USD',t:'USD'}]},
     {key:'min',label:'Ngưỡng số dư tối thiểu',type:'number'},
-    {key:'fee',label:'Phí QL / tháng',type:'number'}
+    {key:'fee',label:'Phí QL / tháng',type:'number'},
+    {key:'managedSince',label:'Ngày bắt đầu QL (YYYY-MM-DD)',type:'date'}
   ],v,(d)=>{
     if(!d.name.trim()){toast('Nhập tên','bad');return false;}
     Object.assign(v,d);
@@ -19846,6 +19850,28 @@ function fillOpVesselPicker(){
   const visible=S.opVessels.filter(v=>allowedIds.includes(v.id) && !v.archived);
   sel.innerHTML=visible.map(v=>`<option value="${v.id}">${esc(v.name)} · ${esc(v.owner) || ''}</option>`).join('');
   if(cur && visible.find(v=>v.id===cur)) sel.value=cur;
+}
+/* v2.71.5: Số tháng quản lý từ 'Ngày bắt đầu QL' đến tháng hiện tại — LÀM TRÒN LÊN
+   (lẻ tháng tính trọn tháng). Trả 0 nếu chưa đặt ngày. */
+function opManagedMonths(v, toDate){
+  if(!v || !v.managedSince) return 0;
+  const start=new Date(v.managedSince+'T00:00:00');
+  if(isNaN(start.getTime())) return 0;
+  const end = toDate ? new Date(toDate+'T00:00:00') : new Date();
+  if(end < start) return 0;
+  // "Lẻ tháng tính trọn tháng": đếm số THÁNG DƯƠNG LỊCH đã chạm, không phụ thuộc ngày.
+  // Tháng bắt đầu luôn tính = 1; mỗi lần sang tháng mới +1.
+  // VD 10/01 → 05/03: chênh 2 tháng + 1 = 3 tháng.
+  const months=(end.getFullYear()-start.getFullYear())*12+(end.getMonth()-start.getMonth())+1;
+  return Math.max(1, months);
+}
+/* Tổng phí QL gợi ý lũy kế = phí/tháng × số tháng QL */
+function opMgmtFeeAccrued(v){
+  return (+v.fee||0) * opManagedMonths(v);
+}
+/* Tổng phí QL ĐÃ phát hành (thực tế) cho 1 tàu — đọc từ các bút toán phí đã ghi */
+function opMgmtFeeIssued(vid){
+  return (S.opMgmtFees||[]).filter(f=>f.vesselId===vid).reduce((s,f)=>s+(+f.amount||0),0);
 }
 function opBalance(vid){
   // Balance = Σ thu hộ − Σ chi hộ − Σ phí NH − Σ phí khác
@@ -19874,21 +19900,28 @@ function renderOpVessels(){
     }
   }
   if(!visible.length){tbl.innerHTML='<tr><td class="empty">Chưa có tàu quản lý nào ' + (canSeeAllRecords()?'':'(hoặc bạn chưa được phân công)') + '</td></tr>';return;}
-  let html=`<thead><tr><th>Tàu</th><th>Chủ tàu</th><th class="r">Số dư hiện tại</th><th class="r">Ngưỡng tối thiểu</th><th class="r">Phí QL/tháng</th><th class="c">Trạng thái</th><th></th></tr></thead><tbody>`;
+  let html=`<thead><tr><th>Tàu</th><th>Chủ tàu</th><th class="r">Số dư hiện tại</th><th class="r">Ngưỡng tối thiểu</th><th class="r">Phí QL/tháng</th><th class="r" title="Số tháng QL × phí/tháng (gợi ý, làm tròn lên)">Phí QL lũy kế (gợi ý)</th><th class="r" title="Tổng phí QL đã thực phát hành hóa đơn">Đã phát hành</th><th class="c">Trạng thái</th><th></th></tr></thead><tbody>`;
   visible.forEach(v=>{
     const bal=opBalance(v.id);
     let status,statusCls;
     if(bal<v.min){status='⚠ DƯỚI NGƯỠNG';statusCls='chip-bad';}
     else if(bal<v.min*1.2){status='⚡ GẦN NGƯỠNG';statusCls='chip-warn';}
     else{status='✓ AN TOÀN';statusCls='chip-good';}
+    const months=opManagedMonths(v);
+    const accrued=opMgmtFeeAccrued(v);
+    const issued=opMgmtFeeIssued(v.id);
+    const canIssue = isAdmin() || canApproveL1() || canApproveL2();
     html+=`<tr>
-      <td><b>${esc(v.name)}</b></td>
+      <td><b>${esc(v.name)}</b>${v.managedSince?`<div style="font-size:10px;color:var(--muted)">QL từ ${esc(v.managedSince)} · ${months} tháng</div>`:'<div style="font-size:10px;color:var(--warn)">chưa đặt ngày QL</div>'}</td>
       <td>${esc(v.owner) || '—'}</td>
       <td class="r num" style="font-weight:600;color:${bal<v.min?'var(--bad)':bal<v.min*1.2?'var(--warn)':'var(--ink)'}">${fmt(bal,v.ccy)}</td>
       <td class="r num">${fmt(v.min,v.ccy)}</td>
       <td class="r num">${fmt(v.fee,v.ccy)}</td>
+      <td class="r num" style="color:var(--muted)" title="${months} tháng × ${fmt(v.fee,v.ccy)}">${accrued>0?fmt(accrued,v.ccy):'—'}</td>
+      <td class="r num" style="font-weight:600;color:${issued>0?'var(--good)':'var(--muted)'}">${issued>0?fmt(issued,v.ccy):'—'}</td>
       <td class="c"><span class="chip ${statusCls}">${status}</span></td>
       <td><div class="row-actions">
+        ${canIssue?`<button class="icon-btn" title="Phát hành hóa đơn phí QL" onclick="openMgmtFeeModal('${v.id}')" style="color:var(--accent)">🧾</button>`:''}
         <button class="icon-btn" title="Sửa" onclick="editOpVessel('${v.id}')">✎</button>
         <button class="icon-btn danger" title="Xóa" onclick="delOpVessel('${v.id}')">✕</button>
       </div></td>
@@ -19896,6 +19929,147 @@ function renderOpVessels(){
   });
   html+='</tbody>';
   tbl.innerHTML=html;
+}
+
+/* v2.71.5: Modal phát hành hóa đơn phí QL cho 1 tàu QL hộ.
+   Gợi ý kỳ + số tiền từ managedSince × fee; KT điều chỉnh được rồi phát hành.
+   Phát hành tạo: (1) 1 Phải thu mảng VESSEL_MGMT (lên báo cáo doanh thu),
+   (2) 1 bút toán GIẢM QUỸ thu/chi hộ (cấn trừ tiền chủ tàu ứng), (3) lưu vào S.opMgmtFees. */
+function openMgmtFeeModal(vid){
+  if(!(isAdmin()||canApproveL1()||canApproveL2())){ toast('Không có quyền phát hành phí QL','bad'); return; }
+  const v=(S.opVessels||[]).find(x=>x.id===vid); if(!v){ toast('Không tìm thấy tàu','bad'); return; }
+  const months=opManagedMonths(v);
+  const accrued=opMgmtFeeAccrued(v);
+  const issued=opMgmtFeeIssued(vid);
+  const suggest=Math.max(0, accrued - issued);  // gợi ý phần chưa phát hành
+  const now=new Date();
+  const ym=now.getFullYear()+'-'+String(now.getMonth()+1).padStart(2,'0');
+  const issuedList=(S.opMgmtFees||[]).filter(f=>f.vesselId===vid).sort((a,b)=>(b.date||'').localeCompare(a.date||''));
+  const histHtml = issuedList.length
+    ? issuedList.map(f=>`<tr><td class="mono" style="font-size:11px">${esc(f.date||'')}</td><td>${esc(f.period||'')}</td><td class="r num">${fmt(f.amount,v.ccy)}</td><td style="font-size:11px;color:var(--muted)">${esc(f.invoiceNo||'')}</td><td><button class="icon-btn danger" title="Hủy phí này" onclick="deleteMgmtFee('${f.id}')">✕</button></td></tr>`).join('')
+    : '<tr><td colspan="5" class="empty">Chưa phát hành kỳ phí QL nào</td></tr>';
+  const body=`
+    <div style="font-size:12px;color:var(--muted);margin-bottom:12px;padding:8px 12px;background:rgba(28,58,92,.05);border-left:3px solid var(--accent)">
+      <b>${esc(v.name)}</b> · Chủ tàu: ${esc(v.owner||'—')}<br>
+      ${v.managedSince?`QL từ <b>${esc(v.managedSince)}</b> · <b>${months}</b> tháng · phí ${fmt(v.fee,v.ccy)}/tháng`:'<span style="color:var(--warn)">Chưa đặt Ngày bắt đầu QL — sửa tàu để app gợi ý số tháng</span>'}<br>
+      Phí lũy kế gợi ý: <b>${fmt(accrued,v.ccy)}</b> · Đã phát hành: <b>${fmt(issued,v.ccy)}</b> · Còn lại gợi ý: <b style="color:var(--accent)">${fmt(suggest,v.ccy)}</b>
+    </div>
+    <div class="form-grid" style="grid-template-columns:1fr 1fr">
+      <div class="field"><label>Kỳ phí (mô tả)</label><input type="text" id="mf-period" value="Phí QL đến T${String(now.getMonth()+1).padStart(2,'0')}/${now.getFullYear()}"></div>
+      <div class="field"><label>Ngày phát hành</label><input type="date" id="mf-date" value="${now.toISOString().slice(0,10)}"></div>
+      <div class="field"><label>Số tiền (chưa VAT) ${esc(v.ccy)}</label><input type="number" id="mf-amount" step="any" value="${Math.round(suggest*100)/100}" oninput="mfRecalc()"></div>
+      <div class="field"><label>Thuế suất %</label>
+        <select id="mf-vat" onchange="mfRecalc()">
+          <option value="0">0%</option><option value="5">5%</option><option value="8">8%</option><option value="10" selected>10%</option>
+        </select>
+      </div>
+      <div class="field"><label>Tiền VAT</label><input type="text" id="mf-vat-amt" readonly style="background:var(--paper-2)"></div>
+      <div class="field"><label><b>Tổng có VAT</b></label><input type="text" id="mf-gross" readonly style="background:var(--paper-2);font-weight:600"></div>
+      <div class="field"><label>Số hóa đơn</label><input type="text" id="mf-invoice" placeholder="VD: HD-QL-2026-001"></div>
+    </div>
+    <label style="display:flex;align-items:center;gap:8px;margin-top:10px;font-size:12px;cursor:pointer">
+      <input type="checkbox" id="mf-deduct" checked>
+      Cấn trừ vào quỹ chủ tàu ứng (ghi 1 bút toán giảm quỹ thu/chi hộ)
+    </label>
+    <div style="font-size:11px;color:var(--muted);font-style:italic;margin-top:6px">Phát hành sẽ tạo 1 khoản <b>Phải thu</b> (mảng QL tàu — lên báo cáo doanh thu)${''} và nếu tick, 1 bút toán <b>giảm quỹ</b>. Phí QL chỉ là doanh thu một lần (ở Phải thu); trong quỹ là khoản đã dùng tiền ứng để trả phí.</div>
+    <div style="margin-top:14px;font-family:var(--font-display);font-size:13px;font-weight:600">Các kỳ phí QL đã phát hành</div>
+    <div class="tbl-scroll" style="margin-top:6px"><table class="tbl" style="font-size:12px"><thead><tr><th>Ngày</th><th>Kỳ</th><th class="r">Số tiền (net)</th><th>Số HĐ</th><th></th></tr></thead><tbody>${histHtml}</tbody></table></div>
+  `;
+  const foot=`<button class="btn-sec" onclick="closeModal()">Đóng</button>
+              <button class="btn-primary" onclick="issueMgmtFee('${vid}')">🧾 Phát hành phí QL</button>`;
+  openModal('🧾 Phát hành phí quản lý · '+esc(v.name), body, foot);
+  setTimeout(mfRecalc,30);
+}
+function mfRecalc(){
+  const net=+(document.getElementById('mf-amount')||{}).value||0;
+  const pct=+(document.getElementById('mf-vat')||{}).value||0;
+  const vat=Math.round(net*pct/100*100)/100;
+  const va=document.getElementById('mf-vat-amt'); if(va) va.value=vat.toLocaleString('vi-VN');
+  const g=document.getElementById('mf-gross'); if(g) g.value=(net+vat).toLocaleString('vi-VN');
+}
+function issueMgmtFee(vid){
+  if(!(isAdmin()||canApproveL1()||canApproveL2())){ toast('Không có quyền phát hành phí QL','bad'); return; }
+  const v=(S.opVessels||[]).find(x=>x.id===vid); if(!v) return;
+  const net=+(document.getElementById('mf-amount')||{}).value||0;
+  if(net<=0){ toast('Số tiền phí QL phải > 0','bad'); return; }
+  const pct=+(document.getElementById('mf-vat')||{}).value||0;
+  const vat=Math.round(net*pct/100*100)/100;
+  const gross=net+vat;
+  const date=(document.getElementById('mf-date')||{}).value||todayISO();
+  const period=(document.getElementById('mf-period')||{}).value.trim();
+  const invoiceNo=(document.getElementById('mf-invoice')||{}).value.trim();
+  const deduct=(document.getElementById('mf-deduct')||{}).checked;
+  const ccy=v.ccy||'VND';
+  const feeId=uid();
+
+  // (1) Phải thu — mảng VESSEL_MGMT (doanh thu phí QL, lên báo cáo theo mảng)
+  if(!S.receivables) S.receivables=[];
+  const arRec={
+    id:uid(),
+    partner:v.owner||v.name,
+    desc:(period||'Phí quản lý vận hành')+' · '+v.name,
+    amountNet:net, vatPercent:pct, vatAmount:vat, amountGross:gross, amount:gross,
+    ccy, segment:'VESSEL_MGMT', projectId:null, vesselId:null,
+    issueDate:date, dueDate:'', invoiceNo, payments:[],
+    _mgmtFeeId:feeId, _opVesselId:vid,
+    createdBy:actorName(), createdByDept:getActorDeptName(),
+    createdAt:new Date().toISOString(), updatedAt:new Date().toISOString(),
+    status:'approved',
+    submittedBy:actorName(), submittedAt:new Date().toISOString(),
+    approvedL1By:actorName(), approvedL1At:new Date().toISOString(),
+    approvedL2By:actorName(), approvedL2At:new Date().toISOString()
+  };
+  S.receivables.push(arRec);
+
+  // (2) Bút toán GIẢM QUỸ thu/chi hộ (nếu cấn trừ tiền ứng) — ghi như Chi hộ, KHÔNG VAT (VAT đã ở AR)
+  let opTxId='';
+  if(deduct){
+    if(!S.opTransactions) S.opTransactions=[];
+    opTxId=uid();
+    const fx = ccy==='USD' ? 1 : (+S.fxRate||0);
+    S.opTransactions.push({
+      id:opTxId, date, vesselId:vid, type:'OUT',
+      desc:'Cấn trừ phí quản lý'+(period?(' ('+period+')'):''),
+      amount:gross, ccy, fxToUsd:fx, amountUsd: ccy==='USD'?gross:(fx>0?gross/fx:0),
+      vatPercent:0, vatAmount:0, amountGross:gross,
+      vendor:'(Phí QL Seahorse)', invoiceNo, contractNo:'',
+      paid:true, paidDate:date, bankFee:0, otherFee:0,
+      _mgmtFeeId:feeId,
+      createdBy:actorName(), createdByDept:getActorDeptName(),
+      createdAt:new Date().toISOString(), updatedAt:new Date().toISOString()
+    });
+  }
+
+  // (3) Lưu record phí QL để theo dõi đã phát hành
+  if(!S.opMgmtFees) S.opMgmtFees=[];
+  S.opMgmtFees.push({
+    id:feeId, vesselId:vid, date, period, amount:net, vatPercent:pct, vatAmount:vat, amountGross:gross,
+    ccy, invoiceNo, deducted:!!deduct, arId:arRec.id, opTxId,
+    createdBy:actorName(), createdAt:new Date().toISOString()
+  });
+
+  saveState();
+  try{ logAuditEvent('mgmt_fee_issue',{vesselId:vid, net, gross, deducted:!!deduct}); }catch(e){}
+  closeModal();
+  renderAll();
+  toast('Đã phát hành phí QL '+fmt(gross,ccy)+(deduct?' · đã cấn trừ quỹ':''),'good');
+}
+function deleteMgmtFee(feeId){
+  if(!(isAdmin()||canApproveL2())){ toast('Chỉ Admin/KTT được hủy phí QL','bad'); return; }
+  const f=(S.opMgmtFees||[]).find(x=>x.id===feeId); if(!f) return;
+  confirmDelete('kỳ phí QL này',
+    `Kỳ: ${esc(f.period||'')}<br>Số tiền: <b>${fmt(f.amountGross||f.amount,f.ccy)}</b><br><br>Sẽ xóa kèm: khoản Phải thu doanh thu + bút toán giảm quỹ (nếu có).`,
+    ()=>{
+      const ids=[];
+      if(f.arId){ S.receivables=(S.receivables||[]).filter(r=>r.id!==f.arId); ids.push(f.arId); }
+      if(f.opTxId){ S.opTransactions=(S.opTransactions||[]).filter(t=>t.id!==f.opTxId); ids.push(f.opTxId); }
+      S.opMgmtFees=(S.opMgmtFees||[]).filter(x=>x.id!==feeId);
+      try{ markDeleted(ids); }catch(e){}
+      saveState();
+      try{ logAuditEvent('mgmt_fee_delete',{feeId}); }catch(e){}
+      renderAll();
+      toast('Đã hủy kỳ phí QL','good');
+    });
 }
 function opTypeChanged(){
   const type=document.getElementById('opt-type').value;
@@ -20701,6 +20875,7 @@ function generateOpReport(){
     sumIn:'Tổng thu hộ · Total collections',
     sumOut:'Tổng chi hộ · Total disbursements',
     sumFee:'Tổng phí · Total fees',
+    mgmtFee:'Phí quản lý · Management fee',
     sigOwner:'Chủ tàu · Vessel Owner',
     sigCo:'Đại diện công ty · Company Representative',
     signDate:'Ngày ký · Date signed',
@@ -20719,6 +20894,7 @@ function generateOpReport(){
     openBal:'Tồn đầu kỳ',
     closeBal:'Tồn cuối kỳ',
     sumIn:'Tổng thu hộ', sumOut:'Tổng chi hộ', sumFee:'Tổng phí',
+    mgmtFee:'Phí quản lý',
     sigOwner:'Chủ tàu', sigCo:'Đại diện công ty',
     signDate:'Ngày ký',
     note:'Báo cáo lập tự động từ hệ thống quản trị Seahorse'
@@ -20771,6 +20947,33 @@ function generateOpReport(){
       sumFee+=opTxFeesUsd(x);
     });
     const closeBal=openBal+sumIn-sumOut-sumFee;
+
+    // v2.71.5: Dòng PHÍ QUẢN LÝ trong báo cáo tháng.
+    // - Nếu trong kỳ ĐÃ phát hành hóa đơn phí QL → ghi đủ (số HĐ + số tiền thật, gross).
+    // - Nếu CHƯA → lấy giá trị QUY ĐỊNH (phí/tháng × số tháng trong kỳ báo cáo) làm tham chiếu dự kiến.
+    // Dòng này là THÔNG TIN cho chủ tàu; KHÔNG cộng/trừ lại vào số dư (nếu đã cấn trừ thì
+    // khoản đó đã nằm trong "Tổng chi hộ" rồi — tránh trừ trùng).
+    const mfIssued=(S.opMgmtFees||[]).filter(f=>f.vesselId===vid && (f.date||'')>=from && (f.date||'')<=to);
+    let mgmtFeeInfo;
+    if(mfIssued.length){
+      const mfTotal=mfIssued.reduce((s,f)=>s+(+f.amountGross||+f.amount||0),0);
+      const mfCcy=(mfIssued[0].ccy||v.ccy||'USD');
+      const mfUsd = mfCcy==='USD' ? mfTotal : ((+S.fxRate||0)>0 ? mfTotal/(+S.fxRate) : mfTotal);
+      const invList=mfIssued.map(f=>f.invoiceNo).filter(Boolean).join(', ');
+      mgmtFeeInfo={ has:true, amountUsd:mfUsd,
+        note:(invList?('HĐ: '+invList):'(đã phát hành)'), deducted:mfIssued.some(f=>f.deducted) };
+    } else {
+      const sM=new Date(from+'T00:00:00'), eM=new Date(to+'T00:00:00');
+      let mInPeriod=1;
+      if(!isNaN(sM.getTime())&&!isNaN(eM.getTime())&&eM>=sM){
+        mInPeriod=(eM.getFullYear()-sM.getFullYear())*12+(eM.getMonth()-sM.getMonth())+1;
+      }
+      const planned=(+v.fee||0)*Math.max(1,mInPeriod);
+      const mfCcy=(v.ccy||'USD');
+      const plannedUsd = mfCcy==='USD' ? planned : ((+S.fxRate||0)>0 ? planned/(+S.fxRate) : planned);
+      mgmtFeeInfo={ has:false, amountUsd:plannedUsd,
+        note:lang==='bi'?'Dự kiến — chưa xuất hóa đơn · Estimated — not yet invoiced':'Dự kiến — chưa xuất hóa đơn', deducted:false };
+    }
 
     const tableRowsIN=(rows)=>{
       if(!rows.length) return `<tr><td colspan="7" style="text-align:center;font-style:italic;color:#888">— Không có giao dịch —</td></tr>`;
@@ -20840,6 +21043,7 @@ function generateOpReport(){
           <tr style="background:rgba(45,106,106,.04)"><td class="lbl" style="padding:8pt 12pt"><b>(+) ${t.sumIn}</b><br><span style="font-size:9pt;color:#666">${inRows.length} bút toán</span></td><td class="r" style="padding:8pt 12pt;font-size:13pt;color:#2d6a6a"><b>${fmtMoney(sumIn,'USD')}</b></td></tr>
           <tr style="background:rgba(184,71,46,.04)"><td class="lbl" style="padding:8pt 12pt"><b>(−) ${t.sumOut}</b><br><span style="font-size:9pt;color:#666">${outRows.length} bút toán</span></td><td class="r" style="padding:8pt 12pt;font-size:13pt;color:#a8362b"><b>${fmtMoney(sumOut,'USD')}</b></td></tr>
           <tr><td class="lbl" style="padding:8pt 12pt">(−) ${t.sumFee}<br><span style="font-size:9pt;color:#666">Phí NH + phí khác</span></td><td class="r" style="padding:8pt 12pt">${fmtMoney(sumFee,'USD')}</td></tr>
+          <tr style="background:rgba(196,138,57,.06)"><td class="lbl" style="padding:8pt 12pt"><b>${t.mgmtFee}</b><br><span style="font-size:9pt;color:#666">${mgmtFeeInfo.has?(mgmtFeeInfo.deducted?(lang==='bi'?'Đã xuất HĐ · đã cấn trừ quỹ':'Đã xuất HĐ · đã cấn trừ quỹ'):mgmtFeeInfo.note):mgmtFeeInfo.note}${mgmtFeeInfo.has&&mgmtFeeInfo.note?('<br>'+esc(mgmtFeeInfo.note)):''}</span></td><td class="r" style="padding:8pt 12pt;font-size:12pt;color:#8a5a1e">${mgmtFeeInfo.has?'':'<span style="font-size:9pt;font-style:italic">~ </span>'}${fmtMoney(mgmtFeeInfo.amountUsd, 'USD')}</td></tr>
           <tr class="grand" style="background:rgba(28,58,92,.08);border-top:2pt solid #1c3a5c"><td class="lbl" style="padding:12pt;font-size:14pt"><b>${t.closeBal}</b></td><td class="r" style="padding:12pt;font-size:16pt;color:${closeBal<0?'#a8362b':'#2d6a6a'}"><b>${fmtMoney(closeBal,'USD')}</b></td></tr>
         </table>
       </div>
@@ -27777,8 +27981,8 @@ function excelConfirmImport(){
    lượt import nên không xóa nhầm lô khác). Chỉ Admin/KTT. Có xác nhận. Đánh dấu deleted
    để cloud đồng bộ xóa luôn. */
 function deleteLastImportBatch(){
-  if(!isAdmin() && !canApproveL2()){
-    toast('Chỉ Admin / Kế toán trưởng được xóa lô import','bad'); return;
+  if(!isAdmin() && !canApproveL1() && !canApproveL2()){
+    toast('Chỉ Admin / người duyệt được xóa lô import','bad'); return;
   }
   const b = S.lastImportBatch;
   if(!b || !b.batchId || !b.target){
@@ -27819,7 +28023,7 @@ function renderExcelImportInfo(){
   const el=document.getElementById('xls-last-batch-info');
   if(!el) return;
   const b=S.lastImportBatch;
-  const canDel = isAdmin() || canApproveL2();
+  const canDel = isAdmin() || canApproveL1() || canApproveL2();
   if(!b || !b.batchId){
     el.innerHTML = '<span style="color:var(--muted);font-style:italic">Chưa có lô import nào trong phiên này.</span>';
     return;
@@ -27843,7 +28047,7 @@ function renderExcelImportInfo(){
 function renderOpDedupeInfo(){
   const dEl=document.getElementById('xls-dedupe-info');
   if(!dEl) return;
-  const canDel = isAdmin() || canApproveL2();
+  const canDel = isAdmin() || canApproveL1() || canApproveL2();
   const dupes=_countOpDupes();
   dEl.innerHTML = `
     <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap">
@@ -27873,8 +28077,8 @@ function _opDupKey(t){
    Mỗi nhóm trùng giữ lại 1 bản (cũ nhất theo createdAt), xóa phần dư.
    Chỉ Admin/KTT. Có xác nhận. Đồng bộ xóa lên cloud. */
 function dedupeOpTransactions(){
-  if(!isAdmin() && !canApproveL2()){
-    toast('Chỉ Admin / Kế toán trưởng được dọn trùng','bad'); return;
+  if(!isAdmin() && !canApproveL1() && !canApproveL2()){
+    toast('Chỉ Admin / người duyệt được dọn trùng','bad'); return;
   }
   const arr = Array.isArray(S.opTransactions) ? S.opTransactions : [];
   if(!arr.length){ toast('Chưa có bút toán Thu/Chi hộ nào','warn'); return; }
