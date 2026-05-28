@@ -577,6 +577,7 @@ body{min-height:100vh;background-image:radial-gradient(circle at 20% 0%,rgba(184
         <div id="presence-list"></div>
       </div>
     </div>
+    <button class="btn btn-ghost" id="quickview-btn" onclick="openQuickView()" title="Tổng quan nhanh: tiền · phải thu · phải trả · dự kiến 30 ngày" style="border:1px solid rgba(246,241,232,.4);padding:4px 10px;display:none">📊 Nhanh</button>
     <button class="btn btn-ghost" onclick="cloudSync(null,{interactive:true})" id="sync-btn" title="Đồng bộ lên cloud">↻ Sync</button>
     <div class="fx-block">
       <label class="fx-label">FX <span style="opacity:.55">VND/USD</span></label>
@@ -1113,6 +1114,9 @@ body{min-height:100vh;background-image:radial-gradient(circle at 20% 0%,rgba(184
         </select>
         <select id="ar-filter-company" onchange="renderAR()" style="padding:6px 10px;border:1px solid var(--rule);background:var(--paper);font-family:var(--font-mono);font-size:12px;min-width:150px" title="Lọc theo công ty">
           <option value="">— Tất cả công ty —</option>
+        </select>
+        <select id="ar-filter-customer" onchange="renderAR()" style="padding:6px 10px;border:1px solid var(--rule);background:var(--paper);font-family:var(--font-mono);font-size:12px;min-width:170px" title="Lọc theo khách hàng">
+          <option value="">— Tất cả khách hàng —</option>
         </select>
         <button class="btn-primary" onclick="openReceivableModal(null)">+ Thêm phải thu</button>
         <button class="btn-sec" onclick="openMultiRowModal('ar')" title="Nhập phiếu nhiều dòng — 1 KH có nhiều hóa đơn">📋 Nhập nhiều dòng</button>
@@ -2585,7 +2589,7 @@ body{min-height:100vh;background-image:radial-gradient(circle at 20% 0%,rgba(184
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='2.74.4';            // bumped on each release
+const APP_VERSION='2.75.1';            // bumped on each release
 
 /* v2.62.0: Token xác thực backend — PHẢI khớp API_TOKEN trong Apps Script (Code.gs).
    Mọi request tới Apps Script tự động được gắn token qua lớp bọc fetch bên dưới.
@@ -8262,6 +8266,9 @@ function _helpSection_contact(){
 
 function applyRoleUI(){
   const user=CURRENT_ROLE==='user';
+  // v2.75.0: nút "Tổng quan nhanh" chỉ cho admin và CFO (duyệt L2)
+  const qvBtn=document.getElementById('quickview-btn');
+  if(qvBtn) qvBtn.style.display = (isAdmin()||canApproveL2()) ? '' : 'none';
   // Dashboard is admin-only: strip from any user.tabs that might still have it (migration)
   if(user && CURRENT_USER && Array.isArray(CURRENT_USER.tabs)){
     CURRENT_USER.tabs=CURRENT_USER.tabs.filter(t=>t!=='dashboard');
@@ -18080,6 +18087,19 @@ function renderArAp(kind){
     coSel.value = cur;
   }
 
+  // v2.75.1: AR — điền dropdown lọc khách hàng (từ partner của các phải thu trong phạm vi)
+  const custFilter = !isAp ? ((document.getElementById('ar-filter-customer')||{}).value||'') : '';
+  if(!isAp){
+    const custSel=document.getElementById('ar-filter-customer');
+    if(custSel){
+      const cur=custSel.value;
+      const customers=Array.from(new Set(all.map(r=>r.partner||'').filter(Boolean))).sort((a,b)=>a.localeCompare(b,'vi'));
+      custSel.innerHTML='<option value="">— Tất cả khách hàng —</option>'+
+        customers.map(c=>`<option value="${esc(c)}" ${c===cur?'selected':''}>${esc(c)}</option>`).join('');
+      custSel.value=cur;
+    }
+  }
+
   // v1.45.0: For AP — populate creator + vendor dropdowns from ALL scoped records (before status filter)
   if(isAp){
     const creatorSel = document.getElementById('ap-filter-creator');
@@ -18109,6 +18129,7 @@ function renderArAp(kind){
     if(stFilter && wfStatus(r)!==stFilter) return false;
     if(creatorFilter && (r.createdBy||'')!==creatorFilter) return false;
     if(vendorFilter && (r.partner||'')!==vendorFilter) return false;
+    if(custFilter && (r.partner||'')!==custFilter) return false;  // v2.75.1: lọc khách hàng (AR)
     if(companyFilter && (r.companyId||getParentCompanyId())!==companyFilter) return false;
     return true;
   });
@@ -21610,6 +21631,100 @@ function renderDashboard(){
 function saveBankBalance(){
   // Legacy function (deprecated) - kept for compatibility but no-op
   toast('Đã chuyển sang quản lý nhiều tài khoản — vào tab Công nợ','bad');
+}
+
+/* v2.75.0: ===== TỔNG QUAN NHANH (mobile) — admin & CFO ===== */
+function _quickViewData(){
+  const bankByCcy={}, cashByCcy={};
+  (S.bankAccounts||[]).filter(a=>a.isActive!==false).forEach(a=>{
+    const snap=(typeof bankLatestSnapshot==='function')?bankLatestSnapshot(a.id):null;
+    const bal=snap?(+snap.balance||0):0;
+    const c=a.ccy||'USD'; bankByCcy[c]=(bankByCcy[c]||0)+bal;
+  });
+  (S.cashFunds||[]).filter(f=>f.isActive!==false).forEach(f=>{
+    const c=f.ccy||'VND'; cashByCcy[c]=(cashByCcy[c]||0)+(+f.balance||0);
+  });
+  const today=todayISO();
+  const in30=new Date(); in30.setDate(in30.getDate()+30);
+  const in30ISO=in30.toISOString().slice(0,10);
+  const ar=filterBODRecords(S.receivables||[]);
+  const ap=filterBODRecords(S.payables||[]);
+  function summarize(list){
+    const out={items:[], totalUsd:0, soon30Usd:0, overdueUsd:0};
+    list.forEach(r=>{
+      const rem=arRemaining(r);
+      if(rem<=0.0001) return;
+      const remUsd=toDisplay(rem, r.ccy||'USD');
+      out.totalUsd+=remUsd;
+      const st=arStatus(r);
+      let ageDays=null;
+      if(r.dueDate){
+        ageDays=Math.ceil((new Date(today)-new Date(r.dueDate))/86400000);
+        if(r.dueDate<today) out.overdueUsd+=remUsd;
+        if(r.dueDate<=in30ISO) out.soon30Usd+=remUsd;
+      }
+      out.items.push({partner:r.partner||'—', desc:r.desc||'', rem, remUsd, ccy:r.ccy||'USD',
+        dueDate:r.dueDate||'', invoiceNo:r.invoiceNo||'', stKey:st.key, stLabel:st.label, ageDays});
+    });
+    out.items.sort((a,b)=>((a.dueDate||'9999').localeCompare(b.dueDate||'9999')));
+    return out;
+  }
+  return {bankByCcy, cashByCcy, ar:summarize(ar), ap:summarize(ap)};
+}
+function openQuickView(){
+  if(!(isAdmin()||canApproveL2())){ toast('Chỉ Admin/CFO xem Tổng quan nhanh','bad'); return; }
+  const d=_quickViewData();
+  const moneyRows=(obj,label)=>{
+    const ccys=Object.keys(obj).filter(c=>Math.abs(obj[c])>0.0001);
+    if(!ccys.length) return `<div style="font-size:12px;color:var(--muted)">${label}: —</div>`;
+    return ccys.map(c=>`<div style="display:flex;justify-content:space-between;font-size:13px"><span style="color:var(--muted)">${label} (${c})</span><b>${fmtCcy(obj[c],c)}</b></div>`).join('');
+  };
+  const detailRows=(grp)=>{
+    if(!grp.items.length) return '<div style="font-size:12px;color:var(--muted);padding:6px 0">Không có khoản nào còn lại.</div>';
+    return grp.items.map(it=>{
+      const ageTxt = it.dueDate
+        ? (it.ageDays>0 ? `<span style="color:var(--bad)">quá hạn ${it.ageDays}d</span>` : `còn ${Math.abs(it.ageDays)}d`)
+        : '<span style="color:var(--muted)">không hạn</span>';
+      return `<div style="padding:6px 0;border-bottom:1px solid var(--paper-3);font-size:12px">
+        <div style="display:flex;justify-content:space-between;gap:8px"><b>${esc(it.partner)}</b><b style="white-space:nowrap">${fmtCcy(it.rem,it.ccy)}</b></div>
+        <div style="display:flex;justify-content:space-between;gap:8px;color:var(--muted);font-size:11px"><span>${esc(it.desc||it.invoiceNo||'')}</span><span style="white-space:nowrap">${it.dueDate||'—'} · ${ageTxt}</span></div>
+      </div>`;
+    }).join('');
+  };
+  const fmtU=(n)=>fmtCcy(n,'USD');
+  const duKienRong = d.ar.soon30Usd - d.ap.soon30Usd;
+  const body=`
+    <div style="display:flex;flex-direction:column;gap:14px">
+      <div style="padding:12px 14px;border:1px solid var(--rule);border-radius:6px;background:var(--paper-2)">
+        <div style="font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--accent);font-weight:700;margin-bottom:8px">💰 Số dư tiền</div>
+        ${moneyRows(d.bankByCcy,'Ngân hàng')}
+        ${moneyRows(d.cashByCcy,'Tiền mặt')}
+      </div>
+      <details style="padding:12px 14px;border:1px solid var(--rule);border-radius:6px">
+        <summary style="cursor:pointer;display:flex;justify-content:space-between;align-items:center">
+          <span style="font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:#2d6a6a;font-weight:700">📥 Phải thu còn lại</span>
+          <b style="color:#2d6a6a">${fmtU(d.ar.totalUsd)}</b>
+        </summary>
+        <div style="font-size:11px;color:var(--muted);margin:8px 0 4px">Tới hạn ≤30 ngày: <b>${fmtU(d.ar.soon30Usd)}</b> · Quá hạn: <b style="color:var(--bad)">${fmtU(d.ar.overdueUsd)}</b></div>
+        ${detailRows(d.ar)}
+      </details>
+      <details style="padding:12px 14px;border:1px solid var(--rule);border-radius:6px">
+        <summary style="cursor:pointer;display:flex;justify-content:space-between;align-items:center">
+          <span style="font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--bad);font-weight:700">📤 Phải trả còn lại</span>
+          <b style="color:var(--bad)">${fmtU(d.ap.totalUsd)}</b>
+        </summary>
+        <div style="font-size:11px;color:var(--muted);margin:8px 0 4px">Tới hạn ≤30 ngày: <b>${fmtU(d.ap.soon30Usd)}</b> · Quá hạn: <b style="color:var(--bad)">${fmtU(d.ap.overdueUsd)}</b></div>
+        ${detailRows(d.ap)}
+      </details>
+      <div style="padding:12px 14px;border:2px solid var(--ink);border-radius:6px;background:rgba(28,58,92,.04)">
+        <div style="font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--ink);font-weight:700;margin-bottom:8px">📅 Dự kiến 30 ngày tới (theo hạn TT)</div>
+        <div style="display:flex;justify-content:space-between;font-size:13px"><span style="color:var(--muted)">Dự kiến THU</span><b style="color:#2d6a6a">${fmtU(d.ar.soon30Usd)}</b></div>
+        <div style="display:flex;justify-content:space-between;font-size:13px"><span style="color:var(--muted)">Dự kiến TRẢ</span><b style="color:var(--bad)">${fmtU(d.ap.soon30Usd)}</b></div>
+        <div style="display:flex;justify-content:space-between;font-size:15px;margin-top:6px;padding-top:6px;border-top:1.5px solid var(--ink)"><b>Dòng tiền ròng dự kiến</b><b style="color:${duKienRong>=0?'#2d6a6a':'var(--bad)'}">${fmtU(duKienRong)}</b></div>
+      </div>
+      <div style="font-size:10px;color:var(--muted);font-style:italic;text-align:center">Quy đổi USD theo tỷ giá ${(+S.fxRate||25000).toLocaleString('vi-VN')}. Dự kiến = các khoản có hạn TT trong 30 ngày tới (gồm quá hạn).</div>
+    </div>`;
+  openModal('📊 Tổng quan nhanh', body, `<button class="btn-sec" onclick="closeModal()">Đóng</button>`);
 }
 
 function navTo(page){
