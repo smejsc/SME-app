@@ -2560,7 +2560,7 @@ body{min-height:100vh;background-image:radial-gradient(circle at 20% 0%,rgba(184
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='2.71.1';            // bumped on each release
+const APP_VERSION='2.71.2';            // bumped on each release
 
 /* v2.62.0: Token xác thực backend — PHẢI khớp API_TOKEN trong Apps Script (Code.gs).
    Mọi request tới Apps Script tự động được gắn token qua lớp bọc fetch bên dưới.
@@ -4390,6 +4390,15 @@ async function authAction(){
             if(t.vatPercent==null) t.vatPercent=0;
             if(t.vatAmount==null) t.vatAmount=0;
             if(t.amountGross==null) t.amountGross=(+t.amount||0)+(+t.vatAmount||0);
+            // v2.71.1: dòng ngoại tệ ≠ USD bị lưu amountUsd<=0 (import thiếu tỷ giá) →
+            // quy đổi lại: ưu tiên fxToUsd của dòng, nếu thiếu dùng tỷ giá chung S.fxRate.
+            if((t.ccy||'USD')!=='USD' && (+t.amount||0)>0 && !(+t.amountUsd>0)){
+              const fxLine=(+t.fxToUsd||0) || (+S.fxRate||0);
+              if(fxLine>0){
+                if(!(+t.fxToUsd>0)) t.fxToUsd=fxLine;   // ghi lại tỷ giá đã dùng để minh bạch
+                t.amountUsd=(+t.amount||0)/fxLine;
+              }
+            }
             fixed++;
           });
           if(fixed>0){ saveState(); console.log('[migrate v1.89.0] Chuẩn hóa',fixed,'giao dịch thu-chi hộ'); }
@@ -11706,15 +11715,31 @@ function setupFxControls(){
     if(canEditFx){
       fxIn.readOnly=false;
       fxIn.title='Tỷ giá VND/USD — KTT/Admin cập nhật';
-      fxIn.addEventListener('change',()=>{
-        const old=+S.fxRate||25000;
-        const nv=Math.max(1,+fxIn.value||25000);
-        if(nv===old) return;
-        S.fxRate=nv;
-        saveState();
-        renderAll();
-        toast('Đã cập nhật tỷ giá: '+nv.toLocaleString('vi-VN')+' VND/USD');
-      });
+      // v2.71.1: chỉ gắn listener MỘT lần — setupFxControls được gọi nhiều lần
+      // (đăng nhập, pull, render), nếu addEventListener mỗi lần sẽ chồng listener →
+      // một lần đổi tỷ giá push nhiều lần.
+      if(!fxIn._fxBound){
+        fxIn._fxBound=true;
+        fxIn.addEventListener('change',()=>{
+          const old=+S.fxRate||25000;
+          const nv=Math.max(1,+fxIn.value||25000);
+          if(nv===old) return;
+          S.fxRate=nv;
+          saveState();
+          renderAll();
+          toast('Đã cập nhật tỷ giá: '+nv.toLocaleString('vi-VN')+' VND/USD');
+          // Đẩy NGAY lên cloud (không chờ debounce 5s). Trước đây nếu KTT đổi tỷ giá
+          // rồi đóng/mở app trong vòng 5s, push chưa kịp chạy → lần pull kế tiếp ghi đè
+          // S.fxRate bằng giá trị cũ trên cloud → "đổi xong mở lại về số cũ".
+          try{
+            const cfg=getAuthConfig();
+            if(cfg && cfg.scriptUrl){
+              clearTimeout(_autoSyncTimer);
+              cloudSync('push').catch(e=>console.warn('[fx push]', e&&e.message));
+            }
+          }catch(e){ console.warn('[fx immediate push]', e&&e.message); }
+        });
+      }
     } else {
       fxIn.readOnly=true;
       fxIn.style.opacity='.7';
@@ -20393,9 +20418,12 @@ function opTxUsd(t){
   if(!t) return 0;
   const amt=+t.amount||0;
   if((t.ccy||'USD')==='USD') return amt;
-  if(t.amountUsd!=null && !isNaN(+t.amountUsd)) return +t.amountUsd;
-  const fx=+t.fxToUsd||0;
-  return fx>0 ? amt/fx : amt;  // fallback: chưa có tỷ giá → tạm coi như USD
+  // v2.71.1: amountUsd đã lưu chỉ dùng khi > 0. Bản ghi import/cũ thiếu tỷ giá hay bị
+  // lưu amountUsd=0 (vd VND chưa nhập tỷ giá) thì PHẢI quy đổi lại, không trả 0 sai lệch.
+  if(t.amountUsd!=null && !isNaN(+t.amountUsd) && +t.amountUsd>0) return +t.amountUsd;
+  // Quy đổi: ưu tiên tỷ giá của chính dòng; nếu thiếu, dùng tỷ giá chung của app (S.fxRate)
+  const fx=(+t.fxToUsd||0) || (+S.fxRate||0);
+  return fx>0 ? amt/fx : 0;  // không có tỷ giá nào → 0 (tránh cộng nhầm tiền gốc VND vào USD)
 }
 function opTxFeesUsd(t){
   if(!t) return 0;
