@@ -2663,7 +2663,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='2.99.14';            // bumped on each release
+const APP_VERSION='2.99.17';            // bumped on each release
 
 /* v2.62.0: Token xác thực backend — PHẢI khớp API_TOKEN trong Apps Script (Code.gs).
    Mọi request tới Apps Script tự động được gắn token qua lớp bọc fetch bên dưới.
@@ -22724,7 +22724,63 @@ function _quickViewData(){
       if(usd !== null) loanSoon30Usd += usd;
     });
   });
-  return {bankByCcy, cashByCcy, ar:summarize(ar), ap:summarize(ap), loanSoon30Usd};
+  // v2.99.16: Lương dự kiến rơi vào 30 ngày tới — dựa vào ngày 5 đầu tháng (lương T trước trả 5 đầu T sau)
+  // v2.99.17: SKIP tháng đã chi lương (phát hiện qua salaryFund.withdrawals + AP_SALARY)
+  let salarySoon30Usd = 0;
+  if(typeof _cfMonthlySalaryVnd === 'function'){
+    const monthlyVnd = _cfMonthlySalaryVnd();
+    if(monthlyVnd > 0){
+      const todayD = new Date(today);
+      const endD = new Date(in30ISO);
+      const cur = new Date(todayD.getFullYear(), todayD.getMonth(), 5);
+      if(cur < todayD) cur.setMonth(cur.getMonth()+1);
+      while(cur <= endD){
+        // Tháng được trả lương = tháng TRƯỚC của cur (vd cur=5/6 → trả lương T5)
+        const payForMonth = new Date(cur.getFullYear(), cur.getMonth()-1, 1);
+        if(!_salaryPaidForMonth(payForMonth)){
+          salarySoon30Usd += _toUsdFixed(monthlyVnd, 'VND') || 0;
+        }
+        cur.setMonth(cur.getMonth()+1);
+      }
+    }
+  }
+  return {bankByCcy, cashByCcy, ar:summarize(ar), ap:summarize(ap), loanSoon30Usd, salarySoon30Usd};
+}
+
+/* v2.99.17: Phát hiện đã chi lương cho 1 tháng cụ thể.
+   Trả về true nếu trong tháng đó (theo dateMonth) đã có bút toán chi lương qua bất kỳ:
+   - salaryFund.withdrawals (có date trong tháng đó)
+   - AP có expenseType SALARY/BONUS/ALLOWANCE với issueDate trong tháng
+   Ngưỡng: tổng các bút toán chi trong tháng >= 50% lương dự kiến → coi như đã chi. */
+function _salaryPaidForMonth(monthDate){
+  const y = monthDate.getFullYear();
+  const m = monthDate.getMonth();
+  const monthStr = `${y}-${String(m+1).padStart(2,'0')}`;
+  const monthlyVnd = (typeof _cfMonthlySalaryVnd==='function') ? _cfMonthlySalaryVnd() : 0;
+  const fx = +S.fxRate || 25000;
+  let sumPaid = 0;
+  // Quỹ Lương withdrawals
+  if(S.salaryFund && Array.isArray(S.salaryFund.withdrawals)){
+    S.salaryFund.withdrawals.forEach(w=>{
+      if(!w.date) return;
+      // Cấu trúc Quỹ Lương: chi trong tháng X → là chi cho lương tháng X
+      if(!w.date.startsWith(monthStr)) return;
+      const amt = +w.amount || 0;
+      sumPaid += w.ccy==='VND' ? amt : amt*fx;
+    });
+  }
+  // AP có expenseType SALARY/BONUS/ALLOWANCE
+  (S.payables||[]).forEach(r=>{
+    if(wfStatus(r)!=='approved') return;
+    const et = r.expenseType || r.costCategory;
+    if(!['SALARY','BONUS','ALLOWANCE'].includes(et)) return;
+    if(!r.issueDate || !r.issueDate.startsWith(monthStr)) return;
+    const amt = +r.amountGross || +r.amount || 0;
+    sumPaid += r.ccy==='VND' ? amt : amt*fx;
+  });
+  // Coi như đã chi nếu sumPaid >= 50% lương dự kiến (tránh false positive với chi phụ cấp lẻ)
+  if(monthlyVnd > 0) return sumPaid >= monthlyVnd * 0.5;
+  return sumPaid > 0;
 }
 
 /* v2.94.0: Tính tiến độ doanh thu YTD theo mảng.
@@ -22851,7 +22907,8 @@ function _renderQuickView(){
 
   if(_quickViewTab==='overview'){
     const loanSoon = +d.loanSoon30Usd || 0;
-    const apSoonTotal = (+d.ap.soon30Usd||0) + loanSoon;  // v2.99.8: AP + nợ vay
+    const salarySoon = +d.salarySoon30Usd || 0;  // v2.99.16
+    const apSoonTotal = (+d.ap.soon30Usd||0) + loanSoon + salarySoon;  // v2.99.16: AP + nợ vay + lương
     const duKienRong = (+d.ar.soon30Usd||0) - apSoonTotal;
     body=`
       <div style="display:flex;flex-direction:column;gap:14px">
@@ -22880,7 +22937,7 @@ function _renderQuickView(){
           <div style="font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--ink);font-weight:700;margin-bottom:8px">📅 Dự kiến 30 ngày tới (theo hạn TT)</div>
           <div style="display:flex;justify-content:space-between;font-size:13px"><span style="color:var(--muted)">Dự kiến THU</span><b style="color:#2d6a6a">${fmtU(d.ar.soon30Usd)}</b></div>
           <div style="display:flex;justify-content:space-between;font-size:13px"><span style="color:var(--muted)">Dự kiến TRẢ</span><b style="color:var(--bad)">${fmtU(apSoonTotal)}</b></div>
-          <div style="display:flex;justify-content:space-between;font-size:10px;color:var(--muted);font-style:italic;padding-left:8px">↳ NCC ${fmtU(d.ap.soon30Usd)} + Nợ vay ${fmtU(loanSoon)}</div>
+          <div style="display:flex;justify-content:space-between;font-size:10px;color:var(--muted);font-style:italic;padding-left:8px">↳ NCC ${fmtU(d.ap.soon30Usd)} + Nợ vay ${fmtU(loanSoon)}${salarySoon>0?' + Lương '+fmtU(salarySoon):''}</div>
           <div style="display:flex;justify-content:space-between;font-size:15px;margin-top:6px;padding-top:6px;border-top:1.5px solid var(--ink)"><b>Dòng tiền ròng dự kiến</b><b style="color:${duKienRong>=0?'#2d6a6a':'var(--bad)'}">${fmtU(duKienRong)}</b></div>
         </div>
         ${(()=>{
@@ -26912,6 +26969,22 @@ function _cfInflowsInWindow(start, end){
     if(wfStatus(r)!=='approved') return;
     const rem = arRemaining(r);
     if(rem<=0) return;
+    // v2.99.15: nếu AR đã có payments[] thực tế → dự đoán nhiều kỳ thu theo pattern
+    const expected = _cfArExpectedReceipts(r, start, end);
+    if(expected !== null){
+      expected.forEach(ev=>{
+        out.push({
+          date: ev.date,
+          kind: 'AR',
+          record: r,
+          amount: toDisplay(ev.amount, r.ccy||'USD'),
+          isExpected: ev.isExpected,
+          isFinal: ev.isFinal
+        });
+      });
+      return;
+    }
+    // AR mới (chưa thu lần nào) — gom 1 cục vào dueDate như cũ
     const d=_cfPickDate(r);
     if(!d) return;
     if(d>=start && d<end){
@@ -26964,7 +27037,180 @@ function _cfOutflowsInWindow(start, end){
       out.push({date:d, kind:'TAX', record:t, amount:toDisplay(remain, t.ccy||'VND')});
     }
   });
+  // v2.99.15: SALARY — lương dự kiến trả mỗi tháng (ngày 5 của tháng sau)
+  // v2.99.17: SKIP tháng đã chi lương (phát hiện qua salaryFund.withdrawals + AP_SALARY)
+  const monthlyVnd = _cfMonthlySalaryVnd();
+  if(monthlyVnd > 0){
+    const cur = new Date(start);
+    cur.setDate(5);
+    if(cur < start) cur.setMonth(cur.getMonth()+1);
+    while(cur < end){
+      // Tháng được trả lương = tháng trước của cur
+      const payForMonth = new Date(cur.getFullYear(), cur.getMonth()-1, 1);
+      if(!_salaryPaidForMonth(payForMonth)){
+        const monthLabel = `T${payForMonth.getMonth()+1}/${String(payForMonth.getFullYear()).slice(-2)}`;
+        out.push({
+          date: new Date(cur),
+          kind: 'SALARY',
+          record: {label: 'Lương ' + monthLabel, _source: _cfSalarySource},
+          amount: toDisplay(monthlyVnd, 'VND')
+        });
+      }
+      cur.setMonth(cur.getMonth()+1);
+    }
+  }
   return out;
+}
+
+/* v2.99.15: Tính lương tháng dự kiến (VND) — fallback 3 tầng:
+   1. Cài đặt thủ công S.cashflowConfig.monthlySalaryVnd > 0
+   2. AP expenseType SALARY/BONUS/ALLOWANCE 3 tháng gần nhất / 3
+   3. salaryFund.withdrawals 3 tháng gần nhất / 3
+   Trả về 0 nếu không có nguồn nào. */
+let _cfSalarySource = 'none';
+function _cfMonthlySalaryVnd(){
+  // Tầng 1: thủ công
+  const cfg = S.cashflowConfig || {};
+  if(+cfg.monthlySalaryVnd > 0){
+    _cfSalarySource = 'manual';
+    return +cfg.monthlySalaryVnd;
+  }
+  // Tầng 2: AP expenseType SALARY
+  const today = new Date();
+  const threeMonthsAgo = new Date(today);
+  threeMonthsAgo.setMonth(today.getMonth()-3);
+  const sumSalaryAp = (S.payables||[]).filter(r=>{
+    if(wfStatus(r)!=='approved') return false;
+    const et = r.expenseType || r.costCategory;
+    if(!['SALARY','BONUS','ALLOWANCE'].includes(et)) return false;
+    if(!r.issueDate) return false;
+    return new Date(r.issueDate) >= threeMonthsAgo;
+  }).reduce((s,r)=>{
+    const amt = +r.amountGross || +r.amount || 0;
+    return s + (r.ccy==='VND' ? amt : amt*fxRate());
+  }, 0);
+  if(sumSalaryAp > 0){
+    _cfSalarySource = 'ap_salary';
+    return sumSalaryAp / 3;
+  }
+  // Tầng 3: salaryFund.withdrawals
+  if(S.salaryFund && S.salaryFund.withdrawals){
+    const sumWd = S.salaryFund.withdrawals.filter(w=>{
+      if(!w.date) return false;
+      return new Date(w.date) >= threeMonthsAgo;
+    }).reduce((s,w)=>{
+      const amt = +w.amount || 0;
+      return s + (w.ccy==='VND' ? amt : amt*fxRate());
+    }, 0);
+    if(sumWd > 0){
+      _cfSalarySource = 'salary_fund';
+      return sumWd / 3;
+    }
+  }
+  _cfSalarySource = 'none';
+  return 0;
+}
+
+/* v2.99.15: Dự đoán AR sẽ thu vào kỳ nào (dựa vào pattern payments[] thực tế).
+   Chỉ áp cho AR đã có ≥1 payments. Nếu chưa có thì vẫn gom 1 cục vào dueDate như cũ.
+   Logic: tính interval trung bình giữa các payments quá khứ → ước lượng các kỳ thu tiếp theo. */
+function _cfArExpectedReceipts(r, start, end){
+  const payments = (r.payments||[]).filter(p=>(+p.amount||0)>0)
+    .sort((a,b)=>(a.date||'').localeCompare(b.date||''));
+  if(payments.length === 0) return null; // KHÔNG có pattern → trả null, caller sẽ gom 1 cục
+  const rem = arRemaining(r);
+  if(rem <= 0) return [];
+  // Tính: số tiền TB/lần thu + interval TB (ngày)
+  const avgAmount = payments.reduce((s,p)=>s+(+p.amount||0),0) / payments.length;
+  let avgIntervalDays = 30;  // default 1 tháng
+  if(payments.length >= 2){
+    const totalSpan = (new Date(payments[payments.length-1].date) - new Date(payments[0].date)) / 86400000;
+    avgIntervalDays = Math.max(7, totalSpan / (payments.length - 1));
+  }
+  // Sinh các kỳ thu dự kiến TIẾP từ ngày thu cuối + interval
+  const events = [];
+  let nextDate = new Date(payments[payments.length-1].date);
+  let remaining = rem;
+  let safety = 0;
+  while(remaining > 0.01 && safety < 50){
+    nextDate.setDate(nextDate.getDate() + Math.round(avgIntervalDays));
+    if(nextDate >= end) break;  // ngoài window → dừng
+    const amt = Math.min(avgAmount, remaining);
+    if(nextDate >= start){
+      events.push({date: new Date(nextDate), amount: amt, isExpected:true});
+    }
+    remaining -= amt;
+    safety++;
+  }
+  // Nếu vẫn còn dư & quá window → dồn vào dueDate cuối cùng (nếu có)
+  if(remaining > 0.01 && r.dueDate){
+    const dueD = new Date(r.dueDate);
+    if(dueD >= start && dueD < end){
+      events.push({date: dueD, amount: remaining, isExpected:true, isFinal:true});
+    }
+  }
+  return events;
+}
+
+/* v2.99.15: Dialog cài đặt lương tháng dự kiến (admin/KTT) */
+function _cfEditMonthlySalary(){
+  if(!isAdmin() && !canApproveL2() && !(CURRENT_USER && CURRENT_USER.canManageUsers)){
+    toast('Chỉ Admin / KTT', 'bad'); return;
+  }
+  const cur = +(S.cashflowConfig||{}).monthlySalaryVnd || 0;
+  // Gợi ý từ 2 nguồn còn lại
+  const today = new Date();
+  const threeMonthsAgo = new Date(today);
+  threeMonthsAgo.setMonth(today.getMonth()-3);
+  const sumApSalary = (S.payables||[]).filter(r=>{
+    if(wfStatus(r)!=='approved') return false;
+    const et = r.expenseType || r.costCategory;
+    if(!['SALARY','BONUS','ALLOWANCE'].includes(et)) return false;
+    if(!r.issueDate) return false;
+    return new Date(r.issueDate) >= threeMonthsAgo;
+  }).reduce((s,r)=>{
+    const amt = +r.amountGross || +r.amount || 0;
+    return s + (r.ccy==='VND' ? amt : amt*fxRate());
+  }, 0);
+  const sumSfWd = ((S.salaryFund||{}).withdrawals||[]).filter(w=>{
+    if(!w.date) return false;
+    return new Date(w.date) >= threeMonthsAgo;
+  }).reduce((s,w)=>{
+    const amt = +w.amount || 0;
+    return s + (w.ccy==='VND' ? amt : amt*fxRate());
+  }, 0);
+  const avgAp = sumApSalary/3;
+  const avgSf = sumSfWd/3;
+  const body = `
+    <div style="font-size:13px;line-height:1.6">
+      <p style="margin-bottom:14px">Cài đặt lương tháng dự kiến để app cộng vào dòng tiền chi mỗi tháng (ngày 5 đầu tháng sau = trả lương tháng trước).</p>
+      <div class="field">
+        <label>Lương dự kiến / tháng (VND) — thủ công <span style="color:var(--muted);text-transform:none;font-weight:400;font-size:10px">(để trống = 0 → app fallback sang AP_SALARY / Quỹ Lương)</span></label>
+        <input type="number" id="cf-monthly-salary" value="${cur||''}" step="any" placeholder="VD: 500000000" style="font-family:var(--font-mono);text-align:right">
+      </div>
+      <div style="margin-top:14px;padding:10px 12px;background:rgba(28,58,92,.04);border-left:3px solid var(--ink);font-size:11.5px;line-height:1.55">
+        <b>Gợi ý dữ liệu:</b>
+        <div style="margin-top:4px">• Trung bình AP loại SALARY/BONUS/ALLOWANCE 3 tháng gần nhất: <b>${fmt(avgAp,'VND')}/tháng</b> ${avgAp>0?`<a href="javascript:document.getElementById('cf-monthly-salary').value=${Math.round(avgAp)}" style="color:var(--accent)">[Dùng số này]</a>`:''}</div>
+        <div style="margin-top:2px">• Trung bình Quỹ Lương chi 3 tháng gần nhất: <b>${fmt(avgSf,'VND')}/tháng</b> ${avgSf>0?`<a href="javascript:document.getElementById('cf-monthly-salary').value=${Math.round(avgSf)}" style="color:var(--accent)">[Dùng số này]</a>`:''}</div>
+        <div style="margin-top:6px;color:var(--muted);font-style:italic">Nếu để trống ô bên trên, app tự fallback: thủ công > AP_SALARY > Quỹ Lương > 0</div>
+      </div>
+      <div style="margin-top:10px;font-size:10px;color:var(--muted);font-style:italic">Lương trả vào <b>ngày 5 đầu tháng sau</b> (lương T5 trả 5/6, T6 trả 5/7...)</div>
+    </div>`;
+  openModal('⚙ Cài đặt lương dự kiến tháng', body,
+    `<button class="btn-sec" onclick="closeModal()">Hủy</button>
+     <button class="btn-primary" onclick="_cfSaveMonthlySalary()">💾 Lưu</button>`);
+}
+
+function _cfSaveMonthlySalary(){
+  const v = +document.getElementById('cf-monthly-salary').value || 0;
+  if(v < 0){ toast('Số tiền không hợp lệ','bad'); return; }
+  if(!S.cashflowConfig) S.cashflowConfig = {};
+  S.cashflowConfig.monthlySalaryVnd = v;
+  try{ logAuditEvent('cashflow_set_monthly_salary', {amountVnd:v}); }catch(e){}
+  saveState();
+  toast(v>0 ? `Đã cập nhật: ${fmt(v,'VND')}/tháng` : 'Đã xóa cài đặt — app sẽ fallback');
+  closeModal();
+  renderCashflow();
 }
 
 function renderCashflow(){
@@ -27006,6 +27252,12 @@ function renderCashflow(){
   const kpiEl=document.getElementById('cf-kpi');
   if(kpiEl){
     const scopeLabel = CF_SCOPE==='day' ? '30 ngày tới' : CF_SCOPE==='week' ? '8 tuần tới' : '12 tháng tới';
+    // v2.99.15: thông tin nguồn lương + nút cài đặt
+    const monthlyVnd = _cfMonthlySalaryVnd();
+    const srcLabels = {manual:'cài đặt thủ công', ap_salary:'TB AP_SALARY 3T', salary_fund:'TB Quỹ Lương 3T', none:'chưa có'};
+    const salaryNote = monthlyVnd>0
+      ? `<div style="font-size:10px;color:var(--muted);margin-top:3px">Lương dự kiến: <b style="color:var(--ink)">${fmt(monthlyVnd,'VND')}/tháng</b> <span style="font-style:italic">(${srcLabels[_cfSalarySource]})</span> <a href="javascript:_cfEditMonthlySalary()" style="color:var(--accent);text-decoration:underline">⚙ Cài đặt</a></div>`
+      : `<div style="font-size:10px;color:var(--muted);margin-top:3px"><span style="color:var(--warn);font-style:italic">⚠ Chưa cấu hình lương dự kiến.</span> <a href="javascript:_cfEditMonthlySalary()" style="color:var(--accent);text-decoration:underline">⚙ Cài đặt ngay</a></div>`;
     kpiEl.innerHTML=`
       <div class="kpi">
         <div class="kpi-label">Số dư NH hiện tại</div>
@@ -27020,7 +27272,8 @@ function renderCashflow(){
       <div class="kpi">
         <div class="kpi-label">Tổng chi (${scopeLabel})</div>
         <div class="kpi-value" style="color:var(--bad)">${fmt(totalOut8)}</div>
-        <div class="kpi-sub">${rows.reduce((s,r)=>s+r.outflows.length,0)} khoản (AP + Vay + NSNN)</div>
+        <div class="kpi-sub">${rows.reduce((s,r)=>s+r.outflows.length,0)} khoản (AP + Vay + Lương + NSNN)</div>
+        ${salaryNote}
       </div>
       <div class="kpi" style="background:${endBalance>=0?'rgba(61,107,61,.06)':'rgba(168,54,43,.08)'}">
         <div class="kpi-label">Số dư cuối kỳ dự kiến</div>
@@ -27040,12 +27293,15 @@ function renderCashflow(){
       const apCount=r.outflows.filter(o=>o.kind==='AP').length;
       const loanCount=r.outflows.filter(o=>o.kind==='LOAN').length;
       const taxCount=r.outflows.filter(o=>o.kind==='TAX').length;
+      const salCount=r.outflows.filter(o=>o.kind==='SALARY').length;  // v2.99.15
       const apAmt=r.outflows.filter(o=>o.kind==='AP').reduce((s,o)=>s+o.amount,0);
       const loanAmt=r.outflows.filter(o=>o.kind==='LOAN').reduce((s,o)=>s+o.amount,0);
       const taxAmt=r.outflows.filter(o=>o.kind==='TAX').reduce((s,o)=>s+o.amount,0);
+      const salAmt=r.outflows.filter(o=>o.kind==='SALARY').reduce((s,o)=>s+o.amount,0);  // v2.99.15
       const outDetail = [
         apAmt?`AP ${fmt(apAmt)}`:null,
         loanAmt?`Vay ${fmt(loanAmt)}`:null,
+        salAmt?`Lương ${fmt(salAmt)}`:null,
         taxAmt?`NSNN ${fmt(taxAmt)}`:null
       ].filter(Boolean).join(' · ')||'—';
       html+=`<tr${idx===0?' style="background:rgba(184,71,46,.04)"':''}>
@@ -27077,17 +27333,23 @@ function renderCashflow(){
       let html=`<thead><tr><th>Ngày</th><th>Kỳ</th><th>Loại</th><th>Đối tác/Mô tả</th><th class="r">Số tiền</th><th>CCY</th><th>Trạng thái</th></tr></thead><tbody>`;
       allEvents.forEach(e=>{
         const isIn=(e.kind==='AR');
-        const kindLabel = e.kind==='AR'?'📥 Thu (AR)':e.kind==='AP'?'📤 Chi (AP)':e.kind==='LOAN'?'🏦 Trả vay':'🏛 NSNN';
+        const kindLabel = e.kind==='AR'?'📥 Thu (AR)':e.kind==='AP'?'📤 Chi (AP)':e.kind==='LOAN'?'🏦 Trả vay':e.kind==='SALARY'?'👥 Lương':'🏛 NSNN';
         const kindColor = e.kind==='AR'?'var(--good)':'var(--bad)';
         let descTxt='';
         let ccy='';
         let amountOriginal=0;
         if(e.kind==='AR' || e.kind==='AP'){
-          descTxt=`${esc(e.record.partner||'?')} · ${esc(e.record.desc||'—')}`;
+          descTxt=`${esc(e.record.partner||'?')} · ${esc(e.record.desc||'—')}${e.isExpected?' <span class="chip" style="font-size:9px;background:#c5876d;color:#fff" title="Ước lượng theo pattern thu thực tế">DỰ KIẾN</span>':''}`;
           ccy=e.record.ccy||'USD';
-          amountOriginal=arRemaining(e.record);
+          // v2.99.15: nếu là expected AR thì amount là 1 phần (e.amount đã convert sang USD/display), không phải toàn bộ rem
+          if(e.kind==='AR' && e.isExpected){
+            // Reverse-convert: e.amount đang ở display ccy, đổi lại nguyên tệ để fmt đúng
+            amountOriginal = (ccy==='VND' && displayCcy()==='USD') ? e.amount*fxRate() : (ccy==='USD' && displayCcy()==='VND') ? e.amount/fxRate() : e.amount;
+          } else {
+            amountOriginal=arRemaining(e.record);
+          }
         } else if(e.kind==='LOAN'){
-          descTxt=`Vay ${esc(e.record.bankName||'?')} · Kỳ ${esc(e.scheduleItem.period||'?')}`;
+          descTxt=`Vay ${esc(e.record.lender||e.record.bankName||'?')} · Kỳ ${esc(e.scheduleItem.period||'?')}`;
           ccy=e.record.ccy||'VND';
           amountOriginal=(+e.scheduleItem.principal||0)+(+e.scheduleItem.interest||0);
         } else if(e.kind==='TAX'){
@@ -27095,6 +27357,11 @@ function renderCashflow(){
           descTxt=`${m.icon} ${m.label} · ${esc(e.record.description||'')}`;
           ccy=e.record.ccy||'VND';
           amountOriginal=(+e.record.amount||0)-(+e.record.paidAmount||0);
+        } else if(e.kind==='SALARY'){
+          descTxt=`${esc(e.record.label||'Lương')} <span style="font-size:9px;color:var(--muted);font-style:italic">(${(e.record._source||'auto')})</span>`;
+          ccy='VND';
+          // amount đang ở display ccy → reverse
+          amountOriginal = displayCcy()==='USD' ? e.amount*fxRate() : e.amount;
         }
         html+=`<tr>
           <td class="mono" style="font-size:11px">${e.date.toLocaleDateString('vi-VN')}</td>
@@ -27103,7 +27370,7 @@ function renderCashflow(){
           <td>${descTxt}</td>
           <td class="r num" style="color:${kindColor}">${isIn?'+':'−'} ${fmt(amountOriginal,ccy)}</td>
           <td class="mono">${ccy}</td>
-          <td><span class="chip" style="font-size:10px">${e.kind==='LOAN'?'Theo lịch':'Đến hạn'}</span></td>
+          <td><span class="chip" style="font-size:10px">${e.kind==='LOAN'?'Theo lịch':e.kind==='SALARY'?'Định kỳ':e.isExpected?'Dự kiến':'Đến hạn'}</span></td>
         </tr>`;
       });
       html+='</tbody>';
