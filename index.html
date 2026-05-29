@@ -2654,7 +2654,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='2.87.0';            // bumped on each release
+const APP_VERSION='2.90.0';            // bumped on each release
 
 /* v2.62.0: Token xác thực backend — PHẢI khớp API_TOKEN trong Apps Script (Code.gs).
    Mọi request tới Apps Script tự động được gắn token qua lớp bọc fetch bên dưới.
@@ -16908,17 +16908,23 @@ function renderBanking(){
   const activeLoans = loans.filter(l=>l.status!=='closed');
   const totalLoanByCcy = {};
   let totalInterestThisMonth = 0;
+  // v2.90.0: Gốc đáo hạn tháng này — tách theo loại vay
+  let principalDueShortThisMonth = 0;   // gốc đáo hạn của vay ngắn hạn (<12 tháng)
+  let principalDueLongThisMonth = 0;    // gốc đáo hạn của vay trung/dài hạn
+  const thisMonthStr = todayISO().slice(0,7);
   activeLoans.forEach(l=>{
     const remaining = loanRemainingPrincipal(l);
     const ccy = l.ccy||'VND';
     totalLoanByCcy[ccy] = (totalLoanByCcy[ccy]||0) + remaining;
     const sched = l.paymentSchedule||[];
-    const thisMonth = todayISO().slice(0,7);
-    sched.filter(p=>(p.dueDate||'').startsWith(thisMonth)).forEach(p=>{
-      // convert to display ccy
+    sched.filter(p=>(p.dueDate||'').startsWith(thisMonthStr) && !p.paid).forEach(p=>{
       totalInterestThisMonth += toDisplay(p.interest||0, ccy);
+      const principalAmt = toDisplay(p.principal||0, ccy);
+      if(l.loanType==='short') principalDueShortThisMonth += principalAmt;
+      else principalDueLongThisMonth += principalAmt;
     });
   });
+  const totalBankDueThisMonth = totalInterestThisMonth + principalDueShortThisMonth + principalDueLongThisMonth;
   // v1.34: Total interest + bank fees đã ghi nhận thực tế (từ AP linked) năm nay
   const thisYear = todayISO().slice(0,4);
   let actualInterestYTD = 0, actualBankFeeYTD = 0;
@@ -16942,14 +16948,19 @@ function renderBanking(){
         <div class="kpi-sub">${activeLoans.length} món vay đang hoạt động</div>
       </div>
       <div class="kpi">
-        <div class="kpi-label">Lãi phải trả tháng này</div>
+        <div class="kpi-label">📋 Lãi DỰ KIẾN tháng này</div>
         <div class="kpi-value" style="color:var(--bad)">${fmt(totalInterestThisMonth)}</div>
-        <div class="kpi-sub">Tổng lãi đáo hạn trong ${todayISO().slice(0,7)}</div>
+        <div class="kpi-sub">Theo lịch trả nợ · ${todayISO().slice(0,7)} · KẾ HOẠCH</div>
       </div>
       <div class="kpi">
-        <div class="kpi-label">💸 Lãi vay đã ghi CP (${thisYear})</div>
+        <div class="kpi-label">🏦 TỔNG phải trả NH tháng này</div>
+        <div class="kpi-value" style="color:var(--bad)">${fmt(totalBankDueThisMonth)}</div>
+        <div class="kpi-sub">Lãi ${fmt(totalInterestThisMonth)} + Gốc NH ${fmt(principalDueShortThisMonth)} + Gốc DH ${fmt(principalDueLongThisMonth)}</div>
+      </div>
+      <div class="kpi">
+        <div class="kpi-label">💸 Lãi ĐÃ HẠCH TOÁN (${thisYear})</div>
         <div class="kpi-value" style="color:var(--accent)">${fmt(actualInterestYTD)}</div>
-        <div class="kpi-sub">+ Phí NH: ${fmt(actualBankFeeYTD)} · auto từ schedule</div>
+        <div class="kpi-sub">+ Phí NH: ${fmt(actualBankFeeYTD)} · THỰC TẾ đã ghi CP từ đầu năm</div>
       </div>`;
   }
 
@@ -17011,7 +17022,7 @@ function renderBanking(){
           <div style="display:flex;gap:20px;flex-wrap:wrap;font-size:13px">
             <div><span style="color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.06em">Tổng hạn mức</span><br><b style="font-size:15px">${fmtCcy(totals.limitUsd,'USD')}</b></div>
             <div><span style="color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.06em">Đã vay</span><br><b style="font-size:15px;color:var(--bad)">${fmtCcy(totals.drawnUsd,'USD')}</b></div>
-            <div><span style="color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.06em">Còn được vay</span><br><b style="font-size:15px;color:#2d6a6a">${fmtCcy(totals.remainingUsd,'USD')}</b></div>
+            <div><span style="color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.06em">Còn có thể sử dụng</span><br><b style="font-size:15px;color:#2d6a6a">${fmtCcy(totals.remainingUsd,'USD')}</b></div>
             <div><span style="color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.06em">Sử dụng</span><br><b style="font-size:15px;color:${totals.utilization>80?'var(--bad)':(totals.utilization>50?'#c5876d':'var(--ink)')}">${totals.utilization.toFixed(1)}%</b></div>
             <div style="font-size:10px;color:var(--muted);font-style:italic;align-self:end">Quy đổi USD theo FX ${(+S.fxRate||25000).toLocaleString('vi-VN')}</div>
           </div>
@@ -17023,7 +17034,7 @@ function renderBanking(){
               <th class="mono">Năm</th>
               <th class="mono" style="text-align:right">Hạn mức</th>
               <th class="mono" style="text-align:right">Đã vay</th>
-              <th class="mono" style="text-align:right">Còn được vay</th>
+              <th class="mono" style="text-align:right">Còn có thể sử dụng</th>
               <th class="mono">Sử dụng</th>
               <th class="mono">Số khoản</th>
               <th class="mono">Đáo hạn HĐ</th>
@@ -17093,9 +17104,21 @@ function renderBanking(){
       // v2.65.0: Cập nhật bộ đếm kết quả
       const cntEl = document.getElementById('loan-filter-count');
       if(cntEl){
-        cntEl.textContent = (fBank||fStatus||fText)
-          ? `Hiển thị ${loansFiltered.length}/${loans.length} khoản vay`
-          : `${loans.length} khoản vay`;
+        // v2.90.0: tính tổng dư nợ gốc + tổng lãi đã trả (theo bộ lọc + theo từng tiền tệ)
+        const remByCcy={}, paidIntByCcy={};
+        loansFiltered.forEach(l=>{
+          const ccy = l.ccy||'VND';
+          remByCcy[ccy] = (remByCcy[ccy]||0) + loanRemainingPrincipal(l);
+          (l.paymentSchedule||[]).filter(p=>p.paid).forEach(p=>{
+            paidIntByCcy[ccy] = (paidIntByCcy[ccy]||0) + (+p.interest||0);
+          });
+        });
+        const remTxt = Object.entries(remByCcy).filter(([_,v])=>v>0).map(([c,v])=>`${v.toLocaleString('vi-VN')} ${c}`).join(' · ') || '0';
+        const intTxt = Object.entries(paidIntByCcy).filter(([_,v])=>v>0).map(([c,v])=>`${v.toLocaleString('vi-VN')} ${c}`).join(' · ') || '0';
+        const filterTag = (fBank||fStatus||fText) ? ' (đang lọc)' : '';
+        cntEl.innerHTML = `<span style="font-weight:500">${(fBank||fStatus||fText)?`Hiển thị ${loansFiltered.length}/${loans.length} khoản vay`:`${loans.length} khoản vay`}</span>
+          <span style="margin-left:14px;color:var(--warn)">📊 Dư nợ gốc${filterTag}: <b>${remTxt}</b></span>
+          <span style="margin-left:14px;color:#2d6a6a">💸 Lãi đã trả: <b>${intTxt}</b></span>`;
       }
       const byType={short:[], medium:[], long:[]};
       loansFiltered.forEach(l=>{
@@ -17714,7 +17737,7 @@ function openCreditFacilityForm(id){
       </div>
       <div class="field">
         <label>Năm hạn mức *</label>
-        <input type="number" id="cf-year" value="${f.year||defaultYear}" min="2020" max="2050">
+        <input type="text" inputmode="numeric" pattern="[0-9]{4}" id="cf-year" value="${f.year||defaultYear}" maxlength="4" placeholder="2026">
       </div>
       <div class="field">
         <label>Hạn mức tổng *</label>
@@ -17849,7 +17872,7 @@ function _loanModal(l){
           ${(S.creditFacilities||[]).filter(cf=>cf.isActive!==false).map(cf=>{
             const cfSum = creditFacilitySummary().find(x=>x.id===cf.id) || cf;
             const remTxt = fmtCcy(cfSum.remaining||0, cf.ccy||'VND');
-            return `<option value="${cf.id}" ${l.facilityId===cf.id?'selected':''}>${esc(cf.bankName)} · ${cf.year} · Còn được vay: ${remTxt}</option>`;
+            return `<option value="${cf.id}" ${l.facilityId===cf.id?'selected':''}>${esc(cf.bankName)} · ${cf.year} · Còn có thể sử dụng: ${remTxt}</option>`;
           }).join('')}
         </select>
         <div style="font-size:11px;color:var(--muted);margin-top:3px;font-style:italic">Liên kết để app trừ vào hạn mức + tính "Còn được vay" tự động</div>
@@ -18111,7 +18134,154 @@ function viewLoanSchedule(id){
       </div>
     </div>`;
   openModal(`📅 Lịch trả nợ · ${esc(l.bankName)}`, body,
-    '<button class="btn-sec" onclick="closeModal()">Đóng</button>');
+    `<button class="btn-sec" onclick="loanAddCustomExpense('${l.id}')">➕ Ghi nhận phát sinh khác</button>
+     <button class="btn-sec" onclick="closeModal()">Đóng</button>`);
+}
+
+/* v2.89.0: Ghi nhận phát sinh khác (phí gia hạn, lãi phạt, phí cam kết, tất toán trước hạn...) */
+function loanAddCustomExpense(loanId){
+  if(!canEditTreasury()){toast('Chỉ Admin / Kế toán trưởng','bad');return;}
+  const l=(S.loans||[]).find(x=>x.id===loanId);
+  if(!l){toast('Không tìm thấy khoản vay','bad');return;}
+  const remaining = loanRemainingPrincipal(l);
+  const body=`
+    <div style="font-size:13px;display:grid;grid-template-columns:1fr 1fr;gap:10px">
+      <div style="grid-column:1/3;padding:8px 12px;background:rgba(184,71,46,.05);font-size:11px;border-left:3px solid var(--accent)">
+        <b>${esc(l.bankName)}</b> · ${esc(l.contractNo||'')} · Dư nợ còn: <b style="color:var(--accent)">${remaining.toLocaleString()} ${esc(l.ccy)}</b>
+      </div>
+      <div class="field" style="grid-column:1/3">
+        <label>Loại phát sinh *</label>
+        <select id="lce-type" onchange="_lceUpdateDesc()">
+          <option value="early_settlement">Tất toán trước hạn (đóng khoản vay sớm)</option>
+          <option value="overdue_interest">Lãi phạt quá hạn</option>
+          <option value="extension_fee">Phí gia hạn khoản vay</option>
+          <option value="commitment_fee">Phí cam kết (commitment fee)</option>
+          <option value="account_fee">Phí quản lý tài khoản vay</option>
+          <option value="other">Phát sinh khác (tự nhập diễn giải)</option>
+        </select>
+      </div>
+      <div class="field">
+        <label>Ngày phát sinh *</label>
+        <input type="date" id="lce-date" value="${todayISO()}">
+      </div>
+      <div class="field">
+        <label>Số tiền *</label>
+        <input type="number" id="lce-amount" placeholder="100000000" step="any">
+      </div>
+      <div class="field" style="grid-column:1/3">
+        <label>Diễn giải *</label>
+        <input type="text" id="lce-desc" placeholder="VD: Tất toán trước hạn HĐ HM06/2025/168159">
+      </div>
+      <div class="field" style="grid-column:1/3">
+        <label style="display:flex;align-items:center;gap:6px;cursor:pointer">
+          <input type="checkbox" id="lce-close-loan" style="margin:0">
+          <span style="font-size:12px">Đóng khoản vay sau khi ghi nhận (chỉ tick nếu Tất toán trước hạn — sẽ đặt status='closed')</span>
+        </label>
+      </div>
+      <div class="field" style="grid-column:1/3">
+        <label>Ghi chú thêm</label>
+        <textarea id="lce-note" rows="2"></textarea>
+      </div>
+    </div>
+    <div id="lce-err" style="color:var(--bad);margin-top:8px;font-size:12px"></div>`;
+  openModal('➕ Ghi nhận phát sinh khác · '+esc(l.bankName), body,
+    `<button class="btn-sec" onclick="viewLoanSchedule('${l.id}')">← Quay về lịch trả nợ</button>
+     <button class="btn-primary" onclick="_lceSave('${l.id}')">💾 Lưu + Tạo AP</button>`);
+  // Auto-fill desc khi đổi loại
+  setTimeout(_lceUpdateDesc, 100);
+}
+
+function _lceUpdateDesc(){
+  const typeEl = document.getElementById('lce-type');
+  const descEl = document.getElementById('lce-desc');
+  if(!typeEl || !descEl) return;
+  const labels = {
+    early_settlement: 'Tất toán trước hạn',
+    overdue_interest: 'Lãi phạt quá hạn',
+    extension_fee: 'Phí gia hạn khoản vay',
+    commitment_fee: 'Phí cam kết',
+    account_fee: 'Phí quản lý tài khoản vay',
+    other: ''
+  };
+  const closeEl = document.getElementById('lce-close-loan');
+  if(closeEl) closeEl.checked = (typeEl.value === 'early_settlement');
+  if(!descEl.value || labels[descEl.value] || labels[typeEl.value]){
+    descEl.value = labels[typeEl.value] || descEl.value;
+  }
+}
+
+function _lceSave(loanId){
+  const l=(S.loans||[]).find(x=>x.id===loanId);
+  if(!l) return;
+  const err = document.getElementById('lce-err');
+  err.textContent = '';
+  const type = document.getElementById('lce-type').value;
+  const date = document.getElementById('lce-date').value;
+  const amount = +document.getElementById('lce-amount').value;
+  const desc = document.getElementById('lce-desc').value.trim();
+  const note = document.getElementById('lce-note').value.trim();
+  const closeLoan = document.getElementById('lce-close-loan').checked;
+  if(!date){err.textContent='Nhập ngày phát sinh'; return;}
+  if(!(amount>0)){err.textContent='Số tiền phải > 0'; return;}
+  if(!desc){err.textContent='Nhập diễn giải'; return;}
+  // Map loại phát sinh → expenseType + costCategory + AP autoSource code
+  const typeMap = {
+    early_settlement: {exp:'BANK_FEE', cat:'Phí ngân hàng', src:'loan_early_settlement'},
+    overdue_interest: {exp:'INTEREST_EXP', cat:'Chi phí lãi vay', src:'loan_overdue_interest'},
+    extension_fee: {exp:'BANK_FEE', cat:'Phí ngân hàng', src:'loan_extension_fee'},
+    commitment_fee: {exp:'BANK_FEE', cat:'Phí ngân hàng', src:'loan_commitment_fee'},
+    account_fee: {exp:'BANK_FEE', cat:'Phí ngân hàng', src:'loan_account_fee'},
+    other: {exp:'BANK_FEE', cat:'Phí ngân hàng', src:'loan_other'}
+  };
+  const m = typeMap[type] || typeMap.other;
+  const partner = (l.bankName||'').trim();
+  const vendor = (typeof getOrCreateVendor==='function') ? getOrCreateVendor(partner) : null;
+  const nowISO_ = new Date().toISOString();
+  const me = actorName();
+  const apRecord = {
+    id: uid(),
+    partner,
+    vendorId: vendor ? vendor.id : '',
+    desc: desc + (note ? ' — '+note : ''),
+    invoiceNo: `LOAN-${l.id.slice(-6)}-${type.toUpperCase().slice(0,6)}-${date.replace(/-/g,'').slice(-6)}`,
+    expenseType: m.exp,
+    isPO: false, isBODOnly: false,
+    costCenterType: 'general', costCenterId: 'general',
+    recipientName: '',
+    costCategory: m.cat,
+    amountNet: amount, vatPercent: 0, vatAmount: 0, amountGross: amount, amount,
+    ccy: l.ccy||'VND',
+    segment: 'Tài chính',
+    projectId: null, vesselId: null, departmentId: '',
+    issueDate: date, dueDate: date, dueMonth: '', dueAmount: 0,
+    payments: [{date, amount, ccy: l.ccy||'VND', note: 'Tự tạo từ khoản vay'}],
+    status: 'approved',
+    submittedBy: me, submittedAt: nowISO_,
+    approvedL1By: me, approvedL1At: nowISO_,
+    approvedL2By: me, approvedL2At: nowISO_,
+    rejectedBy:'', rejectedAt:'', rejectReason:'', rejectedAtLevel:0,
+    createdBy: me, createdAt: nowISO_,
+    noteHeader: 'Auto từ khoản vay (' + (type==='early_settlement'?'tất toán trước hạn':'phát sinh khác') + ')',
+    autoSource: m.src,
+    linkedLoanId: l.id
+  };
+  if(!S.payables) S.payables=[];
+  S.payables.push(apRecord);
+  // Nếu là tất toán trước hạn → đóng khoản vay
+  if(closeLoan){
+    l.status = 'closed';
+    l.closedAt = nowISO_;
+    l.closedReason = 'Tất toán trước hạn';
+    // Đánh dấu tất cả kỳ chưa trả → trả luôn (để dư nợ về 0)
+    (l.paymentSchedule||[]).forEach(p=>{
+      if(!p.paid){ p.paid=true; p.paidDate=date; p.paidNote='Tất toán trước hạn'; }
+    });
+  }
+  try{ logAuditEvent('loan_custom_expense', {loanId:l.id, type, amount, closeLoan}); }catch(e){}
+  saveState();
+  toast(`Đã ghi nhận ${amount.toLocaleString()} ${l.ccy} — AP đã tạo${closeLoan?', khoản vay ĐÓNG':''}`,'good');
+  closeModal();
+  renderAll();
 }
 
 /* ===== PREPAY CRUD ===== */
@@ -22235,15 +22405,20 @@ function _renderQuickView(){
           <div style="display:flex;justify-content:space-between;font-size:15px;margin-top:6px;padding-top:6px;border-top:1.5px solid var(--ink)"><b>Dòng tiền ròng dự kiến</b><b style="color:${duKienRong>=0?'#2d6a6a':'var(--bad)'}">${fmtU(duKienRong)}</b></div>
         </div>
         ${(()=>{
-          // v2.85.0: Card Hạn mức tín dụng còn lại
+          // v2.85.0/v2.88.0: Card Hạn mức tín dụng còn lại — luôn hiển thị, kèm gợi ý nếu chưa có facility
           const ct = creditFacilityTotalsUsd();
-          if(ct.nFacilities===0) return '';  // không hiển thị nếu chưa khai báo facility nào
+          if(ct.nFacilities===0){
+            return `<div style="padding:14px;border:1px dashed var(--rule);border-radius:6px;background:rgba(74,107,44,.02);text-align:center">
+              <div style="font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:#4a6b2c;font-weight:700;margin-bottom:6px">🏦 Hạn mức tín dụng</div>
+              <div style="font-size:12px;color:var(--muted)">Chưa khai báo hạn mức NH nào.<br>Vào <b>Ngân quỹ → Hạn mức tín dụng → "+ Hạn mức mới"</b> để theo dõi khả năng vay.</div>
+            </div>`;
+          }
           const utilColor = ct.utilization>80?'var(--bad)':(ct.utilization>50?'#c5876d':'#2d6a6a');
           return `<div style="padding:14px;border:1px solid var(--rule);border-radius:6px;background:rgba(74,107,44,.04)">
             <div style="font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:#4a6b2c;font-weight:700;margin-bottom:8px">🏦 Hạn mức tín dụng (${ct.nFacilities} NH)</div>
             <div style="display:flex;justify-content:space-between;font-size:13px"><span style="color:var(--muted)">Tổng hạn mức</span><b>${fmtU(ct.limitUsd)}</b></div>
             <div style="display:flex;justify-content:space-between;font-size:13px"><span style="color:var(--muted)">Đã vay</span><b style="color:var(--bad)">${fmtU(ct.drawnUsd)}</b></div>
-            <div style="display:flex;justify-content:space-between;font-size:15px;margin-top:6px;padding-top:6px;border-top:1.5px solid var(--rule)"><b>Còn được vay</b><b style="color:#2d6a6a">${fmtU(ct.remainingUsd)}</b></div>
+            <div style="display:flex;justify-content:space-between;font-size:15px;margin-top:6px;padding-top:6px;border-top:1.5px solid var(--rule)"><b>Còn có thể sử dụng</b><b style="color:#2d6a6a">${fmtU(ct.remainingUsd)}</b></div>
             <div style="display:flex;justify-content:space-between;font-size:11px;margin-top:4px"><span style="color:var(--muted)">Tỷ lệ sử dụng</span><span style="color:${utilColor};font-weight:600">${ct.utilization.toFixed(1)}%</span></div>
           </div>`;
         })()}
