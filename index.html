@@ -637,7 +637,8 @@ body.readonly-mode::before{
     <button class="btn btn-ghost" onclick="cloudSync(null,{interactive:true})" id="sync-btn" title="Đồng bộ lên cloud">↻ Sync</button>
     <div class="fx-block">
       <label class="fx-label">FX <span style="opacity:.55">VND/USD</span></label>
-      <input type="number" id="fx-rate" class="fx-input" placeholder="25000" data-skip-format="1">
+      <input type="number" id="fx-rate" class="fx-input" placeholder="—" data-skip-format="1" value="">
+      <div id="fx-loading-indicator" style="display:none;font-size:9px;color:var(--accent);font-style:italic;margin-top:2px">đang tải...</div>
       <div class="ccy-toggle">
         <button id="ccy-USD" onclick="setDisplayCcy('USD')">USD</button>
         <button id="ccy-VND" onclick="setDisplayCcy('VND')">VND</button>
@@ -1149,7 +1150,7 @@ body.readonly-mode::before{
       <div class="page-title">Phải thu <span class="it">(Doanh thu)</span></div>
       <div class="page-sub">Ghi nhận doanh thu + theo dõi khách hàng nợ</div>
     </div>
-    <div class="page-meta">Workflow phê duyệt 2 cấp<br>Đã duyệt = vào báo cáo BI</div>
+    <div class="page-meta">KTT nhập = Đã duyệt ngay<br>Đã duyệt = vào báo cáo BI · NV nhập → KTT kiểm</div>
   </div>
 
   <div id="ar-scope-banner"></div>
@@ -1159,14 +1160,13 @@ body.readonly-mode::before{
     <div class="section-head">
       <div class="section-title"><span class="tag">↘</span>Sổ phải thu</div>
       <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-        <select id="ar-filter-status" onchange="renderAR()" style="padding:6px 10px;border:1px solid var(--rule);background:var(--paper);font-family:var(--font-mono);font-size:12px">
-          <option value="">Mọi trạng thái</option>
-          <option value="draft">Nháp</option>
-          <option value="pending_acc">Chờ KT kiểm</option>
-          <option value="pending_l1">Trình ký</option>
-          <option value="pending_l2">Chờ thanh toán</option>
-          <option value="approved">Đã duyệt</option>
-          <option value="rejected">Từ chối</option>
+        <select id="ar-filter-status" onchange="renderAR()" style="padding:6px 10px;border:1px solid var(--rule);background:var(--paper);font-family:var(--font-mono);font-size:12px" title="Lọc theo tình trạng thu tiền">
+          <option value="">Mọi tình trạng</option>
+          <option value="unpaid">Chưa thu</option>
+          <option value="paid">Đã thu</option>
+          <option value="overdue">Quá hạn (chưa thu)</option>
+          <option value="draft">— Nháp (chưa duyệt) —</option>
+          <option value="rejected">— Từ chối —</option>
         </select>
         <select id="ar-filter-company" onchange="renderAR()" style="padding:6px 10px;border:1px solid var(--rule);background:var(--paper);font-family:var(--font-mono);font-size:12px;min-width:150px" title="Lọc theo công ty">
           <option value="">— Tất cả công ty —</option>
@@ -2654,7 +2654,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='2.90.0';            // bumped on each release
+const APP_VERSION='2.99.0';            // bumped on each release
 
 /* v2.62.0: Token xác thực backend — PHẢI khớp API_TOKEN trong Apps Script (Code.gs).
    Mọi request tới Apps Script tự động được gắn token qua lớp bọc fetch bên dưới.
@@ -9771,7 +9771,20 @@ function defaultState(){
   };
 }
 function loadState(){
-  try{const j=localStorage.getItem(STORE_KEY);if(j) return Object.assign(defaultState(),JSON.parse(j));}catch(e){}
+  try{
+    const j=localStorage.getItem(STORE_KEY);
+    if(!j) return defaultState();
+    const parsed = JSON.parse(j);
+    // v2.93.0: Nếu data đã được mã hóa (chuẩn từ v1.x trở đi), KHÔNG merge {iv,ct} với defaultState
+    // (vì sẽ trả về defaultState rỗng + sai fxRate=25000 cho đến khi loadEncryptedLocal() async chạy).
+    // Trả về defaultState() — sau đó async loadEncryptedLocal() sẽ ghi đè bằng dữ liệu thật.
+    if(parsed && parsed.iv && parsed.ct){
+      console.log('[loadState] encrypted payload detected — defaultState placeholder, will be replaced by loadEncryptedLocal()');
+      return defaultState();
+    }
+    // Plain JSON legacy — merge an toàn
+    return Object.assign(defaultState(), parsed);
+  }catch(e){console.warn('[loadState]',e);}
   return defaultState();
 }
 
@@ -11081,7 +11094,7 @@ function renderCatalog(){
       const canArchive = canArchiveItem();
       let h = '<thead><tr><th>Mã</th><th>Tên</th><th>Khách hàng</th><th>Mảng</th><th>CCY</th><th>Trạng thái</th><th></th></tr></thead><tbody>';
       list.forEach(p => {
-        const seg = SEGMENTS[p.segment] || {name: p.segment||'?', color:'#888'};
+        const seg = SEGMENTS[p.segment] || {name: p.segment||'?', short:p.segment||'?', chip:''};
         const statusChip = p.archived
           ? `<span class="chip" style="background:#a8362b;color:#fff;font-size:10px" title="Đã hoàn thành bởi ${esc(p.archivedBy||'?')} lúc ${p.archivedAt?new Date(p.archivedAt).toLocaleDateString('vi-VN'):'?'}">⊘ HOÀN THÀNH</span>`
           : `<span class="chip chip-good" style="font-size:10px">✓ ACTIVE</span>`;
@@ -11094,7 +11107,7 @@ function renderCatalog(){
           <td class="mono"><b>${esc(p.code)}</b></td>
           <td>${esc(p.name)}</td>
           <td style="font-size:11px">${esc(p.client||'—')}</td>
-          <td><span class="chip" style="font-size:10px;background:${seg.color};color:#fff">${esc(seg.name)}</span></td>
+          <td><span class="chip ${seg.chip||''}" style="font-size:10px">${esc(seg.name)}</span></td>
           <td class="mono" style="font-size:11px">${esc(p.ccy||'—')}</td>
           <td>${statusChip}</td>
           <td><div class="row-actions">${archiveBtn}<button class="btn-sec" style="font-size:10px;padding:2px 8px" onclick="navTo('projects')">↗ Sửa</button></div></td>
@@ -12107,6 +12120,12 @@ function updateCcyToggleUI(){
 function setupFxControls(){
   const fxIn=document.getElementById('fx-rate');
   if(fxIn){
+    // v2.93.0: Chỉ fill input khi đã login (CRYPTO_KEY có sẵn) và state đã được decrypt.
+    // Trước đây fill ngay lập tức → nếu loadEncryptedLocal chưa kịp chạy, S.fxRate=25000 (default) → hiển thị nhầm.
+    if(typeof CRYPTO_KEY === 'undefined' || !CRYPTO_KEY){
+      fxIn.value='';  // để trống → placeholder "—" hiện ra → không gây nhầm
+      return;
+    }
     fxIn.value=S.fxRate||25000;
     // v1.94.0: chỉ KTT (canApproveL2) + Admin được sửa tỷ giá — người khác chỉ xem
     const canEditFx = canApproveL2();
@@ -13481,27 +13500,28 @@ function openEventModal(eventId){
     const priceReadonly = isEnd ? 'readonly' : '';  // tồn cuối auto-computed (but allow override)
     const priceCcyVal = f.priceCcy || 'USD';
     const unitPriceVal = (f.unitPrice != null && f.unitPrice !== '') ? f.unitPrice : (f.price || 0);
-    return `<tr>
-      <td style="font-weight:600;padding:6px"><span class="chip">${fk.short}</span></td>
-      <td><select id="${group}-${fk.key}-unit" onchange="togglePhuyEv('${group}','${fk.key}');evFuelRowChanged('${group}','${fk.key}')" style="padding:5px;border:1px solid var(--rule);font-family:var(--font-mono);font-size:11px;width:75px">
+    // v2.99.0: chuyển sang CSS Grid để header và body align tuyệt đối
+    return `<div class="fuel-grid-row" style="display:grid;grid-template-columns:50px 70px 60px 80px 130px 110px;gap:6px;align-items:center;padding:5px 4px;border-bottom:1px dashed rgba(0,0,0,.05)">
+      <div style="font-weight:600"><span class="chip">${fk.short}</span></div>
+      <select id="${group}-${fk.key}-unit" onchange="togglePhuyEv('${group}','${fk.key}');evFuelRowChanged('${group}','${fk.key}')" style="padding:4px;border:1px solid var(--rule);font-family:var(--font-mono);font-size:11px;width:100%">
         <option value="liter" ${f.unit==='liter'?'selected':''}>Lít</option>
         <option value="m3" ${f.unit==='m3'?'selected':''}>m³</option>
         <option value="phuy" ${f.unit==='phuy'?'selected':''}>Phuy</option>
-      </select></td>
-      <td><input type="number" id="${group}-${fk.key}-phuy" value="${f.phuyLiters||200}" step="1" onchange="evFuelRowChanged('${group}','${fk.key}')" style="padding:5px;border:1px solid var(--rule);width:60px;font-family:var(--font-mono);font-size:11px;text-align:right;${f.unit==='phuy'?'':'opacity:.3;pointer-events:none'}"></td>
-      <td><input type="number" id="${group}-${fk.key}-qty" value="${f.qty||0}" step="any" oninput="evFuelRowChanged('${group}','${fk.key}')" style="padding:5px;border:1px solid var(--rule);width:90px;font-family:var(--font-mono);font-size:11px;text-align:right"></td>
-      ${showPrice?`<td><div style="display:flex;gap:3px">
-        <input type="number" id="${group}-${fk.key}-price" value="${unitPriceVal}" step="any" ${priceReadonly} oninput="evFuelRowChanged('${group}','${fk.key}')" style="padding:5px;border:1px solid var(--rule);width:78px;font-family:var(--font-mono);font-size:11px;text-align:right;${priceReadonly?'background:var(--paper-2);color:var(--muted)':''}" title="${isEnd?'Tự tính từ đơn giá bơm mới nhất — có thể sửa tay':'Đơn giá / đơn vị'}">
-        <select id="${group}-${fk.key}-priceCcy" onchange="evFuelRowChanged('${group}','${fk.key}')" style="padding:5px;border:1px solid var(--rule);font-family:var(--font-mono);font-size:11px;width:50px">
+      </select>
+      <input type="number" id="${group}-${fk.key}-phuy" value="${f.phuyLiters||200}" step="1" onchange="evFuelRowChanged('${group}','${fk.key}')" style="padding:4px;border:1px solid var(--rule);width:100%;font-family:var(--font-mono);font-size:11px;text-align:right;${f.unit==='phuy'?'':'opacity:.3;pointer-events:none'}">
+      <input type="number" id="${group}-${fk.key}-qty" value="${f.qty||0}" step="any" oninput="evFuelRowChanged('${group}','${fk.key}')" style="padding:4px;border:1px solid var(--rule);width:100%;font-family:var(--font-mono);font-size:11px;text-align:right">
+      ${showPrice?`<div style="display:flex;gap:3px">
+        <input type="number" id="${group}-${fk.key}-price" value="${unitPriceVal}" step="any" ${priceReadonly} oninput="evFuelRowChanged('${group}','${fk.key}')" style="padding:4px;border:1px solid var(--rule);flex:1;min-width:0;font-family:var(--font-mono);font-size:11px;text-align:right;${priceReadonly?'background:var(--paper-2);color:var(--muted)':''}" title="${isEnd?'Tự tính từ đơn giá bơm mới nhất — có thể sửa tay':'Đơn giá / đơn vị'}">
+        <select id="${group}-${fk.key}-priceCcy" onchange="evFuelRowChanged('${group}','${fk.key}')" style="padding:4px;border:1px solid var(--rule);font-family:var(--font-mono);font-size:11px;width:48px;flex-shrink:0">
           <option value="USD" ${priceCcyVal==='USD'?'selected':''}>USD</option>
           <option value="VND" ${priceCcyVal==='VND'?'selected':''}>VND</option>
         </select>
-      </div></td>
-      <td class="r mono" id="${group}-${fk.key}-value" style="font-size:11px;color:var(--accent);font-weight:600;padding:5px 8px">—</td>`:''}
-    </tr>`;
+      </div>
+      <div class="mono" id="${group}-${fk.key}-value" style="font-size:11px;color:var(--accent);font-weight:600;text-align:right">—</div>`:''}
+    </div>`;
   };
 
-  // v1.43.0: fuelBlock now has Value column + Total row
+  // v2.99.0: fuelBlock với CSS Grid — header và body align tuyệt đối
   const fuelBlock=(group,label,note)=>{
     const isEnd = group==='fuelEnd';
     const isStart = group==='fuelStart';
@@ -13510,21 +13530,21 @@ function openEventModal(eventId){
     <div style="margin-top:10px">
       <div style="font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);font-weight:600;margin-bottom:4px">${label}</div>
       ${noteHtml}
-      <table style="width:100%;font-size:11px;border-collapse:collapse"><thead><tr style="border-bottom:1px solid var(--rule)">
-        <th style="text-align:left;padding:4px">Loại</th>
-        <th style="text-align:left">Đv</th>
-        <th style="text-align:left">L/phuy</th>
-        <th style="text-align:right">Số lượng</th>
-        <th style="text-align:right">Đơn giá${isEnd?' (tự tính)':''}</th>
-        <th style="text-align:right" title="SL × Đơn giá">Giá trị</th>
-      </tr></thead><tbody>
+      <div style="border:1px solid var(--rule);border-radius:3px;overflow:hidden">
+        <div style="display:grid;grid-template-columns:50px 70px 60px 80px 130px 110px;gap:6px;padding:6px 4px;background:var(--paper-2);font-size:10px;letter-spacing:.05em;text-transform:uppercase;color:var(--muted);font-weight:700;border-bottom:1px solid var(--rule)">
+          <div>Loại</div>
+          <div>Đv</div>
+          <div>L/phuy</div>
+          <div style="text-align:right">Số lượng</div>
+          <div style="text-align:right">Đơn giá${isEnd?' (tự tính)':''}</div>
+          <div style="text-align:right" title="SL × Đơn giá">Giá trị</div>
+        </div>
         ${FUEL_TYPES.map(fk=>fuelRow(group,fk)).join('')}
-      </tbody><tfoot>
-        <tr style="border-top:2px solid var(--rule);background:rgba(184,71,46,.04)">
-          <td colspan="5" style="text-align:right;padding:6px 8px;font-weight:600;letter-spacing:.05em;text-transform:uppercase;font-size:10px;color:var(--muted)">Tổng giá trị</td>
-          <td class="r mono" id="${group}-total-value" style="font-size:12px;color:var(--accent);font-weight:700;padding:6px 8px">—</td>
-        </tr>
-      </tfoot></table>
+        <div style="display:grid;grid-template-columns:1fr 110px;gap:6px;padding:6px 8px;background:rgba(184,71,46,.04);border-top:2px solid var(--rule)">
+          <div style="text-align:right;font-weight:600;letter-spacing:.05em;text-transform:uppercase;font-size:10px;color:var(--muted)">Tổng giá trị</div>
+          <div class="mono" id="${group}-total-value" style="font-size:12px;color:var(--accent);font-weight:700;text-align:right">—</div>
+        </div>
+      </div>
     </div>`;
   };
 
@@ -13687,17 +13707,19 @@ function saveEvent(eid,isEdit){
   const startAt=document.getElementById('ev-start').value;
   const endAt=document.getElementById('ev-end').value;
   if(!vesselId){err.textContent='Chọn tàu';return;}
-  if(!startAt||!endAt){err.textContent='Nhập đầy đủ Bắt đầu và Kết thúc';return;}
-  if(new Date(endAt)<=new Date(startAt)){err.textContent='Kết thúc phải sau Bắt đầu';return;}
+  if(!startAt){err.textContent='Nhập ngày Bắt đầu (Kết thúc có thể để trống nếu đoạn đang diễn ra)';return;}
+  if(endAt && new Date(endAt)<=new Date(startAt)){err.textContent='Kết thúc phải sau Bắt đầu';return;}
 
   // Check overlap with other events for same vessel
+  // v2.98.0: nếu endAt trống → đoạn đang diễn ra → coi như endAt = far future để check overlap với đoạn cũ
   const others=S.events.filter(x=>x.vesselId===vesselId && x.id!==eid);
   const newStart=new Date(startAt).getTime();
-  const newEnd=new Date(endAt).getTime();
+  const newEnd = endAt ? new Date(endAt).getTime() : (newStart + 365*24*60*60*1000*10); // +10 năm nếu trống
   const overlap=others.find(x=>{
-    if(!x.startAt||!x.endAt) return false;
-    const s=new Date(x.startAt).getTime(),e=new Date(x.endAt).getTime();
-    return newStart<e && newEnd>s; // overlap formula
+    if(!x.startAt) return false;
+    const s = new Date(x.startAt).getTime();
+    const e = x.endAt ? new Date(x.endAt).getTime() : (s + 365*24*60*60*1000*10);
+    return newStart<e && newEnd>s;
   });
   if(overlap){
     err.innerHTML=`Chồng lấn với đoạn ${evtType(overlap.type).label} (${fmtDateTime(overlap.startAt)} → ${fmtDateTime(overlap.endAt)})`;
@@ -18727,8 +18749,33 @@ function renderArAp(kind){
     return;
   }
   // Filter by status + creator + vendor + company
+  // v2.91.0: AR — filter status hỗ trợ thêm 3 trạng thái thanh toán (unpaid/paid/overdue)
+  const paymentFilters = ['unpaid','paid','overdue'];
+  const isPaymentFilter = !isAp && paymentFilters.includes(stFilter);
+  // v2.96.0: AP — mặc định ẨN bản ghi YTD historical (chi phí đã trả 100% nhập từ FAST).
+  // Người dùng có thể bật lại bằng filter status="all_including_ytd" (sẽ thêm sau nếu cần).
+  // Chỉ ẩn khi KHÔNG có filter đặc biệt (để khi anh muốn xem, không bị chặn).
+  const hideYtdHistorical = isAp && !stFilter && !creatorFilter && !vendorFilter;
   let rows=all.filter(r=>{
-    if(stFilter && wfStatus(r)!==stFilter) return false;
+    if(hideYtdHistorical && r && r._isYtdHistorical) return false;
+    if(stFilter){
+      if(isPaymentFilter){
+        // Chỉ áp filter thanh toán cho các bản ghi ĐÃ DUYỆT (đã vào sổ)
+        if(wfStatus(r) !== 'approved') return false;
+        const st = arStatus(r);
+        if(stFilter==='paid'){
+          if(st.key !== 'paid') return false;
+        } else if(stFilter==='overdue'){
+          if(st.key !== 'overdue') return false;
+        } else if(stFilter==='unpaid'){
+          // Chưa thu = còn dư > 0 và CHƯA quá hạn (overdue nằm filter riêng)
+          if(st.key === 'paid') return false;
+        }
+      } else {
+        // Filter theo wfStatus như cũ (draft/rejected/...)
+        if(wfStatus(r) !== stFilter) return false;
+      }
+    }
     if(creatorFilter && (r.createdBy||'')!==creatorFilter) return false;
     if(vendorFilter && (r.partner||'')!==vendorFilter) return false;
     if(custFilter && (r.partner||'')!==custFilter) return false;  // v2.75.1: lọc khách hàng (AR)
@@ -22327,6 +22374,82 @@ function _quickViewData(){
   }
   return {bankByCcy, cashByCcy, ar:summarize(ar), ap:summarize(ap)};
 }
+
+/* v2.94.0: Tính tiến độ doanh thu YTD theo mảng.
+   - Kế hoạch DT: từ S.plans (lọc theo năm hiện tại).
+   - DT dự kiến: từ S.projects active (giá trị HĐ phân bổ theo thời gian, tính phần YTD).
+   - DT thực hiện: từ S.receivables đã duyệt + issueDate YTD.
+   Trả về: {totals: {planUsd, projUsd, actualUsd}, bySeg: {VESSEL_SERVICE:{...}, ...}} */
+function _ytdRevenueProgress(){
+  const today = todayISO();
+  const year = +today.slice(0,4);
+  const yearStart = year + '-01-01';
+  const monthsElapsed = (+today.slice(5,7)) - 0 + (+today.slice(8,10))/30;  // ~5.97 cho 30/5
+  const fxNow = (+S.fxRate||25000);
+  const toUsd = (amt, ccy) => ccy==='USD' ? (+amt||0) : (+amt||0)/fxNow;
+
+  const segs = ['VESSEL_SERVICE','VESSEL_TECH','OM','VESSEL_MGMT','PORT','OTHER'];
+  const bySeg = {};
+  segs.forEach(s=>{ bySeg[s] = {planUsd:0, projUsd:0, actualUsd:0, name:(SEGMENTS[s]||{}).name||s, short:(SEGMENTS[s]||{}).short||s, chip:(SEGMENTS[s]||{}).chip||''}; });
+
+  // 1. Kế hoạch DT (S.plans) — lọc theo năm. KH cả năm.
+  (S.plans||[]).forEach(p=>{
+    if(p.year !== year) return;
+    const seg = p.segment || 'OTHER';
+    if(!bySeg[seg]) return;
+    bySeg[seg].planUsd += toUsd(+p.revenue||0, p.ccy||'VND');
+  });
+
+  // 2. DT dự kiến từ Dự án — phân bổ giá trị HĐ theo tỷ lệ tháng đã trôi qua.
+  (S.projects||[]).forEach(p=>{
+    if(p.archived) return;
+    const seg = p.segment || 'OTHER';
+    if(!bySeg[seg]) return;
+    const start = p.start||'';
+    const end = p.end||'';
+    const value = (+p.value||0);
+    if(!value) return;
+    let portion = 0;
+    if(start && end){
+      // Tính giao điểm với năm nay (từ yearStart đến today)
+      const s = start > yearStart ? start : yearStart;
+      const e = end < today ? end : today;
+      if(s <= e){
+        const totalDays = Math.max(1, (new Date(end) - new Date(start)) / 86400000);
+        const elapsedDays = Math.max(0, (new Date(e) - new Date(s)) / 86400000);
+        portion = value * (elapsedDays / totalDays);
+      }
+    } else if(!start || !end){
+      // Thiếu mốc → chia đều theo năm (giả định 12 tháng), nhân theo phần năm đã trôi qua
+      portion = value * (monthsElapsed/12);
+    }
+    bySeg[seg].projUsd += toUsd(portion, p.ccy||'VND');
+  });
+
+  // 3. DT thực hiện từ Phải thu đã duyệt (status=approved), issueDate YTD.
+  (S.receivables||[]).forEach(r=>{
+    if(!r || wfStatus(r) !== 'approved') return;
+    const issue = r.issueDate || '';
+    if(!issue.startsWith(String(year))) return;
+    const seg = r.segment || 'OTHER';
+    if(!bySeg[seg]) return;
+    // Doanh thu = amountNet (chưa VAT)
+    bySeg[seg].actualUsd += toUsd(+r.amountNet||+r.amount||0, r.ccy||'VND');
+  });
+
+  // Tổng
+  let planUsd=0, projUsd=0, actualUsd=0;
+  Object.values(bySeg).forEach(o=>{
+    planUsd += o.planUsd;
+    projUsd += o.projUsd;
+    actualUsd += o.actualUsd;
+  });
+  return {
+    totals:{planUsd, projUsd, actualUsd, year},
+    bySeg,
+    monthsElapsed
+  };
+}
 let _quickViewTab = 'overview';  // overview | ar | ap
 function openQuickView(){
   if(!canViewQuickOverview()){ toast('Chỉ Admin/CFO/KTT/Trưởng BP xem Tổng quan nhanh','bad'); return; }
@@ -22423,6 +22546,49 @@ function _renderQuickView(){
           </div>`;
         })()}
         <div style="font-size:10px;color:var(--muted);font-style:italic;text-align:center">Quy đổi USD theo tỷ giá ${(+S.fxRate||25000).toLocaleString('vi-VN')}</div>
+        ${(()=>{
+          // v2.94.0: Card Tiến độ doanh thu YTD — KH (Plan) vs Dự kiến (Project) vs Thực hiện (AR)
+          const p = _ytdRevenueProgress();
+          const tot = p.totals;
+          if(tot.planUsd===0 && tot.projUsd===0 && tot.actualUsd===0){
+            return `<div style="padding:14px;border:1px dashed var(--rule);border-radius:6px;background:rgba(45,106,106,.02);text-align:center">
+              <div style="font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:#2d6a6a;font-weight:700;margin-bottom:6px">📈 Tiến độ doanh thu ${tot.year}</div>
+              <div style="font-size:12px;color:var(--muted)">Chưa có dữ liệu Kế hoạch / Dự án / Phải thu năm ${tot.year}.</div>
+            </div>`;
+          }
+          // Tỉ lệ % thực hiện so với KH (chỉ tính nếu có KH)
+          const pctActualVsPlan = tot.planUsd>0 ? (tot.actualUsd/tot.planUsd)*100 : 0;
+          const pctActualVsProj = tot.projUsd>0 ? (tot.actualUsd/tot.projUsd)*100 : 0;
+          const pctColor = (pct)=> pct>=80 ? '#2d6a6a' : (pct>=50 ? '#c5876d' : 'var(--bad)');
+          // Render từng mảng — sort theo planUsd desc, chỉ show mảng có ít nhất 1 con số > 0
+          const segRows = Object.entries(p.bySeg)
+            .filter(([k,o])=> o.planUsd>0 || o.projUsd>0 || o.actualUsd>0)
+            .sort((a,b)=> b[1].planUsd - a[1].planUsd)
+            .map(([k,o])=>{
+              const pct = o.planUsd>0 ? (o.actualUsd/o.planUsd)*100 : 0;
+              return `<div style="display:grid;grid-template-columns:90px 1fr 1fr 1fr 50px;gap:6px;align-items:center;padding:5px 0;border-top:1px dashed rgba(0,0,0,.06);font-size:11px">
+                <span class="chip ${o.chip}" style="font-size:9px;padding:1px 4px;letter-spacing:.04em">${esc(o.short)}</span>
+                <span style="text-align:right;color:var(--muted)">${fmtU(o.planUsd)}</span>
+                <span style="text-align:right;color:var(--muted)">${fmtU(o.projUsd)}</span>
+                <span style="text-align:right;color:#2d6a6a;font-weight:600">${fmtU(o.actualUsd)}</span>
+                <span style="text-align:right;font-weight:700;color:${pctColor(pct)};font-size:10px">${o.planUsd>0?pct.toFixed(0)+'%':'—'}</span>
+              </div>`;
+            }).join('');
+          return `<div style="padding:14px;border:1px solid var(--rule);border-radius:6px;background:rgba(45,106,106,.04)">
+            <div style="font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:#2d6a6a;font-weight:700;margin-bottom:8px">📈 Tiến độ doanh thu ${tot.year} (YTD)</div>
+            <div style="display:flex;justify-content:space-between;font-size:13px"><span style="color:var(--muted)">KH cả năm</span><b>${fmtU(tot.planUsd)}</b></div>
+            <div style="display:flex;justify-content:space-between;font-size:13px"><span style="color:var(--muted)">Dự kiến (Dự án — YTD)</span><b>${fmtU(tot.projUsd)}</b></div>
+            <div style="display:flex;justify-content:space-between;font-size:15px;margin-top:6px;padding-top:6px;border-top:1.5px solid var(--rule)"><b>Thực hiện (AR đã duyệt)</b><b style="color:#2d6a6a">${fmtU(tot.actualUsd)}</b></div>
+            <div style="display:flex;justify-content:space-between;font-size:11px;margin-top:4px"><span style="color:var(--muted)">% thực hiện / KH</span><span style="color:${pctColor(pctActualVsPlan)};font-weight:600">${tot.planUsd>0?pctActualVsPlan.toFixed(1)+'%':'—'}</span></div>
+            <div style="display:flex;justify-content:space-between;font-size:11px;margin-top:2px"><span style="color:var(--muted)">% thực hiện / Dự kiến</span><span style="color:${pctColor(pctActualVsProj)};font-weight:600">${tot.projUsd>0?pctActualVsProj.toFixed(1)+'%':'—'}</span></div>
+            ${segRows ? `<div style="margin-top:10px;padding-top:8px;border-top:1.5px solid var(--rule)">
+              <div style="display:grid;grid-template-columns:90px 1fr 1fr 1fr 50px;gap:6px;font-size:9px;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;font-weight:700;padding-bottom:4px">
+                <span>Mảng</span><span style="text-align:right">KH</span><span style="text-align:right">Dự kiến</span><span style="text-align:right">Thực hiện</span><span style="text-align:right">%</span>
+              </div>
+              ${segRows}
+            </div>` : ''}
+          </div>`;
+        })()}
       </div>`;
   } else if(_quickViewTab==='ar'){
     title='📥 Chi tiết phải thu';
@@ -27305,6 +27471,33 @@ const EXCEL_TEMPLATES={
 
     ]
   },
+  /* v2.96.0/v2.97.0: TEMPLATE TỔNG HỢP CP YTD — Mỗi dòng = 1 Tàu/Dự án × 1 Loại CP × Tổng cả kỳ.
+     v2.97.0: Cho phép Đối tượng TRỐNG = CP hoạt động chung của công ty (overhead),
+              không gắn tàu/dự án nào. Vào báo cáo P&L tổng công ty.
+     Mục đích: KTT nhập 1 lần CP lịch sử từ FAST cho các kỳ trước khi triển khai app.
+     KHÔNG vào tab Công nợ (đánh cờ _isYtdHistorical + _ytdSummary).
+     CHỈ vào báo cáo P&L / theo tàu / theo dự án / chung công ty. */
+  ytd_summary:{
+    name:'CP Tổng hợp YTD (lịch sử)',
+    target:'payables',
+    origin:'ytd_summary',
+    columns:[
+      {key:'entityCode',  label:'Đối tượng — Mã Tàu / Mã DA / TRỐNG = CP chung công ty', required:false, type:'entityLookup',
+        aliases:['Tàu/DA','Tàu','Dự án','Object','Đối tượng']},
+      {key:'costCategory',label:'Loại CP — code (xem sheet "Loại chi phí") *', required:true, type:'text',
+        aliases:['Loại CP','Expense type','Mã loại']},
+      {key:'amountNet',   label:'Số tiền (NET — chưa VAT) *', required:true, type:'number',
+        aliases:['Số tiền','Tổng','Amount','Net']},
+      {key:'vatPercent',  label:'% VAT (mặc định 0)', required:false, type:'number',
+        aliases:['VAT','Thuế']},
+      {key:'ccy',         label:'Tiền tệ (mặc định VND)', required:false, type:'ccy',
+        aliases:['Currency','CCY']},
+      {key:'desc',        label:'Diễn giải (tự sinh nếu trống)', required:false, type:'text',
+        aliases:['Description','Mô tả','Ghi chú']},
+      {key:'periodEnd',   label:'Kỳ kết thúc (YYYY-MM-DD, mặc định 2026-05-29)', required:false, type:'date',
+        aliases:['Kỳ','Ngày','Period','End date']},
+    ]
+  },
   hr_expense:{
     name:'Chi phí Nhân sự',
     target:'payables',
@@ -28139,8 +28332,32 @@ function openExcelImport(){
       </div>
     </div>
 
+    <!-- v2.96.0: Hướng dẫn nhanh cho 2 chế độ import -->
+    <div style="margin-top:10px;padding:10px 14px;border:1px solid var(--rule);border-radius:4px;background:rgba(28,58,92,.03);font-size:11px;line-height:1.5;color:var(--ink)">
+      💡 <b>2 chế độ import chính:</b>
+      <br>• <b>"Phải trả (Chi phí)"</b> — chi tiết từng hóa đơn, có NCC, hạn TT — vào tab Công nợ AP.
+      <br>• <b>"CP Tổng hợp YTD (lịch sử)"</b> — tổng hợp theo Tàu/Dự án × Loại CP, mỗi dòng 1 con số. Tự đánh dấu đã thanh toán → KHÔNG vào tab Công nợ, chỉ vào báo cáo P&L/theo tàu/theo dự án.
+    </div>
+
+    <!-- v2.95.0: Template chuẩn Seahorse — đặt sẵn, KTT tải về 1 click -->
+    <div style="margin-top:14px;padding:12px 14px;border:1.5px solid #2d6a6a;border-radius:4px;background:rgba(45,106,106,.04)">
+      <div style="font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:#2d6a6a;font-weight:700;margin-bottom:8px">📋 TEMPLATE CHUẨN SEAHORSE — TẢI VỀ DÙNG NGAY</div>
+      <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:stretch">
+        <div style="flex:1;min-width:280px;padding:10px 12px;background:var(--paper);border:1px solid var(--rule);border-radius:3px">
+          <div style="font-size:12px;font-weight:700;margin-bottom:4px">📥 Mẫu cho BỘ PHẬN</div>
+          <div style="font-size:11px;color:var(--muted);margin-bottom:8px;line-height:1.4">NV không cần login app. Bộ phận điền Excel → gửi KTT → KTT import 1 lần. Có hướng dẫn + danh mục Mảng / Loại CP đi kèm.</div>
+          <button class="btn-sec" style="font-size:11px;width:100%" onclick="downloadSeahorseTemplate('dept')">⬇ Tải template Bộ phận</button>
+        </div>
+        <div style="flex:1;min-width:280px;padding:10px 12px;background:var(--paper);border:1px solid var(--rule);border-radius:3px">
+          <div style="font-size:12px;font-weight:700;margin-bottom:4px">📊 Mẫu KTT — CP Tổng hợp YTD</div>
+          <div style="font-size:11px;color:var(--muted);margin-bottom:8px;line-height:1.4">Giải pháp tình thế: nhập tổng CP YTD trước thời điểm triển khai app, theo Tàu/Dự án × Loại CP. Chỉ vào báo cáo, KHÔNG vào công nợ. Có hướng dẫn map FAST → app.</div>
+          <button class="btn-sec" style="font-size:11px;width:100%" onclick="downloadSeahorseTemplate('ktt_ytd')">⬇ Tải template KTT YTD</button>
+        </div>
+      </div>
+    </div>
+
     <div style="display:flex;gap:10px;margin-top:14px;flex-wrap:wrap">
-      <button class="btn-sec" onclick="excelDownloadTemplate()">📥 Bước 1: Tải template Excel</button>
+      <button class="btn-sec" onclick="excelDownloadTemplate()">📥 Bước 1: Tải template Excel (theo loại đã chọn)</button>
       <input type="file" id="xls-import-file" accept=".xlsx,.xls" style="display:none" onchange="excelHandleFile(event)">
       <button class="btn-primary" onclick="document.getElementById('xls-import-file').click()">📤 Bước 2: Upload file đã điền</button>
     </div>
@@ -28163,6 +28380,219 @@ function openExcelImport(){
   `;
   openModal('📥 Import Excel hàng loạt', body, '<button class="btn-sec" onclick="closeModal()">Đóng</button>');
   try{ renderExcelImportInfo(); }catch(e){}
+}
+
+/* v2.95.0: Tải template chuẩn Seahorse — sinh file Excel với dữ liệu thực tế của DN */
+function downloadSeahorseTemplate(kind){
+  if(typeof XLSX==='undefined'){ toast('Thư viện Excel chưa sẵn sàng','bad'); return; }
+  const wb = XLSX.utils.book_new();
+  const segs = [
+    ['VESSEL_SERVICE','Tàu dịch vụ'],
+    ['VESSEL_TECH','Tàu kỹ thuật'],
+    ['OM','Tư vấn O&M'],
+    ['VESSEL_MGMT','QL vận hành tàu'],
+    ['PORT','Kinh doanh Cảng biển'],
+    ['OTHER','Quản lý chung'],
+  ];
+  const etypes = [
+    ['BUNKER_PO','Mua nhiên liệu','PO/Kho — kê chi tiết loại, SL, đơn giá'],
+    ['PARTS','Vật tư & phụ tùng','Mua thẳng, ghi CP ngay'],
+    ['CCDC','Mua CCDC','Tự tạo món trong Sổ CCDC'],
+    ['MMTB','Mua MMTB','Tự tạo món trong Sổ MMTB'],
+    ['DOCK','Dock / Sửa chữa lớn','Cộng vào nguyên giá TSCĐ'],
+    ['PORT','Cảng phí','CP tàu'],
+    ['AGENCY','Đại lý tàu','CP tàu'],
+    ['REPAIR','Sửa chữa & bảo dưỡng','CP tàu'],
+    ['INSURANCE','Bảo hiểm tàu (H&M, P&I)','CP tàu'],
+    ['SALARY','Lương','Nhân sự'],
+    ['BONUS','Thưởng','Nhân sự'],
+    ['ALLOWANCE','Phụ cấp/Trợ cấp','Nhân sự'],
+    ['TRAVEL','Vé máy bay, visa','Công tác'],
+    ['ACCOMMODATION','Nhà ở chuyên gia, KS','Công tác'],
+    ['OFFICE','VPP, văn phòng','Quản lý chung'],
+    ['UTIL','Điện nước, internet','Quản lý chung'],
+    ['RENT','Thuê (VP, xe...)','Quản lý chung'],
+    ['ENTERTAIN','Tiếp khách','Quản lý chung'],
+    ['INTEREST','Lãi vay NH','Auto từ Ngân quỹ — KHÔNG import tay'],
+    ['BANK_FEE','Phí ngân hàng','Tài chính'],
+    ['TAX_NSNN','Thuế & nộp NSNN','Tài chính'],
+    ['ADVANCE','Ứng quỹ tiền mặt','Phiếu ứng tiền'],
+    ['OTHER','Chi phí khác','Khác'],
+  ];
+  // Vessels và Projects thực tế từ S — giúp KTT biết tên đúng
+  const vessels = (S.vessels||[]).filter(v=>!v.archived).map(v=>[v.name||v.id, v.code||'', SEGMENTS[v.segment]?.name||v.segment||'']);
+  const projects = (S.projects||[]).filter(p=>!p.archived).map(p=>[p.code||'', p.name||'', SEGMENTS[p.segment]?.name||p.segment||'', p.client||'']);
+
+  if(kind==='dept'){
+    // SHEET: Hướng dẫn
+    const intro = [
+      ['📋 TEMPLATE NHẬP LIỆU CHO BỘ PHẬN — SEAHORSE MARINE & ENERGY JSC'],
+      [],
+      ['MỤC ĐÍCH','Bộ phận điền vào file → gửi KTT (thuy.nt@seahorse.com.vn) → KTT import 1 lần lên app. Bộ phận KHÔNG cần đăng nhập app.'],
+      [],
+      ['CÁCH DÙNG',''],
+      ['1','Mở sheet "PHẢI THU" (doanh thu) hoặc "PHẢI TRẢ" (chi phí) tùy nhu cầu.'],
+      ['2','Mỗi dòng = 1 hóa đơn. KHÔNG xóa hàng tiêu đề. Cột có dấu * là BẮT BUỘC.'],
+      ['3','Định dạng ngày: YYYY-MM-DD (vd 2026-05-29).'],
+      ['4','Số tiền: chỉ số thuần — KHÔNG dấu phẩy/chấm phân cách (vd 5000000).'],
+      ['5','Xem các sheet "Mảng", "Loại chi phí", "Tàu", "Dự án" cho giá trị hợp lệ.'],
+      ['6','Sau khi điền → gửi file qua email cho KTT.'],
+      [],
+      ['LIÊN HỆ','KTT Thúy — thuy.nt@seahorse.com.vn'],
+    ];
+    const wsIntro = XLSX.utils.aoa_to_sheet(intro);
+    wsIntro['!cols']=[{wch:18},{wch:95}];
+    XLSX.utils.book_append_sheet(wb, wsIntro, 'Hướng dẫn');
+
+    // SHEET: PHẢI THU
+    const arRows = [
+      ['Khách hàng *','Diễn giải','Số HĐ','Mảng','Mã dự án','Tên tàu','Ngày HĐ * (YYYY-MM-DD)','Hạn TT','Net (chưa VAT) *','% VAT','Tiền tệ (VND/USD)','Bộ phận điền','Ngày điền'],
+      ['CÔNG TY XYZ LTD','Dịch vụ khảo sát Lô 12/11','HD-2026-0034','VESSEL_SERVICE','','GEOSUPORTER','2026-05-15','2026-06-30',50000000,8,'VND','Phòng Thương mại','2026-05-29'],
+    ];
+    const wsAr = XLSX.utils.aoa_to_sheet(arRows);
+    wsAr['!cols']=[{wch:32},{wch:35},{wch:16},{wch:22},{wch:18},{wch:18},{wch:18},{wch:14},{wch:16},{wch:8},{wch:12},{wch:22},{wch:14}];
+    XLSX.utils.book_append_sheet(wb, wsAr, 'PHẢI THU');
+
+    // SHEET: PHẢI TRẢ
+    const apRows = [
+      ['NCC *','Diễn giải','Số HĐ','Loại CP — code','Mảng','Mã dự án','Tên tàu','Ngày HĐ * (YYYY-MM-DD)','Hạn TT','Net (chưa VAT) *','% VAT','Tiền tệ (VND/USD)','Bộ phận đề xuất','Ngày điền'],
+      ['CTY VẬT TƯ TÀU XYZ','Phụ tùng máy chính M/E Pacific Star','INV-2026-0125','PARTS','VESSEL_TECH','','PACIFIC-STAR','2026-05-20','2026-06-20',23500000,10,'VND','Phòng Kỹ thuật','2026-05-29'],
+    ];
+    const wsAp = XLSX.utils.aoa_to_sheet(apRows);
+    wsAp['!cols']=[{wch:32},{wch:35},{wch:16},{wch:18},{wch:16},{wch:18},{wch:18},{wch:18},{wch:14},{wch:14},{wch:8},{wch:12},{wch:22},{wch:14}];
+    XLSX.utils.book_append_sheet(wb, wsAp, 'PHẢI TRẢ');
+
+  } else if(kind==='ktt_ytd'){
+    // SHEET: Hướng dẫn KTT — v2.97.0: hỗ trợ CP gắn Tàu/DA + CP chung công ty
+    const intro = [
+      ['📊 CP TỔNG HỢP YTD — MẪU CHO KTT IMPORT TỪ FAST'],
+      [],
+      ['MỤC ĐÍCH','Giải pháp tình thế: nhập 1 lần CP YTD trước thời điểm triển khai app, để báo cáo P&L có số liệu đầy đủ. Sau này CP mới sẽ nhập trực tiếp theo workflow.'],
+      [],
+      ['QUY TẮC ĐƠN GIẢN',''],
+      ['•','Mỗi dòng = 1 Đối tượng × 1 Loại CP × Tổng cả kỳ (01/01 → 29/05/2026).'],
+      ['•','Đối tượng = Mã Tàu HOẶC Mã DA, HOẶC để TRỐNG nếu là CP chung công ty (overhead).'],
+      ['•','KHÔNG cần ghi từng hóa đơn, KHÔNG cần ghi NCC — chỉ cần TỔNG số tiền theo loại CP.'],
+      ['•','App sẽ tự đánh dấu là CP lịch sử đã thanh toán → KHÔNG hiện ở tab Công nợ, CHỈ vào báo cáo.'],
+      [],
+      ['2 NHÓM CHI PHÍ',''],
+      ['NHÓM 1 — CP gắn TÀU/DỰ ÁN','Cảng phí (PORT), đại lý (AGENCY), sửa chữa (REPAIR), bảo hiểm (INSURANCE), nhiên liệu (BUNKER_PO), vật tư (PARTS)...'],
+      ['→','Điền MÃ TÀU hoặc MÃ DA vào cột Đối tượng (xem sheet "Tàu (live)" / "Dự án (live)").'],
+      ['→','Vào báo cáo P&L theo tàu / theo dự án.'],
+      [],
+      ['NHÓM 2 — CP CHUNG CÔNG TY (overhead)','VPP (OFFICE), điện nước (UTIL), thuê VP (RENT), tiếp khách (ENTERTAIN), công tác (TRAVEL), phí NH (BANK_FEE), thuế (TAX_NSNN), khác (OTHER)...'],
+      ['→','Để TRỐNG cột Đối tượng — app hiểu là CP chung của công ty.'],
+      ['→','Vào báo cáo P&L tổng công ty (không phân bổ theo tàu/dự án).'],
+      [],
+      ['QUY TRÌNH',''],
+      ['1','Mở sheet "CP YTD TỔNG HỢP".'],
+      ['2','Mở báo cáo FAST → tổng hợp CP theo Tàu/Dự án × Loại CP (và CP chung công ty riêng).'],
+      ['3','Cho mỗi dòng: điền Mã Tàu/Mã DA (hoặc TRỐNG) + Code Loại CP + Tổng số tiền (NET chưa VAT).'],
+      ['4','Tham khảo sheet "Tàu (live)" và "Dự án (live)" để lấy mã đúng.'],
+      ['5','Tham khảo sheet "Loại chi phí" để lấy code đúng.'],
+      ['6','Lưu file → Menu → Import Excel → chọn LOẠI "CP Tổng hợp YTD (lịch sử)" → upload.'],
+      [],
+      ['VÍ DỤ THỰC TẾ',''],
+      ['','── Pacific Star (tàu) ──'],
+      ['','PACIFIC-STAR | PORT      = 225,000,000 VND'],
+      ['','PACIFIC-STAR | AGENCY    =  81,000,000 VND'],
+      ['','PACIFIC-STAR | REPAIR    = 640,000,000 VND'],
+      ['','PACIFIC-STAR | INSURANCE = 800,000,000 VND'],
+      ['',''],
+      ['','── CP chung công ty (để trống Đối tượng) ──'],
+      ['','(trống) | OFFICE   = 25,000,000 VND'],
+      ['','(trống) | UTIL     = 18,000,000 VND'],
+      ['','(trống) | RENT     = 350,000,000 VND'],
+      ['','(trống) | BANK_FEE = 12,000,000 VND'],
+      [],
+      ['LƯU Ý QUAN TRỌNG',''],
+      ['•','KHÔNG import loại "INTEREST" (lãi vay) — app tự sinh khi tick kỳ trả nợ trong Ngân quỹ.'],
+      ['•','KHÔNG import "SALARY/BONUS/ALLOWANCE" qua đây — nhập qua module Lương riêng.'],
+      ['•','Số tiền NET = chưa VAT. Nếu chỉ có Gross → chia ngược: Net = Gross / (1 + VAT%/100).'],
+      ['•','Có thể KHÔNG cần điền VAT/CCY — mặc định 0% và VND.'],
+    ];
+    const wsIntro = XLSX.utils.aoa_to_sheet(intro);
+    wsIntro['!cols']=[{wch:32},{wch:88}];
+    XLSX.utils.book_append_sheet(wb, wsIntro, 'Hướng dẫn KTT');
+
+    // SHEET: CP YTD TỔNG HỢP — sample đầy đủ 2 nhóm
+    const ap2 = [
+      ['Đối tượng — Mã Tàu/Mã DA (TRỐNG = CP chung)','Loại CP — code *','Số tiền (NET chưa VAT) *','% VAT (mặc định 0)','Tiền tệ (mặc định VND)','Diễn giải (tự sinh nếu trống)','Kỳ kết thúc (mặc định 2026-05-29)'],
+      // Nhóm 1: gắn tàu
+      ['PACIFIC-STAR','PORT',225000000,0,'VND','','2026-05-29'],
+      ['PACIFIC-STAR','AGENCY',81000000,0,'VND','','2026-05-29'],
+      ['PACIFIC-STAR','REPAIR',640000000,10,'VND','','2026-05-29'],
+      ['PACIFIC-STAR','INSURANCE',800000000,10,'VND','Bảo hiểm H&M cả năm 2026','2026-01-05'],
+      ['GEOSUPORTER','PORT',180000000,0,'VND','','2026-05-29'],
+      ['GEOSUPORTER','PARTS',95000000,10,'VND','','2026-05-29'],
+      ['SEAHORSE-KEYSTONE','BUNKER_PO',1250000000,8,'VND','Tổng nhiên liệu YTD','2026-05-29'],
+      // Nhóm 2: CP chung công ty (Đối tượng TRỐNG)
+      ['','OFFICE',25000000,8,'VND','VPP văn phòng YTD','2026-05-29'],
+      ['','UTIL',18000000,10,'VND','Điện/Nước/Internet VP','2026-05-29'],
+      ['','RENT',350000000,10,'VND','Thuê VP Vũng Tàu YTD','2026-05-29'],
+      ['','ENTERTAIN',45000000,10,'VND','Tiếp khách YTD','2026-05-29'],
+      ['','TRAVEL',88000000,10,'VND','Công tác BOD/QL YTD','2026-05-29'],
+      ['','BANK_FEE',12000000,0,'VND','Phí NH YTD','2026-05-29'],
+      ['','TAX_NSNN',180000000,0,'VND','Thuế môn bài + nộp NSNN','2026-05-29'],
+      ['','OTHER',32000000,0,'VND','CP khác','2026-05-29'],
+    ];
+    const wsAp = XLSX.utils.aoa_to_sheet(ap2);
+    wsAp['!cols']=[{wch:38},{wch:18},{wch:18},{wch:12},{wch:14},{wch:36},{wch:18}];
+    XLSX.utils.book_append_sheet(wb, wsAp, 'CP YTD TỔNG HỢP');
+
+    // SHEET: Mapping FAST → App
+    const mapAoa = [['Cột trong FAST','Cột trong template','Ghi chú mapping']];
+    const mappings = [
+      ['Mã đơn hàng / Mã công trình / Mã tàu','Đối tượng — Mã Tàu HOẶC Mã DA','Khớp với sheet "Tàu (live)" hoặc "Dự án (live)". TRỐNG = CP chung công ty.'],
+      ['Tài khoản chi phí (6411/6412/6271/642x...)','Loại CP — code','6411→PORT, 6412→AGENCY, 6413→REPAIR, 6414→INSURANCE, 6271→PARTS, 6421→OFFICE, 6422→RENT, 6423→UTIL, 6425→ENTERTAIN, 6427→TRAVEL, 6428→OTHER'],
+      ['SUM(Phát sinh nợ trong kỳ)','Số tiền (NET chưa VAT)','Tổng các bút toán Nợ cho cặp Đối tượng × Loại CP'],
+      ['Thuế suất GTGT','% VAT','Nếu trộn nhiều VAT% trong cùng nhóm → đặt 0 hoặc lấy trung bình'],
+      ['','Diễn giải','Tự sinh: "Tổng hợp YTD đến [kỳ] · [Tên loại CP] · [Đối tượng hoặc CP chung công ty]"'],
+    ];
+    mappings.forEach(m=>mapAoa.push(m));
+    const wsMap = XLSX.utils.aoa_to_sheet(mapAoa);
+    wsMap['!cols']=[{wch:42},{wch:32},{wch:82}];
+    XLSX.utils.book_append_sheet(wb, wsMap, 'Mapping FAST → App');
+  }
+
+  // SHEET: Mảng (segments) — chung cho cả 2 file
+  const segAoa = [['Mã (dùng trong cột Mảng)','Tên đầy đủ']];
+  segs.forEach(s=>segAoa.push(s));
+  const wsSeg = XLSX.utils.aoa_to_sheet(segAoa);
+  wsSeg['!cols']=[{wch:22},{wch:32}];
+  XLSX.utils.book_append_sheet(wb, wsSeg, 'Mảng');
+
+  // SHEET: Loại chi phí
+  const etAoa = [['Code','Tên loại','Ghi chú']];
+  etypes.forEach(e=>etAoa.push(e));
+  const wsEt = XLSX.utils.aoa_to_sheet(etAoa);
+  wsEt['!cols']=[{wch:18},{wch:32},{wch:55}];
+  XLSX.utils.book_append_sheet(wb, wsEt, 'Loại chi phí');
+
+  // SHEET: Tàu trong app (live data)
+  if(vessels.length){
+    const vAoa = [['Tên tàu','Mã tàu','Mảng']];
+    vessels.forEach(v=>vAoa.push(v));
+    const wsV = XLSX.utils.aoa_to_sheet(vAoa);
+    wsV['!cols']=[{wch:25},{wch:15},{wch:22}];
+    XLSX.utils.book_append_sheet(wb, wsV, 'Tàu (live)');
+  }
+
+  // SHEET: Dự án trong app (live data)
+  if(projects.length){
+    const pAoa = [['Mã dự án','Tên dự án','Mảng','Khách hàng']];
+    projects.forEach(p=>pAoa.push(p));
+    const wsP = XLSX.utils.aoa_to_sheet(pAoa);
+    wsP['!cols']=[{wch:16},{wch:35},{wch:22},{wch:30}];
+    XLSX.utils.book_append_sheet(wb, wsP, 'Dự án (live)');
+  }
+
+  const fname = kind==='dept'
+    ? 'SM_Template_DonVi_NhapLieu.xlsx'
+    : 'SM_Template_KTT_ChiPhiYTD_TuFAST.xlsx';
+  XLSX.writeFile(wb, fname);
+  toast('Đã tải template: '+fname, 'good');
+  try{ logAuditEvent('seahorse_template_download', {kind, fname}); }catch(e){}
 }
 
 function excelDownloadTemplate(){
@@ -29256,6 +29686,52 @@ function excelConfirmImport(){
       _importedFromExcel:true,
       _importBatch: IMPORT_BATCH_ID
     };
+    // v2.96.0/v2.97.0: YTD summary template — override các trường để vào thẳng báo cáo, ẨN khỏi tab Công nợ
+    if(tpl.origin === 'ytd_summary'){
+      const periodEnd = d.periodEnd || '2026-05-29';
+      const etLabel = (typeof getExpenseType==='function')
+        ? (getExpenseType(d.costCategory)||{}).label
+        : '';
+      // v2.97.0: Đối tượng có thể TRỐNG = CP chung công ty (overhead — không gắn tàu/dự án)
+      const hasObject = !!(d._vesselId || d._projectId);
+      let objName = 'CP chung công ty';
+      if(d._vesselId){
+        objName = ((S.vessels||[]).find(v=>v.id===d._vesselId)||{}).name || 'Tàu';
+      } else if(d._projectId){
+        const p = (S.projects||[]).find(x=>x.id===d._projectId)||{};
+        objName = (p.code ? p.code+' ' : '') + (p.name||'Dự án');
+      }
+      // Tự sinh diễn giải nếu KTT để trống
+      if(!record.desc){
+        record.desc = `Tổng hợp YTD đến ${periodEnd} · ${etLabel||d.costCategory} · ${objName}`;
+      }
+      record.partner = hasObject
+        ? '[Tổng hợp YTD 01/01—'+periodEnd.slice(5)+']'
+        : '[CP chung công ty — YTD 01/01—'+periodEnd.slice(5)+']';
+      record.invoiceNo = `YTD-${hasObject?(d._vesselId||d._projectId||'').slice(-6):'OVHD'}-${d.costCategory}`;
+      record.issueDate = periodEnd;
+      record.dueDate = periodEnd;
+      record.dueMonth = periodEnd.slice(0,7);
+      // 100% đã thanh toán — payment đầy đủ
+      record.payments = [{date: periodEnd, amount: gross, ccy: record.ccy, note: 'Auto YTD historical'}];
+      // Workflow: đã duyệt
+      const me = actorName();
+      const nowIso = new Date().toISOString();
+      record.status = 'approved';
+      record.submittedBy = me; record.submittedAt = nowIso;
+      record.approvedL1By = '(YTD import — '+me+')'; record.approvedL1At = nowIso;
+      record.approvedL2By = '(YTD import — '+me+')'; record.approvedL2At = nowIso;
+      // Cờ đặc biệt
+      record._isYtdHistorical = true;
+      record._ytdSummary = true;
+      record._ytdIsOverhead = !hasObject;  // v2.97.0: CP chung công ty (không gắn tàu/dự án)
+      // Mảng: tự suy từ vessel/project nếu KTT để trống; nếu là CP chung → 'OTHER'
+      if(!d.segment){
+        const v = d._vesselId ? (S.vessels||[]).find(x=>x.id===d._vesselId) : null;
+        const p = d._projectId ? (S.projects||[]).find(x=>x.id===d._projectId) : null;
+        record.segment = (v && v.segment) || (p && p.segment) || 'OTHER';
+      }
+    }
     touchRecord(record);
 
     // v1.43.0: Fuel fields for AP (only if applicable)
