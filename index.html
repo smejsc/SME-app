@@ -2657,7 +2657,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='2.99.12';            // bumped on each release
+const APP_VERSION='2.99.13';            // bumped on each release
 
 /* v2.62.0: Token xác thực backend — PHẢI khớp API_TOKEN trong Apps Script (Code.gs).
    Mọi request tới Apps Script tự động được gắn token qua lớp bọc fetch bên dưới.
@@ -17208,17 +17208,63 @@ function renderBanking(){
           <span style="margin-left:14px;color:var(--warn)">📊 Dư nợ gốc${filterTag}: <b>${remTxt}</b></span>
           <span style="margin-left:14px;color:#2d6a6a">💸 Lãi đã trả: <b>${intTxt}</b></span>`;
       }
-      const byType={short:[], medium:[], long:[]};
+      // v2.99.13: Nhóm 2 cấp — Bên cho vay (lender/bankName) → Loại hạn (auto theo paymentSchedule.length)
+      // Loại hạn auto: <12 kỳ = short, 12-60 = medium, >60 = long. Nếu loan có loanType cũ thì ưu tiên dùng.
+      const _autoLoanType = (l) => {
+        const n = (l.paymentSchedule||[]).length;
+        if(!n) return l.loanType || 'unscheduled';  // chưa có lịch (vd vay NN không phân kỳ)
+        if(n < 12) return 'short';
+        if(n <= 60) return 'medium';
+        return 'long';
+      };
+      const _lenderIcon = (name) => {
+        const n = (name||'').toLowerCase();
+        // Heuristic: NH Việt Nam có chữ "bank/NH" hoặc 1 số NH phổ biến
+        const vnBanks = ['vietcombank','vcb','vietinbank','bidv','agribank','techcombank','tcb','mbbank','mb bank','acb','vpbank','sacombank','hdbank','tpbank','vrb','vietbank','msb','seabank','shb','ocb','eximbank','lienvietpostbank','lpb','pvcombank','vib','abbank','ncb','baovietbank','viet capital','kienlongbank'];
+        if(vnBanks.some(b => n.includes(b))) return '🏦';
+        if(/\b(ltd|inc|corp|llc|gmbh|pte|sdn|co\.|company|holdings)\b/i.test(name||'')) return '🌍';
+        if(/\b(jsc|công ty|cty|cong ty)\b/i.test(name||'')) return '🏢';
+        return '💼';
+      };
+      const byLender = {};
       loansFiltered.forEach(l=>{
-        const t = l.loanType||'short';
-        (byType[t]||byType.short).push(l);
+        const ld = (l.lender||l.bankName||'(Chưa rõ)').trim();
+        if(!byLender[ld]) byLender[ld] = [];
+        byLender[ld].push(l);
       });
-      const typeLabels = {short:'Vay ngắn hạn (<12 tháng)', medium:'Vay trung hạn (12-60 tháng)', long:'Vay dài hạn (>60 tháng)'};
+      // Sắp xếp lender theo tổng dư nợ giảm dần
+      const lenderEntries = Object.entries(byLender).sort((a,b)=>{
+        const totA = a[1].reduce((s,l)=>s+toDisplay(loanRemainingPrincipal(l), l.ccy||'VND'),0);
+        const totB = b[1].reduce((s,l)=>s+toDisplay(loanRemainingPrincipal(l), l.ccy||'VND'),0);
+        return totB - totA;
+      });
+      const typeLabels = {short:'Ngắn hạn (<12 kỳ)', medium:'Trung hạn (12-60 kỳ)', long:'Dài hạn (>60 kỳ)', unscheduled:'Chưa lập lịch trả'};
+      const typeIcons = {short:'⚡', medium:'📅', long:'🏗', unscheduled:'❔'};
       let html='';
-      Object.entries(byType).forEach(([type,items])=>{
-        if(items.length===0) return;
-        html+=`<div style="font-family:var(--font-display);font-size:13px;font-weight:600;margin:14px 0 6px;color:var(--accent)">📊 ${typeLabels[type]} <span style="font-weight:400;color:var(--muted);font-size:11px">(${items.length})</span></div>`;
-        items.forEach(l=>{
+      lenderEntries.forEach(([lender, lenderLoans])=>{
+        // Tính tổng dư nợ của lender này theo từng CCY
+        const lenderRemByCcy = {};
+        lenderLoans.forEach(l=>{
+          const c = l.ccy||'VND';
+          lenderRemByCcy[c] = (lenderRemByCcy[c]||0) + loanRemainingPrincipal(l);
+        });
+        const lenderRemTxt = Object.entries(lenderRemByCcy).filter(([_,v])=>v>0)
+          .map(([c,v])=>`${v.toLocaleString('vi-VN')} ${c}`).join(' + ') || '0';
+        const icon = _lenderIcon(lender);
+        html += `<div style="font-family:var(--font-display);font-size:15px;font-weight:700;margin:20px 0 8px;padding:8px 12px;background:rgba(28,58,92,.06);border-left:4px solid var(--ink);color:var(--ink);display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
+          <span>${icon} ${esc(lender)} <span style="font-weight:400;color:var(--muted);font-size:11px">(${lenderLoans.length} khoản)</span></span>
+          <span style="font-size:12px;color:var(--warn);font-weight:600">Còn nợ: ${lenderRemTxt}</span>
+        </div>`;
+        // Nhóm con: theo loại hạn
+        const byType={short:[], medium:[], long:[], unscheduled:[]};
+        lenderLoans.forEach(l=>{
+          const t = _autoLoanType(l);
+          (byType[t]||byType.short).push(l);
+        });
+        Object.entries(byType).forEach(([type,items])=>{
+          if(items.length===0) return;
+          html+=`<div style="font-family:var(--font-display);font-size:12px;font-weight:600;margin:8px 0 4px 12px;color:var(--accent);letter-spacing:.04em">${typeIcons[type]} ${typeLabels[type]} <span style="font-weight:400;color:var(--muted);font-size:10px">(${items.length})</span></div>`;
+          items.forEach(l=>{
           const remaining = loanRemainingPrincipal(l);
           const paid = (+l.principal||0) - remaining;
           const progress = l.principal>0 ? Math.round(paid*100/l.principal) : 0;
@@ -17230,11 +17276,11 @@ function renderBanking(){
               ? '<span class="chip chip-bad" style="font-size:9px">QUÁ HẠN</span>'
               : '<span class="chip chip-warn" style="font-size:9px">ĐANG VAY</span>';
           html+=`
-            <div style="border:1px solid var(--rule);background:var(--paper);margin-bottom:8px;padding:12px 14px">
+            <div style="border:1px solid var(--rule);background:var(--paper);margin:0 0 6px 24px;padding:12px 14px">
               <div style="display:flex;align-items:flex-start;gap:12px;margin-bottom:8px">
                 <div style="flex:1;min-width:0">
                   <div style="font-weight:600;font-size:13px">
-                    🏦 ${esc(l.bankName||'?')} · ${esc(l.contractNo||'(không số HĐ)')}
+                    ${esc(l.contractNo||'(không số HĐ)')}
                     ${statusChip}
                   </div>
                   <div style="font-size:11px;color:var(--muted);margin-top:2px">
@@ -17278,8 +17324,9 @@ function renderBanking(){
                   Tổng: <b style="color:var(--accent)">${(+nextDue.total||0).toLocaleString()} ${esc(l.ccy||'')}</b>
                 </div>`:''}
             </div>`;
-        });
-      });
+          });  // end items.forEach
+        });  // end byType
+      });  // end lenderEntries
       // v2.65.0: thông báo khi lọc không ra kết quả nào
       if(!html && loans.length>0){
         html = '<div style="padding:24px;text-align:center;color:var(--muted);background:var(--paper);border:1px dashed var(--rule)">'
@@ -18071,15 +18118,16 @@ function _loanModal(l){
   const body=`
     <div style="font-size:13px;display:grid;grid-template-columns:1fr 1fr;gap:10px;max-width:600px">
       <div class="field">
-        <label>Ngân hàng *</label>
-        <input type="text" id="ln-bank" value="${esc(l.bankName||'')}" placeholder="BIDV, Vietcombank...">
+        <label>Bên cho vay * <span style="color:var(--muted);text-transform:none;font-weight:400;font-size:10px">(NH / Cty / Cá nhân)</span></label>
+        <input type="text" id="ln-bank" value="${esc(l.bankName||l.lender||'')}" placeholder="VRB, ACB, CHEN ZHIFU INV CO LTD...">
+        <div style="font-size:10px;color:var(--muted);font-style:italic;margin-top:3px">App sẽ nhóm các khoản vay theo bên cho vay này</div>
       </div>
       <div class="field">
-        <label>Loại vay *</label>
+        <label>Loại vay * <span style="color:var(--muted);text-transform:none;font-weight:400;font-size:10px">(theo số kỳ trả — gợi ý)</span></label>
         <select id="ln-type">
-          <option value="short" ${l.loanType==='short'?'selected':''}>Ngắn hạn (&lt;12 tháng)</option>
-          <option value="medium" ${l.loanType==='medium'?'selected':''}>Trung hạn (12-60 tháng)</option>
-          <option value="long" ${l.loanType==='long'?'selected':''}>Dài hạn (&gt;60 tháng)</option>
+          <option value="short" ${l.loanType==='short'?'selected':''}>Ngắn hạn (&lt;12 kỳ)</option>
+          <option value="medium" ${l.loanType==='medium'?'selected':''}>Trung hạn (12-60 kỳ)</option>
+          <option value="long" ${l.loanType==='long'?'selected':''}>Dài hạn (&gt;60 kỳ)</option>
         </select>
       </div>
       <div class="field" style="grid-column:1/3">
@@ -18205,14 +18253,14 @@ function _saveLoan(id){
     // Preserve paid status from old schedule
     const oldPaid={};
     (loan.paymentSchedule||[]).forEach(p=>{if(p.paid)oldPaid[p.period]=p;});
-    Object.assign(loan,{bankName:bank,loanType:type,contractNo:contract,principal,ccy,interestRate:rate,termMonths:term,startDate:start,endDate:finalEnd,repayMethod:method,paymentFrequency,gracePeriodMonths,note,facilityId,updatedAt:new Date().toISOString()});
+    Object.assign(loan,{bankName:bank,lender:bank,loanType:type,contractNo:contract,principal,ccy,interestRate:rate,termMonths:term,startDate:start,endDate:finalEnd,repayMethod:method,paymentFrequency,gracePeriodMonths,note,facilityId,updatedAt:new Date().toISOString()});
     // Regenerate schedule + re-apply prepays + paid flags
     loanApplyPrepay(loan);  // builds schedule from base + applies all prepayments
     loan.paymentSchedule.forEach(p=>{if(oldPaid[p.period]){p.paid=true; p.paidDate=oldPaid[p.period].paidDate;}});
   } else {
     loan={
       id:'LOAN-'+uid().slice(-6),
-      bankName:bank, loanType:type, contractNo:contract,
+      bankName:bank, lender:bank, loanType:type, contractNo:contract,
       principal, ccy, interestRate:rate, termMonths:term,
       startDate:start, endDate:finalEnd, repayMethod:method,
       paymentFrequency, gracePeriodMonths,
