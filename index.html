@@ -915,9 +915,12 @@ body.readonly-mode::before{
         <div class="field"><label>Số chuyên gia <span style="color:var(--muted);text-transform:none;font-weight:400">(O&M)</span></label><input type="number" class="num" id="prj-experts" value="0"></div>
         <div class="field"><label>Số ngày làm việc <span style="color:var(--muted);text-transform:none;font-weight:400">(O&M)</span></label><input type="number" class="num" id="prj-workdays" value="0"></div>
         <div class="field" style="grid-column:span 2"><label>Loại dự án</label>
-          <label style="display:flex;align-items:center;gap:8px;padding:6px 0;cursor:pointer">
-            <input type="checkbox" id="prj-isOM" style="margin:0">
-            <span>Đây là <b>Dự án O&M độc lập</b> (có NV phụ trách riêng, hiện trong tab 06 Chi phí Tàu/Dự án)</span>
+          <label style="display:flex;align-items:flex-start;gap:8px;padding:6px 0;cursor:pointer">
+            <input type="checkbox" id="prj-isOM" style="margin:3px 0 0 0">
+            <span style="font-size:12px;line-height:1.5">
+              <b>Đây là Dự án O&amp;M độc lập</b> — tick nếu cần phân công NV phụ trách riêng (KTV O&amp;M) và muốn xem báo cáo CP/Doanh thu của dự án này trong tab <b>06 QL vận hành tàu → Chi phí Tàu/Dự án</b>.
+              <br><span style="color:var(--muted);font-style:italic">Không tick nếu chỉ cần khai báo dự án để lập kế hoạch doanh thu (Tab 01) — không cần theo dõi CP chi tiết.</span>
+            </span>
           </label>
         </div>
       </div>
@@ -2654,7 +2657,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='2.99.0';            // bumped on each release
+const APP_VERSION='2.99.8';            // bumped on each release
 
 /* v2.62.0: Token xác thực backend — PHẢI khớp API_TOKEN trong Apps Script (Code.gs).
    Mọi request tới Apps Script tự động được gắn token qua lớp bọc fetch bên dưới.
@@ -4837,7 +4840,7 @@ const TAB_TO_FIELDS={
    IMPORTANT v1.39.1: bankAccounts/bankSnapshots/loans REMOVED from shared — chỉ user có quyền tab 'banking' mới load. */
 // v1.57.0: auditLog REMOVED from shared sync — stays local only (admin trên 1 máy chính)
 // Trade-off: nếu admin đăng nhập máy khác → audit log empty. Đổi lại: giảm payload size.
-const SHARED_FIELDS=['fxRate','displayCcy','companyInfo','meta','presence','vesselExpenseCats','omProjectExpenseCats','hrExpenseCats','qnExpenseCats','departments','vendors','expenseTypes','revenueTypes','companies','deletedIds'];
+const SHARED_FIELDS=['fxRate','displayCcy','companyInfo','meta','presence','vesselExpenseCats','omProjectExpenseCats','hrExpenseCats','qnExpenseCats','departments','vendors','expenseTypes','revenueTypes','companies','deletedIds','auditLogShared'];
 /* All possible data fields (used by admin or for save-merge) */
 const ALL_DATA_FIELDS=[
   'plans','projects','vessels','onhires','events',
@@ -12203,6 +12206,16 @@ function _toUsdFixed(amount, sourceCcy){
   if(src==='VND') return amount/fxRate();
   return null;
 }
+
+/* v2.99.3: Quy đổi CỨNG về VND — không phụ thuộc displayCcy. 
+   Dùng cho báo cáo Phải thu (AR) — luôn quy về VND cho tổng. */
+function _toVndFixed(amount, sourceCcy){
+  if(amount==null||isNaN(amount)) return 0;
+  const src=(sourceCcy||'VND').toUpperCase();
+  if(src==='VND') return amount;
+  if(src==='USD') return amount*fxRate();
+  return amount;  // các ccy khác: giữ nguyên (chưa có tỷ giá)
+}
 /* HTML escape — XSS protection.
    Use whenever interpolating user-controlled strings into innerHTML/template literals.
    Dữ liệu cần escape: tên đối tác, diễn giải, tên tàu, tên dự án, tên NV, ghi chú... */
@@ -12364,6 +12377,27 @@ function fmtFull(n,sourceCcy){
   const s=Math.abs(n).toLocaleString(isMinor?'en-US':'vi-VN',
     isMinor?{minimumFractionDigits:2,maximumFractionDigits:2}:{maximumFractionDigits:0});
   return (n<0?'-':'')+(ccy==='USD'?'$'+s:s+'₫');
+}
+
+/* v2.99.3: Quy đổi BẮT BUỘC sang VND + ghi chú nguyên tệ bên dưới nếu sourceCcy khác VND.
+   Dùng cho báo cáo Phải thu (AR) — hiển thị chính VND, nguyên tệ là dòng phụ nhỏ.
+   Nếu sourceCcy là VND: chỉ trả về VND, không có ghi chú. */
+function fmtVndWithNote(n, sourceCcy){
+  if(n==null||isNaN(n)) return '—';
+  if(n===0) return '—';
+  const fx = +S.fxRate || 25000;
+  // Quy đổi sang VND
+  const vndAmt = (sourceCcy==='VND' || !sourceCcy) ? n : (n * fx);
+  const neg = vndAmt < 0;
+  const vndStr = Math.abs(vndAmt).toLocaleString('vi-VN', {maximumFractionDigits:0});
+  let html = `<div style="font-weight:600">${neg?'-':''}${vndStr}<span style="font-size:9px;color:var(--muted);margin-left:2px">₫</span></div>`;
+  // Nếu nguyên tệ KHÁC VND → thêm dòng nhỏ ghi nguyên tệ
+  if(sourceCcy && sourceCcy !== 'VND'){
+    const origStr = Math.abs(n).toLocaleString('en-US',
+      (sourceCcy==='USD'||sourceCcy==='EUR') ? {minimumFractionDigits:2,maximumFractionDigits:2} : {maximumFractionDigits:0});
+    html += `<div style="font-size:9px;color:var(--muted);font-style:italic;line-height:1.2;margin-top:1px">↳ ${neg?'-':''}${origStr} ${sourceCcy} × ${fx.toLocaleString('vi-VN')}</div>`;
+  }
+  return html;
 }
 function pct(n){if(n==null||isNaN(n)) return '—';return (n*100).toFixed(1)+'%';}
 
@@ -12900,10 +12934,28 @@ function _planEntityFill(){
       html+='</optgroup>';
     }
   } else if(seg==='OM'){
-    html+='<optgroup label="🛠 Dự án O&M">';
-    (S.projects||[]).filter(p=>p.isOM).forEach(p=>{
-      html+=`<option value="PROJECT:${esc(p.id)}">🛠 ${esc(p.code)} · ${esc(p.name)}</option>`;
-    });
+    html+='<optgroup label="🛠 Dự án O&amp;M">';
+    // v2.99.1: chấp nhận cả segment='OM' (không bắt buộc isOM) — dự án có segment O&M tự nhiên là dự án O&M
+    const omProjects = (S.projects||[]).filter(p=>p.isOM || p.segment==='OM');
+    if(omProjects.length===0){
+      html+='<option value="" disabled>(Chưa có dự án O&amp;M nào — tạo ở Tab 02. Dự án)</option>';
+    } else {
+      omProjects.forEach(p=>{
+        html+=`<option value="PROJECT:${esc(p.id)}">🛠 ${esc(p.code)} · ${esc(p.name)}</option>`;
+      });
+    }
+    html+='</optgroup>';
+  } else if(seg==='PORT'){
+    // Cảng biển — list các dự án có segment PORT
+    html+='<optgroup label="🏗 Dự án Cảng">';
+    const portProjects = (S.projects||[]).filter(p=>p.segment==='PORT');
+    if(portProjects.length===0){
+      html+='<option value="" disabled>(Chưa có dự án Cảng — tạo ở Tab 02)</option>';
+    } else {
+      portProjects.forEach(p=>{
+        html+=`<option value="PROJECT:${esc(p.id)}">🏗 ${esc(p.code)} · ${esc(p.name)}</option>`;
+      });
+    }
     html+='</optgroup>';
   } else {
     // OTHER (Quản lý chung) — free text fallback
@@ -15915,7 +15967,15 @@ function renderVesselExpense(){
 function bankLatestSnapshot(accountId){
   const snaps = (S.bankSnapshots||[]).filter(s=>s.bankAccountId===accountId);
   if(!snaps.length) return null;
-  return snaps.sort((a,b)=>(b.date||'').localeCompare(a.date||''))[0];
+  // v2.99.6: Sort 2 tầng: trước theo date desc, sau theo createdAt/updatedAt desc.
+  // Khi NV sửa nhiều lần cùng ngày → bản mới nhất (tạo/sửa cuối) được chọn.
+  return snaps.sort((a,b)=>{
+    const dCmp = (b.date||'').localeCompare(a.date||'');
+    if(dCmp !== 0) return dCmp;
+    const tA = a.updatedAt || a.createdAt || '';
+    const tB = b.updatedAt || b.createdAt || '';
+    return tB.localeCompare(tA);
+  })[0];
 }
 
 /* Render Banking page */
@@ -16007,11 +16067,17 @@ function renderSalaryFund(){
 
   const kpi=document.getElementById('sf-kpi');
   if(kpi){
+    // v2.99.7: Số dư quỹ hiển thị TỔNG quy đổi theo displayCcy (chính),
+    // chi tiết theo từng CCY ở dòng phụ. Phù hợp khi anh đang ở chế độ VND
+    // → tổng phải là 1 số VND duy nhất, không phải 2 dòng tách.
+    const totalBal = totalIn - totalOut;
+    const ccyBreakdown = Object.entries(balByCcy).filter(([c,v])=>Math.abs(v)>0.01)
+      .map(([c,v])=>`${(+v||0).toLocaleString(c==='USD'?'en-US':'vi-VN',c==='USD'?{minimumFractionDigits:2,maximumFractionDigits:2}:{maximumFractionDigits:0})} ${c}`).join(' · ');
     kpi.innerHTML=`
       <div class="kpi">
         <div class="kpi-label">Số dư quỹ</div>
-        <div class="kpi-value" style="color:var(--good)">${Object.entries(balByCcy).map(([c,v])=>fmtCcy(v,c)).join(' · ')||'—'}</div>
-        <div class="kpi-sub">Quy đổi ~ ${fmt(totalIn-totalOut)}</div>
+        <div class="kpi-value" style="color:var(--good)">${fmt(totalBal)}</div>
+        <div class="kpi-sub">${ccyBreakdown ? 'Gốc: '+ccyBreakdown : '—'}</div>
       </div>
       <div class="kpi">
         <div class="kpi-label">Trích vào (tổng)</div>
@@ -17711,25 +17777,107 @@ function _saveBankSnapshot(){
 function viewBankSnapshots(accId){
   const acc=(S.bankAccounts||[]).find(a=>a.id===accId);
   if(!acc)return;
-  const snaps=(S.bankSnapshots||[]).filter(s=>s.bankAccountId===accId).sort((a,b)=>(b.date||'').localeCompare(a.date||''));
+  const snaps=(S.bankSnapshots||[]).filter(s=>s.bankAccountId===accId).sort((a,b)=>{
+    const dCmp = (b.date||'').localeCompare(a.date||'');
+    if(dCmp !== 0) return dCmp;
+    const tA = a.updatedAt || a.createdAt || '';
+    const tB = b.updatedAt || b.createdAt || '';
+    return tB.localeCompare(tA);
+  });
+  // v2.99.5: phát hiện snapshot trùng ngày (do gõ nhầm rồi tạo lại)
+  const dateCount = {};
+  snaps.forEach(s=>{ const d=s.date||''; dateCount[d]=(dateCount[d]||0)+1; });
+  const dupesNote = Object.entries(dateCount).filter(([d,c])=>c>1).length
+    ? `<div style="padding:8px 12px;background:rgba(184,71,46,.08);border-left:3px solid var(--accent);margin-bottom:10px;font-size:11px;display:flex;align-items:center;justify-content:space-between;gap:10px">
+        <div>⚠ Có nhiều snapshot trùng ngày — app dùng bản tạo/sửa MỚI NHẤT làm số dư hiển thị.</div>
+        ${isAdmin()?`<button class="btn-sec" onclick="_bankDedupeSnapshots('${esc(accId)}')" style="font-size:11px;white-space:nowrap;color:var(--bad);border-color:var(--bad)">🧹 Giữ bản mới nhất, xóa các bản trùng</button>`:''}
+      </div>`
+    : '';
   const body=snaps.length===0
     ? '<div style="padding:20px;text-align:center;color:var(--muted)">Chưa có snapshot nào</div>'
-    : `<table class="table" style="font-size:12px">
+    : dupesNote + `<table class="table" style="font-size:12px">
         <thead><tr><th>Ngày</th><th class="num">Số dư</th><th>Ghi chú</th><th>Người</th><th></th></tr></thead>
         <tbody>
-          ${snaps.map(s=>`
-            <tr>
-              <td>${esc(s.date)}</td>
+          ${snaps.map((s,i)=>{
+            const isDupe = (dateCount[s.date||'']||0) > 1;
+            const isLatest = i === 0;
+            return `<tr style="${isDupe?'background:rgba(184,71,46,.04)':''}">
+              <td>${esc(s.date)}${isLatest?' <span class="chip chip-good" style="font-size:9px">MỚI NHẤT</span>':''}${isDupe && !isLatest?' <span class="chip" style="font-size:9px;background:#a8362b;color:#fff">TRÙNG NGÀY</span>':''}</td>
               <td class="num"><b>${(+s.balance||0).toLocaleString()} ${esc(acc.ccy)}</b></td>
               <td>${esc(s.note||'')}</td>
               <td style="font-size:11px;color:var(--muted)">${esc(s.createdBy||'')}</td>
-              <td><button class="icon-btn danger" onclick="_deleteBankSnapshot('${esc(s.id)}')" title="Xóa">✕</button></td>
-            </tr>`).join('')}
+              <td style="white-space:nowrap">
+                <button class="icon-btn" onclick="_editBankSnapshot('${esc(s.id)}','${esc(accId)}')" title="Sửa số dư">✎</button>
+                <button class="icon-btn danger" onclick="_deleteBankSnapshot('${esc(s.id)}')" title="Xóa">✕</button>
+              </td>
+            </tr>`;
+          }).join('')}
         </tbody>
       </table>`;
   openModal(`Lịch sử số dư · ${esc(acc.accountNo)}`, body,
-    '<button class="btn-sec" onclick="closeModal()">Đóng</button>');
+    `<button class="btn-sec" onclick="addBankSnapshot('${esc(accId)}')">+ Snapshot mới</button>
+     <button class="btn-sec" onclick="closeModal()">Đóng</button>`);
 }
+
+/* v2.99.5: Sửa snapshot — số dư, ngày, ghi chú. Dùng khi gõ nhầm. */
+function _editBankSnapshot(id, accId){
+  if(!canEditTreasury()){toast('Chỉ Admin / Kế toán trưởng','bad');return;}
+  const snap=(S.bankSnapshots||[]).find(s=>s.id===id);
+  if(!snap){toast('Không tìm thấy snapshot','bad');return;}
+  const acc=(S.bankAccounts||[]).find(a=>a.id===snap.bankAccountId);
+  if(!acc){toast('Không tìm thấy TK','bad');return;}
+  const body=`
+    <div style="font-size:13px;display:grid;grid-template-columns:1fr 1fr;gap:10px">
+      <div style="grid-column:1/3;padding:8px 12px;background:var(--paper-2);font-size:11px;border-left:3px solid var(--ink)">
+        🏦 <b>${esc(acc.bankName)}</b> · ${esc(acc.accountNo)} · ${esc(acc.ccy)}
+      </div>
+      <div class="field">
+        <label>Ngày *</label>
+        <input type="date" id="bs-edit-date" value="${esc(snap.date||'')}">
+      </div>
+      <div class="field">
+        <label>Số dư cuối kỳ *</label>
+        <input type="number" id="bs-edit-bal" step="any" value="${+snap.balance||0}">
+      </div>
+      <div class="field" style="grid-column:1/3">
+        <label>Ghi chú</label>
+        <input type="text" id="bs-edit-note" value="${esc(snap.note||'')}">
+      </div>
+      <div id="bs-edit-err" style="grid-column:1/3;color:var(--bad);font-size:12px"></div>
+      <div style="grid-column:1/3;font-size:11px;color:var(--muted);font-style:italic;line-height:1.4">
+        💡 Sửa snapshot này nếu gõ nhầm số dư hoặc nhầm ngày. Người tạo gốc: <b>${esc(snap.createdBy||'?')}</b> lúc ${esc((snap.createdAt||'').slice(0,16).replace('T',' '))}.
+      </div>
+    </div>`;
+  openModal('✎ Sửa snapshot số dư', body,
+    `<button class="btn-sec" onclick="viewBankSnapshots('${esc(accId)}')">← Quay về lịch sử</button>
+     <button class="btn-primary" onclick="_saveEditBankSnapshot('${esc(id)}','${esc(accId)}')">💾 Lưu thay đổi</button>`);
+}
+
+function _saveEditBankSnapshot(id, accId){
+  const err=document.getElementById('bs-edit-err');
+  err.textContent='';
+  const snap=(S.bankSnapshots||[]).find(s=>s.id===id);
+  if(!snap){toast('Không tìm thấy snapshot','bad');return;}
+  const date=document.getElementById('bs-edit-date').value;
+  const bal=+document.getElementById('bs-edit-bal').value;
+  const note=document.getElementById('bs-edit-note').value.trim();
+  if(!date){err.textContent='Nhập ngày';return;}
+  if(isNaN(bal)){err.textContent='Số dư không hợp lệ';return;}
+  const oldDate = snap.date;
+  const oldBal = +snap.balance||0;
+  snap.date = date;
+  snap.balance = bal;
+  snap.note = note;
+  snap.updatedAt = new Date().toISOString();
+  snap.updatedBy = actorName();
+  try{ touchRecord(snap); }catch(e){}
+  try{ logAuditEvent('bank_snapshot_edit', {snapshotId:id, accId, oldDate, newDate:date, oldBal, newBal:bal}); }catch(e){}
+  saveState();
+  toast('Đã cập nhật snapshot');
+  closeModal();
+  renderBanking();
+}
+
 function _deleteBankSnapshot(id){
   if(!isAdmin()){toast('Chỉ admin','bad');return;}
   if(!confirm('Xóa snapshot này?'))return;
@@ -17737,6 +17885,53 @@ function _deleteBankSnapshot(id){
   markDeleted(id);
   saveState();
   toast('Đã xóa');
+  closeModal();
+  renderBanking();
+}
+
+/* v2.99.6: Dọn snapshot trùng ngày cho 1 TK — giữ bản mới nhất (createdAt/updatedAt), xóa các bản còn lại */
+function _bankDedupeSnapshots(accId){
+  if(!isAdmin()){toast('Chỉ admin','bad');return;}
+  const acc=(S.bankAccounts||[]).find(a=>a.id===accId);
+  if(!acc)return;
+  const all=(S.bankSnapshots||[]).filter(s=>s.bankAccountId===accId);
+  // Group theo date, mỗi date giữ 1 bản có updatedAt/createdAt mới nhất
+  const byDate = {};
+  all.forEach(s=>{
+    const d = s.date||'';
+    if(!byDate[d]) byDate[d]=[];
+    byDate[d].push(s);
+  });
+  const toKeep = [];
+  const toDelete = [];
+  Object.entries(byDate).forEach(([d, list])=>{
+    if(list.length===1){ toKeep.push(list[0]); return; }
+    // Sort theo timestamp mới nhất
+    const sorted = list.slice().sort((a,b)=>{
+      const tA = a.updatedAt || a.createdAt || '';
+      const tB = b.updatedAt || b.createdAt || '';
+      return tB.localeCompare(tA);
+    });
+    toKeep.push(sorted[0]);
+    sorted.slice(1).forEach(s=>toDelete.push(s));
+  });
+  if(toDelete.length===0){ toast('Không có bản trùng ngày để xóa','warn'); return; }
+  const keepRows = toKeep.filter(k=>(byDate[k.date||'']||[]).length>1)
+    .map(k=>`  • ${k.date}: ${(+k.balance||0).toLocaleString()} ${acc.ccy} (giữ — ${k.createdBy||'?'})`).join('\n');
+  const delSummary = toDelete.slice(0,8).map(s=>`  • ${s.date}: ${(+s.balance||0).toLocaleString()} ${acc.ccy} (xóa — ${s.createdBy||'?'})`).join('\n');
+  const moreDel = toDelete.length>8 ? `\n  ... và ${toDelete.length-8} bản khác` : '';
+  const msg = `🧹 DỌN SNAPSHOT TRÙNG NGÀY · ${acc.bankName} ${acc.accountNo}\n\n`
+    + `App sẽ giữ bản mới nhất (theo createdAt/updatedAt) cho mỗi ngày, xóa các bản còn lại.\n\n`
+    + `BẢN GIỮ LẠI (${toKeep.filter(k=>(byDate[k.date||'']||[]).length>1).length}):\n${keepRows||'(không có)'}\n\n`
+    + `BẢN SẼ XÓA (${toDelete.length}):\n${delSummary}${moreDel}\n\n`
+    + `Tiếp tục?`;
+  if(!confirm(msg)) return;
+  const delIds = toDelete.map(s=>s.id);
+  S.bankSnapshots = (S.bankSnapshots||[]).filter(s=>!delIds.includes(s.id));
+  try{ markDeleted(delIds); }catch(e){}
+  try{ logAuditEvent('bank_snapshot_dedupe', {accId, deleted:toDelete.length, kept:toKeep.length}); }catch(e){}
+  saveState();
+  toast(`Đã xóa ${toDelete.length} bản trùng ngày · giữ ${toKeep.length} bản`,'good');
   closeModal();
   renderBanking();
 }
@@ -18825,11 +19020,20 @@ function renderArAp(kind){
     const vat=+r.vatAmount||0;
     const tot=+r.amountGross||+r.amount||0;
     if(wfS==='approved'){
-      sumNet+=toDisplay(net,r.ccy||'USD');
-      sumVat+=toDisplay(vat,r.ccy||'USD');
-      sumTot+=toDisplay(tot,r.ccy||'USD');
-      sumPaid+=toDisplay(pd,r.ccy||'USD');
-      sumRem+=toDisplay(rem,r.ccy||'USD');
+      // v2.99.3: AR luôn quy về VND cho tổng (báo cáo nội bộ DN Việt Nam); AP giữ theo displayCcy như cũ.
+      if(isAp){
+        sumNet+=toDisplay(net,r.ccy||'USD');
+        sumVat+=toDisplay(vat,r.ccy||'USD');
+        sumTot+=toDisplay(tot,r.ccy||'USD');
+        sumPaid+=toDisplay(pd,r.ccy||'USD');
+        sumRem+=toDisplay(rem,r.ccy||'USD');
+      } else {
+        sumNet+=_toVndFixed(net,r.ccy||'VND');
+        sumVat+=_toVndFixed(vat,r.ccy||'VND');
+        sumTot+=_toVndFixed(tot,r.ccy||'VND');
+        sumPaid+=_toVndFixed(pd,r.ccy||'VND');
+        sumRem+=_toVndFixed(rem,r.ccy||'VND');
+      }
     }
     const segLabel=r.segment&&SEGMENTS[r.segment]?SEGMENTS[r.segment].short:'—';
     const proj=r.projectId?S.projects.find(p=>p.id===r.projectId):null;
@@ -18886,11 +19090,11 @@ function renderArAp(kind){
       <td class="mono" style="font-size:11px">${r.issueDate||'—'}</td>
       <td class="mono" style="font-size:11px">${r.dueDate||'—'}</td>
       ${isAp?`<td class="mono" style="font-size:11px;color:var(--accent);font-weight:600">${r.dueMonth||'—'}</td>`:''}
-      <td class="r num">${fmt(net,r.ccy)}</td>
-      <td class="r num" style="color:var(--muted);font-size:11px">${vat>0?fmt(vat,r.ccy):'—'}</td>
-      <td class="r num" style="font-weight:600">${fmt(tot,r.ccy)}</td>
-      <td class="r num" style="color:var(--good)">${pd>0?fmt(pd,r.ccy):'—'}</td>
-      <td class="r num" style="font-weight:600;color:${rem>0?(isAp?'var(--bad)':'var(--accent)'):'var(--muted)'}">${fmt(rem,r.ccy)}</td>
+      <td class="r num">${isAp?fmt(net,r.ccy):fmtVndWithNote(net,r.ccy||'VND')}</td>
+      <td class="r num" style="color:var(--muted);font-size:11px">${vat>0?(isAp?fmt(vat,r.ccy):fmtVndWithNote(vat,r.ccy||'VND')):'—'}</td>
+      <td class="r num" style="font-weight:600">${isAp?fmt(tot,r.ccy):fmtVndWithNote(tot,r.ccy||'VND')}</td>
+      <td class="r num" style="color:var(--good)">${pd>0?(isAp?fmt(pd,r.ccy):fmtVndWithNote(pd,r.ccy||'VND')):'—'}</td>
+      <td class="r num" style="font-weight:600;color:${rem>0?(isAp?'var(--bad)':'var(--accent)'):'var(--muted)'}">${isAp?fmt(rem,r.ccy):fmtVndWithNote(rem,r.ccy||'VND')}</td>
       ${isAp?'':`<td class="c">${(()=>{
         if(wfS!=='approved') return '<span style="color:var(--rule)">—</span>';
         if(rem<=0.0001){
@@ -18909,12 +19113,18 @@ function renderArAp(kind){
     </tr>`;
   });
   const colSpan=isAp?8:7;
-  h+=`<tr class="total"><td colspan="${colSpan}"><b>CHỈ ĐÃ DUYỆT</b> (vào báo cáo BI)</td>
-    <td class="r"><b>${fmt(sumNet)}</b></td>
-    <td class="r" style="color:var(--muted);font-size:11px">${fmt(sumVat)}</td>
-    <td class="r"><b>${fmt(sumTot)}</b></td>
-    <td class="r" style="color:var(--good)"><b>${fmt(sumPaid)}</b></td>
-    <td class="r" style="color:${isAp?'var(--bad)':'var(--accent)'}"><b>${fmt(sumRem)}</b></td>
+  // v2.99.3: helper hiển thị tổng VND (chỉ cho AR — luôn VND, không phụ thuộc displayCcy)
+  const fmtVndTotal = (v) => {
+    if(v==null||isNaN(v)||v===0) return '—';
+    const neg = v<0;
+    return (neg?'-':'') + Math.abs(v).toLocaleString('vi-VN',{maximumFractionDigits:0}) + '<span style="font-size:9px;color:var(--muted);margin-left:2px">₫</span>';
+  };
+  h+=`<tr class="total"><td colspan="${colSpan}"><b>CHỈ ĐÃ DUYỆT</b> (vào báo cáo BI)${isAp?'':' <span style="font-size:10px;color:var(--muted);font-style:italic">— Tổng quy đổi VND theo tỷ giá '+(+S.fxRate||25000).toLocaleString('vi-VN')+'</span>'}</td>
+    <td class="r"><b>${isAp?fmt(sumNet):fmtVndTotal(sumNet)}</b></td>
+    <td class="r" style="color:var(--muted);font-size:11px">${isAp?fmt(sumVat):fmtVndTotal(sumVat)}</td>
+    <td class="r"><b>${isAp?fmt(sumTot):fmtVndTotal(sumTot)}</b></td>
+    <td class="r" style="color:var(--good)"><b>${isAp?fmt(sumPaid):fmtVndTotal(sumPaid)}</b></td>
+    <td class="r" style="color:${isAp?'var(--bad)':'var(--accent)'}"><b>${isAp?fmt(sumRem):fmtVndTotal(sumRem)}</b></td>
     <td colspan="${isAp?3:4}"></td></tr>`;
   h+='</tbody>';tEl.innerHTML=h;
 }
@@ -22372,7 +22582,19 @@ function _quickViewData(){
     out.items.sort((a,b)=>((a.dueDate||'9999').localeCompare(b.dueDate||'9999')));
     return out;
   }
-  return {bankByCcy, cashByCcy, ar:summarize(ar), ap:summarize(ap)};
+  // v2.99.8: Nợ vay đến hạn 30 ngày tới — bổ sung vào dự kiến TRẢ
+  let loanSoon30Usd = 0;
+  (S.loans||[]).forEach(l=>{
+    (l.paymentSchedule||[]).forEach(p=>{
+      if(p.paid) return;
+      const dueDate = p.dueDate || '';
+      if(!dueDate || dueDate > in30ISO) return;
+      const amt = (+p.total || ((+p.principal||0) + (+p.interest||0)));
+      const usd = _toUsdFixed(amt, l.ccy||'VND');
+      if(usd !== null) loanSoon30Usd += usd;
+    });
+  });
+  return {bankByCcy, cashByCcy, ar:summarize(ar), ap:summarize(ap), loanSoon30Usd};
 }
 
 /* v2.94.0: Tính tiến độ doanh thu YTD theo mảng.
@@ -22462,7 +22684,8 @@ function _switchQuickViewTab(tab){
 }
 function _renderQuickView(){
   const d=_quickViewData();
-  const fmtU=(n)=>fmtCcy(n,'USD');
+  // v2.99.8: hiển thị theo displayCcy (nút USD/VND trên topbar) — fmt() tự convert + thêm ký hiệu
+  const fmtU=(usdAmount)=>fmt(usdAmount,'USD');
   const otherCcyTxt=(o)=>{
     const ks=Object.keys(o||{}).filter(k=>Math.abs(o[k])>0.0001);
     if(!ks.length) return '';
@@ -22497,7 +22720,9 @@ function _renderQuickView(){
   let title='📊 Tổng quan nhanh';
 
   if(_quickViewTab==='overview'){
-    const duKienRong = d.ar.soon30Usd - d.ap.soon30Usd;
+    const loanSoon = +d.loanSoon30Usd || 0;
+    const apSoonTotal = (+d.ap.soon30Usd||0) + loanSoon;  // v2.99.8: AP + nợ vay
+    const duKienRong = (+d.ar.soon30Usd||0) - apSoonTotal;
     body=`
       <div style="display:flex;flex-direction:column;gap:14px">
         <div style="padding:12px 14px;border:1px solid var(--rule);border-radius:6px;background:var(--paper-2)">
@@ -22524,7 +22749,8 @@ function _renderQuickView(){
         <div style="padding:14px;border:2px solid var(--ink);border-radius:6px;background:rgba(28,58,92,.04)">
           <div style="font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--ink);font-weight:700;margin-bottom:8px">📅 Dự kiến 30 ngày tới (theo hạn TT)</div>
           <div style="display:flex;justify-content:space-between;font-size:13px"><span style="color:var(--muted)">Dự kiến THU</span><b style="color:#2d6a6a">${fmtU(d.ar.soon30Usd)}</b></div>
-          <div style="display:flex;justify-content:space-between;font-size:13px"><span style="color:var(--muted)">Dự kiến TRẢ</span><b style="color:var(--bad)">${fmtU(d.ap.soon30Usd)}</b></div>
+          <div style="display:flex;justify-content:space-between;font-size:13px"><span style="color:var(--muted)">Dự kiến TRẢ</span><b style="color:var(--bad)">${fmtU(apSoonTotal)}</b></div>
+          <div style="display:flex;justify-content:space-between;font-size:10px;color:var(--muted);font-style:italic;padding-left:8px">↳ NCC ${fmtU(d.ap.soon30Usd)} + Nợ vay ${fmtU(loanSoon)}</div>
           <div style="display:flex;justify-content:space-between;font-size:15px;margin-top:6px;padding-top:6px;border-top:1.5px solid var(--ink)"><b>Dòng tiền ròng dự kiến</b><b style="color:${duKienRong>=0?'#2d6a6a':'var(--bad)'}">${fmtU(duKienRong)}</b></div>
         </div>
         ${(()=>{
