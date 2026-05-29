@@ -2664,7 +2664,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='2.99.18';            // bumped on each release
+const APP_VERSION='2.99.19';            // bumped on each release
 
 /* v2.62.0: Token xác thực backend — PHẢI khớp API_TOKEN trong Apps Script (Code.gs).
    Mọi request tới Apps Script tự động được gắn token qua lớp bọc fetch bên dưới.
@@ -26587,13 +26587,15 @@ function renderNSNN(){
   }
 
   // Fill type filter dropdown
+  // v2.99.19: Hiện cả loại 'manual' lẫn loại auto-sinh-thành-record (PIT, INSURANCE_SOCIAL từ AP Lương)
   const typeFilter=document.getElementById('nsnn-filter-type');
   if(typeFilter && typeFilter.options.length<=1){
     let html='<option value="">Tất cả</option>';
     Object.keys(NSNN_TAX_TYPES).forEach(k=>{
       const m=NSNN_TAX_TYPES[k];
-      // Only show manual ones for the records filter (auto are not stored as records)
-      if(m.source==='manual') html+=`<option value="${k}">${m.icon} ${esc(m.label)}</option>`;
+      // VAT_OUTPUT, VAT_INPUT, VAT_PAYABLE là KPI tính ad-hoc — không có record cụ thể
+      if(['VAT_OUTPUT','VAT_INPUT','VAT_PAYABLE'].includes(k)) return;
+      html+=`<option value="${k}">${m.icon} ${esc(m.label)}</option>`;
     });
     typeFilter.innerHTML=html;
   }
@@ -26693,12 +26695,14 @@ function _nsnnRenderByMonth(yr){
     data[p]={auto:_nsnnComputeAuto(p), manual:_nsnnSumManual(p)};
   });
 
-  let html=`<thead><tr><th style="min-width:160px">Loại thuế</th>`;
-  for(let m=1;m<=12;m++) html+=`<th class="r" style="font-size:10px">T${m}</th>`;
-  html+=`<th class="r" style="background:rgba(184,71,46,.06)">Cả năm</th></tr></thead><tbody>`;
+  // v2.99.19: Phân nhóm — A. Thuế (nộp NSNN) / B. BHXH (nộp cơ quan BHXH)
+  // GROUP_A: tất cả loại trừ INSURANCE_SOCIAL. GROUP_B: chỉ INSURANCE_SOCIAL.
+  const GROUP_A_CODES = Object.keys(NSNN_TAX_TYPES).filter(k => k !== 'INSURANCE_SOCIAL');
+  const GROUP_B_CODES = ['INSURANCE_SOCIAL'];
 
-  Object.keys(NSNN_TAX_TYPES).forEach(code=>{
-    const m=NSNN_TAX_TYPES[code];
+  // Helper: tính 1 row + return {cells, total, hasAny}
+  const computeRow = (code) => {
+    const m = NSNN_TAX_TYPES[code];
     let rowTotal=0;
     let cells='';
     let hasAny=false;
@@ -26706,6 +26710,10 @@ function _nsnnRenderByMonth(yr){
       let val=0;
       if(m.source==='auto' || m.source==='auto_override'){
         val = data[p].auto[code] || 0;
+        // v2.99.18: PIT/INSURANCE_SOCIAL auto → ưu tiên record cụ thể nếu có
+        if((code==='PIT' || code==='INSURANCE_SOCIAL') && data[p].manual[code]){
+          val = data[p].manual[code];  // record cụ thể trùm số auto
+        }
       } else {
         val = data[p].manual[code] || 0;
       }
@@ -26717,12 +26725,86 @@ function _nsnnRenderByMonth(yr){
       const onclick = (code==='VAT_PAYABLE' && isAdmin()) ? ` onclick="_nsnnOverrideVAT('${p}')"` : '';
       cells += `<td class="r num" style="font-size:11px${overrideStyle};${clickable}" title="${p}${isOverride?' (override)':''}"${onclick}>${val?fmt(val):'—'}</td>`;
     });
-    // v2.74.1: 3 dòng GTGT cốt lõi LUÔN hiện (kể cả = 0) để thấy cân đối đầu ra − đầu vào = phải nộp.
-    // Các loại thuế khác vẫn ẩn khi cả năm không phát sinh.
+    return {cells, total:rowTotal, hasAny, meta:m};
+  };
+
+  // Helper: tổng cộng 1 nhóm (đã loại các loại GTGT trung gian để không double count)
+  // Trong cột tháng: tổng nhóm = sum (val per row, KHÔNG bao gồm VAT_OUTPUT+VAT_INPUT vì chúng là thành phần của VAT_PAYABLE)
+  const computeGroupTotal = (codes) => {
+    let cells='';
+    let grandTotal=0;
+    months.forEach(p=>{
+      let monthSum=0;
+      codes.forEach(code=>{
+        // Bỏ qua VAT_OUTPUT, VAT_INPUT (chúng là thành phần cấu thành VAT_PAYABLE)
+        if(code==='VAT_OUTPUT' || code==='VAT_INPUT') return;
+        const m=NSNN_TAX_TYPES[code];
+        let val=0;
+        if(m.source==='auto' || m.source==='auto_override'){
+          val = data[p].auto[code] || 0;
+          if((code==='PIT' || code==='INSURANCE_SOCIAL') && data[p].manual[code]){
+            val = data[p].manual[code];
+          }
+        } else {
+          val = data[p].manual[code] || 0;
+        }
+        monthSum += val;
+      });
+      grandTotal += monthSum;
+      cells += `<td class="r num" style="font-size:12px;font-weight:700;background:rgba(184,71,46,.04)">${monthSum?fmt(monthSum):'—'}</td>`;
+    });
+    return {cells, total:grandTotal};
+  };
+
+  let html=`<thead><tr><th style="min-width:200px">Loại</th>`;
+  for(let m=1;m<=12;m++) html+=`<th class="r" style="font-size:10px">T${m}</th>`;
+  html+=`<th class="r" style="background:rgba(184,71,46,.06)">Cả năm</th></tr></thead><tbody>`;
+
+  // ── NHÓM A: THUẾ NỘP NSNN ──
+  html += `<tr style="background:rgba(28,58,92,.08)"><td colspan="14" style="font-weight:700;font-size:13px;color:var(--ink);letter-spacing:.04em;padding:8px 10px">A. THUẾ <span style="font-weight:400;color:var(--muted);font-size:11px;font-style:italic">— nộp NSNN qua kho bạc</span></td></tr>`;
+  GROUP_A_CODES.forEach(code=>{
+    const row = computeRow(code);
     const ALWAYS_SHOW = (code==='VAT_OUTPUT' || code==='VAT_INPUT' || code==='VAT_PAYABLE');
-    if(!hasAny && !ALWAYS_SHOW) return;
-    html+=`<tr><td><span style="display:inline-flex;align-items:center;gap:4px"><span>${m.icon}</span>${esc(m.label)}</span></td>${cells}<td class="r num" style="background:rgba(184,71,46,.06);font-weight:600">${fmt(rowTotal)}</td></tr>`;
+    if(!row.hasAny && !ALWAYS_SHOW) return;
+    html+=`<tr><td style="padding-left:18px"><span style="display:inline-flex;align-items:center;gap:4px"><span>${row.meta.icon}</span>${esc(row.meta.label)}</span></td>${row.cells}<td class="r num" style="background:rgba(184,71,46,.06);font-weight:600">${fmt(row.total)}</td></tr>`;
   });
+  const totalA = computeGroupTotal(GROUP_A_CODES);
+  html += `<tr style="background:rgba(28,58,92,.04);border-top:2px solid var(--ink)"><td style="padding-left:18px;font-weight:700;color:var(--ink)">Σ TỔNG THUẾ (A)</td>${totalA.cells}<td class="r num" style="background:rgba(184,71,46,.12);font-weight:700;color:var(--accent)">${fmt(totalA.total)}</td></tr>`;
+
+  // ── NHÓM B: BHXH/BHYT/BHTN ──
+  const rowB = computeRow('INSURANCE_SOCIAL');
+  // Luôn hiện nhóm B (kể cả không phát sinh) để admin thấy đang trống — nhắc nhập
+  html += `<tr style="background:rgba(74,140,90,.10)"><td colspan="14" style="font-weight:700;font-size:13px;color:#4a8c5a;letter-spacing:.04em;padding:8px 10px">B. BHXH/BHYT/BHTN <span style="font-weight:400;color:var(--muted);font-size:11px;font-style:italic">— nộp cơ quan BHXH (32% lương gross)</span></td></tr>`;
+  html+=`<tr><td style="padding-left:18px"><span style="display:inline-flex;align-items:center;gap:4px"><span>${rowB.meta.icon}</span>${esc(rowB.meta.label)}</span></td>${rowB.cells}<td class="r num" style="background:rgba(184,71,46,.06);font-weight:600">${fmt(rowB.total)}</td></tr>`;
+  const totalB = computeGroupTotal(GROUP_B_CODES);
+  html += `<tr style="background:rgba(74,140,90,.06);border-top:2px solid #4a8c5a"><td style="padding-left:18px;font-weight:700;color:#4a8c5a">Σ TỔNG BHXH (B)</td>${totalB.cells}<td class="r num" style="background:rgba(184,71,46,.12);font-weight:700;color:var(--accent)">${fmt(totalB.total)}</td></tr>`;
+
+  // ── TỔNG CỘNG (A + B) ──
+  let grandCells='';
+  let grandYear=0;
+  months.forEach((_,i)=>{
+    // sum monthly từ cells của A + B
+    // Easier: re-aggregate from data
+    const p = months[i];
+    let sum=0;
+    GROUP_A_CODES.concat(GROUP_B_CODES).forEach(code=>{
+      if(code==='VAT_OUTPUT' || code==='VAT_INPUT') return;
+      const m=NSNN_TAX_TYPES[code];
+      let val=0;
+      if(m.source==='auto' || m.source==='auto_override'){
+        val = data[p].auto[code] || 0;
+        if((code==='PIT' || code==='INSURANCE_SOCIAL') && data[p].manual[code]){
+          val = data[p].manual[code];
+        }
+      } else {
+        val = data[p].manual[code] || 0;
+      }
+      sum += val;
+    });
+    grandYear += sum;
+    grandCells += `<td class="r num" style="font-size:12px;font-weight:700;background:rgba(184,71,46,.10);color:var(--accent)">${sum?fmt(sum):'—'}</td>`;
+  });
+  html += `<tr style="background:rgba(184,71,46,.10);border-top:3px double var(--accent)"><td style="font-weight:700;color:var(--accent);font-size:13px">TỔNG CỘNG (A + B)</td>${grandCells}<td class="r num" style="background:var(--accent);color:#fff;font-weight:700;font-size:13px">${fmt(grandYear)}</td></tr>`;
 
   html+='</tbody>';
   el.innerHTML=html;
