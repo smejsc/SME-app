@@ -130,7 +130,7 @@ body{min-height:100vh;background-image:radial-gradient(circle at 20% 0%,rgba(184
      Admin/KTT chủ yếu xem qua nút 📊 NHANH (tự mở sau đăng nhập). */
   #help-btn{display:none !important}              /* ẩn nút Hướng dẫn */
   .fx-block{display:none !important}              /* ẩn FX/USD-VND (đã nhất quán trong Tổng quan nhanh) */
-  #sync-btn{display:none !important}              /* ẩn nút SYNC thủ công — auto-sync vẫn chạy nền */
+  /* v2.81.0: GIỮ LẠI nút Sync — admin/CFO cần để ép tải dữ liệu xuống khi đăng nhập máy mới */
   /* thu gọn dashboard KPI */
   .kpi-card{padding:10px 12px;font-size:12px}
   .kpi-card .kpi-value{font-size:20px}
@@ -138,6 +138,32 @@ body{min-height:100vh;background-image:radial-gradient(circle at 20% 0%,rgba(184
   /* các tab điều hướng */
   .nav-item{padding:8px 10px;font-size:11px}
 }
+
+/* v2.81.0: CHẾ ĐỘ CHỈ ĐỌC trên iPhone/iPad cho Admin/CFO.
+   Cách tiếp cận: ẩn các khu vực thao tác (toolbar có nút thêm/sửa, cột action trong bảng),
+   không ẩn từng nút riêng (tránh ảnh hưởng các nút an toàn như Đóng/Sync/Đăng nhập).
+   Trong các modal hệ thống (đăng nhập, cài đặt, đổi MK) — KHÔNG áp readonly. */
+body.readonly-mode .ar-toolbar,
+body.readonly-mode .ap-toolbar,
+body.readonly-mode .section-head .btn-primary,
+body.readonly-mode .section-head button[onclick*="open"]:not([onclick*="openQuickView"]):not([onclick*="openHelp"]):not([onclick*="closeModal"]):not([onclick*="openMenuModal"]),
+body.readonly-mode .tbl td.col-action,
+body.readonly-mode .tbl th.col-action,
+body.readonly-mode .row-actions,
+body.readonly-mode .ar-row-actions,
+body.readonly-mode .ap-row-actions{display:none !important}
+/* Vô hiệu hóa input/textarea/select trong bảng dữ liệu (giữ input lọc/tìm) */
+body.readonly-mode .tbl input:not([type="search"]):not(.filter-input),
+body.readonly-mode .tbl textarea,
+body.readonly-mode .tbl select:not(.filter-select){pointer-events:none;opacity:.7}
+/* Banner nhắc chế độ chỉ đọc trên đầu */
+body.readonly-mode::before{
+  content:'👁 Chế độ chỉ xem (Admin/CFO trên di động) — Để chỉnh sửa, dùng máy tính';
+  display:block;background:rgba(28,58,92,.92);color:#fff;text-align:center;
+  padding:6px 12px;font-size:11px;font-weight:500;letter-spacing:.04em;
+  position:sticky;top:0;z-index:9999;
+}
+@media (min-width:901px){ body.readonly-mode::before{display:none !important} }
 
 /* ===== PRINT (for PDF export via browser) ===== */
 .print-area{display:none}
@@ -2619,7 +2645,7 @@ body{min-height:100vh;background-image:radial-gradient(circle at 20% 0%,rgba(184
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='2.80.0';            // bumped on each release
+const APP_VERSION='2.84.0';            // bumped on each release
 
 /* v2.62.0: Token xác thực backend — PHẢI khớp API_TOKEN trong Apps Script (Code.gs).
    Mọi request tới Apps Script tự động được gắn token qua lớp bọc fetch bên dưới.
@@ -4477,7 +4503,7 @@ async function authAction(){
       setTimeout(()=>{
         try{
           const isNarrow = window.innerWidth <= 900;
-          if(isNarrow && cfg.mobileAutoQuickView!==false && (isAdmin()||canApproveL2())){
+          if(isNarrow && cfg.mobileAutoQuickView!==false && canViewQuickOverview()){
             if(typeof openQuickView==='function') openQuickView();
           }
         }catch(e){ console.warn('[mobile-auto-quickview]', e&&e.message); }
@@ -4523,7 +4549,15 @@ async function authAction(){
       // Mark that we just logged in — block auto-push for next 5s so pull completes cleanly
       _suppressAutoSync=true;
       setTimeout(()=>{ _suppressAutoSync=false; }, 5000);
-      setTimeout(()=>cloudSync('pull').then(()=>{ presenceStart(); try{ if(pruneDeletedIds(120)>0) saveState(); }catch(e){} }),300);
+      setTimeout(()=>cloudSync('pull')
+        .then(()=>{ try{ if(pruneDeletedIds(120)>0) saveState(); }catch(e){} })
+        .catch(e=>console.warn('[post-login pull]', e&&e.message))
+        .finally(()=>{
+          // v2.82.0: đảm bảo presenceStart LUÔN chạy sau login — dù pull có thành công hay không.
+          // Trước đây dùng .then() nên nếu pull lỗi/treo, presenceStart không chạy → S.presence
+          // rỗng → nút "online" trên topbar bị ẩn vĩnh viễn cho đến khi reload trang.
+          try{ presenceStart(); }catch(e){ console.warn('[presenceStart]', e&&e.message); }
+        }), 300);
     }
     // Check for app update silently — auto-reload if new version available
     setTimeout(()=>checkForUpdate(),1500);
@@ -4929,6 +4963,14 @@ function openSettings(){
           Hiện trong banner hướng dẫn khi NV gặp sự cố máy rỗng. Giúp NV biết liên hệ ai. Để trống nếu không muốn hiện.
         </div>
       </div>
+      ${isAdmin()?`
+      <div class="field" style="border-top:1px dashed var(--rule);padding-top:14px;margin-top:14px">
+        <label>Công cụ admin <span style="font-size:9px;color:var(--accent);font-weight:600">v2.84.0</span></label>
+        <button type="button" class="btn-sec" onclick="migrateArToApproved()" style="margin-top:4px">⚙ Nâng AR Nháp/Chờ duyệt → Đã duyệt</button>
+        <div style="font-size:11px;color:var(--muted);font-style:italic;margin-top:6px">
+          Theo quy trình mới: AR (phải thu) không cần workflow nhiều cấp — KTT phát hành HĐ thực = đã duyệt nội bộ. Bấm nút này để chạy migration một-lần cho các AR cũ còn ở trạng thái Nháp/Chờ duyệt. Có hộp thoại liệt kê chi tiết trước khi áp.
+        </div>
+      </div>`:''}
       <div class="field">
         <label>Phiên bản phần mềm</label>
         <div style="font-family:var(--font-mono);font-size:12px;color:var(--muted);padding:6px 0">
@@ -7320,6 +7362,12 @@ function canCheckAcc(){
   return !!(CURRENT_USER && CURRENT_USER.canCheckAcc);
 }
 
+/* v2.83.0: Quyền XEM Tổng quan nhanh — mọi vai trò quản lý/duyệt đều được xem
+   (Admin, Duyệt L2/CFO, KT Kiểm/KTT, Duyệt L1/Trưởng BP). NV thường chỉ nhập liệu thì không cần. */
+function canViewQuickOverview(){
+  return isAdmin() || canApproveL2() || canCheckAcc() || canApproveL1();
+}
+
 /* Viewer = chỉ đọc báo cáo, không sửa/xóa/duyệt */
 function isViewer(){
   return CURRENT_ROLE==='user' && !!(CURRENT_USER && CURRENT_USER.isViewer);
@@ -8331,9 +8379,19 @@ function _helpSection_contact(){
 
 function applyRoleUI(){
   const user=CURRENT_ROLE==='user';
-  // v2.75.0: nút "Tổng quan nhanh" chỉ cho admin và CFO (duyệt L2)
+  // v2.75.0/v2.83.0: nút "Tổng quan nhanh" cho Admin, Duyệt L2 (CFO), KT Kiểm (KTT), Duyệt L1 (trưởng BP)
   const qvBtn=document.getElementById('quickview-btn');
-  if(qvBtn) qvBtn.style.display = (isAdmin()||canApproveL2()) ? '' : 'none';
+  if(qvBtn) qvBtn.style.display = canViewQuickOverview() ? '' : 'none';
+  // v2.81.0: chế độ CHỈ ĐỌC trên iPhone/iPad (≤900px) cho Admin & CFO/L2 — không cho thao tác.
+  // L1 và NV thường vẫn thao tác bình thường để làm việc trên di động.
+  try{
+    const cfg=getAuthConfig();
+    const isNarrow = window.innerWidth <= 900;
+    const isReadOnlyUser = (isAdmin()||canApproveL2()) && !canApproveL1();  // admin/CFO thuần, không kiêm L1
+    // Admin luôn có thể "kiêm" L1 (vì isAdmin()), nên dùng điều kiện gọn hơn:
+    const readonly = isNarrow && (isAdmin()||canApproveL2()) && cfg.mobileReadOnly!==false;
+    document.body.classList.toggle('readonly-mode', readonly);
+  }catch(e){ console.warn('[readonly-mode]', e&&e.message); }
   // Dashboard is admin-only: strip from any user.tabs that might still have it (migration)
   if(user && CURRENT_USER && Array.isArray(CURRENT_USER.tabs)){
     CURRENT_USER.tabs=CURRENT_USER.tabs.filter(t=>t!=='dashboard');
@@ -18329,7 +18387,7 @@ function renderArAp(kind){
       }
     } else if(wfS==='approved'){
       if(rem>0.0001){
-        actionBtns.push(`<button class="icon-btn good" title="Ghi nhận ${isAp?'trả':'thu'}" onclick="addArPayment('${kind}','${r.id}')">$</button>`);
+        actionBtns.push(`<button class="icon-btn good" title="${isAp?'Ghi nhận trả tiền':'Ghi nhận đã thu tiền (ngày + phí NH)'}" onclick="addArPayment('${kind}','${r.id}')" style="font-weight:700">${isAp?'💸':'💰'}</button>`);
       }
       actionBtns.push(`<button class="icon-btn" title="Xem chi tiết / payments" onclick="${isAp?'openPayableModal':'openReceivableModal'}('${r.id}')">👁</button>`);
       if(isAdmin()||canApproveL2()){
@@ -19803,19 +19861,26 @@ function saveAr(kind,id){
     Object.assign(r, updates);
     touchRecord(r);  // v1.38.4: track for concurrency merge
   } else {
+    // v2.84.0: AR (phải thu) — nếu người nhập là KTT (canCheckAcc) hoặc Admin, hóa đơn vào sổ NGAY
+    // ở trạng thái 'approved' (đã duyệt). Lý do: AR là HĐ xuất bán, KTT đã phát hành HĐ thực
+    // thì coi như đã duyệt nội bộ — không cần workflow nhiều cấp như AP.
+    // NV thường nhập AR vẫn qua workflow để KTT kiểm.
+    const arFastTrack = (kind==='ar' && (isAdmin() || canCheckAcc()));
+    const histTag = arFastTrack ? '(KTT nhập trực tiếp — '+actorName()+')' : '';
+    const nowIso = new Date().toISOString();
     const newRec = {
       id:uid(),
       partner,vendorId,desc,invoiceNo,amountNet,vatPercent,vatAmount,amountGross,amount,ccy,segment,companyId,projectId,vesselId,issueDate,dueDate,dueMonth,dueAmount,
       payments:[],
-      status:'draft',
-      submittedBy:'',submittedAt:'',
-      approvedL1By:'',approvedL1At:'',
-      approvedL2By:'',approvedL2At:'',
+      status: arFastTrack ? 'approved' : 'draft',
+      submittedBy: arFastTrack ? actorName() : '', submittedAt: arFastTrack ? nowIso : '',
+      approvedL1By: arFastTrack ? histTag : '', approvedL1At: arFastTrack ? nowIso : '',
+      approvedL2By: arFastTrack ? histTag : '', approvedL2At: arFastTrack ? nowIso : '',
       rejectedBy:'',rejectedAt:'',rejectReason:'',rejectedAtLevel:null,
       createdBy:actorName(),
       createdByDept: getActorDeptName(),  // v1.45.0: snapshot dept name at creation
-      createdAt:new Date().toISOString(),
-      updatedAt:new Date().toISOString()  // v1.38.4
+      createdAt: nowIso,
+      updatedAt: nowIso  // v1.38.4
     };
     if(kind==='ap'){
       newRec.expenseType = expenseType;
@@ -19832,7 +19897,46 @@ function saveAr(kind,id){
     S[list].push(newRec);
   }
   saveState();closeModal();renderAll();
-  toast(kind==='ap'?'Đã lưu phải trả':'Đã lưu phải thu');
+  toast(kind==='ap'?'Đã lưu phải trả':((isAdmin()||canCheckAcc())?'Đã lưu phải thu (vào sổ ngay)':'Đã lưu phải thu (chờ KT kiểm)'));
+}
+
+/* v2.84.0: Migration một-lần — nâng tất cả AR đang Nháp/chờ duyệt sang trạng thái 'approved'.
+   Áp dụng quy trình AR mới: AR không cần workflow nhiều cấp. Chỉ admin được chạy.
+   Có hộp thoại liệt kê các bản ghi sẽ bị thay đổi trước khi áp. */
+function migrateArToApproved(){
+  if(!isAdmin()){ toast('Chỉ admin được chạy migration','bad'); return; }
+  const allAr = S.receivables||[];
+  const needFix = allAr.filter(r => r && wfStatus(r) !== 'approved' && wfStatus(r) !== 'rejected');
+  if(!needFix.length){
+    toast('Không có AR nào cần nâng — tất cả đã ở trạng thái Đã duyệt/Bị từ chối','good');
+    return;
+  }
+  const list = needFix.slice(0,10).map((r,i)=>`${i+1}. ${esc(r.partner||'?')} · HĐ ${esc(r.invoiceNo||'—')} · ${fmtCcy(+r.amount||0, r.ccy||'USD')} · trạng thái: ${wfStatus(r)}`).join('\n');
+  const moreTxt = needFix.length>10 ? `\n... và ${needFix.length-10} bản ghi khác` : '';
+  const msg = '⚙ NÂNG TRẠNG THÁI AR (PHẢI THU) SANG "ĐÃ DUYỆT"\n\n'
+    + 'App sẽ nâng '+needFix.length+' bản ghi Phải thu (đang Nháp/chờ duyệt) sang "Đã duyệt".\n'
+    + 'Lý do: theo quy trình mới (v2.84.0), AR không cần workflow nhiều cấp — KTT đã phát hành HĐ thực thì coi như đã duyệt.\n\n'
+    + 'Danh sách (10 đầu):\n' + list + moreTxt + '\n\n'
+    + 'Tiếp tục?';
+  if(!confirm(msg)) return;
+  const nowIso = new Date().toISOString();
+  const histTag = '(Migration v2.84.0 — '+actorName()+')';
+  let n=0;
+  needFix.forEach(r=>{
+    r.status = 'approved';
+    if(!r.submittedBy){ r.submittedBy = r.createdBy || actorName(); r.submittedAt = r.createdAt || nowIso; }
+    if(!r.approvedL1By){ r.approvedL1By = histTag; r.approvedL1At = nowIso; }
+    if(!r.approvedL2By){ r.approvedL2By = histTag; r.approvedL2At = nowIso; }
+    r.rejectedBy = ''; r.rejectedAt = ''; r.rejectReason = ''; r.rejectedAtLevel = null;
+    r.updatedAt = nowIso;
+    try{ touchRecord(r); }catch(e){}
+    n++;
+  });
+  try{ logAuditEvent('ar_migration_v2_84', {count:n, by:actorName()}); }catch(e){}
+  saveState();
+  toast('Đã nâng '+n+' bản ghi AR sang "Đã duyệt"','good');
+  closeModal();
+  renderAll();
 }
 
 function addArPayment(kind,id){
@@ -21792,7 +21896,7 @@ function _quickViewData(){
 }
 let _quickViewTab = 'overview';  // overview | ar | ap
 function openQuickView(){
-  if(!(isAdmin()||canApproveL2())){ toast('Chỉ Admin/CFO xem Tổng quan nhanh','bad'); return; }
+  if(!canViewQuickOverview()){ toast('Chỉ Admin/CFO/KTT/Trưởng BP xem Tổng quan nhanh','bad'); return; }
   _quickViewTab = 'overview';  // v2.79.0: mỗi lần mở luôn bắt đầu từ tổng quan
   _renderQuickView();
 }
@@ -27565,7 +27669,7 @@ function openExcelImport(){
         <li>Mở template, điền dữ liệu (copy/paste từ FAST cũng OK)</li>
         <li>Bấm <b>Upload file đã điền</b> → preview → confirm</li>
       </ol>
-      <p style="color:var(--muted);font-size:11px"><b>Lưu ý v2.70.0:</b> Bút toán import sẽ được gán cho <b>nhân viên</b> chọn bên dưới, và đặt trạng thái theo cột <b>"Trạng thái"</b> trong file (nhap / chuyen_kt / da_duyet). Để trống cột này = Nháp. Dòng "da_duyet" được ghi nhận là duyệt từ dữ liệu lịch sử — KT vẫn ghi nhận thanh toán (ngày + phí NH) theo quy trình.</p>
+      <p style="color:var(--muted);font-size:11px"><b>Lưu ý v2.84.0:</b> Bút toán import gán cho <b>nhân viên</b> chọn bên dưới. Trạng thái lấy theo cột <b>"Trạng thái"</b> trong file (nhap / chuyen_kt / da_duyet). <b>Phải thu (AR)</b>: khi KTT/Admin import mà cột Trạng thái trống → tự đặt <b>Đã duyệt</b> (theo quy trình AR mới — không cần workflow nhiều cấp). <b>Phải trả (AP)</b>: vẫn theo workflow cũ, trống = Nháp. Dòng "da_duyet" = ghi nhận từ dữ liệu lịch sử.</p>
     </div>
 
     <div class="form-grid" style="grid-template-columns:1fr 1fr">
@@ -28640,12 +28744,26 @@ function excelConfirmImport(){
         approvedL2By: histTag, approvedL2At: importDate
       };
     } else {
-      // Mặc định / 'nhap' / để trống → Nháp, để NV tự hoàn thiện rồi chuyển KT
-      wfStatusVal='draft';
-      wfFields={
-        submittedBy:'', submittedAt:'',
-        approvedL1By:'', approvedL1At:'', approvedL2By:'', approvedL2At:''
-      };
+      // v2.84.0: Mặc định trống — phân biệt AR vs AP:
+      // - AR (phải thu) + người import là KTT/Admin → tự đã duyệt (theo quy trình AR mới)
+      // - Còn lại (AP hoặc NV nhập) → Nháp như cũ
+      const isArFastTrack = (tpl.target==='receivables') && (isAdmin() || canCheckAcc());
+      if(isArFastTrack){
+        const histTag2='(KTT import — '+actorName()+')';
+        wfStatusVal='approved';
+        wfFields={
+          submittedBy: assignee, submittedAt: importDate,
+          approvedL1By: histTag2, approvedL1At: importDate,
+          approvedL2By: histTag2, approvedL2At: importDate
+        };
+      } else {
+        // Mặc định / 'nhap' / để trống → Nháp, để NV tự hoàn thiện rồi chuyển KT
+        wfStatusVal='draft';
+        wfFields={
+          submittedBy:'', submittedAt:'',
+          approvedL1By:'', approvedL1At:'', approvedL2By:'', approvedL2At:''
+        };
+      }
     }
 
     const record={
