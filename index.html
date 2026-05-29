@@ -1592,6 +1592,15 @@ body.readonly-mode::before{
     <div id="bank-accounts-list"></div>
   </div>
 
+  <!-- v2.85.0: Hạn mức tín dụng theo NH/năm -->
+  <div class="section">
+    <div class="section-head">
+      <div class="section-title">Hạn mức tín dụng (theo NH)</div>
+      <button class="btn-sec" onclick="openCreditFacilityForm()" style="font-size:11px">+ Hạn mức mới</button>
+    </div>
+    <div id="credit-facilities-list"></div>
+  </div>
+
   <div class="section">
     <div class="section-head">
       <div class="section-title">Tín dụng &amp; Vay</div>
@@ -2645,7 +2654,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='2.84.0';            // bumped on each release
+const APP_VERSION='2.86.0';            // bumped on each release
 
 /* v2.62.0: Token xác thực backend — PHẢI khớp API_TOKEN trong Apps Script (Code.gs).
    Mọi request tới Apps Script tự động được gắn token qua lớp bọc fetch bên dưới.
@@ -4823,7 +4832,7 @@ const SHARED_FIELDS=['fxRate','displayCcy','companyInfo','meta','presence','vess
 /* All possible data fields (used by admin or for save-merge) */
 const ALL_DATA_FIELDS=[
   'plans','projects','vessels','onhires','events',
-  'receivables','payables','bankAccounts','bankSnapshots','loans','bankBalance','bankBalanceCcy',
+  'receivables','payables','bankAccounts','bankSnapshots','loans','creditFacilities','bankBalance','bankBalanceCcy',
   'opVessels','opTransactions','opMgmtFees','invGroups','invMovements','warehouses',
   'vesselExpenseCats','omProjectExpenseCats','hrExpenseCats','qnExpenseCats',
   'fixedAssets','tools',
@@ -9638,6 +9647,8 @@ function defaultState(){
     bankAccounts:[],     // [{id, bankName, branch, accountNo, accountName, ccy, isActive, note, createdAt}]
     bankSnapshots:[],    // v1.31: [{id, bankAccountId, date, balance, note, createdBy, createdAt}]
     loans:[],            // v1.31: [{id, bankName, loanType, contractNo, principal, ccy, interestRate, startDate, endDate, termMonths, repayMethod, paymentSchedule:[], status, note, createdBy, createdAt}]
+    // v2.85.0: Hạn mức tín dụng theo NH/năm. 1 facility = 1 hạn mức tổng. Các loans liên kết qua loan.facilityId.
+    creditFacilities:[], // [{id, bankName, year, limit, ccy, contractNo, startDate, expiryDate, collateral, note, isActive, createdAt, createdBy}]
     // v2.20.0: Quỹ tiền mặt (nhiều quỹ) + sổ quỹ
     cashFunds:[],        // [{id, name, fundType:'OFFICE'|'VESSEL'|'OTHER', ccy, balance, isActive, note, createdBy, createdAt}]
     cashTxns:[],         // [{id, fundId, date, direction:'IN'|'OUT', amount, ccy, category, desc, sourceType:'ar'|'ap'|'manual'|'transfer', sourceId, recordedBy, recordedAt}]
@@ -16977,6 +16988,66 @@ function renderBanking(){
     }
   }
 
+  // v2.85.0: Render bảng Hạn mức tín dụng (creditFacilities)
+  const cfBox = document.getElementById('credit-facilities-list');
+  if(cfBox){
+    const facilities = creditFacilitySummary();
+    if(facilities.length===0){
+      cfBox.innerHTML = '<div style="padding:30px;text-align:center;color:var(--muted);background:var(--paper);border:1px dashed var(--rule)">Chưa có hạn mức nào. Bấm <b>+ Hạn mức mới</b> để khai báo hạn mức NH cấp cho công ty (theo từng năm).</div>';
+    } else {
+      // Tổng hợp tổng (chỉ tính các facility ACTIVE)
+      const totals = creditFacilityTotalsUsd();
+      let h = `
+        <div style="margin-bottom:10px;padding:10px 14px;background:rgba(28,58,92,.04);border:1.5px solid var(--ink);border-radius:4px">
+          <div style="display:flex;gap:20px;flex-wrap:wrap;font-size:13px">
+            <div><span style="color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.06em">Tổng hạn mức</span><br><b style="font-size:15px">${fmtCcy(totals.limitUsd,'USD')}</b></div>
+            <div><span style="color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.06em">Đã vay</span><br><b style="font-size:15px;color:var(--bad)">${fmtCcy(totals.drawnUsd,'USD')}</b></div>
+            <div><span style="color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.06em">Còn được vay</span><br><b style="font-size:15px;color:#2d6a6a">${fmtCcy(totals.remainingUsd,'USD')}</b></div>
+            <div><span style="color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.06em">Sử dụng</span><br><b style="font-size:15px;color:${totals.utilization>80?'var(--bad)':(totals.utilization>50?'#c5876d':'var(--ink)')}">${totals.utilization.toFixed(1)}%</b></div>
+            <div style="font-size:10px;color:var(--muted);font-style:italic;align-self:end">Quy đổi USD theo FX ${(+S.fxRate||25000).toLocaleString('vi-VN')}</div>
+          </div>
+        </div>
+        <table class="tbl">
+          <thead>
+            <tr>
+              <th>Ngân hàng</th>
+              <th class="mono">Năm</th>
+              <th class="mono" style="text-align:right">Hạn mức</th>
+              <th class="mono" style="text-align:right">Đã vay</th>
+              <th class="mono" style="text-align:right">Còn được vay</th>
+              <th class="mono">Sử dụng</th>
+              <th class="mono">Số khoản</th>
+              <th class="mono">Đáo hạn HĐ</th>
+              <th class="col-action"></th>
+            </tr>
+          </thead>
+          <tbody>`;
+      facilities.forEach(f=>{
+        const util = f.utilization;
+        const utilColor = util>80?'var(--bad)':(util>50?'#c5876d':'#2d6a6a');
+        const expDate = f.expiryDate||'';
+        const daysToExpiry = expDate ? Math.floor((new Date(expDate).getTime() - Date.now())/86400000) : null;
+        const expWarn = daysToExpiry!==null && daysToExpiry<60 ? '⚠ ' : '';
+        const expStyle = daysToExpiry!==null && daysToExpiry<30 ? 'color:var(--bad);font-weight:700' : (daysToExpiry!==null && daysToExpiry<60 ? 'color:#c5876d' : '');
+        h += `<tr>
+          <td><b>${esc(f.bankName)}</b>${f.contractNo?`<br><span style="font-size:10px;color:var(--muted)" class="mono">${esc(f.contractNo)}</span>`:''}</td>
+          <td class="mono">${f.year}</td>
+          <td class="mono" style="text-align:right"><b>${fmtCcy(f.limit, f.ccy)}</b></td>
+          <td class="mono" style="text-align:right;color:var(--bad)">${fmtCcy(f.drawn, f.ccy)}</td>
+          <td class="mono" style="text-align:right;color:#2d6a6a"><b>${fmtCcy(f.remaining, f.ccy)}</b></td>
+          <td class="mono" style="color:${utilColor};font-weight:600">${util.toFixed(1)}%</td>
+          <td class="mono">${f.nLoans}</td>
+          <td class="mono" style="${expStyle}">${expWarn}${expDate||'—'}${daysToExpiry!==null && daysToExpiry>=0 && daysToExpiry<60?'<br><span style="font-size:10px">còn '+daysToExpiry+'d</span>':''}</td>
+          <td class="col-action">
+            <button class="icon-btn" title="Sửa" onclick="openCreditFacilityForm('${f.id}')">✎</button>
+          </td>
+        </tr>`;
+      });
+      h += '</tbody></table>';
+      cfBox.innerHTML = h;
+    }
+  }
+
   // Loans list
   const loanBox = document.getElementById('loans-list');
   if(loanBox){
@@ -17113,6 +17184,55 @@ function loanRemainingPrincipal(loan){
   const total = +loan.principal||0;
   const paid = (loan.paymentSchedule||[]).filter(p=>p.paid).reduce((s,p)=>s+(+p.principal||0),0);
   return Math.max(0, total - paid);
+}
+
+/* v2.85.0: Tổng hợp hạn mức tín dụng theo từng facility.
+   Trả về mảng các facility kèm: drawn (đã vay = tổng principal của các loans liên kết),
+   remaining (còn được vay = limit - drawn), nLoans (số khoản vay đang dùng hạn mức này). */
+function creditFacilitySummary(){
+  const facilities = (S.creditFacilities||[]).filter(f=>f.isActive!==false);
+  const loans = (S.loans||[]).filter(l=>l && (l.status==='active'||!l.status));
+  return facilities.map(f=>{
+    // Khoản vay liên kết: ưu tiên loan.facilityId; fallback theo tên NH + năm (cho dữ liệu cũ chưa liên kết)
+    const linkedLoans = loans.filter(l=>{
+      if(l.facilityId === f.id) return true;
+      // Fallback: cùng NH + năm khởi đầu trong khoảng năm facility (chỉ khi loan chưa có facilityId)
+      if(!l.facilityId && l.bankName === f.bankName && l.startDate){
+        const ly = (l.startDate||'').slice(0,4);
+        return ly === String(f.year);
+      }
+      return false;
+    });
+    // Đã vay = tổng dư nợ gốc CÒN LẠI của các loans liên kết (tức "đang chiếm hạn mức")
+    const drawn = linkedLoans.reduce((s,l)=>s + loanRemainingPrincipal(l), 0);
+    const limit = +f.limit || 0;
+    return {
+      ...f,
+      drawn,
+      remaining: Math.max(0, limit - drawn),
+      utilization: limit > 0 ? Math.min(100, (drawn/limit)*100) : 0,
+      linkedLoans,
+      nLoans: linkedLoans.length
+    };
+  });
+}
+
+/* v2.85.0: Tổng hạn mức + đã vay + còn lại toàn DN (gộp tất cả facility active) — quy đổi USD.
+   Dùng cho card "🏦 Tín dụng" trên Tổng quan nhanh. */
+function creditFacilityTotalsUsd(){
+  const list = creditFacilitySummary();
+  let limitUsd = 0, drawnUsd = 0;
+  list.forEach(f=>{
+    const fx = (+S.fxRate||25000);
+    const factor = (f.ccy==='USD') ? 1 : (1/fx);
+    limitUsd += (+f.limit||0) * factor;
+    drawnUsd += (+f.drawn||0) * factor;
+  });
+  return {
+    limitUsd, drawnUsd, remainingUsd: Math.max(0, limitUsd - drawnUsd),
+    nFacilities: list.length,
+    utilization: limitUsd>0 ? (drawnUsd/limitUsd)*100 : 0
+  };
 }
 
 /* Generate payment schedule for a loan
@@ -17568,6 +17688,124 @@ function _deleteBankSnapshot(id){
 }
 
 /* ===== LOAN CRUD ===== */
+/* v2.85.0: Quản lý HẠN MỨC TÍN DỤNG (Credit Facility) — 1 NH cấp 1 hạn mức/năm, nhiều loans giải ngân */
+function openCreditFacilityForm(id){
+  if(!isAdmin() && !canApproveL2() && !canCheckAcc()){
+    toast('Chỉ Admin/CFO/KTT được quản lý hạn mức','bad'); return;
+  }
+  const f = id ? ((S.creditFacilities||[]).find(x=>x.id===id)||{}) : {};
+  const isEdit = !!f.id;
+  const today = new Date();
+  const defaultYear = today.getFullYear();
+  const body = `
+    <div class="form-grid" style="grid-template-columns:1fr 1fr;gap:14px">
+      <div class="field">
+        <label>Ngân hàng *</label>
+        <input type="text" id="cf-bank" value="${esc(f.bankName||'')}" placeholder="VD: Vietcombank">
+      </div>
+      <div class="field">
+        <label>Năm hạn mức *</label>
+        <input type="number" id="cf-year" value="${f.year||defaultYear}" min="2020" max="2050">
+      </div>
+      <div class="field">
+        <label>Hạn mức tổng *</label>
+        <input type="number" id="cf-limit" value="${+f.limit||0}" placeholder="VD: 100000000000" step="any">
+      </div>
+      <div class="field">
+        <label>Tiền tệ *</label>
+        <select id="cf-ccy">
+          <option value="VND" ${f.ccy==='VND'?'selected':''}>VND</option>
+          <option value="USD" ${f.ccy==='USD'?'selected':''}>USD</option>
+        </select>
+      </div>
+      <div class="field">
+        <label>Số hợp đồng tín dụng</label>
+        <input type="text" id="cf-contract" value="${esc(f.contractNo||'')}" placeholder="VD: HD-2026-VCB-001">
+      </div>
+      <div class="field">
+        <label>Ngày hiệu lực</label>
+        <input type="date" id="cf-start" value="${esc(f.startDate||'')}">
+      </div>
+      <div class="field">
+        <label>Ngày đáo hạn hạn mức</label>
+        <input type="date" id="cf-expiry" value="${esc(f.expiryDate||'')}">
+      </div>
+      <div class="field">
+        <label>&nbsp;</label>
+        <label style="display:flex;align-items:center;gap:6px;padding:6px 0">
+          <input type="checkbox" id="cf-active" ${f.isActive!==false?'checked':''}>
+          <span style="font-size:13px">Đang hoạt động</span>
+        </label>
+      </div>
+      <div class="field" style="grid-column:1/-1">
+        <label>Tài sản thế chấp</label>
+        <input type="text" id="cf-collateral" value="${esc(f.collateral||'')}" placeholder="VD: Tàu Pacific Star + BĐS Vũng Tàu">
+      </div>
+      <div class="field" style="grid-column:1/-1">
+        <label>Ghi chú</label>
+        <textarea id="cf-note" rows="2">${esc(f.note||'')}</textarea>
+      </div>
+    </div>
+    <div id="cf-err" class="err" style="color:var(--bad);margin-top:8px;font-size:12px"></div>`;
+  const foot = `
+    ${isEdit?`<button class="btn-sec" style="color:var(--bad);border-color:var(--bad)" onclick="deleteCreditFacility('${f.id}')">🗑 Xóa</button>`:''}
+    <button class="btn-sec" onclick="closeModal()">Hủy</button>
+    <button class="btn-primary" onclick="saveCreditFacility('${f.id||''}')">${isEdit?'Cập nhật':'Thêm hạn mức'}</button>`;
+  openModal(isEdit?'Sửa hạn mức tín dụng':'Thêm hạn mức tín dụng', body, foot);
+}
+
+function saveCreditFacility(id){
+  const err = document.getElementById('cf-err');
+  err.textContent = '';
+  const bank = document.getElementById('cf-bank').value.trim();
+  const year = +document.getElementById('cf-year').value || 0;
+  const limit = +document.getElementById('cf-limit').value || 0;
+  const ccy = document.getElementById('cf-ccy').value;
+  const contractNo = document.getElementById('cf-contract').value.trim();
+  const startDate = document.getElementById('cf-start').value || '';
+  const expiryDate = document.getElementById('cf-expiry').value || '';
+  const active = document.getElementById('cf-active').checked;
+  const collateral = document.getElementById('cf-collateral').value.trim();
+  const note = document.getElementById('cf-note').value.trim();
+  if(!bank){err.textContent='Nhập tên ngân hàng';return;}
+  if(!year || year<2020){err.textContent='Nhập năm hạn mức hợp lệ';return;}
+  if(!limit || limit<=0){err.textContent='Nhập hạn mức tổng (>0)';return;}
+  if(!S.creditFacilities) S.creditFacilities=[];
+  if(id){
+    const f = S.creditFacilities.find(x=>x.id===id);
+    if(!f) return;
+    Object.assign(f, {bankName:bank, year, limit, ccy, contractNo, startDate, expiryDate, collateral, note, isActive:active, updatedAt:new Date().toISOString()});
+  } else {
+    S.creditFacilities.push({
+      id:'CF-'+uid().slice(-6),
+      bankName:bank, year, limit, ccy, contractNo, startDate, expiryDate, collateral, note,
+      isActive:active,
+      createdAt:new Date().toISOString(), createdBy:actorName()
+    });
+  }
+  saveState();
+  toast(id?'Đã cập nhật hạn mức':'Đã thêm hạn mức tín dụng');
+  closeModal();
+  renderBanking();
+}
+
+function deleteCreditFacility(id){
+  if(!isAdmin()){toast('Chỉ admin xóa hạn mức','bad'); return;}
+  const f = (S.creditFacilities||[]).find(x=>x.id===id);
+  if(!f) return;
+  const linked = (S.loans||[]).filter(l=>l.facilityId===id).length;
+  const linkedMsg = linked>0 ? `\n⚠ Có ${linked} khoản vay đang liên kết với hạn mức này (sẽ bị bỏ liên kết, không bị xóa).` : '';
+  if(!confirm(`Xóa hạn mức "${f.bankName} ${f.year}" (${fmtCcy(f.limit, f.ccy)})?${linkedMsg}`)) return;
+  // Bỏ liên kết facilityId ở các loans (không xóa loan)
+  (S.loans||[]).forEach(l=>{ if(l.facilityId===id) l.facilityId=null; });
+  S.creditFacilities = (S.creditFacilities||[]).filter(x=>x.id!==id);
+  markDeleted(id);
+  saveState();
+  toast('Đã xóa hạn mức');
+  closeModal();
+  renderBanking();
+}
+
 function addLoan(){
   if(!canEditTreasury()){toast('Chỉ Admin / Kế toán trưởng','bad');return;}
   _loanModal(null);
@@ -17594,6 +17832,18 @@ function _loanModal(l){
           <option value="medium" ${l.loanType==='medium'?'selected':''}>Trung hạn (12-60 tháng)</option>
           <option value="long" ${l.loanType==='long'?'selected':''}>Dài hạn (&gt;60 tháng)</option>
         </select>
+      </div>
+      <div class="field" style="grid-column:1/3">
+        <label>Hạn mức tín dụng (chọn nếu khoản vay này thuộc 1 hạn mức NH cấp) <span style="font-size:9px;color:var(--accent);font-weight:600">v2.85.0</span></label>
+        <select id="ln-facility">
+          <option value="">— Không liên kết hạn mức nào (vay độc lập) —</option>
+          ${(S.creditFacilities||[]).filter(cf=>cf.isActive!==false).map(cf=>{
+            const cfSum = creditFacilitySummary().find(x=>x.id===cf.id) || cf;
+            const remTxt = fmtCcy(cfSum.remaining||0, cf.ccy||'VND');
+            return `<option value="${cf.id}" ${l.facilityId===cf.id?'selected':''}>${esc(cf.bankName)} · ${cf.year} · Còn được vay: ${remTxt}</option>`;
+          }).join('')}
+        </select>
+        <div style="font-size:11px;color:var(--muted);margin-top:3px;font-style:italic">Liên kết để app trừ vào hạn mức + tính "Còn được vay" tự động</div>
       </div>
       <div class="field" style="grid-column:1/3">
         <label>Số hợp đồng tín dụng</label>
@@ -17679,6 +17929,9 @@ function _saveLoan(id){
   const paymentFrequency=+document.getElementById('ln-freq').value||1;
   let gracePeriodMonths=parseInt(document.getElementById('ln-grace').value,10)||0;
   const note=document.getElementById('ln-note').value.trim();
+  // v2.85.0: liên kết khoản vay với hạn mức (facility) nếu có
+  const facilityIdEl = document.getElementById('ln-facility');
+  const facilityId = facilityIdEl ? (facilityIdEl.value || null) : null;
   if(!bank){err.textContent='Nhập tên NH';return;}
   if(!(principal>0)){err.textContent='Số tiền vay phải > 0';return;}
   if(isNaN(rate)||rate<0){err.textContent='Lãi suất không hợp lệ';return;}
@@ -17703,7 +17956,7 @@ function _saveLoan(id){
     // Preserve paid status from old schedule
     const oldPaid={};
     (loan.paymentSchedule||[]).forEach(p=>{if(p.paid)oldPaid[p.period]=p;});
-    Object.assign(loan,{bankName:bank,loanType:type,contractNo:contract,principal,ccy,interestRate:rate,termMonths:term,startDate:start,endDate:finalEnd,repayMethod:method,paymentFrequency,gracePeriodMonths,note,updatedAt:new Date().toISOString()});
+    Object.assign(loan,{bankName:bank,loanType:type,contractNo:contract,principal,ccy,interestRate:rate,termMonths:term,startDate:start,endDate:finalEnd,repayMethod:method,paymentFrequency,gracePeriodMonths,note,facilityId,updatedAt:new Date().toISOString()});
     // Regenerate schedule + re-apply prepays + paid flags
     loanApplyPrepay(loan);  // builds schedule from base + applies all prepayments
     loan.paymentSchedule.forEach(p=>{if(oldPaid[p.period]){p.paid=true; p.paidDate=oldPaid[p.period].paidDate;}});
@@ -17716,6 +17969,7 @@ function _saveLoan(id){
       paymentFrequency, gracePeriodMonths,
       prepayments:[],
       note, status:'active',
+      facilityId,  // v2.85.0: liên kết hạn mức
       createdAt:new Date().toISOString(), createdBy:actorName()
     };
     loan.paymentSchedule=generateLoanSchedule(loan);
@@ -21971,6 +22225,19 @@ function _renderQuickView(){
           <div style="display:flex;justify-content:space-between;font-size:13px"><span style="color:var(--muted)">Dự kiến TRẢ</span><b style="color:var(--bad)">${fmtU(d.ap.soon30Usd)}</b></div>
           <div style="display:flex;justify-content:space-between;font-size:15px;margin-top:6px;padding-top:6px;border-top:1.5px solid var(--ink)"><b>Dòng tiền ròng dự kiến</b><b style="color:${duKienRong>=0?'#2d6a6a':'var(--bad)'}">${fmtU(duKienRong)}</b></div>
         </div>
+        ${(()=>{
+          // v2.85.0: Card Hạn mức tín dụng còn lại
+          const ct = creditFacilityTotalsUsd();
+          if(ct.nFacilities===0) return '';  // không hiển thị nếu chưa khai báo facility nào
+          const utilColor = ct.utilization>80?'var(--bad)':(ct.utilization>50?'#c5876d':'#2d6a6a');
+          return `<div style="padding:14px;border:1px solid var(--rule);border-radius:6px;background:rgba(74,107,44,.04)">
+            <div style="font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:#4a6b2c;font-weight:700;margin-bottom:8px">🏦 Hạn mức tín dụng (${ct.nFacilities} NH)</div>
+            <div style="display:flex;justify-content:space-between;font-size:13px"><span style="color:var(--muted)">Tổng hạn mức</span><b>${fmtU(ct.limitUsd)}</b></div>
+            <div style="display:flex;justify-content:space-between;font-size:13px"><span style="color:var(--muted)">Đã vay</span><b style="color:var(--bad)">${fmtU(ct.drawnUsd)}</b></div>
+            <div style="display:flex;justify-content:space-between;font-size:15px;margin-top:6px;padding-top:6px;border-top:1.5px solid var(--rule)"><b>Còn được vay</b><b style="color:#2d6a6a">${fmtU(ct.remainingUsd)}</b></div>
+            <div style="display:flex;justify-content:space-between;font-size:11px;margin-top:4px"><span style="color:var(--muted)">Tỷ lệ sử dụng</span><span style="color:${utilColor};font-weight:600">${ct.utilization.toFixed(1)}%</span></div>
+          </div>`;
+        })()}
         <div style="font-size:10px;color:var(--muted);font-style:italic;text-align:center">Quy đổi USD theo tỷ giá ${(+S.fxRate||25000).toLocaleString('vi-VN')}</div>
       </div>`;
   } else if(_quickViewTab==='ar'){
@@ -27703,6 +27970,12 @@ function openExcelImport(){
       <div id="xls-dedupe-info" style="margin-top:10px;padding-top:10px;border-top:1px dashed var(--rule)"></div>
       <div id="xls-ap-dedupe-info" style="margin-top:10px;padding-top:10px;border-top:1px dashed var(--rule)"></div>
     </div>
+
+    <!-- v2.86.0: Xóa TẤT CẢ bản ghi import Excel (không phụ thuộc lastImportBatch — dùng cờ _importedFromExcel) -->
+    <div style="margin-top:12px;padding:10px 14px;border:1px solid var(--bad);border-radius:4px;background:rgba(184,71,46,.04)">
+      <div style="font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--bad);font-weight:700;margin-bottom:6px">🧹 Gỡ hàng loạt — tất cả bản ghi từng import Excel</div>
+      <div id="xls-bulk-undo-info" style="font-size:12px"></div>
+    </div>
   `;
   openModal('📥 Import Excel hàng loạt', body, '<button class="btn-sec" onclick="closeModal()">Đóng</button>');
   try{ renderExcelImportInfo(); }catch(e){}
@@ -28921,6 +29194,7 @@ function deleteLastImportBatch(){
 function renderExcelImportInfo(){
   renderOpDedupeInfo();  // v2.71.3: luôn render phần dọn trùng (kể cả khi chưa có lô gần nhất)
   try{ renderApDedupeInfo(); }catch(e){}  // v2.72.1: rà công nợ phải trả trùng
+  try{ renderBulkUndoInfo(); }catch(e){}  // v2.86.0: gỡ hàng loạt theo cờ _importedFromExcel
   const el=document.getElementById('xls-last-batch-info');
   if(!el) return;
   const b=S.lastImportBatch;
@@ -28942,6 +29216,68 @@ function renderExcelImportInfo(){
         ? `<button class="btn-sec" style="color:var(--bad);border-color:var(--bad);white-space:nowrap" onclick="deleteLastImportBatch()">🗑 Xóa lô import gần nhất</button>`
         : (remaining===0 ? '<span style="font-size:11px;color:var(--muted);font-style:italic">Đã xóa</span>' : '')}
     </div>`;
+}
+
+/* v2.86.0: Render khu "Gỡ hàng loạt" — xóa mọi bản ghi có cờ _importedFromExcel.
+   Không phụ thuộc S.lastImportBatch (vốn chỉ giữ 1 lô gần nhất, dễ bị mất). */
+function renderBulkUndoInfo(){
+  const el = document.getElementById('xls-bulk-undo-info');
+  if(!el) return;
+  const canDel = isAdmin() || canApproveL2() || canCheckAcc();
+  if(!canDel){
+    el.innerHTML = '<span style="color:var(--muted);font-style:italic">Chỉ Admin/CFO/KTT được gỡ hàng loạt</span>';
+    return;
+  }
+  const targets = [
+    {key:'receivables', name:'Phải thu (AR)', emoji:'📥'},
+    {key:'payables', name:'Phải trả (AP)', emoji:'📤'},
+    {key:'opTransactions', name:'Thu/Chi hộ', emoji:'⚓'},
+    {key:'vendors', name:'NCC', emoji:'🏢'},
+    {key:'fixedAssets', name:'TSCĐ', emoji:'🛠'},
+    {key:'tools', name:'CCDC', emoji:'🔧'}
+  ];
+  let h = '<div style="display:flex;flex-direction:column;gap:6px">';
+  let totalFound = 0;
+  targets.forEach(t=>{
+    const arr = Array.isArray(S[t.key]) ? S[t.key] : [];
+    const imported = arr.filter(r => r && r._importedFromExcel === true);
+    if(imported.length===0) return;
+    totalFound += imported.length;
+    h += `<div style="display:flex;align-items:center;justify-content:space-between;gap:10px;padding:4px 0;border-bottom:1px dashed rgba(0,0,0,.08)">
+      <span style="font-size:12px">${t.emoji} <b>${t.name}:</b> <b style="color:var(--bad)">${imported.length}</b> bản ghi có cờ "import từ Excel"</span>
+      <button class="btn-sec" style="color:var(--bad);border-color:var(--bad);font-size:11px;white-space:nowrap" onclick="bulkDeleteImportedRecords('${t.key}','${esc(t.name)}')">🗑 Xóa ${imported.length}</button>
+    </div>`;
+  });
+  if(totalFound===0){
+    el.innerHTML = '<span style="color:var(--muted);font-style:italic">Không có bản ghi nào có cờ "đã import từ Excel".</span>';
+    return;
+  }
+  h += '</div>';
+  h += '<div style="font-size:10px;color:var(--muted);font-style:italic;margin-top:8px;line-height:1.4">⚠ Chỉ xóa các bản ghi do app đánh dấu là "đã import từ Excel" (cờ _importedFromExcel). Bản ghi nhập tay sẽ KHÔNG bị xóa. Có thể khôi phục bằng cách import lại file Excel.</div>';
+  el.innerHTML = h;
+}
+
+function bulkDeleteImportedRecords(key, displayName){
+  if(!isAdmin() && !canApproveL2() && !canCheckAcc()){ toast('Không có quyền','bad'); return; }
+  const arr = Array.isArray(S[key]) ? S[key] : [];
+  const imported = arr.filter(r => r && r._importedFromExcel === true);
+  if(imported.length===0){ toast('Không có bản ghi nào để xóa','warn'); return; }
+  const sample = imported.slice(0,5).map((r,i)=>{
+    const partner = r.partner||r.name||r.vendor||r.invoiceNo||r.code||'?';
+    const amt = (+r.amount||+r.amountGross||+r.cost||0);
+    const ccy = r.ccy||'';
+    return `${i+1}. ${String(partner).slice(0,50)}${amt?' · '+fmtCcy(amt,ccy):''}`;
+  }).join('\n');
+  const more = imported.length>5 ? `\n... và ${imported.length-5} bản ghi khác` : '';
+  if(!confirm(`🗑 XÓA HÀNG LOẠT bản ghi import — ${displayName}\n\nApp sẽ xóa ${imported.length} bản ghi có cờ "đã import từ Excel" khỏi "${displayName}".\n\n5 bản ghi đầu:\n${sample}${more}\n\n⚠ Bản ghi nhập tay KHÔNG bị ảnh hưởng. Có thể KHÔI PHỤC bằng cách import lại file Excel.\n\nTiếp tục?`)) return;
+  const deletedIds = imported.map(r=>r.id).filter(Boolean);
+  try{ markDeleted(deletedIds); }catch(e){}
+  S[key] = arr.filter(r => !(r && r._importedFromExcel === true));
+  try{ logAuditEvent('bulk_delete_imported', {target:key, count:imported.length, by:actorName()}); }catch(e){}
+  saveState();
+  toast(`Đã xóa ${imported.length} bản ghi ${displayName}`,'good');
+  closeModal();
+  renderAll();
 }
 
 /* v2.71.3: render khu "Dọn bút toán Thu/Chi hộ trùng" — chạy độc lập với lô gần nhất */
