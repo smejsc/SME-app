@@ -1451,6 +1451,7 @@ body.readonly-mode::before{
         <div class="field"><label>Hạn TT</label><input type="date" id="hex-due"></div>
         <div class="field"><label>Dự kiến TT tháng</label><input type="month" id="hex-due-month"></div>
         <div class="field" style="background:rgba(139,90,43,.06);padding:6px 8px;border-radius:4px"><label>👤 TNCN khấu trừ <span style="color:var(--muted);text-transform:none;font-weight:400;font-size:10px">(chỉ khi là lương)</span></label><input type="number" id="hex-pit-amount" value="0" step="any" placeholder="0 = không có TNCN"></div>
+        <div class="field" style="background:rgba(74,140,90,.06);padding:6px 8px;border-radius:4px"><label>🏥 BHXH/BHYT/BHTN <span style="color:var(--muted);text-transform:none;font-weight:400;font-size:10px">(mặc định 32% lương gross)</span></label><input type="number" id="hex-bhxh-amount" value="0" step="any" placeholder="0 = không có BHXH"></div>
       </div>
       <div class="form-actions">
         <button class="btn-primary" onclick="addHrExpense()">+ Thêm chi phí (vào Nháp)</button>
@@ -2663,7 +2664,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='2.99.17';            // bumped on each release
+const APP_VERSION='2.99.18';            // bumped on each release
 
 /* v2.62.0: Token xác thực backend — PHẢI khớp API_TOKEN trong Apps Script (Code.gs).
    Mọi request tới Apps Script tự động được gắn token qua lớp bọc fetch bên dưới.
@@ -7758,6 +7759,7 @@ function wfApproveL2(r){
   try{ applyAdvanceToFund(r); }catch(e){console.warn('applyAdvanceToFund failed',e);}
   try{ applyAssetToTools(r); }catch(e){console.warn('applyAssetToTools failed',e);}
   try{ applyDockToAsset(r); }catch(e){console.warn('applyDockToAsset failed',e);}
+  try{ _autoSyncTaxFromApSalary(r); }catch(e){console.warn('autoSyncTax failed',e);}  // v2.99.18
   try{ logAuditEvent('approve_l2',{recordId:r.id,partner:r.partner||r.desc,amount:r.amount,ccy:r.ccy}); }catch(e){}
   touchRecord(r);  // v2.61.0: timestamp cho sync
   return true;
@@ -7777,6 +7779,7 @@ function wfReject(r,reason){
   r.rejectedAt=new Date().toISOString();
   r.rejectReason=reason||'';
   r.rejectedAtLevel=at;
+  try{ _autoCleanupTaxFromAp(r.id); }catch(e){console.warn('autoCleanup tax failed',e);}  // v2.99.18
   try{ logAuditEvent('reject',{recordId:r.id,partner:r.partner||r.desc,level:at,reason:reason||''}); }catch(e){}
   touchRecord(r);  // v2.61.0: timestamp cho sync
   return true;
@@ -9555,7 +9558,8 @@ const NSNN_TAX_TYPES = {
   VAT_OUTPUT:       {label:'GTGT đầu ra',     icon:'🧾', color:'#2a5a8c', source:'auto',          hint:'Tự tính từ AR đã duyệt (sum của vatAmount)'},
   VAT_INPUT:        {label:'GTGT đầu vào',    icon:'🧾', color:'#5a7a3e', source:'auto',          hint:'Tự tính từ AP đã duyệt (sum của vatAmount)'},
   VAT_PAYABLE:      {label:'GTGT phải nộp',   icon:'💰', color:'#b8472e', source:'auto_override', hint:'= GTGT đầu ra − GTGT đầu vào. Admin có thể override từng tháng.'},
-  PIT:              {label:'TNCN',            icon:'👤', color:'#8b5a2b', source:'auto',          hint:'Tự tính từ AP loại SALARY có field pitAmount'},
+  PIT:              {label:'TNCN',            icon:'👤', color:'#8b5a2b', source:'auto',          hint:'Tự tính từ AP loại SALARY có field pitAmount. AUTO sinh record khi AP Lương được duyệt.'},
+  INSURANCE_SOCIAL: {label:'BHXH/BHYT/BHTN',  icon:'🏥', color:'#4a8c5a', source:'auto',          hint:'Tự tính từ AP loại SALARY có field bhxhAmount (32% lương gross mặc định). AUTO sinh record khi AP Lương được duyệt. Hạn nộp ngày 20 tháng sau.'},
   IMPORT_DUTY:      {label:'Thuế Nhập khẩu',  icon:'📦', color:'#7a5a2a', source:'manual',        hint:'Thuế NK hàng hóa nhập (nhập tay)'},
   IMPORT_VAT:       {label:'GTGT Nhập khẩu',  icon:'📦', color:'#a06b3e', source:'manual',        hint:'Thuế GTGT khâu nhập khẩu (nhập tay)'},
   FCT:              {label:'Nhà thầu (FCT)',  icon:'🏢', color:'#6a4a8c', source:'manual',        hint:'Thuế nhà thầu (TNDN + GTGT thầu nước ngoài, nhập tay)'},
@@ -14311,7 +14315,7 @@ function hexRecalcVat(){deptRecalcVat('hex');}
 function qexRecalcVat(){deptRecalcVat('qex');}
 
 function resetDeptForm(prefix){
-  ['desc','partner','amount-net','vat-amount','amount-gross','due','due-month','pit-amount'].forEach(f=>{
+  ['desc','partner','amount-net','vat-amount','amount-gross','due','due-month','pit-amount','bhxh-amount'].forEach(f=>{
     const el=document.getElementById(prefix+'-'+f);
     if(el) el.value=(f.includes('amount')?0:'');
   });
@@ -14376,6 +14380,13 @@ function addDeptExpense(prefix, origin, defaultSegment){
   // v1.37: pitAmount only for HR expense (loại lương → có TNCN khấu trừ)
   const pitEl=document.getElementById(prefix+'-pit-amount');
   const pitAmount = pitEl ? (+pitEl.value || 0) : 0;
+  // v2.99.18: bhxhAmount cho HR expense — auto-suggest 32% gross nếu user để 0
+  const bhxhEl=document.getElementById(prefix+'-bhxh-amount');
+  let bhxhAmount = bhxhEl ? (+bhxhEl.value || 0) : 0;
+  // Auto-suggest BHXH nếu là HR form (prefix='hex') và user chưa nhập (=0)
+  if(prefix==='hex' && bhxhAmount===0 && amountGross>0){
+    bhxhAmount = Math.round(amountGross * 0.32);  // 32% mặc định
+  }
   const prjEl=document.getElementById(prefix+'-project');
   const vesselEl=document.getElementById(prefix+'-vessel');
   let projectId=prjEl?prjEl.value:'';
@@ -14401,6 +14412,7 @@ function addDeptExpense(prefix, origin, defaultSegment){
     dueAmount:0,
     payments:[],
     pitAmount,  // v1.37: TNCN khấu trừ (chỉ áp dụng cho HR expense)
+    bhxhAmount, // v2.99.18: BHXH/BHYT/BHTN (32% gross mặc định, auto sinh NSNN khi duyệt)
     status:'draft',
     submittedBy:'',submittedAt:'',
     approvedL1By:'',approvedL1At:'',
@@ -21022,6 +21034,7 @@ function deleteAr(kind,id){
       try{ logAuditEvent(kind==='ap'?'delete_ap':'delete_ar',
         {recordId:r.id, partner:r.partner||'', amount:r.amount||0, ccy:r.ccy||'',
          desc:r.desc||'', issueDate:r.issueDate||'', actor:actorName()}); }catch(e){}
+      if(kind==='ap'){ try{ _autoCleanupTaxFromAp(r.id); }catch(e){console.warn('autoCleanup tax failed',e);} }  // v2.99.18
       S[list]=S[list].filter(x=>x.id!==id);markDeleted(id);saveState();toast('Đã xóa');renderAll();
     });
 }
@@ -22724,8 +22737,8 @@ function _quickViewData(){
       if(usd !== null) loanSoon30Usd += usd;
     });
   });
-  // v2.99.16: Lương dự kiến rơi vào 30 ngày tới — dựa vào ngày 5 đầu tháng (lương T trước trả 5 đầu T sau)
-  // v2.99.17: SKIP tháng đã chi lương (phát hiện qua salaryFund.withdrawals + AP_SALARY)
+  // v2.99.16/v2.99.17: Lương dự kiến rơi vào 30 ngày tới — dựa vào ngày 5 đầu tháng (lương T trước trả 5 đầu T sau)
+  // SKIP tháng đã chi lương (phát hiện qua salaryFund.withdrawals + AP_SALARY)
   let salarySoon30Usd = 0;
   if(typeof _cfMonthlySalaryVnd === 'function'){
     const monthlyVnd = _cfMonthlySalaryVnd();
@@ -22735,7 +22748,6 @@ function _quickViewData(){
       const cur = new Date(todayD.getFullYear(), todayD.getMonth(), 5);
       if(cur < todayD) cur.setMonth(cur.getMonth()+1);
       while(cur <= endD){
-        // Tháng được trả lương = tháng TRƯỚC của cur (vd cur=5/6 → trả lương T5)
         const payForMonth = new Date(cur.getFullYear(), cur.getMonth()-1, 1);
         if(!_salaryPaidForMonth(payForMonth)){
           salarySoon30Usd += _toUsdFixed(monthlyVnd, 'VND') || 0;
@@ -22744,7 +22756,50 @@ function _quickViewData(){
       }
     }
   }
-  return {bankByCcy, cashByCcy, ar:summarize(ar), ap:summarize(ap), loanSoon30Usd, salarySoon30Usd};
+  // v2.99.18: NSNN đến hạn 30 ngày tới (records cụ thể có dueDate)
+  let nsnnSoon30Usd = 0;
+  if(S.taxes && Array.isArray(S.taxes.records)){
+    S.taxes.records.forEach(t=>{
+      const remain = (+t.amount||0) - (+t.paidAmount||0);
+      if(remain <= 0) return;
+      const dueDate = t.dueDate || '';
+      if(!dueDate || dueDate > in30ISO || dueDate < today) return;
+      const usd = _toUsdFixed(remain, t.ccy||'VND');
+      if(usd !== null) nsnnSoon30Usd += usd;
+    });
+  }
+  // v2.99.18: BHXH không còn forecast tự sinh nữa — giờ là record trong S.taxes.records,
+  // đã được tính trong nsnnSoon30Usd ở trên (auto sinh khi AP Lương được duyệt)
+  return {bankByCcy, cashByCcy, ar:summarize(ar), ap:summarize(ap), loanSoon30Usd, salarySoon30Usd, nsnnSoon30Usd};
+}
+
+/* v2.99.18: Phát hiện đã nộp BHXH cho 1 tháng — kiểm AP có expenseType BHXH/BHYT/BHTN
+   hoặc partner chứa 'BHXH'/'Bảo hiểm xã hội' với issueDate trong tháng đó.
+   Ngưỡng 50% lương BHXH dự kiến. */
+function _bhxhPaidForMonth(monthDate, monthlyBhxhVnd){
+  if(monthlyBhxhVnd === undefined && typeof _cfMonthlyBhxhVnd === 'function'){
+    monthlyBhxhVnd = _cfMonthlyBhxhVnd();
+  }
+  const y = monthDate.getFullYear();
+  const m = monthDate.getMonth();
+  const monthStr = `${y}-${String(m+1).padStart(2,'0')}`;
+  const fx = +S.fxRate || 25000;
+  let sumPaid = 0;
+  (S.payables||[]).forEach(r=>{
+    if(wfStatus(r)!=='approved') return;
+    if(!r.issueDate || !r.issueDate.startsWith(monthStr)) return;
+    const et = (r.expenseType || r.costCategory || '').toUpperCase();
+    const partner = (r.partner || '').toLowerCase();
+    const desc = (r.desc || '').toLowerCase();
+    const isBhxh = ['BHXH','BHYT','BHTN','SOCIAL_INSURANCE'].includes(et)
+      || partner.includes('bhxh') || partner.includes('bảo hiểm xã hội')
+      || desc.includes('bhxh') || desc.includes('bảo hiểm xã hội');
+    if(!isBhxh) return;
+    const amt = +r.amountGross || +r.amount || 0;
+    sumPaid += r.ccy==='VND' ? amt : amt*fx;
+  });
+  if(monthlyBhxhVnd > 0) return sumPaid >= monthlyBhxhVnd * 0.5;
+  return sumPaid > 0;
 }
 
 /* v2.99.17: Phát hiện đã chi lương cho 1 tháng cụ thể.
@@ -22907,8 +22962,9 @@ function _renderQuickView(){
 
   if(_quickViewTab==='overview'){
     const loanSoon = +d.loanSoon30Usd || 0;
-    const salarySoon = +d.salarySoon30Usd || 0;  // v2.99.16
-    const apSoonTotal = (+d.ap.soon30Usd||0) + loanSoon + salarySoon;  // v2.99.16: AP + nợ vay + lương
+    const salarySoon = +d.salarySoon30Usd || 0;
+    const nsnnSoon = +d.nsnnSoon30Usd || 0;   // v2.99.18: bao gồm cả BHXH (auto sinh khi AP Lương duyệt)
+    const apSoonTotal = (+d.ap.soon30Usd||0) + loanSoon + salarySoon + nsnnSoon;
     const duKienRong = (+d.ar.soon30Usd||0) - apSoonTotal;
     body=`
       <div style="display:flex;flex-direction:column;gap:14px">
@@ -22937,7 +22993,7 @@ function _renderQuickView(){
           <div style="font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--ink);font-weight:700;margin-bottom:8px">📅 Dự kiến 30 ngày tới (theo hạn TT)</div>
           <div style="display:flex;justify-content:space-between;font-size:13px"><span style="color:var(--muted)">Dự kiến THU</span><b style="color:#2d6a6a">${fmtU(d.ar.soon30Usd)}</b></div>
           <div style="display:flex;justify-content:space-between;font-size:13px"><span style="color:var(--muted)">Dự kiến TRẢ</span><b style="color:var(--bad)">${fmtU(apSoonTotal)}</b></div>
-          <div style="display:flex;justify-content:space-between;font-size:10px;color:var(--muted);font-style:italic;padding-left:8px">↳ NCC ${fmtU(d.ap.soon30Usd)} + Nợ vay ${fmtU(loanSoon)}${salarySoon>0?' + Lương '+fmtU(salarySoon):''}</div>
+          <div style="display:flex;justify-content:space-between;font-size:10px;color:var(--muted);font-style:italic;padding-left:8px">↳ NCC ${fmtU(d.ap.soon30Usd)} + Nợ vay ${fmtU(loanSoon)}${salarySoon>0?' + Lương '+fmtU(salarySoon):''}${nsnnSoon>0?' + NSNN '+fmtU(nsnnSoon)+' <span title="GTGT/TNCN/BHXH... đã ghi nhận">ⓘ</span>':''}</div>
           <div style="display:flex;justify-content:space-between;font-size:15px;margin-top:6px;padding-top:6px;border-top:1.5px solid var(--ink)"><b>Dòng tiền ròng dự kiến</b><b style="color:${duKienRong>=0?'#2d6a6a':'var(--bad)'}">${fmtU(duKienRong)}</b></div>
         </div>
         ${(()=>{
@@ -26028,6 +26084,83 @@ function _nsnnInit(){
   if(!Array.isArray(S.taxes.records)) S.taxes.records=[];
 }
 
+/* v2.99.18: Auto-sync NSNN records khi AP Lương được DUYỆT.
+   - PIT từ r.pitAmount > 0
+   - INSURANCE_SOCIAL từ r.bhxhAmount > 0
+   Idempotent: nếu đã sinh record cho AP này thì update thay vì tạo mới.
+   Hạn nộp: ngày 20 tháng sau issueDate. */
+function _autoSyncTaxFromApSalary(r){
+  if(!r || !r.id) return;
+  // Chỉ áp dụng cho AP loại Lương được duyệt
+  const et = r.expenseType || r.costCategory || '';
+  const etUpper = String(et).toUpperCase();
+  const isSalaryAp = ['SALARY','BONUS','ALLOWANCE','ET-SALARY','ET-BONUS','ET-ALLOWANCE'].includes(etUpper)
+    || etUpper.includes('SALARY') || etUpper.includes('LƯƠNG') || etUpper.includes('LUONG');
+  if(!isSalaryAp) return;
+  if(r.status !== 'approved') return;
+  _nsnnInit();
+  const issueDate = r.issueDate || new Date().toISOString().slice(0,10);
+  // Hạn nộp = ngày 20 tháng sau issueDate
+  const dueD = new Date(issueDate);
+  dueD.setMonth(dueD.getMonth()+1);
+  dueD.setDate(20);
+  const dueDateStr = dueD.toISOString().slice(0,10);
+  const period = issueDate.slice(0,7);  // YYYY-MM của lương phát sinh
+  const pitAmt = +r.pitAmount || 0;
+  const bhxhAmt = +r.bhxhAmount || 0;
+  // Helper: upsert tax record cho AP này
+  const upsert = (taxType, amount, label) => {
+    if(amount <= 0) return;
+    // Tìm record đã tồn tại linked với AP này + loại
+    const existing = S.taxes.records.find(t =>
+      t.linkedApId === r.id && t.type === taxType);
+    if(existing){
+      // Update nếu khác — chỉ update phần CHƯA NỘP (paidAmount đã có thì giữ)
+      if(Math.abs((+existing.amount||0) - amount) > 0.01){
+        existing.amount = amount;
+        existing.description = label;
+        existing.updatedAt = new Date().toISOString();
+      }
+      return;
+    }
+    // Tạo mới
+    S.taxes.records.push({
+      id:'TAX-AUTO-'+(typeof uid==='function'?uid().slice(-6):Math.random().toString(36).slice(-6)),
+      type: taxType,
+      period: period,
+      description: label,
+      amount: amount,
+      ccy: r.ccy || 'VND',
+      dueDate: dueDateStr,
+      paidAmount: 0,
+      paidDate: '',
+      isExpense: false,  // không tạo AP — vì đã có AP Lương rồi
+      vesselId: '',
+      isOpVessel: false,
+      projectId: '',
+      linkedApId: r.id,  // link 1-1 với AP để idempotent
+      _autoFromAp: true, // đánh dấu tự sinh
+      addedBy: 'AUTO (' + actorName() + ')',
+      addedAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    });
+  };
+  upsert('PIT', pitAmt, `TNCN T${period.slice(5)}/${period.slice(2,4)} (auto từ AP Lương · ${r.partner||r.desc||'?'})`);
+  upsert('INSURANCE_SOCIAL', bhxhAmt, `BHXH T${period.slice(5)}/${period.slice(2,4)} (auto từ AP Lương · ${r.partner||r.desc||'?'})`);
+  try{ logAuditEvent('auto_sync_tax_from_salary', {apId:r.id, pit:pitAmt, bhxh:bhxhAmt, period}); }catch(e){}
+}
+
+/* v2.99.18: Khi AP Lương bị reject hoặc xóa → gỡ record NSNN auto đã sinh */
+function _autoCleanupTaxFromAp(apId){
+  if(!apId) return;
+  _nsnnInit();
+  const before = S.taxes.records.length;
+  S.taxes.records = S.taxes.records.filter(t => !(t._autoFromAp && t.linkedApId === apId));
+  if(S.taxes.records.length !== before){
+    try{ logAuditEvent('auto_cleanup_tax_from_ap', {apId, removed: before - S.taxes.records.length}); }catch(e){}
+  }
+}
+
 /* Sub-tab switcher */
 let NSNN_SUBTAB='overview';
 function _nsnnSwitchSubtab(name){
@@ -26334,7 +26467,7 @@ function _nsnnComputeAuto(period){
     return date.startsWith(period);  // YYYY-MM matches if date starts with it
   };
 
-  let vatOut=0, vatIn=0, pit=0;
+  let vatOut=0, vatIn=0, pit=0, bhxh=0;  // v2.99.18: + bhxh
   const ar = filterBODRecords(S.receivables||[]);
   const ap = filterBODRecords(S.payables||[]);
 
@@ -26364,6 +26497,12 @@ function _nsnnComputeAuto(period){
     if(isSalary && +r.pitAmount > 0){
       pit += toDisplay(+r.pitAmount, r.ccy||'VND');
     }
+    // v2.99.18: BHXH auto from SALARY/BONUS/ALLOWANCE records
+    const isHrLike = isSalary || et==='ET-BONUS' || et==='ET-ALLOWANCE'
+      || (etMeta && ['BONUS','ALLOWANCE'].includes(etMeta.code));
+    if(isHrLike && +r.bhxhAmount > 0){
+      bhxh += toDisplay(+r.bhxhAmount, r.ccy||'VND');
+    }
   });
 
   // v2.70.0: VAT đầu vào từ hóa đơn CHI HỘ (op_transactions OUT) đã thanh toán (xác nhận).
@@ -26385,7 +26524,7 @@ function _nsnnComputeAuto(period){
   const hasOverride = (typeof overrideVal === 'number');
   if(hasOverride) vatPayable = overrideVal;
 
-  return {VAT_OUTPUT:vatOut, VAT_INPUT:vatIn, VAT_PAYABLE:vatPayable, PIT:pit, _hasVatOverride:hasOverride};
+  return {VAT_OUTPUT:vatOut, VAT_INPUT:vatIn, VAT_PAYABLE:vatPayable, PIT:pit, INSURANCE_SOCIAL:bhxh, _hasVatOverride:hasOverride};
 }
 
 /* === Sum manual tax records for a period ===
@@ -27059,6 +27198,8 @@ function _cfOutflowsInWindow(start, end){
       cur.setMonth(cur.getMonth()+1);
     }
   }
+  // v2.99.18: BHXH + NSNN forecast đã BỎ tự sinh — giờ là S.taxes.records 
+  // (auto sinh khi AP Lương được duyệt, đã được tính trong nhánh "NSNN — taxes.records" ở trên)
   return out;
 }
 
@@ -27111,6 +27252,114 @@ function _cfMonthlySalaryVnd(){
   return 0;
 }
 
+/* v2.99.18: BHXH tháng dự kiến (VND) — fallback 2 tầng:
+   1. Cài đặt thủ công S.cashflowConfig.monthlyBhxhVnd > 0
+   2. AP có expenseType='BHXH' / 'BHYT' / 'BHTN' / 'INSURANCE_SOCIAL' 3 tháng gần nhất / 3
+   Trả về 0 nếu không có nguồn nào. */
+let _cfBhxhSource = 'none';
+function _cfMonthlyBhxhVnd(){
+  const cfg = S.cashflowConfig || {};
+  if(+cfg.monthlyBhxhVnd > 0){
+    _cfBhxhSource = 'manual';
+    return +cfg.monthlyBhxhVnd;
+  }
+  const today = new Date();
+  const threeMonthsAgo = new Date(today);
+  threeMonthsAgo.setMonth(today.getMonth()-3);
+  const BHXH_TYPES = ['BHXH','BHYT','BHTN','INSURANCE_SOCIAL'];
+  const sumBhxh = (S.payables||[]).filter(r=>{
+    if(wfStatus(r)!=='approved') return false;
+    const et = (r.expenseType || r.costCategory || '').toUpperCase();
+    if(!BHXH_TYPES.includes(et)) return false;
+    if(!r.issueDate) return false;
+    return new Date(r.issueDate) >= threeMonthsAgo;
+  }).reduce((s,r)=>{
+    const amt = +r.amountGross || +r.amount || 0;
+    return s + (r.ccy==='VND' ? amt : amt*fxRate());
+  }, 0);
+  if(sumBhxh > 0){
+    _cfBhxhSource = 'ap_bhxh';
+    return sumBhxh / 3;
+  }
+  _cfBhxhSource = 'none';
+  return 0;
+}
+
+/* v2.99.18: Liệt kê các sự kiện nộp NSNN dự kiến trong window [start, end).
+   - Records có sẵn trong S.taxes.records (đã có dueDate cụ thể) → giữ nguyên (đã có code xử lý).
+   - Tự sinh thêm GTGT/TNCN cho các tháng vừa qua nếu CHƯA có record cho tháng đó:
+     + GTGT phải nộp tháng N: lấy từ NSNN auto-tính (sum VAT đầu ra - đầu vào của tháng N), hạn nộp 20/(N+1).
+     + TNCN tháng N: sum từ AP loại SALARY có pitAmount (nếu KTT khấu trừ), hạn nộp 20/(N+1).
+   Trả về [{date, kind:'TAX_FORECAST', record, amount}] */
+function _cfTaxForecastInWindow(start, end){
+  const events = [];
+  _nsnnInit();
+  // Lấy tháng nằm trong window (tính theo hạn 20/(N+1))
+  // Tìm các ngày 20 đầu mỗi tháng nằm trong [start, end)
+  const cur = new Date(start);
+  cur.setDate(20);
+  if(cur < start) cur.setMonth(cur.getMonth()+1);
+  const fx = +S.fxRate || 25000;
+  while(cur < end){
+    // Tháng được nộp thuế = tháng TRƯỚC của cur (vd cur=20/6 → nộp thuế T5)
+    const taxMonth = new Date(cur.getFullYear(), cur.getMonth()-1, 1);
+    const monthStr = `${taxMonth.getFullYear()}-${String(taxMonth.getMonth()+1).padStart(2,'0')}`;
+    const monthLabel = `T${taxMonth.getMonth()+1}/${String(taxMonth.getFullYear()).slice(-2)}`;
+    // ── GTGT phải nộp T(monthStr) — nếu CHƯA có record VAT_PAYABLE cho tháng này
+    const hasVatRec = S.taxes.records.some(t=>
+      t.type==='VAT_PAYABLE' && (t.period||'').startsWith(monthStr));
+    if(!hasVatRec){
+      const vatOut = (S.receivables||[]).filter(r=>{
+        if(wfStatus(r)!=='approved') return false;
+        return (r.issueDate||'').startsWith(monthStr);
+      }).reduce((s,r)=>{
+        const v = +r.vatAmount||0;
+        return s + (r.ccy==='VND' ? v : v*fx);
+      }, 0);
+      const vatIn = (S.payables||[]).filter(r=>{
+        if(wfStatus(r)!=='approved') return false;
+        return (r.issueDate||'').startsWith(monthStr);
+      }).reduce((s,r)=>{
+        const v = +r.vatAmount||0;
+        return s + (r.ccy==='VND' ? v : v*fx);
+      }, 0);
+      const vatPayable = vatOut - vatIn;
+      if(vatPayable > 0){
+        events.push({
+          date: new Date(cur),
+          kind: 'TAX_FORECAST',
+          record: {label:`GTGT phải nộp ${monthLabel}`, type:'VAT_PAYABLE', _forecast:true},
+          amount: toDisplay(vatPayable, 'VND')
+        });
+      }
+    }
+    // ── TNCN T(monthStr) — nếu chưa có record PIT
+    const hasPitRec = S.taxes.records.some(t=>
+      t.type==='PIT' && (t.period||'').startsWith(monthStr));
+    if(!hasPitRec){
+      const pit = (S.payables||[]).filter(r=>{
+        if(wfStatus(r)!=='approved') return false;
+        const et = (r.expenseType||r.costCategory||'').toUpperCase();
+        if(!['SALARY','BONUS','ALLOWANCE'].includes(et)) return false;
+        return (r.issueDate||'').startsWith(monthStr);
+      }).reduce((s,r)=>{
+        const p = +r.pitAmount||0;
+        return s + (r.ccy==='VND' ? p : p*fx);
+      }, 0);
+      if(pit > 0){
+        events.push({
+          date: new Date(cur),
+          kind: 'TAX_FORECAST',
+          record: {label:`TNCN ${monthLabel}`, type:'PIT', _forecast:true},
+          amount: toDisplay(pit, 'VND')
+        });
+      }
+    }
+    cur.setMonth(cur.getMonth()+1);
+  }
+  return events;
+}
+
 /* v2.99.15: Dự đoán AR sẽ thu vào kỳ nào (dựa vào pattern payments[] thực tế).
    Chỉ áp cho AR đã có ≥1 payments. Nếu chưa có thì vẫn gom 1 cục vào dueDate như cũ.
    Logic: tính interval trung bình giữa các payments quá khứ → ước lượng các kỳ thu tiếp theo. */
@@ -27152,12 +27401,13 @@ function _cfArExpectedReceipts(r, start, end){
   return events;
 }
 
-/* v2.99.15: Dialog cài đặt lương tháng dự kiến (admin/KTT) */
+/* v2.99.15/v2.99.18: Dialog cài đặt lương + BHXH tháng dự kiến (admin/KTT) */
 function _cfEditMonthlySalary(){
   if(!isAdmin() && !canApproveL2() && !(CURRENT_USER && CURRENT_USER.canManageUsers)){
     toast('Chỉ Admin / KTT', 'bad'); return;
   }
   const cur = +(S.cashflowConfig||{}).monthlySalaryVnd || 0;
+  const curBhxh = +(S.cashflowConfig||{}).monthlyBhxhVnd || 0;
   // Gợi ý từ 2 nguồn còn lại
   const today = new Date();
   const threeMonthsAgo = new Date(today);
@@ -27181,34 +27431,53 @@ function _cfEditMonthlySalary(){
   }, 0);
   const avgAp = sumApSalary/3;
   const avgSf = sumSfWd/3;
+  // v2.99.18: Gợi ý BHXH ≈ 22% lương (tỷ lệ DN đóng + NLĐ đóng phần lương)
+  const bhxhSuggest = cur > 0 ? Math.round(cur * 0.22) : Math.round(Math.max(avgAp, avgSf) * 0.22);
   const body = `
     <div style="font-size:13px;line-height:1.6">
-      <p style="margin-bottom:14px">Cài đặt lương tháng dự kiến để app cộng vào dòng tiền chi mỗi tháng (ngày 5 đầu tháng sau = trả lương tháng trước).</p>
+      <p style="margin-bottom:14px">Cài đặt lương + BHXH tháng dự kiến để app cộng vào dòng tiền chi mỗi tháng.</p>
+
       <div class="field">
-        <label>Lương dự kiến / tháng (VND) — thủ công <span style="color:var(--muted);text-transform:none;font-weight:400;font-size:10px">(để trống = 0 → app fallback sang AP_SALARY / Quỹ Lương)</span></label>
+        <label>💰 Lương dự kiến / tháng (VND) — thủ công</label>
         <input type="number" id="cf-monthly-salary" value="${cur||''}" step="any" placeholder="VD: 500000000" style="font-family:var(--font-mono);text-align:right">
+        <div style="font-size:10px;color:var(--muted);font-style:italic;margin-top:3px">Trả vào ngày 5 đầu tháng sau. Để trống → app fallback sang AP_SALARY / Quỹ Lương.</div>
       </div>
+
+      <div class="field" style="margin-top:14px">
+        <label>🏥 BHXH dự kiến / tháng (VND) <span style="color:var(--muted);text-transform:none;font-weight:400;font-size:10px">(ước tính ~22% lương)</span></label>
+        <input type="number" id="cf-monthly-bhxh" value="${curBhxh||''}" step="any" placeholder="VD: 110000000" style="font-family:var(--font-mono);text-align:right">
+        <div style="font-size:10px;color:var(--muted);font-style:italic;margin-top:3px">Trả vào ngày 20 tháng sau (hạn cuối nộp BHXH). Để trống → không cộng vào forecast.</div>
+        ${bhxhSuggest>0 ? `<div style="margin-top:4px"><a href="javascript:document.getElementById('cf-monthly-bhxh').value=${bhxhSuggest}" style="color:var(--accent);font-size:11px">[Đề xuất: ${fmt(bhxhSuggest,'VND')} (~22% lương)]</a></div>` : ''}
+      </div>
+
       <div style="margin-top:14px;padding:10px 12px;background:rgba(28,58,92,.04);border-left:3px solid var(--ink);font-size:11.5px;line-height:1.55">
-        <b>Gợi ý dữ liệu:</b>
-        <div style="margin-top:4px">• Trung bình AP loại SALARY/BONUS/ALLOWANCE 3 tháng gần nhất: <b>${fmt(avgAp,'VND')}/tháng</b> ${avgAp>0?`<a href="javascript:document.getElementById('cf-monthly-salary').value=${Math.round(avgAp)}" style="color:var(--accent)">[Dùng số này]</a>`:''}</div>
-        <div style="margin-top:2px">• Trung bình Quỹ Lương chi 3 tháng gần nhất: <b>${fmt(avgSf,'VND')}/tháng</b> ${avgSf>0?`<a href="javascript:document.getElementById('cf-monthly-salary').value=${Math.round(avgSf)}" style="color:var(--accent)">[Dùng số này]</a>`:''}</div>
-        <div style="margin-top:6px;color:var(--muted);font-style:italic">Nếu để trống ô bên trên, app tự fallback: thủ công > AP_SALARY > Quỹ Lương > 0</div>
+        <b>Gợi ý lương từ dữ liệu:</b>
+        <div style="margin-top:4px">• TB AP loại SALARY/BONUS/ALLOWANCE 3T gần nhất: <b>${fmt(avgAp,'VND')}/tháng</b> ${avgAp>0?`<a href="javascript:document.getElementById('cf-monthly-salary').value=${Math.round(avgAp)}" style="color:var(--accent)">[Dùng số này]</a>`:''}</div>
+        <div style="margin-top:2px">• TB Quỹ Lương chi 3T gần nhất: <b>${fmt(avgSf,'VND')}/tháng</b> ${avgSf>0?`<a href="javascript:document.getElementById('cf-monthly-salary').value=${Math.round(avgSf)}" style="color:var(--accent)">[Dùng số này]</a>`:''}</div>
       </div>
-      <div style="margin-top:10px;font-size:10px;color:var(--muted);font-style:italic">Lương trả vào <b>ngày 5 đầu tháng sau</b> (lương T5 trả 5/6, T6 trả 5/7...)</div>
+
+      <div style="margin-top:10px;font-size:10px;color:var(--muted);font-style:italic">
+        💡 App tự nhận diện đã chi để KHÔNG cộng trùng (ngưỡng 50%). NSNN (GTGT/TNCN/Môn bài...) dùng từ tab 12 NSNN — không cần khai báo ở đây.
+      </div>
     </div>`;
-  openModal('⚙ Cài đặt lương dự kiến tháng', body,
+  openModal('⚙ Cài đặt Lương + BHXH dự kiến', body,
     `<button class="btn-sec" onclick="closeModal()">Hủy</button>
      <button class="btn-primary" onclick="_cfSaveMonthlySalary()">💾 Lưu</button>`);
 }
 
 function _cfSaveMonthlySalary(){
   const v = +document.getElementById('cf-monthly-salary').value || 0;
-  if(v < 0){ toast('Số tiền không hợp lệ','bad'); return; }
+  const vBhxh = +document.getElementById('cf-monthly-bhxh').value || 0;
+  if(v < 0 || vBhxh < 0){ toast('Số tiền không hợp lệ','bad'); return; }
   if(!S.cashflowConfig) S.cashflowConfig = {};
   S.cashflowConfig.monthlySalaryVnd = v;
-  try{ logAuditEvent('cashflow_set_monthly_salary', {amountVnd:v}); }catch(e){}
+  S.cashflowConfig.monthlyBhxhVnd = vBhxh;
+  try{ logAuditEvent('cashflow_set_monthly_salary', {salaryVnd:v, bhxhVnd:vBhxh}); }catch(e){}
   saveState();
-  toast(v>0 ? `Đã cập nhật: ${fmt(v,'VND')}/tháng` : 'Đã xóa cài đặt — app sẽ fallback');
+  const msgParts = [];
+  if(v>0) msgParts.push(`Lương ${fmt(v,'VND')}/tháng`);
+  if(vBhxh>0) msgParts.push(`BHXH ${fmt(vBhxh,'VND')}/tháng`);
+  toast(msgParts.length ? 'Đã cập nhật: ' + msgParts.join(' + ') : 'Đã xóa cài đặt');
   closeModal();
   renderCashflow();
 }
