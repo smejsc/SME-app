@@ -2663,7 +2663,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='2.99.23';            // bumped on each release
+const APP_VERSION='2.99.25';            // bumped on each release
 
 /* v2.62.0: Token xác thực backend — PHẢI khớp API_TOKEN trong Apps Script (Code.gs).
    Mọi request tới Apps Script tự động được gắn token qua lớp bọc fetch bên dưới.
@@ -12112,8 +12112,7 @@ function upgradeNumericInputs(rootSelector){
   root.querySelectorAll('input[type="number"], input[data-format-thousands]').forEach(inp=>{
     if(inp.dataset.formatThousands && inp.dataset._hintAttached) return;
     if(inp.dataset.skipFormat){
-      // Vẫn gắn hint "Bằng chữ" nếu chưa có
-      if(!inp.dataset._hintAttached){ _attachNumberHint(inp); inp.dataset._hintAttached='1'; }
+      // v2.99.24: skipFormat → KHÔNG gắn hint (FX rate, mã số, percent...)
       return;
     }
     // v2.99.22: Relax — chỉ skip nếu có step thập phân CỰC NHỎ (vd 0.001) hoặc input đặc biệt
@@ -12160,8 +12159,10 @@ function upgradeNumericInputs(rootSelector){
   });
 }
 
-/* v2.99.22: Gắn dòng hint "Bằng chữ" dưới ô input số */
+/* v2.99.22/24: Gắn dòng hint "Bằng chữ" dưới ô input số */
 function _attachNumberHint(inp){
+  // v2.99.24: Skip nếu input có data-no-hint
+  if(inp.dataset.noHint) return;
   // Tạo div hint nếu chưa có
   let hint = inp.nextElementSibling;
   if(!hint || !hint.classList || !hint.classList.contains('num-hint')){
@@ -12171,17 +12172,45 @@ function _attachNumberHint(inp){
     inp.parentNode.insertBefore(hint, inp.nextSibling);
   }
   const update = ()=>{
-    const raw = inp.value;  // dùng getter đã override → ra số thuần
-    const n = parseFloat(raw);
+    // v2.99.25: Đọc THẲNG attribute value qua getAttribute (không qua getter override — tránh logic phức tạp)
+    // Sau đó parse số một cách tin cậy
+    let displayVal = '';
+    try{
+      // Ưu tiên đọc qua _origValueDesc nếu có override
+      if(inp._origValueDesc){
+        displayVal = inp._origValueDesc.get.call(inp);
+      } else {
+        // Đọc attribute thường
+        displayVal = inp.value;
+      }
+    }catch(e){ displayVal = inp.value || ''; }
+    const raw = String(displayVal||'').trim();
+    if(!raw){ hint.textContent=''; return; }
+    // Parse số: nếu có nhiều dấu chấm + dấu cuối là 3 chữ số → toàn phân nhóm
+    // Nếu dấu cuối là 1-2 chữ số → thập phân (USD)
+    let cleaned;
+    if(raw.includes('.')){
+      const lastDot = raw.lastIndexOf('.');
+      const afterLast = raw.slice(lastDot+1);
+      if(/^\d{3}$/.test(afterLast)){
+        cleaned = raw.replace(/\./g,'').replace(/,/g,'');
+      } else {
+        cleaned = raw.slice(0,lastDot).replace(/\./g,'').replace(/,/g,'') + '.' + afterLast;
+      }
+    } else {
+      cleaned = raw.replace(/,/g,'');
+    }
+    const n = parseFloat(cleaned);
     if(!isFinite(n) || n===0){ hint.textContent=''; return; }
-    // Tự nhận diện CCY: tìm select có id chứa 'ccy' trong cùng form
+    // v2.99.24: Bỏ hint cho số nhỏ < 1000 (vd %, count, FX...)
+    if(Math.abs(n) < 1000){ hint.textContent=''; return; }
+    // Tự nhận diện CCY
     let ccy = 'VND';
     const form = inp.closest('.form-grid, form, div');
     if(form){
       const ccySel = form.querySelector('select[id*="ccy"], select[id*="-ccy"], select.ccy');
       if(ccySel && ccySel.value) ccy = ccySel.value.toUpperCase();
     }
-    // Format theo CCY
     const formatted = ccy==='USD'
       ? n.toLocaleString('en-US', {minimumFractionDigits: n%1?2:0, maximumFractionDigits:2}) + ' USD'
       : Math.round(n).toLocaleString('vi-VN') + '₫';
