@@ -158,12 +158,11 @@ body.readonly-mode .tbl textarea,
 body.readonly-mode .tbl select:not(.filter-select){pointer-events:none;opacity:.7}
 /* Banner nhắc chế độ chỉ đọc trên đầu */
 body.readonly-mode::before{
-  content:'👁 Chế độ chỉ xem (Admin/CFO trên di động) — Để chỉnh sửa, dùng máy tính';
-  display:block;background:rgba(28,58,92,.92);color:#fff;text-align:center;
-  padding:6px 12px;font-size:11px;font-weight:500;letter-spacing:.04em;
+  content:'👁 CHẾ ĐỘ CHỈ XEM trên iPhone/iPad — chỉnh sửa & đẩy lên cloud đã bị chặn để bảo vệ dữ liệu. Dùng máy tính để thao tác.';
+  display:block;background:rgba(184,71,46,.92);color:#fff;text-align:center;
+  padding:8px 14px;font-size:11px;font-weight:600;letter-spacing:.02em;line-height:1.4;
   position:sticky;top:0;z-index:9999;
 }
-@media (min-width:901px){ body.readonly-mode::before{display:none !important} }
 
 /* ===== PRINT (for PDF export via browser) ===== */
 .print-area{display:none}
@@ -2664,7 +2663,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='2.99.19';            // bumped on each release
+const APP_VERSION='2.99.20';            // bumped on each release
 
 /* v2.62.0: Token xác thực backend — PHẢI khớp API_TOKEN trong Apps Script (Code.gs).
    Mọi request tới Apps Script tự động được gắn token qua lớp bọc fetch bên dưới.
@@ -8412,15 +8411,31 @@ function applyRoleUI(){
   // v2.75.0/v2.83.0: nút "Tổng quan nhanh" cho Admin, Duyệt L2 (CFO), KT Kiểm (KTT), Duyệt L1 (trưởng BP)
   const qvBtn=document.getElementById('quickview-btn');
   if(qvBtn) qvBtn.style.display = canViewQuickOverview() ? '' : 'none';
-  // v2.81.0: chế độ CHỈ ĐỌC trên iPhone/iPad (≤900px) cho Admin & CFO/L2 — không cho thao tác.
-  // L1 và NV thường vẫn thao tác bình thường để làm việc trên di động.
+  // v2.81.0/v2.99.20: chế độ CHỈ ĐỌC trên iPhone/iPad cho TẤT CẢ user.
+  // Lý do: iOS thường dùng đọc nhanh trên đường — không cần thao tác → giảm rủi ro nhập sai/đè cloud.
+  // Phát hiện iOS qua userAgent (không dùng width vì lap màn hình nhỏ không phải iOS).
   try{
     const cfg=getAuthConfig();
-    const isNarrow = window.innerWidth <= 900;
-    const isReadOnlyUser = (isAdmin()||canApproveL2()) && !canApproveL1();  // admin/CFO thuần, không kiêm L1
-    // Admin luôn có thể "kiêm" L1 (vì isAdmin()), nên dùng điều kiện gọn hơn:
-    const readonly = isNarrow && (isAdmin()||canApproveL2()) && cfg.mobileReadOnly!==false;
+    const ua=navigator.userAgent||'';
+    const isIOS = /iPad|iPhone|iPod/.test(ua) ||
+                  (ua.includes('Mac') && navigator.maxTouchPoints>1); // iPad mới giả Mac
+    const readonly = isIOS && cfg.mobileReadOnly!==false;
     document.body.classList.toggle('readonly-mode', readonly);
+    // v2.99.20: ghi flag global để các hàm push/sync biết chặn
+    window.IOS_READONLY = readonly;
+    // Đổi label nút Sync trên topbar thành "Tải về" khi iOS read-only
+    const sBtn=document.getElementById('sync-btn');
+    if(sBtn){
+      if(readonly){
+        sBtn.innerHTML='↓ Tải về';
+        sBtn.title='Chỉ TẢI dữ liệu mới từ cloud (iPhone/iPad không đẩy lên)';
+        sBtn.setAttribute('onclick',"cloudSync('pull',{interactive:true})");
+      } else {
+        sBtn.innerHTML='↻ Sync';
+        sBtn.title='Đồng bộ lên cloud';
+        sBtn.setAttribute('onclick',"cloudSync(null,{interactive:true})");
+      }
+    }
   }catch(e){ console.warn('[readonly-mode]', e&&e.message); }
   // Dashboard is admin-only: strip from any user.tabs that might still have it (migration)
   if(user && CURRENT_USER && Array.isArray(CURRENT_USER.tabs)){
@@ -8694,6 +8709,15 @@ function updateSyncStatus(state,note){
 async function cloudSync(mode, opts){
   opts=opts||{};
   const _interactive=!!opts.interactive;  // true khi do người bấm nút Sync
+  mode=mode||'push'; // default push
+  // v2.99.20: iOS read-only → CHẶN push (đẩy lên cloud), CHO PHÉP pull (tải về)
+  if(window.IOS_READONLY && (mode==='push' || mode==='both')){
+    if(_interactive){
+      toast('iPhone/iPad chỉ xem — không đẩy dữ liệu lên cloud. Đang tải về thay vào…','warn');
+    }
+    // Fallback: chuyển sang pull để vẫn có data mới
+    mode = 'pull';
+  }
   const cfg=getAuthConfig();
   if(!cfg||!cfg.scriptUrl){
     toast('Chưa cấu hình Apps Script URL. Vào "Cài đặt" để cài.','bad');
@@ -8701,7 +8725,6 @@ async function cloudSync(mode, opts){
   }
   // Fire-and-forget update check (doesn't block sync)
   checkForUpdate();
-  mode=mode||'push'; // default push
   updateSyncStatus('syncing');
   try{
     if(mode==='pull'){
