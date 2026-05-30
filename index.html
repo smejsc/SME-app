@@ -2663,7 +2663,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='2.99.21';            // bumped on each release
+const APP_VERSION='2.99.22';            // bumped on each release
 
 /* v2.62.0: Token xác thực backend — PHẢI khớp API_TOKEN trong Apps Script (Code.gs).
    Mọi request tới Apps Script tự động được gắn token qua lớp bọc fetch bên dưới.
@@ -12109,34 +12109,146 @@ document.addEventListener('input',function(e){
 function upgradeNumericInputs(rootSelector){
   const root=rootSelector?document.querySelector(rootSelector):document;
   if(!root) return;
-  root.querySelectorAll('input[type="number"]').forEach(inp=>{
-    if(inp.dataset.formatThousands) return;
-    if(inp.dataset.skipFormat) return;
-    // Skip inputs with step containing decimal (like 0.01, any) — keep them as native number
-    const step=inp.getAttribute('step');
-    if(step && step!=='1' && step!=='' && step!=='10' && step!=='100') return;
-    inp.type='text';
-    inp.setAttribute('inputmode','numeric');
-    inp.dataset.formatThousands='1';
-    if(inp.value) inp.value=_formatThousands(inp.value);
-    // Intercept .value: getter returns raw digits string; setter formats display
-    const proto=Object.getPrototypeOf(inp);
-    const desc=Object.getOwnPropertyDescriptor(proto,'value');
-    if(desc && !inp._origValueDesc){
-      inp._origValueDesc=desc;
-      Object.defineProperty(inp,'value',{
-        configurable:true,
-        get(){
-          const displayed=desc.get.call(this);
-          return String(displayed||'').replace(/\./g,'');
-        },
-        set(v){
-          desc.set.call(this,_formatThousands(v));
-        }
-      });
+  root.querySelectorAll('input[type="number"], input[data-format-thousands]').forEach(inp=>{
+    if(inp.dataset.formatThousands && inp.dataset._hintAttached) return;
+    if(inp.dataset.skipFormat){
+      // Vẫn gắn hint "Bằng chữ" nếu chưa có
+      if(!inp.dataset._hintAttached){ _attachNumberHint(inp); inp.dataset._hintAttached='1'; }
+      return;
     }
+    // v2.99.22: Relax — chỉ skip nếu có step thập phân CỰC NHỎ (vd 0.001) hoặc input đặc biệt
+    const step=inp.getAttribute('step');
+    const skipFormat = step && (step.includes('.') && +step < 0.1);
+    if(!skipFormat && !inp.dataset.formatThousands){
+      inp.type='text';
+      inp.setAttribute('inputmode','decimal');  // v2.99.22: decimal thay numeric cho phép dấu chấm thập phân
+      inp.dataset.formatThousands='1';
+      if(inp.value) inp.value=_formatThousands(inp.value);
+      const proto=Object.getPrototypeOf(inp);
+      const desc=Object.getOwnPropertyDescriptor(proto,'value');
+      if(desc && !inp._origValueDesc){
+        inp._origValueDesc=desc;
+        Object.defineProperty(inp,'value',{
+          configurable:true,
+          get(){
+            const displayed=desc.get.call(this);
+            // v2.99.22: gỡ dấu chấm phân nhóm + giữ dấu chấm thập phân duy nhất nếu có
+            const raw = String(displayed||'').replace(/\s/g,'');
+            // Nếu có nhiều dấu chấm → dấu cuối là thập phân, các dấu trước là phân nhóm
+            const dots = (raw.match(/\./g)||[]).length;
+            if(dots<=1) return raw.replace(/\./g,'');  // 0 hoặc 1 dấu → loại bỏ (1 dấu = phân nhóm, không có thập phân)
+            // >1 dấu → giữ dấu cuối làm thập phân
+            const lastDot = raw.lastIndexOf('.');
+            return raw.slice(0,lastDot).replace(/\./g,'') + '.' + raw.slice(lastDot+1);
+          },
+          set(v){
+            desc.set.call(this,_formatThousands(v));
+          }
+        });
+      }
+    }
+    // v2.99.22: gắn hint "Bằng chữ" cho mọi input số đã format
+    if(!inp.dataset._hintAttached){ _attachNumberHint(inp); inp.dataset._hintAttached='1'; }
   });
 }
+
+/* v2.99.22: Gắn dòng hint "Bằng chữ" dưới ô input số */
+function _attachNumberHint(inp){
+  // Tạo div hint nếu chưa có
+  let hint = inp.nextElementSibling;
+  if(!hint || !hint.classList || !hint.classList.contains('num-hint')){
+    hint = document.createElement('div');
+    hint.className = 'num-hint';
+    hint.style.cssText = 'font-size:10px;color:var(--muted);font-style:italic;margin-top:2px;line-height:1.3;min-height:14px';
+    inp.parentNode.insertBefore(hint, inp.nextSibling);
+  }
+  const update = ()=>{
+    const raw = inp.value;  // dùng getter đã override → ra số thuần
+    const n = parseFloat(raw);
+    if(!isFinite(n) || n===0){ hint.textContent=''; return; }
+    // Tự nhận diện CCY: tìm select có id chứa 'ccy' trong cùng form
+    let ccy = 'VND';
+    const form = inp.closest('.form-grid, form, div');
+    if(form){
+      const ccySel = form.querySelector('select[id*="ccy"], select[id*="-ccy"], select.ccy');
+      if(ccySel && ccySel.value) ccy = ccySel.value.toUpperCase();
+    }
+    // Format theo CCY
+    const formatted = ccy==='USD'
+      ? n.toLocaleString('en-US', {minimumFractionDigits: n%1?2:0, maximumFractionDigits:2}) + ' USD'
+      : Math.round(n).toLocaleString('vi-VN') + '₫';
+    const words = (ccy==='USD' && n%1!==0)
+      ? _numberToEnglishWords(Math.floor(n)) + (n%1 ? ' point ' + Math.round((n%1)*100) + ' cents' : '')
+      : _numberToVietnameseWords(Math.round(n));
+    hint.innerHTML = `≈ <b>${formatted}</b>${words?' · '+words:''}`;
+  };
+  inp.addEventListener('input', update);
+  inp.addEventListener('change', update);
+  update();
+}
+
+/* v2.99.22: Chuyển số ra chữ tiếng Việt (gọn, đủ dùng đến tỷ) */
+function _numberToVietnameseWords(n){
+  if(!isFinite(n) || n===0) return '';
+  if(n<0) return 'Âm ' + _numberToVietnameseWords(-n);
+  const digits = ['không','một','hai','ba','bốn','năm','sáu','bảy','tám','chín'];
+  function read3(num, full){
+    const tr = Math.floor(num/100);
+    const ch = Math.floor((num%100)/10);
+    const dv = num%10;
+    let s = '';
+    if(tr>0){ s += digits[tr] + ' trăm'; if(ch===0 && dv>0) s += ' linh'; }
+    else if(full){ s += 'không trăm'; if(ch===0 && dv>0) s += ' linh'; }
+    if(ch>1){ s += ' ' + digits[ch] + ' mươi'; }
+    else if(ch===1){ s += ' mười'; }
+    else if(ch===0 && dv>0 && tr===0 && full){ /*nothing*/ }
+    if(dv>0){
+      if(ch>1 && dv===1) s += ' mốt';
+      else if(ch>=1 && dv===5) s += ' lăm';
+      else s += ' ' + digits[dv];
+    }
+    return s.trim();
+  }
+  if(n<1000) return _cap(read3(n,false));
+  const ty = Math.floor(n/1e9);
+  const trieu = Math.floor((n%1e9)/1e6);
+  const nghin = Math.floor((n%1e6)/1e3);
+  const dv = n%1e3;
+  let parts = [];
+  if(ty>0) parts.push(read3(ty,false) + ' tỷ');
+  if(trieu>0) parts.push(read3(trieu, ty>0) + ' triệu');
+  if(nghin>0) parts.push(read3(nghin, ty>0||trieu>0) + ' nghìn');
+  if(dv>0) parts.push(read3(dv, ty>0||trieu>0||nghin>0));
+  return _cap(parts.join(' ').replace(/\s+/g,' ').trim()) + ' đồng';
+}
+function _numberToEnglishWords(n){
+  if(!isFinite(n) || n===0) return '';
+  const ones = ['','one','two','three','four','five','six','seven','eight','nine','ten','eleven','twelve','thirteen','fourteen','fifteen','sixteen','seventeen','eighteen','nineteen'];
+  const tens = ['','','twenty','thirty','forty','fifty','sixty','seventy','eighty','ninety'];
+  function read3(num){
+    let s='';
+    const h=Math.floor(num/100); const t=num%100;
+    if(h>0) s += ones[h] + ' hundred';
+    if(t>0){
+      if(s) s+=' and ';
+      if(t<20) s += ones[t];
+      else { s += tens[Math.floor(t/10)]; if(t%10>0) s += '-' + ones[t%10]; }
+    }
+    return s;
+  }
+  if(n<1000) return _cap(read3(n));
+  const bn = Math.floor(n/1e9);
+  const mn = Math.floor((n%1e9)/1e6);
+  const ts = Math.floor((n%1e6)/1e3);
+  const u = n%1e3;
+  let parts=[];
+  if(bn>0) parts.push(read3(bn)+' billion');
+  if(mn>0) parts.push(read3(mn)+' million');
+  if(ts>0) parts.push(read3(ts)+' thousand');
+  if(u>0) parts.push(read3(u));
+  return _cap(parts.join(' ').trim()) + ' dollars';
+}
+function _cap(s){ return s ? s.charAt(0).toUpperCase() + s.slice(1) : ''; }
 
 
 /* ===== FX & DISPLAY CCY ===== */
@@ -16710,6 +16822,149 @@ function sfDeleteWithdrawal(id){
   renderSalaryFund();
 }
 
+/* v2.99.22: Xóa đợt trích quỹ */
+function sfDeleteContribution(id){
+  if(!isAdmin() && !(CURRENT_USER && CURRENT_USER.canManageUsers)){toast('Chỉ Admin / KTT','bad');return;}
+  _sfInit();
+  const c=S.salaryFund.contributions.find(x=>x.id===id);
+  if(!c) return;
+  const note = c.note || (c.isOpening?'Khai báo số dư đầu kỳ':'Trích quỹ');
+  if(!confirm(`Xóa đợt trích "${note}" (${(+c.amount||0).toLocaleString()} ${c.ccy})?\n\nLưu ý: Nếu trích này được tạo từ 1 khoản AR đã thu (sourceArId) → AR đó sẽ có thể trích lại sau khi xóa.`)) return;
+  S.salaryFund.contributions=S.salaryFund.contributions.filter(x=>x.id!==id);
+  try{logAuditEvent('salary_fund_contribute_delete',{id, amount:c.amount, ccy:c.ccy});}catch(e){}
+  saveState();
+  toast('Đã xóa');
+  renderSalaryFund();
+}
+
+/* v2.99.22: Sửa đợt trích quỹ */
+function sfEditContribution(id){
+  if(!isAdmin() && !(CURRENT_USER && CURRENT_USER.canManageUsers)){toast('Chỉ Admin / KTT','bad');return;}
+  _sfInit();
+  const c=S.salaryFund.contributions.find(x=>x.id===id);
+  if(!c){toast('Không tìm thấy','bad');return;}
+  const body=`
+    <div style="font-size:13px;display:grid;grid-template-columns:1fr 1fr;gap:10px">
+      <div style="grid-column:1/3;padding:8px 12px;background:rgba(28,58,92,.04);font-size:11px;border-left:3px solid var(--good)">
+        💰 <b>${c.isOpening?'Số dư đầu kỳ':'Đợt trích quỹ'}</b>
+        ${c.sourceArId?`<br><span style="color:var(--muted)">Trích từ AR: ${esc(c.sourceArId)}</span>`:''}
+      </div>
+      <div class="field"><label>Ngày trích *</label>
+        <input type="date" id="sfe-date" value="${esc((c.contributedAt||'').slice(0,10))}">
+      </div>
+      <div class="field"><label>Loại tiền</label>
+        <select id="sfe-ccy">
+          <option value="VND" ${c.ccy==='VND'?'selected':''}>VND</option>
+          <option value="USD" ${c.ccy==='USD'?'selected':''}>USD</option>
+        </select>
+      </div>
+      <div class="field" style="grid-column:1/3"><label>Số tiền *</label>
+        <input type="number" id="sfe-amt" step="any" value="${+c.amount||0}">
+      </div>
+      <div class="field" style="grid-column:1/3"><label>Ghi chú</label>
+        <input type="text" id="sfe-note" value="${esc(c.note||'')}">
+      </div>
+      <div id="sfe-err" style="grid-column:1/3;color:var(--bad);font-size:12px"></div>
+    </div>`;
+  openModal('✎ Sửa đợt trích quỹ', body,
+    `<button class="btn-sec" onclick="closeModal()">Hủy</button>
+     <button class="btn-primary" onclick="_sfSaveEditContribution('${esc(id)}')">💾 Lưu</button>`);
+}
+
+function _sfSaveEditContribution(id){
+  const err=document.getElementById('sfe-err');
+  err.textContent='';
+  const c=S.salaryFund.contributions.find(x=>x.id===id);
+  if(!c){toast('Không tìm thấy','bad');return;}
+  const date=document.getElementById('sfe-date').value;
+  const ccy=document.getElementById('sfe-ccy').value;
+  const amt=+document.getElementById('sfe-amt').value;
+  const note=document.getElementById('sfe-note').value.trim();
+  if(!date){err.textContent='Nhập ngày';return;}
+  if(!(amt>0)){err.textContent='Số tiền phải > 0';return;}
+  const oldAmt=c.amount, oldCcy=c.ccy, oldDate=(c.contributedAt||'').slice(0,10);
+  c.amount=amt;
+  c.ccy=ccy;
+  c.contributedAt=date+'T00:00:00.000Z';
+  c.note=note;
+  c.updatedAt=new Date().toISOString();
+  c.updatedBy=actorName();
+  try{ touchRecord(c); }catch(e){}
+  try{logAuditEvent('salary_fund_contribute_edit',{id, oldAmt, oldCcy, oldDate, newAmt:amt, newCcy:ccy, newDate:date});}catch(e){}
+  saveState();
+  toast('Đã cập nhật đợt trích','good');
+  closeModal();
+  renderSalaryFund();
+}
+
+/* v2.99.22: Sửa đợt chi quỹ */
+function sfEditWithdrawal(id){
+  if(!isAdmin() && !(CURRENT_USER && CURRENT_USER.canManageUsers)){toast('Chỉ Admin / KTT','bad');return;}
+  _sfInit();
+  const w=S.salaryFund.withdrawals.find(x=>x.id===id);
+  if(!w){toast('Không tìm thấy','bad');return;}
+  const cats=S.salaryFund.config.withdrawCategories||[];
+  const body=`
+    <div style="font-size:13px;display:grid;grid-template-columns:1fr 1fr;gap:10px">
+      <div style="grid-column:1/3;padding:8px 12px;background:rgba(28,58,92,.04);font-size:11px;border-left:3px solid var(--warn)">
+        💸 <b>Đợt chi quỹ</b>
+      </div>
+      <div class="field"><label>Ngày *</label>
+        <input type="date" id="sfew-date" value="${esc(w.date||'')}">
+      </div>
+      <div class="field"><label>Loại tiền</label>
+        <select id="sfew-ccy">
+          <option value="VND" ${w.ccy==='VND'?'selected':''}>VND</option>
+          <option value="USD" ${w.ccy==='USD'?'selected':''}>USD</option>
+        </select>
+      </div>
+      <div class="field" style="grid-column:1/3"><label>Danh mục chi *</label>
+        <select id="sfew-cat">
+          ${cats.map(c=>`<option value="${esc(c)}" ${c===w.category?'selected':''}>${esc(c)}</option>`).join('')}
+        </select>
+      </div>
+      <div class="field" style="grid-column:1/3"><label>Số tiền *</label>
+        <input type="number" id="sfew-amt" step="any" value="${+w.amount||0}">
+      </div>
+      <div class="field" style="grid-column:1/3"><label>Ghi chú</label>
+        <input type="text" id="sfew-note" value="${esc(w.note||'')}">
+      </div>
+      <div id="sfew-err" style="grid-column:1/3;color:var(--bad);font-size:12px"></div>
+    </div>`;
+  openModal('✎ Sửa đợt chi quỹ', body,
+    `<button class="btn-sec" onclick="closeModal()">Hủy</button>
+     <button class="btn-primary" onclick="_sfSaveEditWithdrawal('${esc(id)}')">💾 Lưu</button>`);
+}
+
+function _sfSaveEditWithdrawal(id){
+  const err=document.getElementById('sfew-err');
+  err.textContent='';
+  const w=S.salaryFund.withdrawals.find(x=>x.id===id);
+  if(!w){toast('Không tìm thấy','bad');return;}
+  const date=document.getElementById('sfew-date').value;
+  const ccy=document.getElementById('sfew-ccy').value;
+  const cat=document.getElementById('sfew-cat').value;
+  const amt=+document.getElementById('sfew-amt').value;
+  const note=document.getElementById('sfew-note').value.trim();
+  if(!date){err.textContent='Nhập ngày';return;}
+  if(!cat){err.textContent='Chọn danh mục';return;}
+  if(!(amt>0)){err.textContent='Số tiền phải > 0';return;}
+  const oldAmt=w.amount, oldCat=w.category, oldDate=w.date;
+  w.date=date;
+  w.ccy=ccy;
+  w.category=cat;
+  w.amount=amt;
+  w.note=note;
+  w.updatedAt=new Date().toISOString();
+  w.updatedBy=actorName();
+  try{ touchRecord(w); }catch(e){}
+  try{logAuditEvent('salary_fund_withdraw_edit',{id, oldAmt, oldCat, oldDate, newAmt:amt, newCat:cat, newDate:date});}catch(e){}
+  saveState();
+  toast('Đã cập nhật đợt chi','good');
+  closeModal();
+  renderSalaryFund();
+}
+
 /* Tab 3: History */
 function _renderSfHistory(){
   const el=document.getElementById('sf-history-list');
@@ -16739,11 +16994,21 @@ function _renderSfHistory(){
     runByCcy[it.ccy]=(runByCcy[it.ccy]||0)+(it.type==='in'?it.amount:-it.amount);
     balMap[it.id]=runByCcy[it.ccy];
   });
-  let html='<table class="table" style="font-size:12px"><thead><tr><th>Ngày</th><th>Loại</th><th>Mô tả</th><th class="num">Số tiền</th><th class="num">Số dư (cùng CCY)</th><th>Người ghi</th></tr></thead><tbody>';
+  let html='<table class="table" style="font-size:12px"><thead><tr><th>Ngày</th><th>Loại</th><th>Mô tả</th><th class="num">Số tiền</th><th class="num">Số dư (cùng CCY)</th><th>Người ghi</th><th></th></tr></thead><tbody>';
+  const canEdit = isAdmin() || (CURRENT_USER && CURRENT_USER.canManageUsers);
   items.forEach(it=>{
     const color=it.type==='in'?'var(--good)':'var(--warn)';
     const sign=it.type==='in'?'+':'−';
     const chip=it.type==='in'?'<span class="chip chip-good" style="font-size:9px">TRÍCH</span>':'<span class="chip chip-warn" style="font-size:9px">CHI</span>';
+    // v2.99.22: Nút Sửa + Xóa cho cả 2 loại (admin/KTT)
+    let actBtns='';
+    if(canEdit){
+      const fn = it.type==='in' ? 'sfEditContribution' : 'sfEditWithdrawal';
+      const delFn = it.type==='in' ? 'sfDeleteContribution' : 'sfDeleteWithdrawal';
+      actBtns = `
+        <button class="icon-btn" onclick="${fn}('${esc(it.id)}')" title="Sửa">✎</button>
+        <button class="icon-btn danger" onclick="${delFn}('${esc(it.id)}')" title="Xóa">✕</button>`;
+    }
     html+=`<tr>
       <td>${esc(it.date)}</td>
       <td>${chip}</td>
@@ -16751,6 +17016,7 @@ function _renderSfHistory(){
       <td class="num" style="font-family:var(--font-mono);font-weight:600;color:${color}">${sign}${it.amount.toLocaleString()} ${esc(it.ccy)}</td>
       <td class="num" style="font-family:var(--font-mono);color:var(--muted)">${(balMap[it.id]||0).toLocaleString()} ${esc(it.ccy)}</td>
       <td style="font-size:11px;color:var(--muted)">${esc(it.person)}</td>
+      <td style="white-space:nowrap">${actBtns}</td>
     </tr>`;
   });
   html+='</tbody></table>';
