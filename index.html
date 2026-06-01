@@ -639,7 +639,7 @@ body.readonly-mode::before{
       </div>
     </div>
     <button class="btn btn-ghost" id="quickview-btn" onclick="openQuickView()" title="Tổng quan nhanh: tiền · phải thu · phải trả · dự kiến 30 ngày" style="border:1px solid rgba(246,241,232,.4);padding:4px 10px;display:none">📊 Nhanh</button>
-    <button class="btn btn-ghost" onclick="cloudSync(null,{interactive:true})" id="sync-btn" title="Đồng bộ lên cloud">↻ Sync</button>
+    <button class="btn btn-ghost" onclick="syncBoth({interactive:true})" id="sync-btn" title="Đồng bộ: đẩy dữ liệu của bạn lên + tải dữ liệu mới nhất về">↻ Sync</button>
     <div class="fx-block">
       <label class="fx-label">FX <span style="opacity:.55">VND/USD</span></label>
       <input type="number" id="fx-rate" class="fx-input" placeholder="—" data-skip-format="1" value="">
@@ -672,6 +672,7 @@ body.readonly-mode::before{
         <button class="ktt-allowed-item" onclick="closeAdminMenu();exportJSON()"><span class="ico">⤓</span>Export backup (.json)</button>
         <button class="admin-only-item" onclick="closeAdminMenu();document.getElementById('importFile').click()"><span class="ico">⤒</span>Import backup (.json)</button>
         <button class="admin-only-item" onclick="closeAdminMenu();document.getElementById('importMergeFile').click()" title="Gộp data từ backup vào dữ liệu hiện tại — KHÔNG ghi đè, không mất bản ghi mới"><span class="ico">⤓</span>Khôi phục &amp; GỘP từ backup (.json)</button>
+        <button class="admin-only-item" onclick="closeAdminMenu();openSnapshotRestore()" title="Khôi phục từ snapshot tự động trên Drive (GỘP, giữ bản mới) — bản mới nhất, không cần file"><span class="ico">☁</span>Khôi phục từ snapshot (Drive)</button>
         <div class="divider admin-only-item"></div>
         <button class="danger admin-only-item" onclick="closeAdminMenu();clearAllData()"><span class="ico">✕</span>Xóa toàn bộ dữ liệu</button>
       </div>
@@ -2682,7 +2683,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='2.99.38';            // bumped on each release
+const APP_VERSION='2.99.46';            // bumped on each release
 
 /* v2.62.0: Token xác thực backend — PHẢI khớp API_TOKEN trong Apps Script (Code.gs).
    Mọi request tới Apps Script tự động được gắn token qua lớp bọc fetch bên dưới.
@@ -4340,6 +4341,23 @@ async function authAction(){
       CURRENT_USER=null;
     } else {
       // User login: match by name (case-insensitive), then verify password
+      // v2.99.46: LUÔN thử pull cfg mới nhất từ cloud TRƯỚC khi xác thực — để quyền (tab/cờ)
+      // do admin vừa sửa được áp dụng ngay lần đăng nhập lại, không cần xử lý sự cố.
+      // BEST-EFFORT: nếu mạng/cloud lỗi → bỏ qua, vẫn cho login bằng cfg local (KHÔNG chặn).
+      try{
+        const cloudUrl0 = cfg.scriptUrl || (typeof COMPANY_SCRIPT_URL!=='undefined'?COMPANY_SCRIPT_URL:'') || '';
+        if(cloudUrl0){
+          const prevTxt=err.textContent, prevCol=err.style.color;
+          err.style.color='var(--muted)'; err.textContent='Đang cập nhật quyền mới nhất...';
+          await pullCfgFromCloud(cloudUrl0, name, pw);
+          cfg=getAuthConfig();
+          err.textContent=prevTxt||''; err.style.color=prevCol||'';
+        }
+      }catch(e){
+        // Mạng lỗi / mật khẩu chưa khớp bản cloud / chưa có wrap → im lặng, dùng local + cơ chế cũ phía dưới
+        console.warn('[login] pre-pull cfg best-effort bỏ qua:', e&&e.message);
+        try{ err.textContent=''; }catch(_){}
+      }
       let matched=(cfg.users||[]).find(u=>u.name.toLowerCase()===name.toLowerCase());
       if(!matched){
         // v2.71.0: NV có thể chưa có trong cfg local cũ → thử pull cfg mới từ cloud rồi tìm lại
@@ -8661,6 +8679,25 @@ document.addEventListener('keydown',e=>{
    ============================================================ */
 async function saveStateEncrypted(){
   if(!CRYPTO_KEY) return;
+  // v2.99.41 — CHỐT CHẶN: không cho ghi đè localStorage đang CÓ data bằng state RỖNG bất thường.
+  // Bảo vệ chống mất data cục bộ khi S lỡ bị set rỗng (vd decrypt fail, pull lỗi).
+  try{
+    if(window._allowEmptySave !== true && _stateLooksEmpty(S)){
+      const raw=localStorage.getItem(STORE_KEY);
+      if(raw){
+        let existedNonEmpty=false;
+        try{
+          const pl=JSON.parse(raw);
+          existedNonEmpty = !!(pl && (pl.ct || (typeof raw==='string' && raw.length>2000)));
+        }catch(_){ existedNonEmpty = raw.length>2000; }
+        if(existedNonEmpty){
+          console.error('[saveStateEncrypted] CHẶN: từ chối ghi state rỗng đè local đang có data.');
+          try{ toast('⚠ Đã chặn ghi đè dữ liệu trống lên bộ nhớ máy. Dữ liệu cũ được giữ. Nếu vừa đăng nhập, hãy đợi tải xong rồi thử lại.','bad'); }catch(_){}
+          return;
+        }
+      }
+    }
+  }catch(e){ console.warn('[saveStateEncrypted] guard check lỗi (bỏ qua, vẫn lưu):', e); }
   try{
     const payload=await encryptJSON(S);
     localStorage.setItem(STORE_KEY,JSON.stringify(payload));
@@ -8681,6 +8718,7 @@ async function saveStateEncrypted(){
   }
 }
 async function loadEncryptedLocal(){
+  window._loadFailed = false;  // v2.99.41: reset cờ mỗi lần thử load (chỉ bật lại nếu lần này lỗi)
   try{
     const raw=localStorage.getItem(STORE_KEY);
     if(!raw){S=defaultState();return;}
@@ -8700,7 +8738,11 @@ async function loadEncryptedLocal(){
     }
   }catch(e){
     console.error('Load error:',e);
+    // v2.99.41 — KHÔNG set rỗng âm thầm khi giải mã/đọc local lỗi (1 trong 3 lỗ hổng sự cố 1/6).
+    // Đánh dấu _loadFailed để CHẶN auto-push (tránh đẩy state rỗng đè cloud), báo user rõ.
+    window._loadFailed = true;
     S=defaultState();
+    try{ toast('⚠ KHÔNG đọc được dữ liệu trên máy (giải mã lỗi/hỏng). Đã TẠM khóa đồng bộ để bảo vệ. Hãy đăng nhập lại hoặc liên hệ admin — KHÔNG tự ý Sync.','bad'); }catch(_){}
   }
 }
 
@@ -8803,10 +8845,24 @@ async function cloudSync(mode, opts){
         if(mergedAudit.length>2000) mergedAudit=mergedAudit.slice(-2000);
       }catch(e){ console.warn('[pull audit merge]', e&&e.message); }
       // Confirm overwrite if local has more (admin only — users always pull-merge silently)
-      if(CURRENT_ROLE==='admin' && S.transactions && S.transactions.length>0 && S.transactions.length>(decoded.transactions||[]).length){
-        if(!confirm(`Local có ${S.transactions.length} bút toán, cloud có ${(decoded.transactions||[]).length}. Vẫn ghi đè local bằng cloud?`)){
-          updateSyncStatus('idle');return;
+      // (v2.99.41: cảnh báo pull đè giờ xét TẤT CẢ kho — xem khối _localCount/_cloudCount bên dưới)
+      // v2.99.41: Cảnh báo ghi đè khi pull — XÉT TẤT CẢ kho chính (trước đây chỉ canh transactions
+      // nên cloud thiếu opVessels/payables/projects vẫn đè mất local mà không báo).
+      const _localCount = _stateRecordCount(S);
+      const _cloudCount = _stateRecordCount(filteredCloud);
+      if(CURRENT_ROLE==='admin' && _localCount > 0 && _cloudCount < _localCount * 0.7){
+        if(!confirm(`⚠ CẢNH BÁO MẤT DỮ LIỆU\n\nMáy này (local) đang có ~${_localCount} bản ghi, nhưng cloud chỉ có ~${_cloudCount}.\nNếu tải về (pull), dữ liệu local nhiều hơn sẽ bị GHI ĐÈ.\n\n• Nếu cloud bị thiếu/lỗi → bấm HỦY, KHÔNG pull, hãy PUSH dữ liệu máy này lên trước.\n• Nếu chắc chắn cloud đúng → bấm OK để tải về.\n\nTải về (ghi đè local)?`)){
+          updateSyncStatus('idle','Đã hủy pull để bảo vệ dữ liệu local');
+          return;
         }
+      }
+      // v2.99.41: với NV (không phải admin) — pull tự động; nếu cloud nghèo hơn local nhiều,
+      // KHÔNG đè thầm mà cảnh báo (tránh mất bản ghi NV vừa nhập chưa push).
+      if(CURRENT_ROLE!=='admin' && _localCount >= 10 && _cloudCount < _localCount * 0.5){
+        console.warn('[pull] BẢO VỆ: cloud('+_cloudCount+') < 50% local('+_localCount+') — bỏ qua pull đè.');
+        updateSyncStatus('idle','Tạm hoãn tải về (cloud ít hơn máy)');
+        if(_interactive){ try{ toast('Cloud đang ít dữ liệu hơn máy — tạm hoãn tải về để không mất dữ liệu bạn vừa nhập. Hãy Sync (đẩy lên) hoặc báo admin.','bad'); }catch(_){} }
+        return;
       }
       S=filteredCloud;
       S.auditLog = localAuditLog;  // restore local audit log
@@ -8823,6 +8879,13 @@ async function cloudSync(mode, opts){
       try{ updateBackupBanner(); }catch(e){} try{ updateEmptyStateBanner(); }catch(e){}
     } else {
       // PUSH
+      // v2.99.41: nếu lần load local thất bại (decrypt lỗi) → state hiện không đáng tin → CHẶN push.
+      if(window._loadFailed){
+        console.error('[sync] CHẶN push: _loadFailed = true (đọc local lỗi, state không đáng tin)');
+        updateSyncStatus('error','Đã khóa đồng bộ — đọc dữ liệu máy lỗi');
+        if(_interactive){ try{ toast('Đang khóa đồng bộ vì máy chưa đọc được dữ liệu. Đăng nhập lại trước khi Sync.','bad'); }catch(_){} }
+        return;
+      }
       // v2.49.0: Kiểm ngầm — nếu máy đang trống bất thường, không đẩy bản trống đè cloud.
       // - Khi người bấm nút Sync (interactive): hỏi lại để người quyết.
       // - Khi auto-sync (không interactive): âm thầm bỏ qua push, không hỏi.
@@ -9039,6 +9102,8 @@ async function cloudSync(mode, opts){
       updateSyncStatus('synced','Đã sync '+timeAgo(cfg.lastSync));
       toast('Đã đồng bộ lên cloud' + compressionInfo);
       try{ _updateLastKnownRecordCount(); }catch(e){}  // v2.99.30
+      try{ _lastPushHash=_quickStateHash(); }catch(e){}  // v2.99.42: ghi mốc hash chống push trùng
+      try{ window._syncBackoffUntil=0; }catch(e){}  // v2.99.45: sync OK → xóa backoff
       // v1.55.0: Refresh banner
       try{ updateBackupBanner(); }catch(e){} try{ updateEmptyStateBanner(); }catch(e){}
     }
@@ -9046,6 +9111,13 @@ async function cloudSync(mode, opts){
     console.error(e);
     updateSyncStatus('error',e.message);
     toast('Sync lỗi: '+e.message,'bad');
+    // v2.99.45: nếu cloud timeout (đang bận) → đặt backoff 20s để lần auto-sync sau lùi lại,
+    // tránh dồn thêm request vào lúc cloud đang nghẽn (giúp khi 30–40 NV cùng dùng).
+    try{
+      if(/không phản hồi|timeout|abort/i.test(e.message||'')){
+        window._syncBackoffUntil = Date.now() + 20000;
+      }
+    }catch(_){}
   }
 }
 
@@ -9057,6 +9129,20 @@ function timeAgo(iso){
   if(s<3600) return Math.floor(s/60)+'m trước';
   if(s<86400) return Math.floor(s/3600)+'h trước';
   return Math.floor(s/86400)+'d trước';
+}
+
+/* v2.99.43: Nút Sync = ĐẨY LÊN + TẢI VỀ trong 1 lần bấm.
+   NV/admin bấm Sync: vừa gửi dữ liệu mình nhập lên cloud, vừa kéo dữ liệu mới
+   nhất của người khác về để xem. Chạy push trước (nếu lỗi vẫn cố pull để có data mới),
+   pull sau. iOS read-only: cloudSync tự chuyển push→pull nên vẫn an toàn. */
+async function syncBoth(opts){
+  opts=opts||{};
+  try{
+    await cloudSync('push', opts);
+  }catch(e){ console.warn('[syncBoth] push lỗi (vẫn thử pull):', e&&e.message); }
+  try{
+    await cloudSync('pull', opts);
+  }catch(e){ console.warn('[syncBoth] pull lỗi:', e&&e.message); }
 }
 
 
@@ -10055,7 +10141,8 @@ function _stateRecordCount(s){
   if(!s) return 0;
   return (s.payables||[]).length+(s.receivables||[]).length+(s.vessels||[]).length
         +(s.fixedAssets||[]).length+(s.companies||[]).length+(s.projects||[]).length
-        +(s.transactions||[]).length+(s.opTransactions||[]).length+(s.opVessels||[]).length;  // v2.99.31
+        +(s.transactions||[]).length+(s.opTransactions||[]).length+(s.opVessels||[]).length
+        +(s.bankAccounts||[]).length+(s.loans||[]).length+((s.taxes&&s.taxes.records)||[]).length;  // v2.99.41: đủ kho
 }
 
 function mergeStateByFields(cloudFull, localFull, fields){
@@ -11933,12 +12020,46 @@ function exportAuditLog(){
   toast('Đã tải Audit Log CSV');
 }
 
+let _lastPushHash=null;  // v2.99.42: hash của state lần push thành công gần nhất — chống push trùng
+function _quickStateHash(){
+  // Hash nhanh, rẻ: dựa trên số lượng bản ghi từng kho + tổng updatedAt gần nhất.
+  // Không cần chính xác tuyệt đối — chỉ để phát hiện "có thay đổi hay không".
+  try{
+    const parts=[];
+    const keys=['companies','payables','receivables','vessels','fixedAssets','projects',
+      'bankAccounts','loans','opVessels','opTransactions','opMgmtFees','transactions','plans'];
+    keys.forEach(k=>{ const a=S[k]; parts.push(k+':'+(Array.isArray(a)?a.length:0)); });
+    if(S.taxes&&Array.isArray(S.taxes.records)) parts.push('tax:'+S.taxes.records.length);
+    // gộp thêm mốc thời gian thay đổi gần nhất (nếu có _lastMutationTs)
+    parts.push('mt:'+(window._lastMutationTs||0));
+    return parts.join('|');
+  }catch(e){ return String(Date.now()); }  // lỗi → coi như đổi (an toàn: vẫn push)
+}
+
 function scheduleAutoSync(){
   const cfg=getAuthConfig();
   if(!cfg||!cfg.scriptUrl) return;
   if(_suppressAutoSync) return;  // Skip auto-push during login/pull
+  // v2.99.42: đánh dấu có thay đổi thật (để _quickStateHash phản ánh)
+  window._lastMutationTs = Date.now();
   clearTimeout(_autoSyncTimer);
-  _autoSyncTimer=setTimeout(()=>cloudSync('push'),5000); // v1.38.4: 5s debounce (đủ để gõ tiếp mà không spam)
+  // v2.99.45: TỐI ƯU TẢI cho ĐÔNG NGƯỜI (30–40 NV):
+  //  - debounce 15s (gom thay đổi liên tiếp thành 1 push).
+  //  - jitter 0–10s ngẫu nhiên (rộng hơn trước) → 30–40 máy dàn đều thời điểm push,
+  //    giảm mạnh đụng độ ở Apps Script (xử lý tuần tự).
+  //  - backoff: nếu lần push gần nhất bị timeout (cloud bận) → lùi thêm để không dồn nghẽn.
+  const backoff = (window._syncBackoffUntil && Date.now() < window._syncBackoffUntil)
+    ? (window._syncBackoffUntil - Date.now()) : 0;
+  const delay = 15000 + Math.floor(Math.random()*10000) + backoff;
+  _autoSyncTimer=setTimeout(()=>{
+    // Chống push trùng: nếu state không đổi so với lần push gần nhất → bỏ qua.
+    const h=_quickStateHash();
+    if(h===_lastPushHash){
+      console.log('[autosync] bỏ qua push — state không đổi so với lần trước');
+      return;
+    }
+    cloudSync('push');
+  }, delay);
 }
 function uid(){return Date.now().toString(36)+Math.random().toString(36).slice(2,7);}
 
@@ -26749,6 +26870,23 @@ function _nsnnInit(){
   if(!S.taxes.config) S.taxes.config={overrides:{}};
   if(!S.taxes.config.overrides) S.taxes.config.overrides={};
   if(!Array.isArray(S.taxes.records)) S.taxes.records=[];
+  // v2.99.40: chuẩn hóa NHIỀU LẦN NỘP — mỗi record có payments[] {date,amount,note}.
+  // Record cũ chỉ có paidAmount/paidDate → chuyển thành 1 payment để không mất dữ liệu.
+  S.taxes.records.forEach(r=>{
+    if(!Array.isArray(r.payments)){
+      r.payments=[];
+      if((+r.paidAmount||0)>0){
+        r.payments.push({date:r.paidDate||r.dueDate||'', amount:+r.paidAmount||0, note:'(chuyển từ dữ liệu cũ)'});
+      }
+    }
+  });
+}
+/* v2.99.40: tổng đã nộp của 1 record = Σ payments (fallback paidAmount nếu chưa có payments) */
+function _nsnnRecPaid(r){
+  if(r && Array.isArray(r.payments) && r.payments.length){
+    return r.payments.reduce((s,p)=>s+(+p.amount||0),0);
+  }
+  return +(r&&r.paidAmount)||0;
 }
 
 /* v2.99.18: Auto-sync NSNN records khi AP Lương được DUYỆT.
@@ -27233,6 +27371,9 @@ function _nsnnSumManual(period){
   const out={};
   S.taxes.records.forEach(r=>{
     if(!matchPeriod(r)) return;
+    // v2.99.39: record loại GTGT/TNCN tạo qua form chỉ để ghi 'đã nộp' (theo dõi công nợ) —
+    // KHÔNG cộng vào PHÁT SINH (phát sinh GTGT/TNCN lấy từ auto-tính). Tránh đếm trùng.
+    if(r._paidOnly) return;
     out[r.type] = (out[r.type]||0) + toDisplay(+r.amount||0, r.ccy||'VND');
   });
   return out;
@@ -27250,7 +27391,7 @@ function _nsnnSumPaid(period){
   const out={};
   S.taxes.records.forEach(r=>{
     if(!matchPeriod(r)) return;
-    out[r.type] = (out[r.type]||0) + toDisplay(+r.paidAmount||0, r.ccy||'VND');
+    out[r.type] = (out[r.type]||0) + toDisplay(_nsnnRecPaid(r), r.ccy||'VND');
   });
   return out;
 }
@@ -27525,10 +27666,12 @@ function _nsnnRenderRecords(yr){
   let html=`<thead><tr><th>Kỳ</th><th>Loại</th><th>Mô tả</th><th>Gắn tàu/DA</th><th class="r">Phải nộp</th><th class="r">Đã nộp</th><th class="r">Còn lại</th><th>CCY</th><th class="mono">Hạn nộp</th><th class="mono">Ngày TT</th><th></th></tr></thead><tbody>`;
   records.forEach(r=>{
     const m=nsnnTypeMeta(r.type);
-    const remain=(+r.amount||0)-(+r.paidAmount||0);
-    // CP badge
+    const paidR=_nsnnRecPaid(r);
+    const remain=(+r.amount||0)-paidR;
+    const nPay=(Array.isArray(r.payments)?r.payments.length:0);
+    // CP badge — chỉ record cũ còn isExpense/linkedApId (tab 12 mới không tạo AP nữa)
     const cpBadge = r.isExpense
-      ? `<span class="chip" style="font-size:9px;background:#a8362b;color:#fff;margin-left:4px" title="Đã ghi CP — có AP tự tạo (id ${esc(r.linkedApId||'?')})">CP</span>`
+      ? `<span class="chip" style="font-size:9px;background:#a8362b;color:#fff;margin-left:4px" title="Đã ghi CP (dữ liệu cũ)">CP</span>`
       : '';
     // Vessel/project info
     let entityInfo='—';
@@ -27550,14 +27693,15 @@ function _nsnnRenderRecords(yr){
       <td>${esc(r.description||'—')}</td>
       <td style="font-size:11px">${entityInfo}</td>
       <td class="r num">${fmt(r.amount,r.ccy)}</td>
-      <td class="r num" style="color:var(--good)">${fmt(r.paidAmount||0,r.ccy)}</td>
+      <td class="r num" style="color:var(--good)">${fmt(paidR,r.ccy)}${nPay>1?`<span style="font-size:9px;color:var(--muted)"> (${nPay} lần)</span>`:''}</td>
       <td class="r num" style="color:${remain>0?'var(--bad)':'var(--good)'}">${fmt(remain,r.ccy)}</td>
       <td class="mono">${r.ccy||'VND'}</td>
       <td class="mono" style="font-size:11px">${r.dueDate||'—'}</td>
       <td class="mono" style="font-size:11px">${r.paidDate||'—'}</td>
       <td><div class="row-actions">
+        <button class="icon-btn" title="Ghi nhận nộp (nhiều lần)" onclick="_nsnnAddPayment('${r.id}')" style="color:var(--good)">＋</button>
         <button class="icon-btn" title="Sửa" onclick="_nsnnEditRecord('${r.id}')">✎</button>
-        ${isAdmin()?`<button class="icon-btn danger" title="Xóa${r.linkedApId?' (cả AP)':''}" onclick="_nsnnDelRecord('${r.id}')">✕</button>`:''}
+        ${isAdmin()?`<button class="icon-btn danger" title="Xóa" onclick="_nsnnDelRecord('${r.id}')">✕</button>`:''}
       </div></td>
     </tr>`;
   });
@@ -27570,10 +27714,16 @@ function _nsnnAddRecord(){
   _nsnnInit();
   const thisYr=new Date().getFullYear();
   const thisMonth=`${thisYr}-${String(new Date().getMonth()+1).padStart(2,'0')}`;
-  // Generate type options (manual only)
-  const typeOpts=Object.keys(NSNN_TAX_TYPES).filter(k=>NSNN_TAX_TYPES[k].source==='manual').map(k=>({
-    v:k, t:`${NSNN_TAX_TYPES[k].icon} ${NSNN_TAX_TYPES[k].label}`
-  }));
+  // v2.99.39: 2 loại 'theo dõi công nợ' (auto-tính số phải nộp) lên đầu + các loại manual.
+  // GTGT: chỉ theo dõi công nợ (KHÔNG phải chi phí). TNCN: chi phí đã ghi ở AP → đây chỉ theo dõi công nợ.
+  const typeOpts=[
+    {v:'VAT_PAYABLE', t:'💰 GTGT phải nộp (theo dõi công nợ)'},
+    {v:'PIT',         t:'👤 TNCN (theo dõi công nợ)'}
+  ].concat(
+    Object.keys(NSNN_TAX_TYPES).filter(k=>NSNN_TAX_TYPES[k].source==='manual').map(k=>({
+      v:k, t:`${NSNN_TAX_TYPES[k].icon} ${NSNN_TAX_TYPES[k].label}`
+    }))
+  );
   // Vessel + project options
   const vesselOpts=[{v:'',t:'— Không gắn tàu —'}];
   (S.vessels||[]).forEach(v=>vesselOpts.push({v:v.id, t:`⛵ ${v.name}`}));
@@ -27588,24 +27738,21 @@ function _nsnnAddRecord(){
     {key:'amount',label:'Số phải nộp',type:'number'},
     {key:'ccy',label:'CCY',type:'select',options:[{v:'VND',t:'VND'},{v:'USD',t:'USD'}]},
     {key:'dueDate',label:'Hạn nộp',type:'date'},
-    {key:'paidAmount',label:'Số đã nộp',type:'number'},
-    {key:'paidDate',label:'📅 Ngày nộp NSNN (điền khi đã nộp → tự ghi vào chi phí)',type:'date',span:2},
-    {key:'vesselId',label:'Tàu (gắn chi phí, nếu có)',type:'select',options:vesselOpts},
-    {key:'projectId',label:'Dự án (gắn chi phí, nếu có)',type:'select',options:projectOpts}
-  ], {type:'IMPORT_DUTY', period:thisMonth, ccy:'VND', amount:0, paidAmount:0, description:'', dueDate:'', paidDate:'', vesselId:'', projectId:''}, (d)=>{
+    {key:'paidAmount',label:'Số đã nộp (lần đầu — có thể nộp thêm sau)',type:'number'},
+    {key:'paidDate',label:'📅 Ngày nộp (của lần đã nộp ở trên)',type:'date',span:2}
+  ], {type:'VAT_PAYABLE', period:thisMonth, ccy:'VND', amount:0, paidAmount:0, description:'', dueDate:'', paidDate:''}, (d)=>{
     if(!d.type){toast('Chọn loại thuế','bad');return false;}
     if(!d.period || !/^\d{4}-\d{2}$/.test(d.period)){toast('Kỳ tính phải dạng YYYY-MM','bad');return false;}
     if(!(+d.amount>0)){toast('Số phải nộp > 0','bad');return false;}
     const taxId=uid();
-    // Normalize vesselId (strip 'op:' prefix if opVessel)
-    let vId=d.vesselId||'';
-    let isOpVessel=false;
-    if(vId.startsWith('op:')){
-      vId=vId.substring(3);
-      isOpVessel=true;
+    // v2.99.40: TAB 12 CHỈ THEO DÕI CÔNG NỢ — không loại nào tạo AP/chi phí (chi phí ghi ở AP gốc).
+    // GTGT/TNCN: phát sinh lấy từ auto-tính → cờ _paidOnly để KHÔNG cộng trùng vào "Phát sinh".
+    const isPaidOnlyType = (d.type==='VAT_PAYABLE' || d.type==='PIT');
+    // Lần nộp ban đầu (nếu KTT điền ngay) → 1 payment.
+    const payments=[];
+    if((+d.paidAmount||0)>0){
+      payments.push({date:(d.paidDate||'').trim()||todayISO(), amount:+d.paidAmount||0, note:'(nhập khi tạo)'});
     }
-    // v2.99.36: CHI PHÍ ghi nhận khi ĐÃ NỘP (có paidDate). Chưa nộp → chỉ là nghĩa vụ, không tạo AP.
-    const isExpenseNow = !!(d.paidDate||'').trim();
     const taxRec={
       id:taxId,
       type:d.type,
@@ -27614,27 +27761,96 @@ function _nsnnAddRecord(){
       amount:+d.amount||0,
       ccy:d.ccy||'VND',
       dueDate:d.dueDate||'',
-      paidAmount:+d.paidAmount||0,
-      paidDate:d.paidDate||'',
-      isExpense:isExpenseNow,
-      vesselId:vId||'',
-      isOpVessel,
-      projectId:d.projectId||'',
-      linkedApId:'',
+      payments,
+      paidAmount:payments.reduce((s,p)=>s+p.amount,0),
+      paidDate:payments.length?payments[payments.length-1].date:'',
+      _paidOnly:isPaidOnlyType,
+      isExpense:false,           // tab 12 không ghi chi phí
+      vesselId:'', isOpVessel:false, projectId:'', linkedApId:'',
       addedBy:actorName(),
       addedAt:new Date().toISOString(),
       updatedAt:new Date().toISOString()
     };
     S.taxes.records.push(taxRec);
-    // Auto-create AP CHỈ khi đã nộp (isExpenseNow)
-    if(taxRec.isExpense){
-      const apId=_nsnnSyncAp(taxRec);
-      taxRec.linkedApId=apId;
-    }
     saveState();
-    toast(taxRec.isExpense?'Đã thêm thuế · đã nộp → ghi vào chi phí (tạo AP)':'Đã thêm bút toán thuế (chưa nộp — chưa vào chi phí)');
+    toast('Đã thêm bút toán thuế (theo dõi công nợ NSNN)');
     renderAll();
   });
+  // v2.99.39: auto-fill 'Số phải nộp' từ giá trị app đã tính khi chọn GTGT/TNCN hoặc đổi kỳ.
+  setTimeout(()=>{
+    const tSel=document.getElementById('ef-type');
+    const pInp=document.getElementById('ef-period');
+    const aInp=document.getElementById('ef-amount');
+    if(!tSel||!pInp||!aInp) return;
+    const autofill=()=>{
+      const ty=tSel.value, per=(pInp.value||'').trim();
+      if((ty==='VAT_PAYABLE'||ty==='PIT') && /^\d{4}-\d{2}$/.test(per)){
+        try{
+          const auto=_nsnnComputeAuto(per);
+          const v = ty==='VAT_PAYABLE' ? (+auto.VAT_PAYABLE||0) : (+auto.PIT||0);
+          if(v>0){ aInp.value=Math.round(v); }
+        }catch(e){}
+      }
+    };
+    tSel.addEventListener('change', autofill);
+    pInp.addEventListener('change', autofill);
+    autofill();  // điền ngay khi mở (mặc định GTGT, kỳ tháng này)
+  }, 60);
+}
+
+/* v2.99.40: Ghi nhận 1 lần nộp cho record NSNN (nhiều lần nộp). Mở mini-form số + ngày + ghi chú. */
+function _nsnnAddPayment(id){
+  _nsnnInit();
+  const r=S.taxes.records.find(x=>x.id===id);
+  if(!r){ toast('Không tìm thấy bút toán','bad'); return; }
+  const m=nsnnTypeMeta(r.type);
+  const paid=_nsnnRecPaid(r);
+  const remain=(+r.amount||0)-paid;
+  const body=`
+    <div style="font-size:12px;margin-bottom:12px">
+      <b>${m.icon} ${esc(m.label)}</b> · Kỳ ${esc(r.period||'')}<br>
+      Phải nộp: <b>${fmt(r.amount,r.ccy)}</b> · Đã nộp: <b style="color:var(--good)">${fmt(paid,r.ccy)}</b> · Còn lại: <b style="color:${remain>0?'var(--bad)':'var(--good)'}">${fmt(remain,r.ccy)}</b>
+    </div>
+    <div class="form-grid">
+      <div class="field"><label>Ngày nộp *</label><input type="date" id="np-date" value="${todayISO()}"></div>
+      <div class="field"><label>Số tiền nộp *</label><input type="number" class="num" id="np-amount" step="any" value="${remain>0?Math.round(remain):0}"></div>
+      <div class="field" style="grid-column:span 2"><label>Ghi chú (UNC, số chứng từ...)</label><input type="text" id="np-note" placeholder="VD: UNC số 123 ngày..."></div>
+    </div>
+    ${(Array.isArray(r.payments)&&r.payments.length)?`<div style="margin-top:12px;font-size:11px"><div style="font-weight:700;color:var(--muted);margin-bottom:4px">Các lần đã nộp:</div>${r.payments.map((p,i)=>`<div style="display:flex;justify-content:space-between;padding:3px 0;border-top:1px solid var(--rule)"><span>${esc(p.date||'?')}${p.note?' · '+esc(p.note):''}</span><span style="font-weight:600">${fmt(p.amount,r.ccy)} <button class="icon-btn danger" style="font-size:10px" title="Xóa lần nộp" onclick="_nsnnDelPayment('${r.id}',${i})">✕</button></span></div>`).join('')}</div>`:''}`;
+  openModal('Ghi nhận nộp NSNN', body,
+    `<button class="btn-sec" onclick="closeModal()">Hủy</button>
+     <button class="btn-primary" onclick="_nsnnSavePayment('${r.id}')">💾 Lưu lần nộp</button>`);
+}
+function _nsnnSavePayment(id){
+  _nsnnInit();
+  const r=S.taxes.records.find(x=>x.id===id);
+  if(!r) return;
+  const date=(document.getElementById('np-date')||{}).value||'';
+  const amount=+(document.getElementById('np-amount')||{}).value||0;
+  const note=((document.getElementById('np-note')||{}).value||'').trim();
+  if(!date){ toast('Chọn ngày nộp','bad'); return; }
+  if(amount<=0){ toast('Số tiền nộp > 0','bad'); return; }
+  if(!Array.isArray(r.payments)) r.payments=[];
+  r.payments.push({date, amount, note});
+  r.paidAmount=_nsnnRecPaid(r);
+  r.paidDate=date;
+  touchRecord(r);
+  saveState();
+  closeModal();
+  toast('Đã ghi nhận nộp '+fmt(amount,r.ccy));
+  renderAll();
+}
+function _nsnnDelPayment(id, idx){
+  _nsnnInit();
+  const r=S.taxes.records.find(x=>x.id===id);
+  if(!r||!Array.isArray(r.payments)) return;
+  r.payments.splice(idx,1);
+  r.paidAmount=_nsnnRecPaid(r);
+  r.paidDate=r.payments.length?r.payments[r.payments.length-1].date:'';
+  touchRecord(r);
+  saveState();
+  _nsnnAddPayment(id);
+  renderAll();
 }
 
 function _nsnnEditRecord(id){
@@ -29121,6 +29337,128 @@ function importMergeJSON(ev){
     }catch(err){toast('File không hợp lệ hoặc lỗi giải mã: '+err.message,'bad');ev.target.value='';}
   };
   r.readAsText(f);
+}
+
+/* ============================================================
+   v2.99.44: KHÔI PHỤC TỪ SNAPSHOT (Drive, qua Apps Script)
+   - Chỉ admin. Khôi phục = GỘP (merge-by-ID, giữ bản mới hơn) — an toàn.
+   - Snapshot là nội dung 'data' THÔ ({iv,ct} hoặc {gz,payload_gz}),
+     KHÁC file backup (có auth+payload). Giải mã như khi pull.
+   ============================================================ */
+async function openSnapshotRestore(){
+  if(!isAdmin()){ toast('Chỉ admin được khôi phục snapshot','bad'); return; }
+  const cfg=getAuthConfig();
+  if(!cfg||!cfg.scriptUrl){ toast('Chưa cấu hình Apps Script URL','bad'); return; }
+  toast('Đang tải danh sách snapshot...');
+  let list=[];
+  try{
+    const res=await fetchWithTimeout(cfg.scriptUrl, {
+      method:'POST',
+      headers:{'Content-Type':'text/plain;charset=utf-8'},
+      body:JSON.stringify({action:'snapshot_list', token:cfg.apiToken||API_TOKEN})
+    }, 30000);
+    const data=await safeJson(res);
+    if(!data.ok){ toast('Lỗi lấy danh sách: '+(data.error||''),'bad'); return; }
+    list=data.files||[];
+  }catch(e){ toast('Không lấy được danh sách snapshot: '+e.message,'bad'); return; }
+  if(!list.length){ toast('Chưa có snapshot nào trên Drive','bad'); return; }
+  const rows=list.map(f=>{
+    const dt=f.createdAt? new Date(f.createdAt) : null;
+    const when=dt? dt.toLocaleString('vi-VN') : '';
+    const kb=Math.round((f.size||0)/1024);
+    const tag=f.isSuspect? ' <span style="color:#a8362b;font-weight:700">⚠ nghi ngờ</span>':'';
+    return `<tr style="border-top:1px solid var(--rule)">
+      <td style="padding:6px 10px">${esc(f.name)}${tag}</td>
+      <td style="padding:6px 10px;color:var(--muted);font-size:11px">${esc(when)}</td>
+      <td class="num" style="padding:6px 10px;color:var(--muted)">${kb} KB</td>
+      <td style="padding:6px 10px"><button class="btn-sec" style="font-size:11px;padding:3px 10px" onclick="_snapshotPick('${f.id}','${esc(f.name)}')">Chọn</button></td>
+    </tr>`;
+  }).join('');
+  const body=`
+    <div style="font-size:12px;margin-bottom:10px">Chọn 1 bản snapshot để GỘP vào dữ liệu hiện tại (giữ bản ghi mới hơn, không mất dữ liệu đang có). Bản <b>⚠ nghi ngờ</b> là bản app từng phát hiện tụt dữ liệu — cân nhắc kỹ.</div>
+    <div style="overflow:auto;max-height:380px;border:1px solid var(--rule)">
+      <table style="width:100%;border-collapse:collapse;font-size:12px">
+        <thead><tr style="background:var(--paper-2);position:sticky;top:0">
+          <th style="padding:6px 10px;text-align:left">Tên file</th>
+          <th style="padding:6px 10px;text-align:left">Thời điểm</th>
+          <th class="num" style="padding:6px 10px">Cỡ</th>
+          <th style="padding:6px 10px"></th>
+        </tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>`;
+  openModal('Khôi phục từ snapshot', body, `<button class="btn-sec" onclick="closeModal()">Đóng</button>`);
+}
+
+async function _snapshotPick(fileId, name){
+  const cfg=getAuthConfig();
+  toast('Đang tải snapshot...');
+  let content='';
+  try{
+    const res=await fetchWithTimeout(cfg.scriptUrl, {
+      method:'POST',
+      headers:{'Content-Type':'text/plain;charset=utf-8'},
+      body:JSON.stringify({action:'snapshot_get', fileId, token:cfg.apiToken||API_TOKEN})
+    }, 30000);
+    const data=await safeJson(res);
+    if(!data.ok){ toast('Lỗi tải snapshot: '+(data.error||''),'bad'); return; }
+    content=data.content||'';
+  }catch(e){ toast('Không tải được snapshot: '+e.message,'bad'); return; }
+  let snapData;
+  try{
+    const stored=JSON.parse(content);
+    let payloadObj;
+    if(stored && stored.gz===true && stored.payload_gz){
+      payloadObj=JSON.parse(await gzipDecompress(stored.payload_gz));
+    } else {
+      payloadObj=stored;
+    }
+    snapData=await decryptJSON(payloadObj);
+  }catch(e){ toast('Giải mã snapshot thất bại — có thể khác admin password: '+e.message,'bad'); return; }
+  const ARR_KEYS=['companies','payables','receivables','vessels','fixedAssets',
+    'projects','bankAccounts','loans','opVessels','opTransactions','opMgmtFees',
+    'transactions','plans','invGroups','invMovements','warehouses','cashFunds',
+    'taxes','bankSnapshots','creditFacilities'];
+  const plan={}; const previewRows=[];
+  const keys=new Set(ARR_KEYS);
+  Object.keys(snapData||{}).forEach(k=>{ if(Array.isArray(snapData[k]) && snapData[k][0] && typeof snapData[k][0]==='object' && 'id' in snapData[k][0]) keys.add(k); });
+  keys.forEach(k=>{
+    const cur=Array.isArray(S[k])?S[k]:[];
+    const snap=Array.isArray(snapData[k])?snapData[k]:[];
+    if(cur.length===0 && snap.length===0) return;
+    const {merged}=mergeByID(snap, cur, 'id', k==='deletedIds');
+    plan[k]=merged;
+    const added=merged.length-cur.length;
+    previewRows.push({k, cur:cur.length, snap:snap.length, after:merged.length, added});
+  });
+  const rowsHtml=previewRows.sort((a,b)=>b.added-a.added).map(x=>`<tr style="border-top:1px solid var(--rule)">
+    <td style="padding:5px 10px"><b>${x.k}</b></td>
+    <td class="num" style="padding:5px 10px;color:var(--muted)">${x.cur}</td>
+    <td class="num" style="padding:5px 10px;color:var(--muted)">${x.snap}</td>
+    <td class="num" style="padding:5px 10px;font-weight:700;color:${x.added>0?'#2d6a6a':'var(--ink)'}">${x.after}${x.added>0?` <span style="font-size:10px">(+${x.added})</span>`:''}</td>
+  </tr>`).join('');
+  const totalAdded=previewRows.reduce((s,x)=>s+Math.max(0,x.added),0);
+  const body=`
+    <div style="font-size:12px;margin-bottom:10px">Gộp snapshot <b>${esc(name)}</b> vào dữ liệu hiện tại. Bản ghi trùng ID giữ bản mới hơn; bản đã xóa không hồi sinh. <b>Không bản ghi nào hiện có bị mất.</b></div>
+    <div style="overflow:auto;max-height:340px;border:1px solid var(--rule)">
+      <table style="width:100%;border-collapse:collapse;font-size:12px">
+        <thead><tr style="background:var(--paper-2);position:sticky;top:0">
+          <th style="padding:6px 10px;text-align:left">Kho</th>
+          <th class="num" style="padding:6px 10px">Hiện tại</th>
+          <th class="num" style="padding:6px 10px">Trong snapshot</th>
+          <th class="num" style="padding:6px 10px">Sau gộp</th>
+        </tr></thead>
+        <tbody>${rowsHtml||'<tr><td colspan="4" style="padding:14px;text-align:center;color:var(--muted)">Không có kho nào để gộp</td></tr>'}</tbody>
+      </table>
+    </div>
+    <div style="margin-top:10px;padding:8px 12px;background:rgba(45,106,106,.06);border-left:3px solid var(--good);font-size:11px">Sẽ bổ sung <b>${totalAdded}</b> bản ghi từ snapshot. Field cấu hình (tỷ giá, hiển thị, thông tin công ty...) giữ nguyên hiện tại.</div>`;
+  confirmDialog('Khôi phục & GỘP từ snapshot?', body, '', async ()=>{
+    Object.keys(plan).forEach(k=>{ S[k]=plan[k]; });
+    await saveStateEncrypted();
+    try{ _updateLastKnownRecordCount(); }catch(e){}
+    renderAll();
+    toast('Đã gộp '+totalAdded+' bản ghi từ snapshot','good');
+  }, false);
 }
 
 /* ============================================================
