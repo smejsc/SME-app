@@ -1374,6 +1374,17 @@ body.readonly-mode::before{
         <div class="field"><label>Hạn TT</label><input type="date" id="vex-due"></div>
         <div class="field"><label>Dự kiến TT tháng</label><input type="month" id="vex-due-month"></div>
       </div>
+      <div class="form-grid" style="grid-template-columns:1fr">
+        <div class="field" style="background:rgba(193,154,107,.10);padding:8px 10px;border-radius:4px;border-left:3px solid #c19a6b">
+          <label style="display:flex;align-items:center;gap:8px;cursor:pointer;margin:0">
+            <input type="checkbox" id="vex-is-budget" style="width:16px;height:16px;cursor:pointer">
+            <span style="font-size:12px;line-height:1.4">
+              <b>📋 Dự kiến chi (BUDGET) — chưa có hóa đơn thực</b><br>
+              <span style="color:var(--muted);font-size:11px;font-style:italic">Tick nếu đây là DỰ TOÁN/kế hoạch chi (chưa phát sinh thực). Bút toán này KHÔNG vào công nợ, KHÔNG vào Lãi/Lỗ, CHỈ hiển thị trên Báo cáo Chủ tàu + NHANH + Cash flow forecast.</span>
+            </span>
+          </label>
+        </div>
+      </div>
       <div class="form-actions">
         <button class="btn-primary" onclick="addVesselExpense()">+ Thêm chi phí (vào Nháp)</button>
         <button class="btn-sec" onclick="resetVexForm()">Xóa form</button>
@@ -2663,7 +2674,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='2.99.25';            // bumped on each release
+const APP_VERSION='2.99.28';            // bumped on each release
 
 /* v2.62.0: Token xác thực backend — PHẢI khớp API_TOKEN trong Apps Script (Code.gs).
    Mọi request tới Apps Script tự động được gắn token qua lớp bọc fetch bên dưới.
@@ -9374,13 +9385,24 @@ function canSeeBODRecords(){
    Use this wherever AR/AP records are listed/processed. */
 function filterBODRecords(records){
   if(!Array.isArray(records)) return records;
-  if(canSeeBODRecords()) return records;
-  return records.filter(r=>{
+  // v2.99.27: Tự loại BUDGET (dự kiến chi) khỏi tất cả tính toán công nợ + P&L + Cash flow.
+  // BUDGET chỉ hiển thị riêng ở Báo cáo Chủ tàu + NHANH (qua getBudgetRecords()).
+  let arr = records.filter(r => !r._isBudget);
+  if(canSeeBODRecords()) return arr;
+  return arr.filter(r=>{
     if(r.isBODOnly) return false;
     if(isExpenseBODOnly(r.expenseType)) return false;
     if(isRevenueBODOnly(r.revenueType)) return false;
     return true;
   });
+}
+
+/* v2.99.27: Lấy CHỈ các bản ghi BUDGET (dự kiến chi) — dùng cho Báo cáo Chủ tàu */
+function getBudgetRecords(){
+  return (S.payables||[]).filter(r => r._isBudget === true);
+}
+function isBudgetRecord(r){
+  return r && r._isBudget === true;
 }
 
 /* Get default vendor for an expense type (eg CBCNV for HR) */
@@ -12159,10 +12181,29 @@ function upgradeNumericInputs(rootSelector){
   });
 }
 
-/* v2.99.22/24: Gắn dòng hint "Bằng chữ" dưới ô input số */
+/* v2.99.22/24/26: Gắn dòng hint "Bằng chữ" dưới ô input số */
 function _attachNumberHint(inp){
   // v2.99.24: Skip nếu input có data-no-hint
   if(inp.dataset.noHint) return;
+  // v2.99.26: Auto skip dựa trên tên ID — các input KHÔNG phải tiền:
+  //   year, days, months, term, grace, rate (%), experts, fx, qty, phuy, count, age
+  const id = (inp.id||'').toLowerCase();
+  // Whitelist: các input chứa keyword skip NHƯNG vẫn cần hint (đặt trước check skip)
+  const WHITELIST_KEYWORDS = ['salary','bhxh','revenue','profit','principal','amount','value','balance','cost','budget','fee','price','-amt','-bal','limit'];
+  const isMoneyByName = WHITELIST_KEYWORDS.some(k => id.includes(k));
+  if(!isMoneyByName){
+    const SKIP_KEYWORDS = [
+      'year','years','-yr','-y2','-y3',
+      'day','days','workday',
+      'month','months','term','grace',
+      'rate','-pct','percent',
+      'experts','count','-num','-no',
+      'fx','-fx','fxrate','fx-rate',
+      'qty','phuy','quantity',
+      'age','-id','step'
+    ];
+    if(SKIP_KEYWORDS.some(k => id.includes(k))) return;
+  }
   // Tạo div hint nếu chưa có
   let hint = inp.nextElementSibling;
   if(!hint || !hint.classList || !hint.classList.contains('num-hint')){
@@ -12172,22 +12213,19 @@ function _attachNumberHint(inp){
     inp.parentNode.insertBefore(hint, inp.nextSibling);
   }
   const update = ()=>{
-    // v2.99.25: Đọc THẲNG attribute value qua getAttribute (không qua getter override — tránh logic phức tạp)
-    // Sau đó parse số một cách tin cậy
+    // v2.99.28: BYPASS override — đọc value gốc của input qua HTMLInputElement.prototype.
+    // Input đã đổi type='text' nên proto.value là string user nhập (có dấu chấm phân nhóm).
     let displayVal = '';
     try{
-      // Ưu tiên đọc qua _origValueDesc nếu có override
-      if(inp._origValueDesc){
-        displayVal = inp._origValueDesc.get.call(inp);
+      const protoDesc = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value');
+      if(protoDesc && protoDesc.get){
+        displayVal = protoDesc.get.call(inp);
       } else {
-        // Đọc attribute thường
         displayVal = inp.value;
       }
-    }catch(e){ displayVal = inp.value || ''; }
+    }catch(e){ displayVal = ''; }
     const raw = String(displayVal||'').trim();
     if(!raw){ hint.textContent=''; return; }
-    // Parse số: nếu có nhiều dấu chấm + dấu cuối là 3 chữ số → toàn phân nhóm
-    // Nếu dấu cuối là 1-2 chữ số → thập phân (USD)
     let cleaned;
     if(raw.includes('.')){
       const lastDot = raw.lastIndexOf('.');
@@ -12202,7 +12240,6 @@ function _attachNumberHint(inp){
     }
     const n = parseFloat(cleaned);
     if(!isFinite(n) || n===0){ hint.textContent=''; return; }
-    // v2.99.24: Bỏ hint cho số nhỏ < 1000 (vd %, count, FX...)
     if(Math.abs(n) < 1000){ hint.textContent=''; return; }
     // Tự nhận diện CCY
     let ccy = 'VND';
@@ -15820,6 +15857,7 @@ function resetVexForm(){
   document.getElementById('vex-amount-gross').value=0;
   document.getElementById('vex-due').value='';
   document.getElementById('vex-due-month').value='';
+  const bg=document.getElementById('vex-is-budget'); if(bg) bg.checked=false;
 }
 
 /* Switch category dropdown based on selected entity type.
@@ -15928,6 +15966,9 @@ function addVesselExpense(){
   const amountGross=+document.getElementById('vex-amount-gross').value||(amountNet+vatAmount);
   const dueDate=document.getElementById('vex-due').value;
   const dueMonth=document.getElementById('vex-due-month').value;
+  // v2.99.27: Dự kiến chi (BUDGET) — không vào công nợ, không lãi/lỗ
+  const isBudgetEl = document.getElementById('vex-is-budget');
+  const isBudget = isBudgetEl && isBudgetEl.checked;
 
   if(!entityVal){toast('Chọn Tàu hoặc Dự án O&M','bad');return;}
   if(amountNet<=0){toast('Số tiền chưa VAT > 0','bad');return;}
@@ -15975,7 +16016,8 @@ function addVesselExpense(){
     rejectedBy:'',rejectedAt:'',rejectReason:'',rejectedAtLevel:null,
     createdBy:actorName(),
     createdAt:new Date().toISOString(),
-    _origin:'vessel_expense'
+    _origin:'vessel_expense',
+    _isBudget:isBudget    // v2.99.27: dự kiến chi (BUDGET) — không vào công nợ
   });
   saveState();
   resetVexForm();
@@ -23016,6 +23058,168 @@ function saveBankBalance(){
 }
 
 /* v2.75.0: ===== TỔNG QUAN NHANH (mobile) — admin & CFO ===== */
+/* v2.99.27: Card NHANH — Báo cáo Quản lý vận hành tàu cho chủ tàu.
+   Mỗi tàu/dự án O&M có 1 dòng: Tổng thu - Tổng chi - Dự kiến chi - Còn lại.
+   - Tổng thu = AR approved gắn tàu (đã duyệt).
+   - Tổng chi = AP approved gắn tàu (đã duyệt, _origin='vessel_expense', loại trừ BUDGET).
+   - Dự kiến chi = AP với _isBudget=true gắn tàu.
+   - Còn lại = Tổng thu − Tổng chi − Dự kiến chi (tiền chủ tàu còn ở Seahorse).
+*/
+function _renderQuickViewOwnerReport(){
+  const vessels = S.vessels || [];
+  const projects = (S.projects||[]).filter(p => p.isOM || p.segment === 'OM');
+  const entities = [];
+  vessels.forEach(v=>entities.push({id:v.id, type:'VESSEL', name:v.name, code:v.code||v.name}));
+  projects.forEach(p=>entities.push({id:p.id, type:'PROJECT', name:p.name, code:p.code}));
+  if(entities.length === 0) return '';
+  // Build report data
+  const dc = displayCcy();
+  const ar = S.receivables || [];
+  const ap = S.payables || [];
+  const rows = entities.map(ent => {
+    const arMatch = ar.filter(r=>{
+      if(wfStatus(r)!=='approved') return false;
+      if(r._isBudget) return false;
+      if(ent.type==='VESSEL') return r.vesselId === ent.id;
+      return r.projectId === ent.id;
+    });
+    const apMatch = ap.filter(r=>{
+      if(wfStatus(r)!=='approved') return false;
+      if(r._isBudget) return false;
+      if(ent.type==='VESSEL') return r.vesselId === ent.id;
+      return r.projectId === ent.id;
+    });
+    const apBudget = ap.filter(r=>{
+      if(!r._isBudget) return false;
+      if(ent.type==='VESSEL') return r.vesselId === ent.id;
+      return r.projectId === ent.id;
+    });
+    const totalRevenue = arMatch.reduce((s,r)=>s + toDisplay(+r.amountGross||+r.amount||0, r.ccy||'VND'), 0);
+    const totalExpense = apMatch.reduce((s,r)=>s + toDisplay(+r.amountGross||+r.amount||0, r.ccy||'VND'), 0);
+    const totalBudget = apBudget.reduce((s,r)=>s + toDisplay(+r.amountGross||+r.amount||0, r.ccy||'VND'), 0);
+    const remaining = totalRevenue - totalExpense - totalBudget;
+    return {ent, totalRevenue, totalExpense, totalBudget, remaining, arCount:arMatch.length, apCount:apMatch.length, budgetCount:apBudget.length};
+  }).filter(r => r.totalRevenue > 0 || r.totalExpense > 0 || r.totalBudget > 0);
+  if(rows.length === 0) return '';
+  // Render
+  const sumRev = rows.reduce((s,r)=>s+r.totalRevenue, 0);
+  const sumExp = rows.reduce((s,r)=>s+r.totalExpense, 0);
+  const sumBdg = rows.reduce((s,r)=>s+r.totalBudget, 0);
+  const sumRem = rows.reduce((s,r)=>s+r.remaining, 0);
+  const rowHtml = rows.map(r=>{
+    const icon = r.ent.type==='VESSEL' ? '⛵' : '⚙';
+    const remColor = r.remaining >= 0 ? '#2d6a6a' : 'var(--bad)';
+    return `
+      <tr style="border-top:1px solid var(--rule)" onclick="_qvOwnerDetail('${r.ent.type}','${esc(r.ent.id)}')" style="cursor:pointer">
+        <td style="padding:8px 10px;cursor:pointer" title="Bấm xem chi tiết">
+          <b>${icon} ${esc(r.ent.code||r.ent.name)}</b>
+          <div style="font-size:10px;color:var(--muted);font-style:italic">${r.arCount} thu · ${r.apCount} chi${r.budgetCount?' · '+r.budgetCount+' dự kiến':''}</div>
+        </td>
+        <td class="num" style="padding:8px 10px;color:#2d6a6a;font-weight:600">${fmt(r.totalRevenue)}</td>
+        <td class="num" style="padding:8px 10px;color:var(--bad);font-weight:600">${fmt(r.totalExpense)}</td>
+        <td class="num" style="padding:8px 10px;color:#c5876d;font-weight:600">${r.totalBudget?fmt(r.totalBudget):'—'}</td>
+        <td class="num" style="padding:8px 10px;font-weight:700;color:${remColor};border-left:1.5px solid var(--rule)">${fmt(r.remaining)}</td>
+      </tr>`;
+  }).join('');
+  return `
+    <div style="padding:14px;border:2px solid #4a6b2c;border-radius:6px;background:rgba(74,107,44,.04)">
+      <div style="font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:#4a6b2c;font-weight:700;margin-bottom:10px">⚓ Quản lý vận hành tàu cho chủ tàu</div>
+      <div style="overflow-x:auto">
+        <table style="width:100%;border-collapse:collapse;font-size:12px">
+          <thead>
+            <tr style="background:rgba(74,107,44,.10);border-bottom:1.5px solid #4a6b2c">
+              <th style="padding:8px 10px;text-align:left;font-size:10px;letter-spacing:.04em;color:#4a6b2c">Tàu/Dự án</th>
+              <th class="num" style="padding:8px 10px;font-size:10px;letter-spacing:.04em;color:#2d6a6a" title="AR đã duyệt — chưa tính dự toán">Tổng thu</th>
+              <th class="num" style="padding:8px 10px;font-size:10px;letter-spacing:.04em;color:var(--bad)" title="AP đã duyệt — đã/sắp chi thực">Tổng chi</th>
+              <th class="num" style="padding:8px 10px;font-size:10px;letter-spacing:.04em;color:#c5876d" title="AP có cờ _isBudget — kế hoạch, chưa phát sinh">Dự kiến chi</th>
+              <th class="num" style="padding:8px 10px;font-size:10px;letter-spacing:.04em;color:var(--ink);border-left:1.5px solid #4a6b2c">Còn lại</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${rowHtml}
+            <tr style="background:rgba(74,107,44,.10);border-top:2px solid #4a6b2c;font-weight:700">
+              <td style="padding:9px 10px;color:#4a6b2c">∑ TỔNG</td>
+              <td class="num" style="padding:9px 10px;color:#2d6a6a">${fmt(sumRev)}</td>
+              <td class="num" style="padding:9px 10px;color:var(--bad)">${fmt(sumExp)}</td>
+              <td class="num" style="padding:9px 10px;color:#c5876d">${sumBdg?fmt(sumBdg):'—'}</td>
+              <td class="num" style="padding:9px 10px;color:${sumRem>=0?'#2d6a6a':'var(--bad)'};border-left:1.5px solid #4a6b2c;font-size:13px">${fmt(sumRem)}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <div style="margin-top:8px;font-size:10px;color:var(--muted);font-style:italic;line-height:1.4">
+        💡 Cách đọc: <b>Còn lại</b> = Tiền chủ tàu còn ở Seahorse sau khi trừ chi đã ghi + chi dự kiến.
+        Dòng <b style="color:#c5876d">Dự kiến chi</b> (cam) là dự toán chưa phát sinh — đánh dấu bằng checkbox 📋 trong form Nhập CP Tàu.
+        Bấm dòng tàu để xem chi tiết.
+      </div>
+    </div>`;
+}
+
+/* v2.99.27: Drill-down chi tiết tàu/dự án — mở dialog mới hiện 3 nhóm tách riêng */
+function _qvOwnerDetail(entType, entId){
+  let entName = '?', entIcon = '⛵';
+  if(entType==='VESSEL'){
+    const v = (S.vessels||[]).find(x=>x.id===entId);
+    if(v){ entName = v.name; }
+  } else {
+    const p = (S.projects||[]).find(x=>x.id===entId);
+    if(p){ entName = `${p.code} · ${p.name}`; entIcon = '⚙'; }
+  }
+  const ar = (S.receivables||[]).filter(r=>{
+    if(wfStatus(r)!=='approved') return false;
+    if(r._isBudget) return false;
+    return entType==='VESSEL' ? r.vesselId===entId : r.projectId===entId;
+  });
+  const apActual = (S.payables||[]).filter(r=>{
+    if(wfStatus(r)!=='approved') return false;
+    if(r._isBudget) return false;
+    return entType==='VESSEL' ? r.vesselId===entId : r.projectId===entId;
+  });
+  const apBudget = (S.payables||[]).filter(r=>{
+    if(!r._isBudget) return false;
+    return entType==='VESSEL' ? r.vesselId===entId : r.projectId===entId;
+  });
+  const rowsTbl = (list, color) => {
+    if(list.length===0) return `<tr><td colspan="5" style="padding:14px;text-align:center;font-style:italic;color:var(--muted)">— Không có giao dịch —</td></tr>`;
+    return list.map(r=>`
+      <tr style="border-top:1px solid var(--rule)">
+        <td style="padding:6px 10px;font-size:11px">${esc(r.issueDate||'')}</td>
+        <td style="padding:6px 10px;font-size:11px">${esc(r.partner||'—')}</td>
+        <td style="padding:6px 10px;font-size:11px">${esc(r.desc||r.costCategory||'')}</td>
+        <td class="num" style="padding:6px 10px;font-weight:600;color:${color}">${fmtCcy(+r.amountGross||+r.amount||0, r.ccy||'VND')}</td>
+        <td style="padding:6px 10px;font-size:10px;color:var(--muted)">${esc(r.ccy||'VND')}</td>
+      </tr>`).join('');
+  };
+  const totalRev = ar.reduce((s,r)=>s+toDisplay(+r.amountGross||+r.amount||0, r.ccy||'VND'), 0);
+  const totalExp = apActual.reduce((s,r)=>s+toDisplay(+r.amountGross||+r.amount||0, r.ccy||'VND'), 0);
+  const totalBdg = apBudget.reduce((s,r)=>s+toDisplay(+r.amountGross||+r.amount||0, r.ccy||'VND'), 0);
+  const remaining = totalRev - totalExp - totalBdg;
+  const body = `
+    <div style="font-size:12px">
+      <div style="padding:10px 14px;background:rgba(74,107,44,.06);border-left:3px solid #4a6b2c;margin-bottom:14px;display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:8px;font-size:11px">
+        <div><div style="color:var(--muted);font-size:10px">Tổng thu</div><b style="color:#2d6a6a;font-size:14px">${fmt(totalRev)}</b></div>
+        <div><div style="color:var(--muted);font-size:10px">Tổng chi (thực)</div><b style="color:var(--bad);font-size:14px">${fmt(totalExp)}</b></div>
+        <div><div style="color:var(--muted);font-size:10px">Dự kiến chi</div><b style="color:#c5876d;font-size:14px">${totalBdg?fmt(totalBdg):'—'}</b></div>
+        <div><div style="color:var(--muted);font-size:10px">Còn lại</div><b style="color:${remaining>=0?'#2d6a6a':'var(--bad)'};font-size:14px">${fmt(remaining)}</b></div>
+      </div>
+      <details open style="margin-bottom:8px">
+        <summary style="cursor:pointer;padding:6px 10px;background:rgba(45,106,106,.08);font-weight:700;color:#2d6a6a">📥 Tổng thu (${ar.length} khoản)</summary>
+        <table style="width:100%;border-collapse:collapse;margin-top:4px"><thead><tr style="background:var(--paper-2)"><th style="padding:6px 10px;text-align:left;font-size:10px">Ngày</th><th style="padding:6px 10px;text-align:left;font-size:10px">Đối tác</th><th style="padding:6px 10px;text-align:left;font-size:10px">Diễn giải</th><th class="num" style="padding:6px 10px;font-size:10px">Số tiền</th><th style="padding:6px 10px;font-size:10px">CCY</th></tr></thead><tbody>${rowsTbl(ar,'#2d6a6a')}</tbody></table>
+      </details>
+      <details style="margin-bottom:8px">
+        <summary style="cursor:pointer;padding:6px 10px;background:rgba(184,71,46,.08);font-weight:700;color:var(--bad)">📤 Tổng chi thực (${apActual.length} khoản)</summary>
+        <table style="width:100%;border-collapse:collapse;margin-top:4px"><thead><tr style="background:var(--paper-2)"><th style="padding:6px 10px;text-align:left;font-size:10px">Ngày</th><th style="padding:6px 10px;text-align:left;font-size:10px">NCC</th><th style="padding:6px 10px;text-align:left;font-size:10px">Diễn giải</th><th class="num" style="padding:6px 10px;font-size:10px">Số tiền</th><th style="padding:6px 10px;font-size:10px">CCY</th></tr></thead><tbody>${rowsTbl(apActual,'var(--bad)')}</tbody></table>
+      </details>
+      <details ${apBudget.length>0?'open':''}>
+        <summary style="cursor:pointer;padding:6px 10px;background:rgba(197,135,109,.12);font-weight:700;color:#c5876d">📋 Dự kiến chi — BUDGET (${apBudget.length} khoản)</summary>
+        <table style="width:100%;border-collapse:collapse;margin-top:4px"><thead><tr style="background:var(--paper-2)"><th style="padding:6px 10px;text-align:left;font-size:10px">Ngày</th><th style="padding:6px 10px;text-align:left;font-size:10px">NCC</th><th style="padding:6px 10px;text-align:left;font-size:10px">Diễn giải</th><th class="num" style="padding:6px 10px;font-size:10px">Số tiền</th><th style="padding:6px 10px;font-size:10px">CCY</th></tr></thead><tbody>${rowsTbl(apBudget,'#c5876d')}</tbody></table>
+      </details>
+    </div>`;
+  openModal(`${entIcon} ${entName} — Báo cáo cho chủ tàu`, body,
+    `<button class="btn-sec" onclick="closeModal();openQuickView()">← Quay về NHANH</button>
+     <button class="btn-primary" onclick="closeModal()">Đóng</button>`);
+}
+
 function _quickViewData(){
   const bankByCcy={}, cashByCcy={};
   (S.bankAccounts||[]).filter(a=>a.isActive!==false).forEach(a=>{
@@ -23330,6 +23534,7 @@ function _renderQuickView(){
           <div style="display:flex;justify-content:space-between;font-size:10px;color:var(--muted);font-style:italic;padding-left:8px">↳ NCC ${fmtU(d.ap.soon30Usd)} + Nợ vay ${fmtU(loanSoon)}${salarySoon>0?' + Lương '+fmtU(salarySoon):''}${nsnnSoon>0?' + NSNN '+fmtU(nsnnSoon)+' <span title="GTGT/TNCN/BHXH... đã ghi nhận">ⓘ</span>':''}</div>
           <div style="display:flex;justify-content:space-between;font-size:15px;margin-top:6px;padding-top:6px;border-top:1.5px solid var(--ink)"><b>Dòng tiền ròng dự kiến</b><b style="color:${duKienRong>=0?'#2d6a6a':'var(--bad)'}">${fmtU(duKienRong)}</b></div>
         </div>
+        ${_renderQuickViewOwnerReport()}
         ${(()=>{
           // v2.85.0/v2.88.0: Card Hạn mức tín dụng còn lại — luôn hiển thị, kèm gợi ý nếu chưa có facility
           const ct = creditFacilityTotalsUsd();
