@@ -650,6 +650,7 @@ body.readonly-mode::before{
       </div>
     </div>
     <input type="file" id="importFile" accept=".json" style="display:none" onchange="importJSON(event)">
+    <input type="file" id="importMergeFile" accept=".json" style="display:none" onchange="importMergeJSON(event)"><!-- v2.99.31 -->
     <!-- v1.41.0: Help button — always visible to all roles -->
     <button class="btn btn-ghost" id="help-btn" onclick="openHelpModal()" title="Hướng dẫn sử dụng (Ctrl+/ hoặc F1)" style="border:1px solid rgba(246,241,232,.4);margin-right:6px">❓ Hướng dẫn</button>
     <!-- Admin actions consolidated in dropdown menu -->
@@ -670,6 +671,7 @@ body.readonly-mode::before{
         <div class="divider"></div>
         <button class="ktt-allowed-item" onclick="closeAdminMenu();exportJSON()"><span class="ico">⤓</span>Export backup (.json)</button>
         <button class="admin-only-item" onclick="closeAdminMenu();document.getElementById('importFile').click()"><span class="ico">⤒</span>Import backup (.json)</button>
+        <button class="admin-only-item" onclick="closeAdminMenu();document.getElementById('importMergeFile').click()" title="Gộp data từ backup vào dữ liệu hiện tại — KHÔNG ghi đè, không mất bản ghi mới"><span class="ico">⤓</span>Khôi phục &amp; GỘP từ backup (.json)</button>
         <div class="divider admin-only-item"></div>
         <button class="danger admin-only-item" onclick="closeAdminMenu();clearAllData()"><span class="ico">✕</span>Xóa toàn bộ dữ liệu</button>
       </div>
@@ -2680,7 +2682,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='2.99.31';            // bumped on each release
+const APP_VERSION='2.99.32';            // bumped on each release
 
 /* v2.62.0: Token xác thực backend — PHẢI khớp API_TOKEN trong Apps Script (Code.gs).
    Mọi request tới Apps Script tự động được gắn token qua lớp bọc fetch bên dưới.
@@ -10000,7 +10002,9 @@ function _stateLooksEmpty(s){
   const pr=(s.projects||[]).length;
   const ba=(s.bankAccounts||[]).length;
   const ln=(s.loans||[]).length;
-  const totalNow = co+ap+ar+ve+fa+pr+ba+ln;
+  const ov=(s.opVessels||[]).length;       // v2.99.31: tàu QL hộ — TRƯỚC ĐÂY BỊ BỎ SÓT
+  const ot=(s.opTransactions||[]).length;   // v2.99.31: bút toán thu/chi hộ — TRƯỚC ĐÂY BỊ BỎ SÓT
+  const totalNow = co+ap+ar+ve+fa+pr+ba+ln+ov+ot;
   // v2.99.30: STRICT hơn — không chỉ check rỗng hoàn toàn, mà còn so với mốc cao nhất từng đạt.
   // 1. Hoàn toàn rỗng (case cũ): TẤT CẢ kho chính = 0
   if(totalNow === 0) return true;
@@ -10026,7 +10030,8 @@ function _updateLastKnownRecordCount(){
     const total = (s.companies||[]).length + (s.payables||[]).length
       + (s.receivables||[]).length + (s.vessels||[]).length
       + (s.fixedAssets||[]).length + (s.projects||[]).length
-      + (s.bankAccounts||[]).length + (s.loans||[]).length;
+      + (s.bankAccounts||[]).length + (s.loans||[]).length
+      + (s.opVessels||[]).length + (s.opTransactions||[]).length;  // v2.99.31: tính cả tàu QL hộ
     const cfg = getAuthConfig();
     if(!cfg) return;
     const prev = +cfg.lastKnownRecordCount || 0;
@@ -10042,7 +10047,7 @@ function _stateRecordCount(s){
   if(!s) return 0;
   return (s.payables||[]).length+(s.receivables||[]).length+(s.vessels||[]).length
         +(s.fixedAssets||[]).length+(s.companies||[]).length+(s.projects||[]).length
-        +(s.transactions||[]).length+(s.opTransactions||[]).length;
+        +(s.transactions||[]).length+(s.opTransactions||[]).length+(s.opVessels||[]).length;  // v2.99.31
 }
 
 function mergeStateByFields(cloudFull, localFull, fields){
@@ -28948,6 +28953,84 @@ function importJSON(ev){
         `Ghi đè toàn bộ dữ liệu hiện tại bằng file <b>${f.name}</b>?`,
         `Plans: ${(data.plans||[]).length} · Projects: ${(data.projects||[]).length} · Vessels: ${(data.vessels||[]).length} · Transactions: ${(data.transactions||[]).length}`,
         async ()=>{S=Object.assign(defaultState(),data);await saveStateEncrypted();renderAll();toast('Đã import');},false);
+    }catch(err){toast('File không hợp lệ hoặc lỗi giải mã: '+err.message,'bad');ev.target.value='';}
+  };
+  r.readAsText(f);
+}
+
+/* v2.99.31: KHÔI PHỤC & GỘP từ backup (Quy tắc 2 — merge theo ID).
+   Khác importJSON (ghi đè toàn bộ): hàm này GỘP file backup vào state hiện tại.
+   - Mỗi kho mảng-có-ID: union theo id; bản trùng giữ bản updatedAt MỚI hơn (tie → giữ bản hiện tại).
+   - Tôn trọng deletedIds (tombstone) — bản đã xóa không hồi sinh.
+   - Field không phải mảng-id (fxRate, displayCcy, companyInfo...): GIỮ state hiện tại.
+   Dùng để cứu data các kho bị mất (projects, opVessels, opTransactions...) mà KHÔNG mất
+   bản ghi NV nhập sau ngày backup. Tái dùng mergeByID — cùng máy móc với sync. */
+function importMergeJSON(ev){
+  const f=ev.target.files[0];if(!f)return;
+  if(!isAdmin()){toast('Chỉ admin được khôi phục','bad');ev.target.value='';return;}
+  const r=new FileReader();
+  r.onload=async e=>{
+    try{
+      const d=JSON.parse(e.target.result);
+      ev.target.value='';
+      if(!d.auth||!d.payload){toast('File backup không hợp lệ','bad');return;}
+      const cfg=getAuthConfig();
+      if(!d.auth.admin || d.auth.admin.hash!==cfg.admin.hash){
+        toast('File backup mã hóa bằng admin password khác. Không gộp được.','bad');
+        return;
+      }
+      const fileData=await decryptJSON(d.payload);
+      // Các kho mảng-có-ID sẽ được gộp. Lấy union các khóa của cả 2 bên.
+      const ARR_KEYS=['companies','payables','receivables','vessels','fixedAssets',
+        'projects','bankAccounts','loans','opVessels','opTransactions','opMgmtFees',
+        'transactions','plans','invGroups','invMovements','warehouses','cashFunds',
+        'taxes','bankSnapshots','creditFacilities'];
+      // Build preview: cho từng kho, đếm hiện tại / file / sau gộp.
+      const tomb=deletedIdSet();
+      const previewRows=[]; const plan={};
+      const keys=new Set(ARR_KEYS);
+      Object.keys(fileData||{}).forEach(k=>{ if(Array.isArray(fileData[k]) && fileData[k][0] && typeof fileData[k][0]==='object' && 'id' in fileData[k][0]) keys.add(k); });
+      keys.forEach(k=>{
+        const cur=Array.isArray(S[k])?S[k]:[];
+        const file=Array.isArray(fileData[k])?fileData[k]:[];
+        if(cur.length===0 && file.length===0) return;
+        // cur = "local" (giữ bản mới), file = "cloud" (kho đầy đủ cũ)
+        const {merged}=mergeByID(file, cur, 'id', k==='deletedIds');
+        plan[k]=merged;
+        const added=merged.length - cur.length;
+        previewRows.push({k, cur:cur.length, file:file.length, after:merged.length, added});
+      });
+      const rowsHtml=previewRows
+        .sort((a,b)=>b.added-a.added)
+        .map(x=>`<tr style="border-top:1px solid var(--rule)">
+          <td style="padding:5px 10px"><b>${x.k}</b></td>
+          <td class="num" style="padding:5px 10px;color:var(--muted)">${x.cur}</td>
+          <td class="num" style="padding:5px 10px;color:var(--muted)">${x.file}</td>
+          <td class="num" style="padding:5px 10px;font-weight:700;color:${x.added>0?'#2d6a6a':'var(--ink)'}">${x.after}${x.added>0?` <span style="font-size:10px">(+${x.added})</span>`:''}</td>
+        </tr>`).join('');
+      const totalAdded=previewRows.reduce((s,x)=>s+Math.max(0,x.added),0);
+      const body=`
+        <div style="font-size:12px;margin-bottom:10px">Gộp <b>${esc(f.name)}</b> vào dữ liệu hiện tại. Bản ghi trùng ID giữ bản mới hơn; bản đã xóa không hồi sinh. <b>Không bản ghi nào hiện có bị mất.</b></div>
+        <div style="overflow-x:auto;max-height:340px;overflow-y:auto;border:1px solid var(--rule)">
+          <table style="width:100%;border-collapse:collapse;font-size:12px">
+            <thead><tr style="background:var(--paper-2);position:sticky;top:0">
+              <th style="padding:6px 10px;text-align:left">Kho</th>
+              <th class="num" style="padding:6px 10px">Hiện tại</th>
+              <th class="num" style="padding:6px 10px">Trong file</th>
+              <th class="num" style="padding:6px 10px">Sau gộp</th>
+            </tr></thead>
+            <tbody>${rowsHtml||'<tr><td colspan="4" style="padding:14px;text-align:center;color:var(--muted)">Không có kho nào để gộp</td></tr>'}</tbody>
+          </table>
+        </div>
+        <div style="margin-top:10px;padding:8px 12px;background:rgba(45,106,106,.06);border-left:3px solid var(--good);font-size:11px">Tổng cộng sẽ bổ sung <b>${totalAdded}</b> bản ghi từ backup. Các field cấu hình (tỷ giá, hiển thị, thông tin công ty...) giữ nguyên hiện tại.</div>`;
+      confirmDialog('Khôi phục & GỘP dữ liệu?', body, '',
+        async ()=>{
+          Object.keys(plan).forEach(k=>{ S[k]=plan[k]; });
+          await saveStateEncrypted();
+          try{ _updateLastKnownRecordCount(); }catch(e){}
+          renderAll();
+          toast('Đã gộp '+totalAdded+' bản ghi từ backup','good');
+        }, false);
     }catch(err){toast('File không hợp lệ hoặc lỗi giải mã: '+err.message,'bad');ev.target.value='';}
   };
   r.readAsText(f);
