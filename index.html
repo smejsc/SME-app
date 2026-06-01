@@ -2682,7 +2682,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='2.99.32';            // bumped on each release
+const APP_VERSION='2.99.36';            // bumped on each release
 
 /* v2.62.0: Token xác thực backend — PHẢI khớp API_TOKEN trong Apps Script (Code.gs).
    Mọi request tới Apps Script tự động được gắn token qua lớp bọc fetch bên dưới.
@@ -20021,6 +20021,9 @@ function _arEditorBody(r,isPayable){
       etGroups[t.group].push(t);
     });
     let etHtml = '<option value="">— Chọn loại chi phí —</option>';
+    // v2.99.32: 'Dự kiến chi' là một LOẠI đặc biệt — NV chọn để đánh dấu khoản AP là dự kiến
+    // (chưa phát sinh thực). Lưu cờ _isBudget, không vào công nợ/P&L; chỉ hiện ở Báo cáo chủ tàu + NHANH.
+    etHtml += `<option value="__BUDGET__" ${r._isBudget?'selected':''}>📋 Dự kiến chi (chưa phát sinh)</option>`;
     if(typeof EXPENSE_GROUPS!=='undefined'){
       Object.keys(EXPENSE_GROUPS).forEach(gk=>{
         if(!etGroups[gk]) return;
@@ -20986,6 +20989,9 @@ function saveAr(kind,id){
   if(kind==='ap'){
     const etEl = document.getElementById('ar-expense-type');
     expenseType = etEl ? etEl.value : '';
+    // v2.99.32: loại đặc biệt 'Dự kiến chi' → đặt cờ _isBudget, expenseType để rỗng.
+    var apIsBudget = false;
+    if(expenseType === '__BUDGET__'){ apIsBudget = true; expenseType = ''; }
     if(expenseType && isExpenseFuel(expenseType)){
       // STRICT validation: 3 fuel fields required
       const kEl = document.getElementById('ar-fuel-kind');
@@ -21051,6 +21057,7 @@ function saveAr(kind,id){
     const updates = {partner,vendorId,desc,invoiceNo,amountNet,vatPercent,vatAmount,amountGross,amount,ccy,segment,companyId,projectId,vesselId,issueDate,dueDate,dueMonth,dueAmount};
     if(kind==='ap'){
       updates.expenseType = expenseType;
+      updates._isBudget = apIsBudget;  // v2.99.32: loại 'Dự kiến chi'
       // Always set fuel fields (null = not a fuel record)
       updates.fuelKind = fuelKind;
       updates.fuelQty = fuelQty;
@@ -21088,6 +21095,7 @@ function saveAr(kind,id){
     };
     if(kind==='ap'){
       newRec.expenseType = expenseType;
+      newRec._isBudget = apIsBudget;  // v2.99.32: loại 'Dự kiến chi'
       newRec.fuelKind = fuelKind;
       newRec.fuelQty = fuelQty;
       newRec.fuelUnit = fuelUnit;
@@ -23409,6 +23417,13 @@ function _quickViewData(){
   }
   // v2.99.18: BHXH không còn forecast tự sinh nữa — giờ là record trong S.taxes.records,
   // đã được tính trong nsnnSoon30Usd ở trên (auto sinh khi AP Lương được duyệt)
+  // v2.99.33: NSNN dự kiến THỦ CÔNG (fallback) — nếu cấu hình monthlyNsnnVnd > 0 và 30 ngày
+  // tới KHÔNG có record NSNN thực nào → cộng số dự kiến (chống trùng với số thực ở tab 12).
+  const manualNsnnVnd = +((S.cashflowConfig||{}).monthlyNsnnVnd) || 0;
+  if(manualNsnnVnd > 0 && nsnnSoon30Usd <= 0){
+    const u = _toUsdFixed(manualNsnnVnd, 'VND');
+    if(u !== null) nsnnSoon30Usd += u;
+  }
   return {bankByCcy, cashByCcy, ar:summarize(ar), ap:summarize(ap), loanSoon30Usd, salarySoon30Usd, nsnnSoon30Usd};
 }
 
@@ -27306,7 +27321,8 @@ function _nsnnRenderOverview(yr){
       paidAmt = paid[code] || 0;
     }
     const remain = amount - paidAmt;
-    if(amount===0 && paidAmt===0) return;  // skip empty rows
+    // v2.99.34: LUÔN hiện đầy đủ mọi loại phải nộp NSNN (kể cả chưa phát sinh → hiện 0)
+    // để thấy đủ danh mục. Trước đây skip dòng rỗng nên TNCN/NK/FCT/TNDN/Môn bài bị ẩn.
     const overrideBadge = (code==='VAT_PAYABLE' && auto._hasVatOverride) ? ' <span class="chip chip-warn" style="font-size:9px">override</span>' : '';
     html+=`<tr>
       <td><span style="display:inline-flex;align-items:center;gap:6px"><span style="font-size:14px">${m.icon}</span><b>${esc(m.label)}</b>${overrideBadge}</span></td>
@@ -27404,8 +27420,9 @@ function _nsnnRenderByMonth(yr){
   html += `<tr style="background:rgba(28,58,92,.08)"><td colspan="14" style="font-weight:700;font-size:13px;color:var(--ink);letter-spacing:.04em;padding:8px 10px">A. THUẾ <span style="font-weight:400;color:var(--muted);font-size:11px;font-style:italic">— nộp NSNN qua kho bạc</span></td></tr>`;
   GROUP_A_CODES.forEach(code=>{
     const row = computeRow(code);
-    const ALWAYS_SHOW = (code==='VAT_OUTPUT' || code==='VAT_INPUT' || code==='VAT_PAYABLE');
-    if(!row.hasAny && !ALWAYS_SHOW) return;
+    // v2.99.34: LUÔN hiện đầy đủ mọi loại phải nộp NSNN (GTGT, TNCN, NK, GTGT NK, FCT, TNDN,
+    // Môn bài, Phạt) — kể cả tháng/năm chưa phát sinh (hiện "—") để thấy đủ danh mục. Trước
+    // đây chỉ hiện loại có số nên TNCN/NK/FCT/TNDN/Môn bài bị ẩn khi chưa nhập.
     html+=`<tr><td style="padding-left:18px"><span style="display:inline-flex;align-items:center;gap:4px"><span>${row.meta.icon}</span>${esc(row.meta.label)}</span></td>${row.cells}<td class="r num" style="background:rgba(184,71,46,.06);font-weight:600">${fmt(row.total)}</td></tr>`;
   });
   const totalA = computeGroupTotal(GROUP_A_CODES);
@@ -27534,11 +27551,10 @@ function _nsnnAddRecord(){
     {key:'ccy',label:'CCY',type:'select',options:[{v:'VND',t:'VND'},{v:'USD',t:'USD'}]},
     {key:'dueDate',label:'Hạn nộp',type:'date'},
     {key:'paidAmount',label:'Số đã nộp',type:'number'},
-    {key:'paidDate',label:'Ngày TT',type:'date'},
-    {key:'isExpense',label:'✓ Ghi vào chi phí (tự tạo AP) — gắn tàu/dự án nếu có',type:'checkbox',span:2},
-    {key:'vesselId',label:'Tàu (nếu ghi CP)',type:'select',options:vesselOpts},
-    {key:'projectId',label:'Dự án (nếu ghi CP)',type:'select',options:projectOpts}
-  ], {type:'IMPORT_DUTY', period:thisMonth, ccy:'VND', amount:0, paidAmount:0, description:'', dueDate:'', paidDate:'', isExpense:false, vesselId:'', projectId:''}, (d)=>{
+    {key:'paidDate',label:'📅 Ngày nộp NSNN (điền khi đã nộp → tự ghi vào chi phí)',type:'date',span:2},
+    {key:'vesselId',label:'Tàu (gắn chi phí, nếu có)',type:'select',options:vesselOpts},
+    {key:'projectId',label:'Dự án (gắn chi phí, nếu có)',type:'select',options:projectOpts}
+  ], {type:'IMPORT_DUTY', period:thisMonth, ccy:'VND', amount:0, paidAmount:0, description:'', dueDate:'', paidDate:'', vesselId:'', projectId:''}, (d)=>{
     if(!d.type){toast('Chọn loại thuế','bad');return false;}
     if(!d.period || !/^\d{4}-\d{2}$/.test(d.period)){toast('Kỳ tính phải dạng YYYY-MM','bad');return false;}
     if(!(+d.amount>0)){toast('Số phải nộp > 0','bad');return false;}
@@ -27550,6 +27566,8 @@ function _nsnnAddRecord(){
       vId=vId.substring(3);
       isOpVessel=true;
     }
+    // v2.99.36: CHI PHÍ ghi nhận khi ĐÃ NỘP (có paidDate). Chưa nộp → chỉ là nghĩa vụ, không tạo AP.
+    const isExpenseNow = !!(d.paidDate||'').trim();
     const taxRec={
       id:taxId,
       type:d.type,
@@ -27560,23 +27578,23 @@ function _nsnnAddRecord(){
       dueDate:d.dueDate||'',
       paidAmount:+d.paidAmount||0,
       paidDate:d.paidDate||'',
-      isExpense:!!d.isExpense,
+      isExpense:isExpenseNow,
       vesselId:vId||'',
       isOpVessel,
       projectId:d.projectId||'',
       linkedApId:'',
       addedBy:actorName(),
       addedAt:new Date().toISOString(),
-      updatedAt:new Date().toISOString()  // v2.61.0: _recordTimestamp không đọc addedAt → cần updatedAt cho sync
+      updatedAt:new Date().toISOString()
     };
     S.taxes.records.push(taxRec);
-    // Auto-create AP if isExpense
+    // Auto-create AP CHỈ khi đã nộp (isExpenseNow)
     if(taxRec.isExpense){
       const apId=_nsnnSyncAp(taxRec);
       taxRec.linkedApId=apId;
     }
     saveState();
-    toast(taxRec.isExpense?'Đã thêm thuế + ghi vào CP (tạo AP)':'Đã thêm bút toán thuế');
+    toast(taxRec.isExpense?'Đã thêm thuế · đã nộp → ghi vào chi phí (tạo AP)':'Đã thêm bút toán thuế (chưa nộp — chưa vào chi phí)');
     renderAll();
   });
 }
@@ -27606,10 +27624,9 @@ function _nsnnEditRecord(id){
     {key:'ccy',label:'CCY',type:'select',options:[{v:'VND',t:'VND'},{v:'USD',t:'USD'}]},
     {key:'dueDate',label:'Hạn nộp',type:'date'},
     {key:'paidAmount',label:'Số đã nộp',type:'number'},
-    {key:'paidDate',label:'Ngày TT',type:'date'},
-    {key:'isExpense',label:'✓ Ghi vào chi phí (tự tạo AP)',type:'checkbox',span:2},
-    {key:'vesselId',label:'Tàu (nếu ghi CP)',type:'select',options:vesselOpts},
-    {key:'projectId',label:'Dự án (nếu ghi CP)',type:'select',options:projectOpts}
+    {key:'paidDate',label:'📅 Ngày nộp NSNN (điền khi đã nộp → tự ghi vào chi phí)',type:'date',span:2},
+    {key:'vesselId',label:'Tàu (gắn chi phí, nếu có)',type:'select',options:vesselOpts},
+    {key:'projectId',label:'Dự án (gắn chi phí, nếu có)',type:'select',options:projectOpts}
   ], init, (d)=>{
     if(!d.period || !/^\d{4}-\d{2}$/.test(d.period)){toast('Kỳ tính phải dạng YYYY-MM','bad');return false;}
     const wasExpense=!!r.isExpense;
@@ -27621,20 +27638,21 @@ function _nsnnEditRecord(id){
       vId=vId.substring(3);
       isOpVessel=true;
     }
-    Object.assign(r, d, {vesselId:vId, isOpVessel});
-    // Sync AP based on isExpense toggle
+    // v2.99.36: CHI PHÍ = đã nộp (có paidDate). KTT điền ngày nộp → thành chi phí (tạo AP).
+    const isExpenseNow = !!(d.paidDate||'').trim();
+    Object.assign(r, d, {vesselId:vId, isOpVessel, isExpense:isExpenseNow});
+    // Sync AP theo trạng thái đã nộp
     if(r.isExpense){
-      // Create or update AP
       const apId=_nsnnSyncAp(r);
       r.linkedApId=apId;
     } else if(wasExpense && wasAp){
-      // Bỏ tích → xóa AP cũ
+      // Chuyển từ đã nộp → chưa nộp: gỡ AP (không còn là chi phí)
       S.payables=(S.payables||[]).filter(p=>p.id!==wasAp);
       r.linkedApId='';
     }
     touchRecord(r);  // v2.61.0: timestamp cho sync
     saveState();
-    toast('Đã cập nhật');
+    toast(r.isExpense?'Đã cập nhật · đã nộp → vào chi phí':'Đã cập nhật (chưa nộp — chưa vào chi phí)');
   });
 }
 
@@ -27691,7 +27709,7 @@ function _nsnnSyncAp(taxRec){
     segment,
     vesselId:taxRec.vesselId||null,
     projectId:taxRec.projectId||null,
-    issueDate:taxRec.period+'-01',
+    issueDate:(taxRec.paidDate||'').trim() || (taxRec.period+'-01'),  // v2.99.36: ghi CP theo ngày nộp
     dueDate:taxRec.dueDate||'',
     dueMonth:taxRec.period,
     dueAmount:0,
@@ -28077,6 +28095,27 @@ function _cfTaxForecastInWindow(start, end){
         });
       }
     }
+    // ── v2.99.33: NSNN dự kiến THỦ CÔNG (TNCN + thuế khác) — fallback.
+    // CHỐNG TRÙNG: chỉ cộng nếu tháng này CHƯA có khoản NSNN nào (record thực ở tab 12
+    // cho tháng, hoặc đã tự tính GTGT/TNCN forecast ở trên). Nếu đã có → ưu tiên số thực/tự tính.
+    const manualNsnn = +((S.cashflowConfig||{}).monthlyNsnnVnd) || 0;
+    if(manualNsnn > 0){
+      const hasRealForMonth = S.taxes.records.some(t=>{
+        const per = (t.period||'');
+        const remain = (+t.amount||0) - (+t.paidAmount||0);
+        return per.startsWith(monthStr) && remain > 0;
+      });
+      const hasForecastForMonth = events.some(e=>
+        e.kind==='TAX_FORECAST' && e.date.getTime()===cur.getTime());
+      if(!hasRealForMonth && !hasForecastForMonth){
+        events.push({
+          date: new Date(cur),
+          kind: 'TAX_FORECAST',
+          record: {label:`NSNN dự kiến ${monthLabel}`, type:'NSNN_PLAN', _forecast:true},
+          amount: toDisplay(manualNsnn, 'VND')
+        });
+      }
+    }
     cur.setMonth(cur.getMonth()+1);
   }
   return events;
@@ -28130,6 +28169,7 @@ function _cfEditMonthlySalary(){
   }
   const cur = +(S.cashflowConfig||{}).monthlySalaryVnd || 0;
   const curBhxh = +(S.cashflowConfig||{}).monthlyBhxhVnd || 0;
+  const curNsnn = +(S.cashflowConfig||{}).monthlyNsnnVnd || 0;  // v2.99.33
   // Gợi ý từ 2 nguồn còn lại
   const today = new Date();
   const threeMonthsAgo = new Date(today);
@@ -28172,6 +28212,12 @@ function _cfEditMonthlySalary(){
         ${bhxhSuggest>0 ? `<div style="margin-top:4px"><a href="javascript:document.getElementById('cf-monthly-bhxh').value=${bhxhSuggest}" style="color:var(--accent);font-size:11px">[Đề xuất: ${fmt(bhxhSuggest,'VND')} (~22% lương)]</a></div>` : ''}
       </div>
 
+      <div class="field" style="margin-top:14px">
+        <label>🏛 NSNN dự kiến / tháng (VND) <span style="color:var(--muted);text-transform:none;font-weight:400;font-size:10px">(TNCN + thuế/phải nộp NSNN khác)</span></label>
+        <input type="number" id="cf-monthly-nsnn" value="${curNsnn||''}" step="any" placeholder="VD: 50000000" style="font-family:var(--font-mono);text-align:right">
+        <div style="font-size:10px;color:var(--muted);font-style:italic;margin-top:3px">Khoản dự kiến nộp NSNN mỗi tháng (hạn 20 tháng sau). CHỐNG TRÙNG: tháng nào đã có số thực ở tab 12 NSNN → app ưu tiên số thực, bỏ qua số dự kiến này. Để trống → chỉ dùng số thực.</div>
+      </div>
+
       <div style="margin-top:14px;padding:10px 12px;background:rgba(28,58,92,.04);border-left:3px solid var(--ink);font-size:11.5px;line-height:1.55">
         <b>Gợi ý lương từ dữ liệu:</b>
         <div style="margin-top:4px">• TB AP loại SALARY/BONUS/ALLOWANCE 3T gần nhất: <b>${fmt(avgAp,'VND')}/tháng</b> ${avgAp>0?`<a href="javascript:document.getElementById('cf-monthly-salary').value=${Math.round(avgAp)}" style="color:var(--accent)">[Dùng số này]</a>`:''}</div>
@@ -28179,7 +28225,7 @@ function _cfEditMonthlySalary(){
       </div>
 
       <div style="margin-top:10px;font-size:10px;color:var(--muted);font-style:italic">
-        💡 App tự nhận diện đã chi để KHÔNG cộng trùng (ngưỡng 50%). NSNN (GTGT/TNCN/Môn bài...) dùng từ tab 12 NSNN — không cần khai báo ở đây.
+        💡 App tự nhận diện đã chi để KHÔNG cộng trùng (ngưỡng 50%). GTGT phải nộp app tự tính từ VAT đầu ra − đầu vào theo tháng. Số NSNN dự kiến ở trên chỉ là fallback cho tháng chưa có số thực ở tab 12 NSNN.
       </div>
     </div>`;
   openModal('⚙ Cài đặt Lương + BHXH dự kiến', body,
@@ -28190,15 +28236,18 @@ function _cfEditMonthlySalary(){
 function _cfSaveMonthlySalary(){
   const v = +document.getElementById('cf-monthly-salary').value || 0;
   const vBhxh = +document.getElementById('cf-monthly-bhxh').value || 0;
-  if(v < 0 || vBhxh < 0){ toast('Số tiền không hợp lệ','bad'); return; }
+  const vNsnn = +(document.getElementById('cf-monthly-nsnn')||{}).value || 0;  // v2.99.33
+  if(v < 0 || vBhxh < 0 || vNsnn < 0){ toast('Số tiền không hợp lệ','bad'); return; }
   if(!S.cashflowConfig) S.cashflowConfig = {};
   S.cashflowConfig.monthlySalaryVnd = v;
   S.cashflowConfig.monthlyBhxhVnd = vBhxh;
-  try{ logAuditEvent('cashflow_set_monthly_salary', {salaryVnd:v, bhxhVnd:vBhxh}); }catch(e){}
+  S.cashflowConfig.monthlyNsnnVnd = vNsnn;  // v2.99.33
+  try{ logAuditEvent('cashflow_set_monthly_salary', {salaryVnd:v, bhxhVnd:vBhxh, nsnnVnd:vNsnn}); }catch(e){}
   saveState();
   const msgParts = [];
   if(v>0) msgParts.push(`Lương ${fmt(v,'VND')}/tháng`);
   if(vBhxh>0) msgParts.push(`BHXH ${fmt(vBhxh,'VND')}/tháng`);
+  if(vNsnn>0) msgParts.push(`NSNN ${fmt(vNsnn,'VND')}/tháng`);
   toast(msgParts.length ? 'Đã cập nhật: ' + msgParts.join(' + ') : 'Đã xóa cài đặt');
   closeModal();
   renderCashflow();
