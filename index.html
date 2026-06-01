@@ -1272,6 +1272,12 @@ body.readonly-mode::before{
       <div id="opt-chi-fields" style="display:none;margin-top:8px;padding:10px 14px;background:rgba(184,71,46,.04);border-left:3px solid var(--accent);border-radius:3px">
         <div style="font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--accent);font-weight:600;margin-bottom:8px">Thông tin chứng từ chi hộ (cho chủ tàu kiểm tra)</div>
         <div class="form-grid">
+          <div class="field"><label>Tính chất khoản chi <span style="font-size:9px;color:var(--accent);font-weight:600">v2.99.31</span></label>
+            <select id="opt-budget" title="Chi thực = đã/đang chi có chứng từ. Dự kiến chi = khoản sẽ chi trong tháng, chưa phát sinh — hiện riêng cột Dự kiến trên báo cáo chủ tàu.">
+              <option value="ACTUAL" selected>Chi thực (có chứng từ)</option>
+              <option value="BUDGET">📋 Dự kiến chi trong tháng</option>
+            </select>
+          </div>
           <div class="field" style="grid-column:span 2"><label>Tên NCC / Nhà cung cấp</label><input type="text" id="opt-vendor" placeholder="VD: Cty CP Cảng Vũng Tàu, Cty TNHH Cung ứng Sài Gòn..."></div>
           <div class="field"><label>Số hợp đồng</label><input type="text" id="opt-contract" placeholder="VD: HD-2026-001"></div>
           <div class="field"><label>Số hóa đơn</label><input type="text" id="opt-invoice" placeholder="VD: HD-VAT-12345"></div>
@@ -2674,7 +2680,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='2.99.28';            // bumped on each release
+const APP_VERSION='2.99.31';            // bumped on each release
 
 /* v2.62.0: Token xác thực backend — PHẢI khớp API_TOKEN trong Apps Script (Code.gs).
    Mọi request tới Apps Script tự động được gắn token qua lớp bọc fetch bên dưới.
@@ -8805,6 +8811,7 @@ async function cloudSync(mode, opts){
       S.presence = mergedPresence; // v2.72.0: giữ presence đã gộp
       S.auditLogShared = mergedAudit; // v2.73.0: giữ nhật ký quan trọng đã union
       await saveStateEncrypted();
+      try{ _updateLastKnownRecordCount(); }catch(e){}  // v2.99.30: cập nhật mốc cao nhất
       renderAll({fromSync:true});
       cfg.lastSync=new Date().toISOString();
       setAuthConfig(cfg);
@@ -8890,26 +8897,37 @@ async function cloudSync(mode, opts){
             toast(`⚠ ${total} bản ghi đã được NV khác cập nhật — đã merge theo bản mới nhất`, 'warn');
           }
         }catch(mergeErr){
-          // Admin merge fails → fall back to direct push (preserve old behavior)
+          // v2.99.30: KHÔNG còn fall back tự động to direct push — nguy hiểm.
           const detail=mergeErr.message||String(mergeErr);
-          console.warn('[sync admin merge] failed, falling back to direct push:', detail);
+          console.warn('[sync admin merge] failed:', detail);
           if(/network|fetch|connection|failed to fetch|không phản hồi|không hợp lệ/i.test(detail) || !navigator.onLine){
             updateSyncStatus('error','Không kết nối được cloud');
             toast('Mạng yếu hoặc cloud lỗi — thử lại sau','bad');
             return;
           }
-          // v2.44.0: trước khi push thẳng (bỏ qua merge), kiểm tra S có vẻ đầy đủ không.
-          // Nếu S trống bất thường (vd admin mới đăng nhập chưa pull xong) → KHÔNG push,
-          // tránh đẩy bản thiếu đè lên cloud.
-          const _cnt=(S.payables||[]).length+(S.receivables||[]).length+(S.vessels||[]).length
-                    +(S.fixedAssets||[]).length+(S.companies||[]).length+(S.projects||[]).length;
-          if(_cnt===0){
-            updateSyncStatus('error','Dữ liệu máy trống — không đẩy đè cloud');
-            toast('⚠ Không sync: dữ liệu trên máy đang trống. Hãy Pull từ cloud trước, hoặc liên hệ admin.','bad');
+          // Kiểm tra cẩn thận trước khi push direct
+          if(_stateLooksEmpty(S)){
+            updateSyncStatus('error','Dữ liệu máy trống/sụt giảm — không đẩy đè cloud');
+            toast('⚠ Không sync: dữ liệu máy này trống hoặc sụt giảm bất thường. Đăng xuất + đăng nhập lại để Pull data, hoặc liên hệ admin.','bad');
+            console.error('[sync admin] CHẶN push direct vì state looks empty');
             return;
           }
-          // Cloud empty or other error → push direct
-          toEncrypt=S;
+          // Cloud có vấn đề (Thieu manh, decrypt fail, payload null...) → CHẶN
+          if(/Thieu manh|payload|undefined.*iv|cannot read.*payload|corrupted/i.test(detail)){
+            updateSyncStatus('error','Cloud có vấn đề: '+detail);
+            toast('⚠ Cloud có vấn đề — KHÔNG push để tránh đè data. Báo dev kiểm tra. Chi tiết: '+detail,'bad');
+            console.error('[sync admin] CHẶN push direct vì cloud lỗi:', detail);
+            return;
+          }
+          // Chỉ cho phép direct push khi cloud thật sự RỖNG (chưa setup) + admin + state OK
+          if(/cloud trống|empty/i.test(detail) && !_stateLooksEmpty(S)){
+            console.log('[sync admin] cloud thực sự rỗng, push direct lần đầu setup');
+            toEncrypt=S;
+          } else {
+            updateSyncStatus('error','Không pull được để merge: '+detail);
+            toast('Sync thất bại: '+detail,'bad');
+            return;
+          }
         }
       } else {
         // User: must merge with cloud to avoid overwriting fields they don't have permission for
@@ -8954,12 +8972,19 @@ async function cloudSync(mode, opts){
             toast('Mạng yếu — thử lại sau','bad');
             return;
           }
-          if(/cloud trống|empty|payload|undefined.*iv|cannot read.*payload/i.test(detail)){
-            console.log('[sync push] cloud empty, pushing direct');
+          // v2.99.30: KHÔNG còn nhánh "push direct khi cloud lỗi" — nguy hiểm.
+          // Trước đây: cloud trả "Thieu manh #1" → match /payload/ → push S thẳng → đè cloud rỗng.
+          // Giờ: cloud có vấn đề → CHẶN push, yêu cầu user can thiệp.
+          // Trường hợp đặc biệt: cloud thật sự RỖNG (chưa setup) — chỉ admin được push direct và phải có data đầy đủ.
+          if(/cloud trống|empty/i.test(detail) && CURRENT_ROLE==='admin' && !_stateLooksEmpty(S)){
+            // Cloud RỖNG thật sự + local có data đầy đủ + là admin → cho phép push direct (case setup lần đầu)
+            console.log('[sync push] cloud thực sự rỗng, admin push direct lần đầu setup');
             toEncrypt=S;
           } else {
-            updateSyncStatus('error','Không pull được để merge: '+detail);
-            toast('Sync thất bại: '+detail+' — bấm F12 → Console để xem chi tiết','bad');
+            // Mọi case khác (corrupt, thiếu chunk, decrypt fail...) → CHẶN
+            updateSyncStatus('error','Cloud có vấn đề: '+detail);
+            toast('⚠ Cloud có vấn đề — KHÔNG push để tránh đè data. Báo admin kiểm tra. Chi tiết: '+detail,'bad');
+            console.error('[sync push] CHẶN push direct vì cloud lỗi:', detail);
             return;
           }
         }
@@ -9011,6 +9036,7 @@ async function cloudSync(mode, opts){
       setAuthConfig(cfg);
       updateSyncStatus('synced','Đã sync '+timeAgo(cfg.lastSync));
       toast('Đã đồng bộ lên cloud' + compressionInfo);
+      try{ _updateLastKnownRecordCount(); }catch(e){}  // v2.99.30
       // v1.55.0: Refresh banner
       try{ updateBackupBanner(); }catch(e){} try{ updateEmptyStateBanner(); }catch(e){}
     }
@@ -9972,8 +9998,44 @@ function _stateLooksEmpty(s){
   const ve=(s.vessels||[]).length;
   const fa=(s.fixedAssets||[]).length;
   const pr=(s.projects||[]).length;
-  // Trống nếu KHÔNG có công ty VÀ tổng mọi dữ liệu nghiệp vụ chính = 0
-  return co===0 && (ap+ar+ve+fa+pr)===0;
+  const ba=(s.bankAccounts||[]).length;
+  const ln=(s.loans||[]).length;
+  const totalNow = co+ap+ar+ve+fa+pr+ba+ln;
+  // v2.99.30: STRICT hơn — không chỉ check rỗng hoàn toàn, mà còn so với mốc cao nhất từng đạt.
+  // 1. Hoàn toàn rỗng (case cũ): TẤT CẢ kho chính = 0
+  if(totalNow === 0) return true;
+  // 2. So với mốc cao nhất từng có (lưu trong AUTH_KEY/cfg.lastKnownRecordCount).
+  //    Nếu hiện tại < 30% mốc cũ → coi như rỗng nguy hiểm (mất gần hết).
+  //    Lưu vào cfg để không bị xóa khi data lỗi.
+  try{
+    const cfg = getAuthConfig();
+    const lastKnown = +(cfg && cfg.lastKnownRecordCount) || 0;
+    if(lastKnown >= 10 && totalNow < lastKnown * 0.3){
+      console.warn('[stateLooksEmpty] BẢO VỆ: hiện tại', totalNow, '< 30% mốc cũ', lastKnown);
+      return true;
+    }
+  }catch(e){}
+  return false;
+}
+
+/* v2.99.30: Cập nhật mốc cao nhất từng đạt — gọi mỗi khi push thành công + render xong */
+function _updateLastKnownRecordCount(){
+  try{
+    const s = S;
+    if(!s) return;
+    const total = (s.companies||[]).length + (s.payables||[]).length
+      + (s.receivables||[]).length + (s.vessels||[]).length
+      + (s.fixedAssets||[]).length + (s.projects||[]).length
+      + (s.bankAccounts||[]).length + (s.loans||[]).length;
+    const cfg = getAuthConfig();
+    if(!cfg) return;
+    const prev = +cfg.lastKnownRecordCount || 0;
+    if(total > prev){
+      cfg.lastKnownRecordCount = total;
+      cfg.lastKnownAt = new Date().toISOString();
+      setAuthConfig(cfg);
+    }
+  }catch(e){ console.warn('[updateLastKnown]', e.message); }
 }
 /* v2.76.0: tổng số bản ghi nghiệp vụ chính — để so sánh local vs cloud trước khi push. */
 function _stateRecordCount(s){
@@ -12212,49 +12274,50 @@ function _attachNumberHint(inp){
     hint.style.cssText = 'font-size:10px;color:var(--muted);font-style:italic;margin-top:2px;line-height:1.3;min-height:14px';
     inp.parentNode.insertBefore(hint, inp.nextSibling);
   }
+  // v2.99.29: Đợi listener format (line 12112) chạy xong rồi mới đọc value để hint.
+  // Cùng 1 input event, 2 listener chạy thứ tự không đảm bảo → cần đợi 1 tick.
   const update = ()=>{
-    // v2.99.28: BYPASS override — đọc value gốc của input qua HTMLInputElement.prototype.
-    // Input đã đổi type='text' nên proto.value là string user nhập (có dấu chấm phân nhóm).
-    let displayVal = '';
-    try{
-      const protoDesc = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value');
-      if(protoDesc && protoDesc.get){
-        displayVal = protoDesc.get.call(inp);
+    requestAnimationFrame(()=>{
+      let displayVal = '';
+      try{
+        const protoDesc = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value');
+        if(protoDesc && protoDesc.get){
+          displayVal = protoDesc.get.call(inp);
+        } else {
+          displayVal = inp.value;
+        }
+      }catch(e){ displayVal = ''; }
+      const raw = String(displayVal||'').trim();
+      if(!raw){ hint.textContent=''; return; }
+      let cleaned;
+      if(raw.includes('.')){
+        const lastDot = raw.lastIndexOf('.');
+        const afterLast = raw.slice(lastDot+1);
+        if(/^\d{3}$/.test(afterLast)){
+          cleaned = raw.replace(/\./g,'').replace(/,/g,'');
+        } else {
+          cleaned = raw.slice(0,lastDot).replace(/\./g,'').replace(/,/g,'') + '.' + afterLast;
+        }
       } else {
-        displayVal = inp.value;
+        cleaned = raw.replace(/,/g,'');
       }
-    }catch(e){ displayVal = ''; }
-    const raw = String(displayVal||'').trim();
-    if(!raw){ hint.textContent=''; return; }
-    let cleaned;
-    if(raw.includes('.')){
-      const lastDot = raw.lastIndexOf('.');
-      const afterLast = raw.slice(lastDot+1);
-      if(/^\d{3}$/.test(afterLast)){
-        cleaned = raw.replace(/\./g,'').replace(/,/g,'');
-      } else {
-        cleaned = raw.slice(0,lastDot).replace(/\./g,'').replace(/,/g,'') + '.' + afterLast;
+      const n = parseFloat(cleaned);
+      if(!isFinite(n) || n===0){ hint.textContent=''; return; }
+      if(Math.abs(n) < 1000){ hint.textContent=''; return; }
+      let ccy = 'VND';
+      const form = inp.closest('.form-grid, form, div');
+      if(form){
+        const ccySel = form.querySelector('select[id*="ccy"], select[id*="-ccy"], select.ccy');
+        if(ccySel && ccySel.value) ccy = ccySel.value.toUpperCase();
       }
-    } else {
-      cleaned = raw.replace(/,/g,'');
-    }
-    const n = parseFloat(cleaned);
-    if(!isFinite(n) || n===0){ hint.textContent=''; return; }
-    if(Math.abs(n) < 1000){ hint.textContent=''; return; }
-    // Tự nhận diện CCY
-    let ccy = 'VND';
-    const form = inp.closest('.form-grid, form, div');
-    if(form){
-      const ccySel = form.querySelector('select[id*="ccy"], select[id*="-ccy"], select.ccy');
-      if(ccySel && ccySel.value) ccy = ccySel.value.toUpperCase();
-    }
-    const formatted = ccy==='USD'
-      ? n.toLocaleString('en-US', {minimumFractionDigits: n%1?2:0, maximumFractionDigits:2}) + ' USD'
-      : Math.round(n).toLocaleString('vi-VN') + '₫';
-    const words = (ccy==='USD' && n%1!==0)
-      ? _numberToEnglishWords(Math.floor(n)) + (n%1 ? ' point ' + Math.round((n%1)*100) + ' cents' : '')
-      : _numberToVietnameseWords(Math.round(n));
-    hint.innerHTML = `≈ <b>${formatted}</b>${words?' · '+words:''}`;
+      const formatted = ccy==='USD'
+        ? n.toLocaleString('en-US', {minimumFractionDigits: n%1?2:0, maximumFractionDigits:2}) + ' USD'
+        : Math.round(n).toLocaleString('vi-VN') + '₫';
+      const words = (ccy==='USD' && n%1!==0)
+        ? _numberToEnglishWords(Math.floor(n)) + (n%1 ? ' point ' + Math.round((n%1)*100) + ' cents' : '')
+        : _numberToVietnameseWords(Math.round(n));
+      hint.innerHTML = `≈ <b>${formatted}</b>${words?' · '+words:''}`;
+    });
   };
   inp.addEventListener('input', update);
   inp.addEventListener('change', update);
@@ -21897,6 +21960,9 @@ function addOpTx(){
   const vatPercent = isChi ? (+(document.getElementById('opt-vat-percent')||{}).value||0) : 0;
   const vatAmount = isChi ? Math.round(amount*vatPercent/100*100)/100 : 0;
   const amountGross = amount + vatAmount;
+  // v2.99.31: Tính chất khoản chi hộ — Chi thực (ACTUAL) vs Dự kiến chi (BUDGET).
+  // BUDGET vẫn tính vào opBalance (khoá tiền chủ tàu), nhưng hiện riêng cột "Dự kiến chi".
+  const _isBudget = isChi && ((document.getElementById('opt-budget')||{}).value === 'BUDGET');
   S.opTransactions.push({
     id:uid(),
     date:document.getElementById('opt-date').value||todayISO(),
@@ -21913,6 +21979,7 @@ function addOpTx(){
     vendor,        // v1.40.1
     contractNo,    // v1.40.1
     invoiceNo,     // v1.40.1
+    _isBudget,     // v2.99.31: true = dự kiến chi trong tháng (chưa phát sinh thực)
     paid:false,
     paidDate:'',
     bankFee:0,
@@ -21932,6 +21999,7 @@ function addOpTx(){
     document.getElementById('opt-contract').value='';
     document.getElementById('opt-invoice').value='';
     const vp=document.getElementById('opt-vat-percent'); if(vp) vp.value='0';  // v2.70.0
+    const bg=document.getElementById('opt-budget'); if(bg) bg.value='ACTUAL';  // v2.99.31
     opVatRecalc();
   }
   toast('Đã ghi nhận'); renderAll();
@@ -21962,10 +22030,13 @@ function editOpTx(id){
   if(t.paid){toast('Bút toán đã xác nhận TT — chỉ người xác nhận sửa được (nút ✎ trong dòng)','bad');return;}
   if(!t.ccy) t.ccy='USD';
   if(t.fxToUsd==null) t.fxToUsd = t.ccy==='USD'?1:0;
+  // v2.99.31: chuẩn hóa cờ dự kiến chi sang chuỗi để hiện trong select sửa
+  t._budgetSel = t._isBudget ? 'BUDGET' : 'ACTUAL';
   openEditModal('Sửa bút toán thu/chi hộ',[
     {key:'date',label:'Ngày',type:'date'},
     {key:'vesselId',label:'Tàu QL',type:'select',options:S.opVessels.map(v=>({v:v.id,t:`${esc(v.name)} · ${esc(v.owner) || ''}`})),span:2},
     {key:'type',label:'Loại',type:'select',options:[{v:'IN',t:'Thu hộ'},{v:'OUT',t:'Chi hộ'}]},
+    {key:'_budgetSel',label:'Tính chất (chỉ Chi hộ)',type:'select',options:[{v:'ACTUAL',t:'Chi thực'},{v:'BUDGET',t:'📋 Dự kiến chi'}]},
     {key:'amount',label:'Số tiền NET chưa VAT (ngoại tệ gốc)',type:'number'},
     {key:'ccy',label:'Ngoại tệ gốc',type:'select',options:OP_CURRENCIES.map(c=>({v:c,t:c}))},
     {key:'fxToUsd',label:'Tỷ giá → USD (1 USD = ? ngoại tệ; USD thì để 1)',type:'number'},
@@ -21983,7 +22054,11 @@ function editOpTx(id){
     d.vatPercent = pct;
     d.vatAmount = Math.round((+d.amount||0)*pct/100*100)/100;
     d.amountGross = (+d.amount||0) + d.vatAmount;
+    // v2.99.31: dự kiến chi chỉ áp dụng cho Chi hộ (OUT). Thu hộ luôn không phải budget.
+    d._isBudget = (d.type==='OUT') && (d._budgetSel==='BUDGET');
+    delete d._budgetSel;
     Object.assign(t,d);
+    delete t._budgetSel;
     touchRecord(t);  // v2.61.0: timestamp cho sync
     saveState();
   });
@@ -22599,6 +22674,9 @@ function generateOpReport(){
     closeBal:'Tồn cuối kỳ · Closing balance',
     sumIn:'Tổng thu hộ · Total collections',
     sumOut:'Tổng chi hộ · Total disbursements',
+    sumBudget:'Dự kiến chi (chưa phát sinh) · Estimated costs (not yet incurred)',
+    expenseBudget:'BẢNG DỰ KIẾN CHI · ESTIMATED COSTS',
+    budgetNote:'Khoản dự kiến chi trong kỳ — chưa phát sinh thực, đã trừ vào ngân sách còn lại để chủ tàu chủ động nguồn · Estimated costs for the period — not yet incurred, deducted from remaining budget so the owner can plan funds.',
     sumFee:'Tổng phí · Total fees',
     mgmtFee:'Phí quản lý · Management fee',
     sigOwner:'Chủ tàu · Vessel Owner',
@@ -22619,6 +22697,9 @@ function generateOpReport(){
     openBal:'Tồn đầu kỳ',
     closeBal:'Tồn cuối kỳ',
     sumIn:'Tổng thu hộ', sumOut:'Tổng chi hộ', sumFee:'Tổng phí',
+    sumBudget:'Dự kiến chi (chưa phát sinh)',
+    expenseBudget:'BẢNG DỰ KIẾN CHI',
+    budgetNote:'Khoản dự kiến chi trong kỳ — chưa phát sinh thực, đã trừ vào ngân sách còn lại để chủ tàu chủ động nguồn.',
     mgmtFee:'Phí quản lý',
     sigOwner:'Chủ tàu', sigCo:'Đại diện công ty',
     signDate:'Ngày ký',
@@ -22664,14 +22745,18 @@ function generateOpReport(){
     // Filter period
     const period=all.filter(x=>x.date>=from && x.date<=to && (inclUnpaid || x.paid));
     const inRows=period.filter(x=>x.type==='IN');
-    const outRows=period.filter(x=>x.type==='OUT');
-    let sumIn=0, sumOut=0, sumFee=0;
+    // v2.99.31: tách Chi hộ THỰC (đã/đang chi) vs DỰ KIẾN CHI (_isBudget — chưa phát sinh).
+    // Dự kiến VẪN trừ vào tồn cuối kỳ (chủ tàu thấy ngân sách còn lại sau khi trừ cả khoản sắp chi).
+    const outRows=period.filter(x=>x.type==='OUT' && !x._isBudget);
+    const budgetRows=period.filter(x=>x.type==='OUT' && x._isBudget);
+    let sumIn=0, sumOut=0, sumBudget=0, sumFee=0;
     period.forEach(x=>{
       if(x.type==='IN') sumIn+=opTxUsd(x);
+      else if(x._isBudget) sumBudget+=opTxUsd(x);
       else sumOut+=opTxUsd(x);
       sumFee+=opTxFeesUsd(x);
     });
-    const closeBal=openBal+sumIn-sumOut-sumFee;
+    const closeBal=openBal+sumIn-sumOut-sumBudget-sumFee;
 
     // v2.71.5: Dòng PHÍ QUẢN LÝ trong báo cáo tháng.
     // - Nếu trong kỳ ĐÃ phát hành hóa đơn phí QL → ghi đủ (số HĐ + số tiền thật, gross).
@@ -22767,6 +22852,7 @@ function generateOpReport(){
           <tr><td class="lbl" style="padding:8pt 12pt">${t.openBal}</td><td class="r" style="padding:8pt 12pt;font-size:13pt">${fmtMoney(openBal,'USD')}</td></tr>
           <tr style="background:rgba(45,106,106,.04)"><td class="lbl" style="padding:8pt 12pt"><b>(+) ${t.sumIn}</b><br><span style="font-size:9pt;color:#666">${inRows.length} bút toán</span></td><td class="r" style="padding:8pt 12pt;font-size:13pt;color:#2d6a6a"><b>${fmtMoney(sumIn,'USD')}</b></td></tr>
           <tr style="background:rgba(184,71,46,.04)"><td class="lbl" style="padding:8pt 12pt"><b>(−) ${t.sumOut}</b><br><span style="font-size:9pt;color:#666">${outRows.length} bút toán</span></td><td class="r" style="padding:8pt 12pt;font-size:13pt;color:#a8362b"><b>${fmtMoney(sumOut,'USD')}</b></td></tr>
+          ${budgetRows.length?`<tr style="background:rgba(196,138,57,.05)"><td class="lbl" style="padding:8pt 12pt"><b>(−) ${t.sumBudget}</b><br><span style="font-size:9pt;color:#666">${budgetRows.length} khoản · ${lang==='bi'?'estimated, not yet incurred':'dự kiến, chưa phát sinh'}</span></td><td class="r" style="padding:8pt 12pt;font-size:12pt;color:#8a5a1e"><span style="font-size:9pt;font-style:italic">~ </span>${fmtMoney(sumBudget,'USD')}</td></tr>`:''}
           <tr><td class="lbl" style="padding:8pt 12pt">(−) ${t.sumFee}<br><span style="font-size:9pt;color:#666">Phí NH + phí khác</span></td><td class="r" style="padding:8pt 12pt">${fmtMoney(sumFee,'USD')}</td></tr>
           <tr style="background:rgba(196,138,57,.06)"><td class="lbl" style="padding:8pt 12pt"><b>${t.mgmtFee}</b><br><span style="font-size:9pt;color:#666">${mgmtFeeInfo.has?(mgmtFeeInfo.deducted?(lang==='bi'?'Đã xuất HĐ · đã cấn trừ quỹ':'Đã xuất HĐ · đã cấn trừ quỹ'):mgmtFeeInfo.note):mgmtFeeInfo.note}${mgmtFeeInfo.has&&mgmtFeeInfo.note?('<br>'+esc(mgmtFeeInfo.note)):''}</span></td><td class="r" style="padding:8pt 12pt;font-size:12pt;color:#8a5a1e">${mgmtFeeInfo.has?'':'<span style="font-size:9pt;font-style:italic">~ </span>'}${fmtMoney(mgmtFeeInfo.amountUsd, 'USD')}</td></tr>
           <tr class="grand" style="background:rgba(28,58,92,.08);border-top:2pt solid #1c3a5c"><td class="lbl" style="padding:12pt;font-size:14pt"><b>${t.closeBal}</b></td><td class="r" style="padding:12pt;font-size:16pt;color:${closeBal<0?'#a8362b':'#2d6a6a'}"><b>${fmtMoney(closeBal,'USD')}</b></td></tr>
@@ -22847,6 +22933,33 @@ function generateOpReport(){
           </tr>`:''}
         </tbody>
       </table>
+
+      ${budgetRows.length?`
+      <div class="pr-section-title" style="color:#8a5a1e">${t.expenseBudget}</div>
+      <table>
+        <thead><tr>
+          <th style="width:8%">${t.date}</th>
+          <th style="width:20%">${esc(t.desc)}</th>
+          <th style="width:15%">${lang==='bi'?'NCC · Vendor':'Tên NCC'}</th>
+          <th style="width:9%">${lang==='bi'?'HĐ · Contract':'Số HĐ'}</th>
+          <th style="width:9%">${lang==='bi'?'HD · Invoice':'Số HD'}</th>
+          <th class="c" style="width:7%">${lang==='bi'?'CCY':'Tiền tệ'}</th>
+          <th class="r" style="width:12%">${lang==='bi'?'Original':'Số tiền gốc'}</th>
+          <th class="r" style="width:11%">USD</th>
+          <th style="width:8%">${t.paidDate}</th>
+          <th class="c" style="width:10%">${t.status}</th>
+        </tr></thead>
+        <tbody>
+          ${tableRowsOUT(budgetRows)}
+          <tr class="total" style="background:rgba(196,138,57,.08)">
+            <td colspan="7">${t.total} ${t.expenseBudget.split('·')[0].trim()} <span style="font-weight:400;color:#888;font-size:8pt">(USD)</span></td>
+            <td class="r" style="color:#8a5a1e">${fmtMoney(sumBudget,'USD')}</td>
+            <td colspan="2"></td>
+          </tr>
+        </tbody>
+      </table>
+      <div style="margin-top:8pt;padding:8pt 12pt;background:rgba(196,138,57,.05);border-left:3pt solid #c5876d;font-size:9pt;font-style:italic;color:#666">${t.budgetNote}</div>
+      `:''}
 
       <div class="pr-sign" style="margin-top:18pt">
         <div class="pr-sign-block">
@@ -23058,62 +23171,49 @@ function saveBankBalance(){
 }
 
 /* v2.75.0: ===== TỔNG QUAN NHANH (mobile) — admin & CFO ===== */
-/* v2.99.27: Card NHANH — Báo cáo Quản lý vận hành tàu cho chủ tàu.
-   Mỗi tàu/dự án O&M có 1 dòng: Tổng thu - Tổng chi - Dự kiến chi - Còn lại.
-   - Tổng thu = AR approved gắn tàu (đã duyệt).
-   - Tổng chi = AP approved gắn tàu (đã duyệt, _origin='vessel_expense', loại trừ BUDGET).
-   - Dự kiến chi = AP với _isBudget=true gắn tàu.
-   - Còn lại = Tổng thu − Tổng chi − Dự kiến chi (tiền chủ tàu còn ở Seahorse).
+/* v2.99.27 → v2.99.31: Card NHANH — Báo cáo Quản lý vận hành tàu cho chủ tàu.
+   ⚠ v2.99.31 SỬA BẢN CHẤT: trước đây đọc nhầm S.vessels (tàu công ty) + S.projects (dự án O&M).
+   ĐÚNG: mảng QL vận hành hộ = S.opVessels (tàu QL HỘ chủ tàu khác) + S.opTransactions (bút toán thu/chi hộ).
+   Mỗi tàu QL hộ 1 dòng:
+   - Tổng thu     = Σ opTransactions type='IN'  (net, quy display CCY).
+   - Tổng chi     = Σ opTransactions type='OUT' THỰC (!_isBudget) (net, quy display CCY).
+   - Dự kiến chi  = Σ opTransactions type='OUT' có _isBudget=true (khoản sẽ chi trong tháng, chưa phát sinh).
+   - Còn lại      = opBalance(vid) = tiền chủ tàu CÒN ở Seahorse (đã trừ cả chi thực, dự kiến và phí NH/khác).
+   Lưu ý: _isBudget VẪN tính vào opBalance (khoá tiền cho khoản sắp chi) — KHÔNG cộng ngược lại.
 */
 function _renderQuickViewOwnerReport(){
-  const vessels = S.vessels || [];
-  const projects = (S.projects||[]).filter(p => p.isOM || p.segment === 'OM');
-  const entities = [];
-  vessels.forEach(v=>entities.push({id:v.id, type:'VESSEL', name:v.name, code:v.code||v.name}));
-  projects.forEach(p=>entities.push({id:p.id, type:'PROJECT', name:p.name, code:p.code}));
-  if(entities.length === 0) return '';
-  // Build report data
-  const dc = displayCcy();
-  const ar = S.receivables || [];
-  const ap = S.payables || [];
-  const rows = entities.map(ent => {
-    const arMatch = ar.filter(r=>{
-      if(wfStatus(r)!=='approved') return false;
-      if(r._isBudget) return false;
-      if(ent.type==='VESSEL') return r.vesselId === ent.id;
-      return r.projectId === ent.id;
+  const vessels = S.opVessels || [];
+  if(vessels.length === 0) return '';
+  const tx = S.opTransactions || [];
+  const rows = vessels.map(v=>{
+    const vtx = tx.filter(t=>t.vesselId===v.id);
+    let totalRevenue=0, totalExpense=0, totalBudget=0, totalFee=0, inCount=0, outCount=0, budgetCount=0;
+    vtx.forEach(t=>{
+      const c = t.ccy || v.ccy || 'VND';
+      const net = toDisplay(+t.amount||0, c);
+      totalFee += toDisplay((+t.bankFee||0)+(+t.otherFee||0), c);
+      if(t.type==='IN'){ totalRevenue += net; inCount++; }
+      else if(t._isBudget){ totalBudget += net; budgetCount++; }
+      else { totalExpense += net; outCount++; }
     });
-    const apMatch = ap.filter(r=>{
-      if(wfStatus(r)!=='approved') return false;
-      if(r._isBudget) return false;
-      if(ent.type==='VESSEL') return r.vesselId === ent.id;
-      return r.projectId === ent.id;
-    });
-    const apBudget = ap.filter(r=>{
-      if(!r._isBudget) return false;
-      if(ent.type==='VESSEL') return r.vesselId === ent.id;
-      return r.projectId === ent.id;
-    });
-    const totalRevenue = arMatch.reduce((s,r)=>s + toDisplay(+r.amountGross||+r.amount||0, r.ccy||'VND'), 0);
-    const totalExpense = apMatch.reduce((s,r)=>s + toDisplay(+r.amountGross||+r.amount||0, r.ccy||'VND'), 0);
-    const totalBudget = apBudget.reduce((s,r)=>s + toDisplay(+r.amountGross||+r.amount||0, r.ccy||'VND'), 0);
-    const remaining = totalRevenue - totalExpense - totalBudget;
-    return {ent, totalRevenue, totalExpense, totalBudget, remaining, arCount:arMatch.length, apCount:apMatch.length, budgetCount:apBudget.length};
-  }).filter(r => r.totalRevenue > 0 || r.totalExpense > 0 || r.totalBudget > 0);
+    // Còn lại = thu − chi thực − dự kiến − phí (tự nhất quán trong card, đã quy display CCY).
+    // Khớp opBalance(vid) vì opBalance cũng trừ cả chi thực + dự kiến + phí.
+    const remaining = totalRevenue - totalExpense - totalBudget - totalFee;
+    return {v, totalRevenue, totalExpense, totalBudget, remaining, inCount, outCount, budgetCount, txCount:vtx.length};
+  }).filter(r => r.txCount > 0);
   if(rows.length === 0) return '';
-  // Render
   const sumRev = rows.reduce((s,r)=>s+r.totalRevenue, 0);
   const sumExp = rows.reduce((s,r)=>s+r.totalExpense, 0);
   const sumBdg = rows.reduce((s,r)=>s+r.totalBudget, 0);
   const sumRem = rows.reduce((s,r)=>s+r.remaining, 0);
   const rowHtml = rows.map(r=>{
-    const icon = r.ent.type==='VESSEL' ? '⛵' : '⚙';
     const remColor = r.remaining >= 0 ? '#2d6a6a' : 'var(--bad)';
+    const ownerLine = r.v.owner ? esc(r.v.owner) : '';
     return `
-      <tr style="border-top:1px solid var(--rule)" onclick="_qvOwnerDetail('${r.ent.type}','${esc(r.ent.id)}')" style="cursor:pointer">
-        <td style="padding:8px 10px;cursor:pointer" title="Bấm xem chi tiết">
-          <b>${icon} ${esc(r.ent.code||r.ent.name)}</b>
-          <div style="font-size:10px;color:var(--muted);font-style:italic">${r.arCount} thu · ${r.apCount} chi${r.budgetCount?' · '+r.budgetCount+' dự kiến':''}</div>
+      <tr style="border-top:1px solid var(--rule);cursor:pointer" onclick="_qvOwnerDetail('${esc(r.v.id)}')">
+        <td style="padding:8px 10px" title="Bấm xem chi tiết">
+          <b>🚢 ${esc(r.v.name)}</b>
+          <div style="font-size:10px;color:var(--muted);font-style:italic">${ownerLine?ownerLine+' · ':''}${r.inCount} thu · ${r.outCount} chi${r.budgetCount?' · '+r.budgetCount+' dự kiến':''}</div>
         </td>
         <td class="num" style="padding:8px 10px;color:#2d6a6a;font-weight:600">${fmt(r.totalRevenue)}</td>
         <td class="num" style="padding:8px 10px;color:var(--bad);font-weight:600">${fmt(r.totalExpense)}</td>
@@ -23128,11 +23228,11 @@ function _renderQuickViewOwnerReport(){
         <table style="width:100%;border-collapse:collapse;font-size:12px">
           <thead>
             <tr style="background:rgba(74,107,44,.10);border-bottom:1.5px solid #4a6b2c">
-              <th style="padding:8px 10px;text-align:left;font-size:10px;letter-spacing:.04em;color:#4a6b2c">Tàu/Dự án</th>
-              <th class="num" style="padding:8px 10px;font-size:10px;letter-spacing:.04em;color:#2d6a6a" title="AR đã duyệt — chưa tính dự toán">Tổng thu</th>
-              <th class="num" style="padding:8px 10px;font-size:10px;letter-spacing:.04em;color:var(--bad)" title="AP đã duyệt — đã/sắp chi thực">Tổng chi</th>
-              <th class="num" style="padding:8px 10px;font-size:10px;letter-spacing:.04em;color:#c5876d" title="AP có cờ _isBudget — kế hoạch, chưa phát sinh">Dự kiến chi</th>
-              <th class="num" style="padding:8px 10px;font-size:10px;letter-spacing:.04em;color:var(--ink);border-left:1.5px solid #4a6b2c">Còn lại</th>
+              <th style="padding:8px 10px;text-align:left;font-size:10px;letter-spacing:.04em;color:#4a6b2c">Tàu QL hộ</th>
+              <th class="num" style="padding:8px 10px;font-size:10px;letter-spacing:.04em;color:#2d6a6a" title="Tổng thu hộ chủ tàu">Tổng thu</th>
+              <th class="num" style="padding:8px 10px;font-size:10px;letter-spacing:.04em;color:var(--bad)" title="Chi hộ thực — đã/đang chi có chứng từ">Tổng chi</th>
+              <th class="num" style="padding:8px 10px;font-size:10px;letter-spacing:.04em;color:#c5876d" title="Dự kiến chi trong tháng — chưa phát sinh thực">Dự kiến chi</th>
+              <th class="num" style="padding:8px 10px;font-size:10px;letter-spacing:.04em;color:var(--ink);border-left:1.5px solid #4a6b2c" title="Tiền chủ tàu còn ở Seahorse">Còn lại</th>
             </tr>
           </thead>
           <tbody>
@@ -23148,74 +23248,70 @@ function _renderQuickViewOwnerReport(){
         </table>
       </div>
       <div style="margin-top:8px;font-size:10px;color:var(--muted);font-style:italic;line-height:1.4">
-        💡 Cách đọc: <b>Còn lại</b> = Tiền chủ tàu còn ở Seahorse sau khi trừ chi đã ghi + chi dự kiến.
-        Dòng <b style="color:#c5876d">Dự kiến chi</b> (cam) là dự toán chưa phát sinh — đánh dấu bằng checkbox 📋 trong form Nhập CP Tàu.
-        Bấm dòng tàu để xem chi tiết.
+        💡 Cách đọc: <b>Còn lại</b> = tiền chủ tàu còn ở Seahorse, đã trừ chi thực + dự kiến chi + phí NH.
+        Dòng <b style="color:#c5876d">Dự kiến chi</b> (cam) là khoản sẽ chi trong tháng — tích "📋 Dự kiến chi" khi nhập Chi hộ.
+        Số liệu lấy từ tab <b>06 QL vận hành tàu</b>. Bấm dòng tàu để xem chi tiết.
       </div>
     </div>`;
 }
 
-/* v2.99.27: Drill-down chi tiết tàu/dự án — mở dialog mới hiện 3 nhóm tách riêng */
-function _qvOwnerDetail(entType, entId){
-  let entName = '?', entIcon = '⛵';
-  if(entType==='VESSEL'){
-    const v = (S.vessels||[]).find(x=>x.id===entId);
-    if(v){ entName = v.name; }
-  } else {
-    const p = (S.projects||[]).find(x=>x.id===entId);
-    if(p){ entName = `${p.code} · ${p.name}`; entIcon = '⚙'; }
-  }
-  const ar = (S.receivables||[]).filter(r=>{
-    if(wfStatus(r)!=='approved') return false;
-    if(r._isBudget) return false;
-    return entType==='VESSEL' ? r.vesselId===entId : r.projectId===entId;
-  });
-  const apActual = (S.payables||[]).filter(r=>{
-    if(wfStatus(r)!=='approved') return false;
-    if(r._isBudget) return false;
-    return entType==='VESSEL' ? r.vesselId===entId : r.projectId===entId;
-  });
-  const apBudget = (S.payables||[]).filter(r=>{
-    if(!r._isBudget) return false;
-    return entType==='VESSEL' ? r.vesselId===entId : r.projectId===entId;
-  });
+/* v2.99.31: Drill-down chi tiết tàu QL hộ — tách Thu hộ / Chi hộ thực / Dự kiến chi. */
+function _qvOwnerDetail(vid){
+  const v = (S.opVessels||[]).find(x=>x.id===vid);
+  const entName = v ? v.name : '?';
+  const ownerName = v && v.owner ? v.owner : '';
+  const tx = (S.opTransactions||[]).filter(t=>t.vesselId===vid);
+  const inList     = tx.filter(t=>t.type==='IN');
+  const outList    = tx.filter(t=>t.type==='OUT' && !t._isBudget);
+  const budgetList = tx.filter(t=>t.type==='OUT' && t._isBudget);
   const rowsTbl = (list, color) => {
     if(list.length===0) return `<tr><td colspan="5" style="padding:14px;text-align:center;font-style:italic;color:var(--muted)">— Không có giao dịch —</td></tr>`;
-    return list.map(r=>`
+    return list.map(t=>{
+      const c = t.ccy || (v&&v.ccy) || 'VND';
+      const fee = (+t.bankFee||0)+(+t.otherFee||0);
+      return `
       <tr style="border-top:1px solid var(--rule)">
-        <td style="padding:6px 10px;font-size:11px">${esc(r.issueDate||'')}</td>
-        <td style="padding:6px 10px;font-size:11px">${esc(r.partner||'—')}</td>
-        <td style="padding:6px 10px;font-size:11px">${esc(r.desc||r.costCategory||'')}</td>
-        <td class="num" style="padding:6px 10px;font-weight:600;color:${color}">${fmtCcy(+r.amountGross||+r.amount||0, r.ccy||'VND')}</td>
-        <td style="padding:6px 10px;font-size:10px;color:var(--muted)">${esc(r.ccy||'VND')}</td>
-      </tr>`).join('');
+        <td style="padding:6px 10px;font-size:11px">${esc(t.date||'')}</td>
+        <td style="padding:6px 10px;font-size:11px">${esc(t.vendor||'—')}</td>
+        <td style="padding:6px 10px;font-size:11px">${esc(t.desc||'')}${fee>0?`<div style="font-size:9px;color:var(--muted)">+ phí ${fmtCcy(fee,c)}</div>`:''}</td>
+        <td class="num" style="padding:6px 10px;font-weight:600;color:${color}">${fmtCcy(+t.amount||0, c)}</td>
+        <td style="padding:6px 10px;font-size:10px;color:var(--muted)">${esc(c)}</td>
+      </tr>`;
+    }).join('');
   };
-  const totalRev = ar.reduce((s,r)=>s+toDisplay(+r.amountGross||+r.amount||0, r.ccy||'VND'), 0);
-  const totalExp = apActual.reduce((s,r)=>s+toDisplay(+r.amountGross||+r.amount||0, r.ccy||'VND'), 0);
-  const totalBdg = apBudget.reduce((s,r)=>s+toDisplay(+r.amountGross||+r.amount||0, r.ccy||'VND'), 0);
-  const remaining = totalRev - totalExp - totalBdg;
+  let totalRev=0, totalExp=0, totalBdg=0, totalFee=0;
+  tx.forEach(t=>{
+    const c = t.ccy || (v&&v.ccy) || 'VND';
+    const net = toDisplay(+t.amount||0, c);
+    totalFee += toDisplay((+t.bankFee||0)+(+t.otherFee||0), c);
+    if(t.type==='IN') totalRev += net;
+    else if(t._isBudget) totalBdg += net;
+    else totalExp += net;
+  });
+  const remaining = totalRev - totalExp - totalBdg - totalFee;
   const body = `
     <div style="font-size:12px">
       <div style="padding:10px 14px;background:rgba(74,107,44,.06);border-left:3px solid #4a6b2c;margin-bottom:14px;display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:8px;font-size:11px">
-        <div><div style="color:var(--muted);font-size:10px">Tổng thu</div><b style="color:#2d6a6a;font-size:14px">${fmt(totalRev)}</b></div>
-        <div><div style="color:var(--muted);font-size:10px">Tổng chi (thực)</div><b style="color:var(--bad);font-size:14px">${fmt(totalExp)}</b></div>
+        <div><div style="color:var(--muted);font-size:10px">Tổng thu hộ</div><b style="color:#2d6a6a;font-size:14px">${fmt(totalRev)}</b></div>
+        <div><div style="color:var(--muted);font-size:10px">Chi thực</div><b style="color:var(--bad);font-size:14px">${fmt(totalExp)}</b></div>
         <div><div style="color:var(--muted);font-size:10px">Dự kiến chi</div><b style="color:#c5876d;font-size:14px">${totalBdg?fmt(totalBdg):'—'}</b></div>
         <div><div style="color:var(--muted);font-size:10px">Còn lại</div><b style="color:${remaining>=0?'#2d6a6a':'var(--bad)'};font-size:14px">${fmt(remaining)}</b></div>
       </div>
+      ${totalFee?`<div style="font-size:10px;color:var(--muted);font-style:italic;margin-bottom:10px">Đã bao gồm phí NH/khác: ${fmt(totalFee)} (trừ vào "Còn lại").</div>`:''}
       <details open style="margin-bottom:8px">
-        <summary style="cursor:pointer;padding:6px 10px;background:rgba(45,106,106,.08);font-weight:700;color:#2d6a6a">📥 Tổng thu (${ar.length} khoản)</summary>
-        <table style="width:100%;border-collapse:collapse;margin-top:4px"><thead><tr style="background:var(--paper-2)"><th style="padding:6px 10px;text-align:left;font-size:10px">Ngày</th><th style="padding:6px 10px;text-align:left;font-size:10px">Đối tác</th><th style="padding:6px 10px;text-align:left;font-size:10px">Diễn giải</th><th class="num" style="padding:6px 10px;font-size:10px">Số tiền</th><th style="padding:6px 10px;font-size:10px">CCY</th></tr></thead><tbody>${rowsTbl(ar,'#2d6a6a')}</tbody></table>
+        <summary style="cursor:pointer;padding:6px 10px;background:rgba(45,106,106,.08);font-weight:700;color:#2d6a6a">📥 Thu hộ (${inList.length} khoản)</summary>
+        <table style="width:100%;border-collapse:collapse;margin-top:4px"><thead><tr style="background:var(--paper-2)"><th style="padding:6px 10px;text-align:left;font-size:10px">Ngày</th><th style="padding:6px 10px;text-align:left;font-size:10px">Đối tác</th><th style="padding:6px 10px;text-align:left;font-size:10px">Diễn giải</th><th class="num" style="padding:6px 10px;font-size:10px">Số tiền</th><th style="padding:6px 10px;font-size:10px">CCY</th></tr></thead><tbody>${rowsTbl(inList,'#2d6a6a')}</tbody></table>
       </details>
       <details style="margin-bottom:8px">
-        <summary style="cursor:pointer;padding:6px 10px;background:rgba(184,71,46,.08);font-weight:700;color:var(--bad)">📤 Tổng chi thực (${apActual.length} khoản)</summary>
-        <table style="width:100%;border-collapse:collapse;margin-top:4px"><thead><tr style="background:var(--paper-2)"><th style="padding:6px 10px;text-align:left;font-size:10px">Ngày</th><th style="padding:6px 10px;text-align:left;font-size:10px">NCC</th><th style="padding:6px 10px;text-align:left;font-size:10px">Diễn giải</th><th class="num" style="padding:6px 10px;font-size:10px">Số tiền</th><th style="padding:6px 10px;font-size:10px">CCY</th></tr></thead><tbody>${rowsTbl(apActual,'var(--bad)')}</tbody></table>
+        <summary style="cursor:pointer;padding:6px 10px;background:rgba(184,71,46,.08);font-weight:700;color:var(--bad)">📤 Chi hộ thực (${outList.length} khoản)</summary>
+        <table style="width:100%;border-collapse:collapse;margin-top:4px"><thead><tr style="background:var(--paper-2)"><th style="padding:6px 10px;text-align:left;font-size:10px">Ngày</th><th style="padding:6px 10px;text-align:left;font-size:10px">NCC</th><th style="padding:6px 10px;text-align:left;font-size:10px">Diễn giải</th><th class="num" style="padding:6px 10px;font-size:10px">Số tiền</th><th style="padding:6px 10px;font-size:10px">CCY</th></tr></thead><tbody>${rowsTbl(outList,'var(--bad)')}</tbody></table>
       </details>
-      <details ${apBudget.length>0?'open':''}>
-        <summary style="cursor:pointer;padding:6px 10px;background:rgba(197,135,109,.12);font-weight:700;color:#c5876d">📋 Dự kiến chi — BUDGET (${apBudget.length} khoản)</summary>
-        <table style="width:100%;border-collapse:collapse;margin-top:4px"><thead><tr style="background:var(--paper-2)"><th style="padding:6px 10px;text-align:left;font-size:10px">Ngày</th><th style="padding:6px 10px;text-align:left;font-size:10px">NCC</th><th style="padding:6px 10px;text-align:left;font-size:10px">Diễn giải</th><th class="num" style="padding:6px 10px;font-size:10px">Số tiền</th><th style="padding:6px 10px;font-size:10px">CCY</th></tr></thead><tbody>${rowsTbl(apBudget,'#c5876d')}</tbody></table>
+      <details ${budgetList.length>0?'open':''}>
+        <summary style="cursor:pointer;padding:6px 10px;background:rgba(197,135,109,.12);font-weight:700;color:#c5876d">📋 Dự kiến chi trong tháng (${budgetList.length} khoản)</summary>
+        <table style="width:100%;border-collapse:collapse;margin-top:4px"><thead><tr style="background:var(--paper-2)"><th style="padding:6px 10px;text-align:left;font-size:10px">Ngày</th><th style="padding:6px 10px;text-align:left;font-size:10px">NCC</th><th style="padding:6px 10px;text-align:left;font-size:10px">Diễn giải</th><th class="num" style="padding:6px 10px;font-size:10px">Số tiền</th><th style="padding:6px 10px;font-size:10px">CCY</th></tr></thead><tbody>${rowsTbl(budgetList,'#c5876d')}</tbody></table>
       </details>
     </div>`;
-  openModal(`${entIcon} ${entName} — Báo cáo cho chủ tàu`, body,
+  openModal(`🚢 ${entName}${ownerName?' — '+esc(ownerName):''} — Báo cáo cho chủ tàu`, body,
     `<button class="btn-sec" onclick="closeModal();openQuickView()">← Quay về NHANH</button>
      <button class="btn-primary" onclick="closeModal()">Đóng</button>`);
 }
