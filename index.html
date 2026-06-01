@@ -2682,7 +2682,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='2.99.36';            // bumped on each release
+const APP_VERSION='2.99.38';            // bumped on each release
 
 /* v2.62.0: Token xác thực backend — PHẢI khớp API_TOKEN trong Apps Script (Code.gs).
    Mọi request tới Apps Script tự động được gắn token qua lớp bọc fetch bên dưới.
@@ -9095,7 +9095,15 @@ const DEFAULT_EXPENSE_TYPES = [
   // TÀI CHÍNH (auto từ Banking)
   {id:'ET-INTEREST',      code:'INTEREST',      group:'FINANCE',  label:'Lãi vay ngân hàng',       icon:'💸', isPO:false, hint:'Auto tạo khi NV tích "đã trả" kỳ vay (Tab Ngân hàng)'},
   {id:'ET-BANK_FEE',      code:'BANK_FEE',      group:'FINANCE',  label:'Phí ngân hàng',           icon:'🏦', isPO:false, hint:'Phí prepay, phí chuyển tiền, phí khác từ NH'},
-  {id:'ET-TAX_NSNN',      code:'TAX_NSNN',      group:'FINANCE',  label:'Thuế & phải nộp NSNN', icon:'🏛', isPO:false, hint:'Thuế GTGT, TNDN, TNCN, môn bài, phải nộp NSNN'},
+  {id:'ET-TAX_NSNN',      code:'TAX_NSNN',      group:'FINANCE',  label:'Thuế & phải nộp NSNN (chung)', icon:'🏛', isPO:false, hint:'Mục chung (tương thích dữ liệu cũ). Nên chọn loại NSNN cụ thể bên dưới để link đúng tab 12 NSNN.'},
+  // v2.99.38: Danh mục NSNN cụ thể — map 1-1 với NSNN_TAX_TYPES (tab 12) để NV chọn đúng, link chính xác.
+  {id:'ET-TAX_IMPORT_DUTY', code:'TAX_IMPORT_DUTY', group:'FINANCE', label:'Thuế Nhập khẩu',          icon:'📦', isPO:false, nsnnType:'IMPORT_DUTY', hint:'Thuế nhập khẩu hàng hóa — phải nộp NSNN. Link tab 12 NSNN.'},
+  {id:'ET-TAX_IMPORT_VAT',  code:'TAX_IMPORT_VAT',  group:'FINANCE', label:'GTGT hàng Nhập khẩu',     icon:'📦', isPO:false, nsnnType:'IMPORT_VAT', hint:'GTGT khâu nhập khẩu — khấu trừ đầu vào, lên bảng kê GTGT nhóm 2. Link tab 12 NSNN.'},
+  {id:'ET-TAX_FCT',         code:'TAX_FCT',         group:'FINANCE', label:'Thuế Nhà thầu (FCT)',     icon:'🏢', isPO:false, nsnnType:'FCT', hint:'Thuế nhà thầu nước ngoài (TNDN + GTGT thầu). Phần GTGT lên bảng kê nhóm 2. Link tab 12 NSNN.'},
+  {id:'ET-TAX_CIT',         code:'TAX_CIT',         group:'FINANCE', label:'Thuế TNDN',              icon:'🏛', isPO:false, nsnnType:'CIT', hint:'Thuế thu nhập doanh nghiệp (tạm tính/quyết toán). Link tab 12 NSNN.'},
+  {id:'ET-TAX_PIT',         code:'TAX_PIT',         group:'FINANCE', label:'Thuế TNCN',              icon:'👤', isPO:false, nsnnType:'PIT', hint:'Thuế thu nhập cá nhân khấu trừ. Link tab 12 NSNN.'},
+  {id:'ET-TAX_LICENSE',     code:'TAX_LICENSE',     group:'FINANCE', label:'Thuế Môn bài',           icon:'📋', isPO:false, nsnnType:'BUSINESS_LICENSE', hint:'Thuế môn bài hàng năm. Link tab 12 NSNN.'},
+  {id:'ET-TAX_PENALTY',     code:'TAX_PENALTY',     group:'FINANCE', label:'Phạt thuế',              icon:'⚠',  isPO:false, nsnnType:'PENALTY', hint:'Phạt chậm nộp / vi phạm thuế. Link tab 12 NSNN.'},
   {id:'ET-ADVANCE',       code:'ADVANCE',       group:'FINANCE',  label:'Ứng quỹ tiền mặt',        icon:'💰', isPO:false, isAdvance:true, hint:'Phiếu đề xuất ứng tiền mặt. AP duyệt xong → cộng vào số dư Quỹ tiền mặt đã chọn.'},
   // KHÁC
   {id:'ET-OTHER',         code:'OTHER',         group:'OTHER',    label:'Chi phí khác',            icon:'📝', isPO:false},
@@ -19802,6 +19810,9 @@ function vatGatherRowsOutput(opt){
 function vatRowData(r){
   if(r && r._opTx) return r;  // v2.70.0: dòng Chi hộ đã chuẩn hóa sẵn — giữ nguyên
   const v = (S.vendors||[]).find(x=>x.id===r.vendorId);
+  // v2.99.37: phân loại GTGT hàng NK / nhà thầu NN (xếp nhóm riêng trong bảng kê).
+  const etU = (r.expenseType||r.costCategory||'').toString().toUpperCase();
+  const isImportVat = /IMPORT_VAT|IMPORT_DUTY|FCT|NHẬP KHẨU|NHA THAU|NHÀ THẦU/.test(etU) || !!r._isImportVat;
   return {
     invoiceNo: r.invoiceNo||'',
     issueDate: r.issueDate||'',
@@ -19817,6 +19828,7 @@ function vatRowData(r){
     status: wfStatus(r),
     createdBy: r.createdBy||'',
     createdByDept: r.createdByDept||lookupUserDeptName(r.createdBy)||'',
+    _isImportVat: isImportVat,   // v2.99.37
     _id: r.id||''   // v2.74.4: giữ id để nút "nhảy tới" mở đúng hóa đơn
   };
 }
@@ -26912,35 +26924,61 @@ function renderNsnnVat(){
     tEl.innerHTML='<tr><td class="empty">Không có hóa đơn VAT nào trong tháng '+esc(opt.month)+'</td></tr>';
     return;
   }
+  // v2.99.37: render theo 2 nhóm (GTGT thường / GTGT hàng NK + nhà thầu)
+  _renderNsnnVatGrouped(tEl, rows);
+}
+/* v2.99.37: render bảng kê GTGT đầu vào theo 2 NHÓM (thường vs hàng NK/nhà thầu) — thay hàm phẳng cũ */
+function _renderNsnnVatGrouped(tEl, rows){
   let h=`<thead><tr>
     <th>STT</th><th>Số HĐ</th><th class="mono">Ngày HĐ</th><th>Nhà cung cấp</th>
     <th class="mono">MST</th><th>Diễn giải</th>
     <th class="r">Chưa VAT</th><th class="r">%VAT</th><th class="r">Tiền VAT</th><th class="r">Tổng</th>
     <th class="c">Trạng thái</th><th>Người nhập</th>
   </tr></thead><tbody>`;
-  const byCcy={};
-  rows.forEach((d,i)=>{
-    const c=d.ccy||'USD';
-    if(!byCcy[c]) byCcy[c]={net:0,vat:0,gross:0};
-    byCcy[c].net+=d.net; byCcy[c].vat+=d.vatAmount; byCcy[c].gross+=d.gross;
-    h+=`<tr>
-      <td>${i+1}</td>
-      <td class="mono" style="font-size:11px">${esc(d.invoiceNo)||'—'}</td>
-      <td class="mono" style="font-size:11px">${esc(d.issueDate)||'—'}</td>
-      <td><b>${esc(d.vendorName)||'—'}</b></td>
-      <td class="mono" style="font-size:11px">${esc(d.taxCode)||'—'}</td>
-      <td style="max-width:200px;font-size:12px">${esc(d.desc)||'—'}</td>
-      <td class="r num">${fmt(d.net,d.ccy)}</td>
-      <td class="r num" style="font-size:11px">${d.vatPercent?d.vatPercent+'%':'—'}</td>
-      <td class="r num" style="font-weight:600">${fmt(d.vatAmount,d.ccy)}</td>
-      <td class="r num">${fmt(d.gross,d.ccy)}</td>
-      <td class="c"><span style="font-size:10px">${VAT_STATUS_LABEL[d.status]||d.status}</span></td>
-      <td style="font-size:11px">${esc(d.createdBy)||'—'}${d.createdByDept?'<br><span style="color:var(--muted)">'+esc(d.createdByDept)+'</span>':''}</td>
-    </tr>`;
-  });
-  Object.entries(byCcy).forEach(([c,s])=>{
-    h+=`<tr style="background:rgba(196,138,57,.06);font-weight:600">
-      <td colspan="6" style="text-align:right">TỔNG (${c})</td>
+  const grpNormal = rows.filter(d=>!d._isImportVat);
+  const grpImport = rows.filter(d=>d._isImportVat);
+  const grandByCcy={};
+  let seq=0;
+  const renderGroup=(title,color,list)=>{
+    if(!list.length) return;
+    h+=`<tr style="background:${color}14"><td colspan="12" style="font-weight:700;color:${color};padding:7px 10px;font-size:12px;letter-spacing:.03em">${title}</td></tr>`;
+    const byCcy={};
+    list.forEach(d=>{
+      seq++;
+      const c=d.ccy||'USD';
+      if(!byCcy[c]) byCcy[c]={net:0,vat:0,gross:0};
+      if(!grandByCcy[c]) grandByCcy[c]={net:0,vat:0,gross:0};
+      byCcy[c].net+=d.net; byCcy[c].vat+=d.vatAmount; byCcy[c].gross+=d.gross;
+      grandByCcy[c].net+=d.net; grandByCcy[c].vat+=d.vatAmount; grandByCcy[c].gross+=d.gross;
+      h+=`<tr>
+        <td>${seq}</td>
+        <td class="mono" style="font-size:11px">${esc(d.invoiceNo)||'—'}</td>
+        <td class="mono" style="font-size:11px">${esc(d.issueDate)||'—'}</td>
+        <td><b>${esc(d.vendorName)||'—'}</b></td>
+        <td class="mono" style="font-size:11px">${esc(d.taxCode)||'—'}</td>
+        <td style="max-width:200px;font-size:12px">${esc(d.desc)||'—'}</td>
+        <td class="r num">${fmt(d.net,d.ccy)}</td>
+        <td class="r num" style="font-size:11px">${d.vatPercent?d.vatPercent+'%':'—'}</td>
+        <td class="r num" style="font-weight:600">${fmt(d.vatAmount,d.ccy)}</td>
+        <td class="r num">${fmt(d.gross,d.ccy)}</td>
+        <td class="c"><span style="font-size:10px">${VAT_STATUS_LABEL[d.status]||d.status}</span></td>
+        <td style="font-size:11px">${esc(d.createdBy)||'—'}${d.createdByDept?'<br><span style="color:var(--muted)">'+esc(d.createdByDept)+'</span>':''}</td>
+      </tr>`;
+    });
+    Object.entries(byCcy).forEach(([c,s])=>{
+      h+=`<tr style="background:${color}0c;font-weight:600">
+        <td colspan="6" style="text-align:right;font-size:11px">Cộng nhóm (${c})</td>
+        <td class="r num">${fmt(s.net,c)}</td><td></td>
+        <td class="r num">${fmt(s.vat,c)}</td><td class="r num">${fmt(s.gross,c)}</td>
+        <td colspan="2"></td>
+      </tr>`;
+    });
+  };
+  renderGroup('1. Thuế GTGT (mua hàng/dịch vụ trong nước)', '#2a5a8c', grpNormal);
+  renderGroup('2. Thuế GTGT hàng nhập khẩu / nhà thầu nước ngoài', '#a06b3e', grpImport);
+  Object.entries(grandByCcy).forEach(([c,s])=>{
+    h+=`<tr style="background:rgba(196,138,57,.12);font-weight:700;border-top:2px solid var(--accent)">
+      <td colspan="6" style="text-align:right">TỔNG CỘNG GTGT ĐẦU VÀO (${c})</td>
       <td class="r num">${fmt(s.net,c)}</td><td></td>
       <td class="r num">${fmt(s.vat,c)}</td><td class="r num">${fmt(s.gross,c)}</td>
       <td colspan="2"></td>
