@@ -506,7 +506,7 @@ body.readonly-mode::before{
       <div id="auth-login-form">
         <div class="field">
           <label>Tên đăng nhập</label>
-          <input type="text" id="auth-name" placeholder="admin hoặc tên nhân viên" autocomplete="username" autocapitalize="off" autocorrect="off" spellcheck="false">
+          <input type="text" id="auth-name" placeholder="Email công ty (vd: lan.kt@seahorse.com.vn)" autocomplete="username" autocapitalize="off" autocorrect="off" spellcheck="false">
         </div>
         <div class="field">
           <label>Mật khẩu</label>
@@ -2683,12 +2683,15 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='2.99.47';            // bumped on each release
+const APP_VERSION='2.99.50';            // bumped on each release
 
 /* v2.62.0: Token xác thực backend — PHẢI khớp API_TOKEN trong Apps Script (Code.gs).
    Mọi request tới Apps Script tự động được gắn token qua lớp bọc fetch bên dưới.
    Nếu đổi token: phải đổi ở CẢ index.html và Code.gs cùng lúc. */
 const API_TOKEN='SME-Mxb0S7xMNU19euOtsBi3k6OrpZ0gwNvFaOulC0JM';
+/* v2.99.48: Tên miền email công ty — chỉ chấp nhận NV có email @domain này.
+   Để trống ('') nếu muốn TẮT kiểm tra (cho phép mọi email). */
+const COMPANY_EMAIL_DOMAIN='seahorse.com.vn';
 
 /* v2.62.0: Bọc fetch gốc — tự chèn token vào MỌI request tới script.google.com,
    bất kể gọi từ đâu trong app. GET → thêm &token= vào URL; POST → thêm "token"
@@ -4395,7 +4398,13 @@ async function authAction(){
         console.warn('[login] pre-pull cfg best-effort bỏ qua:', e&&e.message);
         try{ err.textContent=''; }catch(_){}
       }
-      let matched=(cfg.users||[]).find(u=>u.name.toLowerCase()===name.toLowerCase());
+      // v2.99.48: cho đăng nhập bằng EMAIL công ty hoặc username (NV cũ vẫn dùng username được)
+      const _findUser=(arr)=>{
+        const q=name.toLowerCase();
+        return (arr||[]).find(u=>u.name.toLowerCase()===q)
+            || (arr||[]).find(u=>(u.email||'').toLowerCase()===q);
+      };
+      let matched=_findUser(cfg.users);
       if(!matched){
         // v2.71.0: NV có thể chưa có trong cfg local cũ → thử pull cfg mới từ cloud rồi tìm lại
         const cloudUrl = cfg.scriptUrl || (COMPANY_SCRIPT_URL || '');
@@ -4405,7 +4414,7 @@ async function authAction(){
             await pullCfgFromCloud(cloudUrl, name, pw);
             cfg=getAuthConfig();
             err.textContent='';
-            matched=(cfg.users||[]).find(u=>u.name.toLowerCase()===name.toLowerCase());
+            matched=_findUser(cfg.users);
           }catch(e){ console.warn('[login] pull-on-missing failed:', e.message); err.style.color='var(--bad)'; }
         }
         if(!matched){
@@ -4428,7 +4437,7 @@ async function authAction(){
             err.style.color='var(--muted)'; err.textContent='Đang đối chiếu mật khẩu với cloud...';
             await pullCfgFromCloud(cloudUrl, name, pw);
             cfg=getAuthConfig();
-            const m2=(cfg.users||[]).find(u=>u.name.toLowerCase()===name.toLowerCase());
+            const m2=_findUser(cfg.users);
             if(m2){
               const h2=await sha256Hex(pw+m2.salt);
               if(h2===m2.hash){ matched=m2; h=h2; healed=true; err.textContent=''; }
@@ -4921,7 +4930,7 @@ const TAB_TO_FIELDS={
    IMPORTANT v1.39.1: bankAccounts/bankSnapshots/loans REMOVED from shared — chỉ user có quyền tab 'banking' mới load. */
 // v1.57.0: auditLog REMOVED from shared sync — stays local only (admin trên 1 máy chính)
 // Trade-off: nếu admin đăng nhập máy khác → audit log empty. Đổi lại: giảm payload size.
-const SHARED_FIELDS=['fxRate','displayCcy','companyInfo','meta','presence','vesselExpenseCats','omProjectExpenseCats','hrExpenseCats','qnExpenseCats','departments','vendors','expenseTypes','revenueTypes','companies','deletedIds','auditLogShared'];
+const SHARED_FIELDS=['fxRate','displayCcy','companyInfo','meta','presence','vesselExpenseCats','omProjectExpenseCats','hrExpenseCats','qnExpenseCats','departments','vendors','expenseTypes','revenueTypes','companies','deletedIds','auditLogShared','cashflowConfig'];
 /* All possible data fields (used by admin or for save-merge) */
 const ALL_DATA_FIELDS=[
   'plans','projects','vessels','onhires','events',
@@ -6757,6 +6766,12 @@ async function saveUser(idx){
   // Email format check
   const emailRegex = /^[a-z0-9._-]+@[a-z0-9.-]+\.[a-z]{2,}$/i;
   if(!emailRegex.test(email)){ err.textContent='Email không hợp lệ — VD đúng: lan.kt@seahorse.com.vn'; return; }
+  // v2.99.48: BẮT BUỘC email công ty (chặn email ngoài). Đổi COMPANY_EMAIL_DOMAIN nếu cần.
+  if(typeof COMPANY_EMAIL_DOMAIN==='string' && COMPANY_EMAIL_DOMAIN &&
+     !email.toLowerCase().endsWith('@'+COMPANY_EMAIL_DOMAIN)){
+    err.textContent='Chỉ chấp nhận email công ty @'+COMPANY_EMAIL_DOMAIN+' — VD: lan.kt@'+COMPANY_EMAIL_DOMAIN;
+    return;
+  }
   // Check duplicate email (skip current user when editing)
   const dupEmail = (cfg.users||[]).find((u,i) => i !== idx && u.email && u.email.toLowerCase() === email.toLowerCase());
   if(dupEmail){ err.textContent=`Email "${email}" đã được dùng cho NV "${dupEmail.name}"`; return; }
@@ -10205,6 +10220,32 @@ function mergeStateByFields(cloudFull, localFull, fields){
       const {merged:mArr, conflicts}=mergeByID(cloudFull[f], localFull[f], 'id', f==='deletedIds');
       merged[f]=mArr;
       if(conflicts.length>0) conflictReport[f]=conflicts;
+    } else if((f==='fxRate' || f==='displayCcy')){
+      // v2.99.50: SỬA LỖI "tỷ giá tự về 25.000". fxRate/displayCcy chỉ Admin/KTT được đặt,
+      // nhưng trước đây nằm trong SHARED_FIELDS nên MỌI máy NV cũng push → máy NV còn giá trị
+      // mặc định (fxRate=25000) push sau sẽ ĐÈ tỷ giá admin vừa đổi (last-write-wins).
+      // Quy tắc mới: chỉ nhận giá trị từ máy hiện tại nếu máy đó CÓ QUYỀN sửa (admin/KTT);
+      // máy NV thường → GIỮ cloud (không cho đè).
+      let canEditFx=false;
+      try{ canEditFx = (CURRENT_ROLE==='admin') || (typeof canApproveL2==='function' && canApproveL2()); }catch(_){ canEditFx=false; }
+      if(canEditFx && localFull[f]!==undefined && localFull[f]!==null && localFull[f]!==''){
+        merged[f]=localFull[f];   // máy có quyền → dùng giá trị máy này
+      } else if(cloudFull[f]!==undefined && cloudFull[f]!==null && cloudFull[f]!==''){
+        merged[f]=cloudFull[f];   // máy thường → giữ cloud, KHÔNG đè
+      } else {
+        merged[f]=localFull[f];
+      }
+    } else if(f==='cashflowConfig' && localFull[f] && typeof localFull[f]==='object'
+              && cloudFull[f] && typeof cloudFull[f]==='object'){
+      // v2.99.49: cashflowConfig là object cấu hình (lương/BHXH/NSNN dự kiến). Gộp theo từng khóa:
+      // lấy local làm chuẩn, NHƯNG nếu local thiếu/rỗng/0 một khóa mà cloud có giá trị → giữ cloud.
+      // Tránh máy chưa đặt cấu hình (giá trị 0) ghi đè mất cấu hình admin đã lưu trên cloud.
+      const cc=Object.assign({}, cloudFull[f], localFull[f]);
+      ['monthlySalaryVnd','monthlyBhxhVnd','monthlyNsnnVnd'].forEach(k=>{
+        const lv=+localFull[f][k]||0, cv=+cloudFull[f][k]||0;
+        if(lv===0 && cv>0){ cc[k]=cv; }  // local chưa đặt (0) mà cloud có → giữ cloud
+      });
+      merged[f]=cc;
     } else if(f==='companyInfo' && localFull[f] && typeof localFull[f]==='object'
               && cloudFull[f] && typeof cloudFull[f]==='object'){
       // v2.48.0: companyInfo là object — gộp theo TỪNG KHÓA CON, không thay nguyên cục.
