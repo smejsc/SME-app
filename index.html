@@ -260,14 +260,14 @@ body.readonly-mode::before{
 .kpi-sub .down{color:var(--bad)}
 
 /* ===== SECTIONS ===== */
-.section{background:var(--paper);border:1px solid var(--rule);margin-bottom:24px}
-.section-head{padding:14px 20px;border-bottom:1px solid var(--rule);background:var(--paper-2);display:flex;justify-content:space-between;align-items:center}
+.section{background:var(--paper);border:1px solid var(--rule);margin-bottom:24px;overflow-x:hidden}
+.section-head{padding:14px 20px;border-bottom:1px solid var(--rule);background:var(--paper-2);display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px}
 .section-title{font-family:var(--font-display);font-size:17px;font-weight:600;letter-spacing:-.005em}
 .section-title .tag{font-family:var(--font-mono);font-size:10px;color:var(--accent);margin-right:10px;font-weight:600;letter-spacing:.1em}
-.section-body{padding:20px}
+.section-body{padding:20px;min-width:0}
 
 /* ===== TABLE ===== */
-.tbl-scroll{overflow-x:auto;-webkit-overflow-scrolling:touch}
+.tbl-scroll{overflow-x:auto;-webkit-overflow-scrolling:touch;max-width:100%;width:100%}
 .tbl-scroll::-webkit-scrollbar{height:8px}
 .tbl-scroll::-webkit-scrollbar-track{background:var(--paper-2)}
 .tbl-scroll::-webkit-scrollbar-thumb{background:var(--rule);border-radius:4px}
@@ -2683,7 +2683,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='2.99.51';            // bumped on each release
+const APP_VERSION='2.99.55';            // bumped on each release
 
 /* v2.62.0: Token xác thực backend — PHẢI khớp API_TOKEN trong Apps Script (Code.gs).
    Mọi request tới Apps Script tự động được gắn token qua lớp bọc fetch bên dưới.
@@ -4298,6 +4298,8 @@ function refreshConfigFromCloud(){
   try{
     localStorage.removeItem(AUTH_KEY);
     localStorage.removeItem(STORE_KEY);
+    // v2.99.52: xoá cả các key dữ liệu riêng theo NV (seahorse_v1__nv_*)
+    try{ Object.keys(localStorage).filter(k=>k.indexOf(STORE_KEY+'__nv_')===0).forEach(k=>localStorage.removeItem(k)); }catch(_){}
     localStorage.removeItem('seahorse_pending_scripturl');
     localStorage.removeItem('seahorse_session_start');
     alert('✓ Đã làm mới cấu hình.\n\nỨng dụng sẽ tải lại. Sau đó đăng nhập bình thường — app tự kéo cấu hình mới nhất từ cloud.');
@@ -4823,6 +4825,8 @@ function authResetPrompt(){
   }
   localStorage.removeItem(AUTH_KEY);
   localStorage.removeItem(STORE_KEY);
+  // v2.99.52: xoá cả dữ liệu riêng theo NV
+  try{ Object.keys(localStorage).filter(k=>k.indexOf(STORE_KEY+'__nv_')===0).forEach(k=>localStorage.removeItem(k)); }catch(_){}
   location.reload();
 }
 
@@ -8736,7 +8740,7 @@ async function saveStateEncrypted(){
   // Bảo vệ chống mất data cục bộ khi S lỡ bị set rỗng (vd decrypt fail, pull lỗi).
   try{
     if(window._allowEmptySave !== true && _stateLooksEmpty(S)){
-      const raw=localStorage.getItem(STORE_KEY);
+      const raw=localStorage.getItem(_storeKeyForUser());  // v2.99.52
       if(raw){
         let existedNonEmpty=false;
         try{
@@ -8753,7 +8757,7 @@ async function saveStateEncrypted(){
   }catch(e){ console.warn('[saveStateEncrypted] guard check lỗi (bỏ qua, vẫn lưu):', e); }
   try{
     const payload=await encryptJSON(S);
-    localStorage.setItem(STORE_KEY,JSON.stringify(payload));
+    localStorage.setItem(_storeKeyForUser(),JSON.stringify(payload));  // v2.99.52: key riêng theo user
   }catch(e){
     // v2.64.0: localStorage có thể đầy (quota) hoặc lỗi mã hóa.
     // KHÔNG nuốt lỗi im lặng — báo rõ để NV biết dữ liệu CHƯA được lưu.
@@ -8773,7 +8777,7 @@ async function saveStateEncrypted(){
 async function loadEncryptedLocal(){
   window._loadFailed = false;  // v2.99.41: reset cờ mỗi lần thử load (chỉ bật lại nếu lần này lỗi)
   try{
-    const raw=localStorage.getItem(STORE_KEY);
+    const raw=localStorage.getItem(_storeKeyForUser());  // v2.99.52: key riêng theo user
     if(!raw){S=defaultState();return;}
     const payload=JSON.parse(raw);
     let data;
@@ -8842,6 +8846,8 @@ async function cloudSync(mode, opts){
   updateSyncStatus('syncing');
   try{
     if(mode==='pull'){
+      // v2.99.54: nhớ cashflowConfig local TRƯỚC khi pull ghi đè (để bảo toàn nếu cloud chưa có)
+      try{ window.__prePullCashflowConfig = Object.assign({}, S.cashflowConfig||{}); }catch(_){ window.__prePullCashflowConfig={}; }
       const res=await fetchWithTimeout(cfg.scriptUrl+'?action=load&key=data',{method:'GET'});
       const data=await safeJson(res);
       if(!data.ok){updateSyncStatus('error',data.error||'Lỗi');return;}
@@ -8921,6 +8927,19 @@ async function cloudSync(mode, opts){
       S.auditLog = localAuditLog;  // restore local audit log
       S.presence = mergedPresence; // v2.72.0: giữ presence đã gộp
       S.auditLogShared = mergedAudit; // v2.73.0: giữ nhật ký quan trọng đã union
+      // v2.99.54: BẢO TOÀN cashflowConfig (lương/BHXH/NSNN dự kiến) khi pull.
+      // Lỗi cũ: pull thay nguyên S = cloud; nếu cloud CHƯA có cấu hình (vừa nhập, chưa push)
+      // → mất số vừa đặt sau khi F5/pull. Quy tắc: với mỗi khóa, nếu cloud =0/thiếu mà local >0 → GIỮ local.
+      try{
+        const lc = (window.__prePullCashflowConfig) || {};
+        const cc = Object.assign({ monthlySalaryVnd:0, monthlyBhxhVnd:0, monthlyNsnnVnd:0 },
+                                 filteredCloud.cashflowConfig||{});
+        ['monthlySalaryVnd','monthlyBhxhVnd','monthlyNsnnVnd'].forEach(k=>{
+          const cv=+cc[k]||0, lv=+(lc[k])||0;
+          if(cv===0 && lv>0) cc[k]=lv;   // cloud chưa có, local có → giữ local
+        });
+        S.cashflowConfig = cc;
+      }catch(e){ console.warn('[pull cashflowConfig preserve]', e&&e.message); }
       await saveStateEncrypted();
       try{ _updateLastKnownRecordCount(); }catch(e){}  // v2.99.30: cập nhật mốc cao nhất
       renderAll({fromSync:true});
@@ -9026,7 +9045,7 @@ async function cloudSync(mode, opts){
           // Kiểm tra cẩn thận trước khi push direct
           if(_stateLooksEmpty(S)){
             updateSyncStatus('error','Dữ liệu máy trống/sụt giảm — không đẩy đè cloud');
-            toast('⚠ Không sync: dữ liệu máy này trống hoặc sụt giảm bất thường. Đăng xuất + đăng nhập lại để Pull data, hoặc liên hệ admin.','bad');
+            if(_interactive){ toast('⚠ Không sync: dữ liệu máy này trống hoặc sụt giảm bất thường. Đăng xuất + đăng nhập lại để Pull data, hoặc liên hệ admin.','bad'); }
             console.error('[sync admin] CHẶN push direct vì state looks empty');
             return;
           }
@@ -9043,7 +9062,7 @@ async function cloudSync(mode, opts){
             toEncrypt=S;
           } else {
             updateSyncStatus('error','Không pull được để merge: '+detail);
-            toast('Sync thất bại: '+detail,'bad');
+            if(_interactive){ toast('Sync thất bại: '+detail,'bad'); }
             return;
           }
         }
@@ -9149,11 +9168,11 @@ async function cloudSync(mode, opts){
         body:finalBody
       });
       const data=await safeJson(res);
-      if(!data.ok){updateSyncStatus('error',data.error||'Lỗi');toast('Sync thất bại','bad');return;}
+      if(!data.ok){updateSyncStatus('error',data.error||'Lỗi');if(_interactive){toast('Sync thất bại','bad');}return;}
       cfg.lastSync=new Date().toISOString();
       setAuthConfig(cfg);
       updateSyncStatus('synced','Đã sync '+timeAgo(cfg.lastSync));
-      toast('Đã đồng bộ lên cloud' + compressionInfo);
+      if(_interactive){ toast('Đã đồng bộ lên cloud' + compressionInfo); }
       try{ _updateLastKnownRecordCount(); }catch(e){}  // v2.99.30
       try{ _lastPushHash=_quickStateHash(); }catch(e){}  // v2.99.42: ghi mốc hash chống push trùng
       try{ window._syncBackoffUntil=0; }catch(e){}  // v2.99.45: sync OK → xóa backoff
@@ -9163,7 +9182,7 @@ async function cloudSync(mode, opts){
   }catch(e){
     console.error(e);
     updateSyncStatus('error',e.message);
-    toast('Sync lỗi: '+e.message,'bad');
+    if(_interactive){ toast('Sync lỗi: '+e.message,'bad'); }
     // v2.99.45: nếu cloud timeout (đang bận) → đặt backoff 20s để lần auto-sync sau lùi lại,
     // tránh dồn thêm request vào lúc cloud đang nghẽn (giúp khi 30–40 NV cùng dùng).
     try{
@@ -9861,6 +9880,20 @@ const COST_CATS = {
 
 /* ===== STATE ===== */
 const STORE_KEY = 'seahorse_v1';
+/* v2.99.52 — SỬA TẬN GỐC lỗi mất danh mục khi NV + admin dùng chung máy.
+   Trước đây MỌI user ghi chung 1 key 'seahorse_v1'. NV (non-admin) có state ĐÃ LỌC
+   (các field ngoài quyền = rỗng), khi ghi đè key chung → admin đăng nhập cùng máy đọc
+   phải bản thiếu → mất dự án/TSCĐ/tàu...
+   Khắc phục: admin dùng key chung (đầy đủ); MỖI NV dùng key RIÊNG theo tên user.
+   → state đã lọc của NV KHÔNG bao giờ đè bản đầy đủ của admin trên cùng máy. */
+function _storeKeyForUser(){
+  try{
+    if(CURRENT_ROLE==='admin' || !CURRENT_USER || !CURRENT_USER.name) return STORE_KEY;
+    // NV: key riêng theo tên (chuẩn hoá: thường + bỏ ký tự lạ)
+    const u=String(CURRENT_USER.name).toLowerCase().replace(/[^a-z0-9]+/g,'_');
+    return STORE_KEY + '__nv_' + u;
+  }catch(e){ return STORE_KEY; }
+}
 let S = loadState();
 // v1.36: Auto-migrate plans on app load (derive profit field if missing)
 try{
@@ -9972,6 +10005,9 @@ function defaultState(){
     ],
     fxRate:25000,
     displayCcy:'USD',
+    // v2.99.54: cashflowConfig LUÔN có trong defaultState (object) — trước đây thiếu nên
+    // sau khi load lại có thể bị coi là undefined/loại bỏ → mất cài đặt lương/BHXH/NSNN dự kiến.
+    cashflowConfig:{ monthlySalaryVnd:0, monthlyBhxhVnd:0, monthlyNsnnVnd:0 },
     companyInfo:{
       name:'CTCP HÀNG HẢI VÀ NĂNG LƯỢNG HẢI MÃ',
       nameEn:'SEAHORSE MARINE & ENERGY JSC',
