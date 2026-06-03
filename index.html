@@ -2683,7 +2683,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='2.99.55';            // bumped on each release
+const APP_VERSION='2.99.56';            // bumped on each release
 
 /* v2.62.0: Token xác thực backend — PHẢI khớp API_TOKEN trong Apps Script (Code.gs).
    Mọi request tới Apps Script tự động được gắn token qua lớp bọc fetch bên dưới.
@@ -21844,7 +21844,7 @@ function delOpVessel(id){
   const v=S.opVessels.find(x=>x.id===id);if(!v)return;
   const tx=S.opTransactions.filter(t=>t.vesselId===id).length;
   confirmDelete('tàu quản lý này',
-    `${esc(v.name)} · ${esc(v.owner) || '—'}<br>Số dư hiện tại: ${fmt(opBalance(id),v.ccy)}<br>${tx?`<b style="color:var(--bad)">⚠ ${tx} bút toán thu/chi hộ</b> cũng bị xóa kèm.`:''}`,
+    `${esc(v.name)} · ${esc(v.owner) || '—'}<br>Số dư hiện tại: ${fmt(opBalance(id),'USD')}<br>${tx?`<b style="color:var(--bad)">⚠ ${tx} bút toán thu/chi hộ</b> cũng bị xóa kèm.`:''}`,
     ()=>{const txIds=S.opTransactions.filter(t=>t.vesselId===id).map(t=>t.id);S.opVessels=S.opVessels.filter(x=>x.id!==id);S.opTransactions=S.opTransactions.filter(t=>t.vesselId!==id);markDeleted([id,...txIds]);saveState();toast('Đã xóa');renderAll();});
 }
 function editOpVessel(id){
@@ -21904,9 +21904,21 @@ function opMgmtFeeIssued(vid){
 }
 function opBalance(vid){
   // Balance = Σ thu hộ − Σ chi hộ − Σ phí NH − Σ phí khác
+  // v2.99.56: SỬA LỖI số dư khổng lồ do cộng LẪN LỘN tiền gốc USD + VND không quy đổi.
+  // Đồng chuẩn của tab QL tàu là USD → phải cộng theo amountUsd (đã quy đổi), KHÔNG cộng t.amount gốc.
+  const toUsd=(t, raw)=>{
+    raw=+raw||0;
+    if(raw===0) return 0;
+    const ccy=t.ccy||'USD';
+    if(ccy==='USD') return raw;
+    const fx=(+t.fxToUsd||0) || (+S.fxRate||0);
+    return fx>0 ? raw/fx : raw;
+  };
   return S.opTransactions.filter(t=>t.vesselId===vid).reduce((s,t)=>{
-    const delta = t.type==='IN' ? +t.amount : -(+t.amount);
-    const fees = (+t.bankFee||0) + (+t.otherFee||0);
+    // ưu tiên amountUsd đã chuẩn hóa; nếu thiếu thì quy đổi từ amount gốc
+    let amtUsd = (+t.amountUsd>0) ? +t.amountUsd : toUsd(t, t.amount);
+    const delta = t.type==='IN' ? amtUsd : -amtUsd;
+    const fees = toUsd(t, (+t.bankFee||0)) + toUsd(t, (+t.otherFee||0));
     return s + delta - fees;
   },0);
 }
@@ -21943,7 +21955,7 @@ function renderOpVessels(){
     html+=`<tr>
       <td><b>${esc(v.name)}</b>${v.managedSince?`<div style="font-size:10px;color:var(--muted)">QL từ ${esc(v.managedSince)} · ${months} tháng</div>`:'<div style="font-size:10px;color:var(--warn)">chưa đặt ngày QL</div>'}</td>
       <td>${esc(v.owner) || '—'}</td>
-      <td class="r num" style="font-weight:600;color:${bal<v.min?'var(--bad)':bal<v.min*1.2?'var(--warn)':'var(--ink)'}">${fmt(bal,v.ccy)}</td>
+      <td class="r num" style="font-weight:600;color:${bal<v.min?'var(--bad)':bal<v.min*1.2?'var(--warn)':'var(--ink)'}" title="Số dư quy đổi USD (đồng chuẩn QL tàu)">${fmt(bal,'USD')}</td>
       <td class="r num">${fmt(v.min,v.ccy)}</td>
       <td class="r num">${fmt(v.fee,v.ccy)}</td>
       <td class="r num" style="color:var(--muted)" title="${months} tháng × ${fmt(v.fee,v.ccy)}">${accrued>0?fmt(accrued,v.ccy):'—'}</td>
@@ -23259,9 +23271,9 @@ function renderDashboard(){
   S.opVessels.forEach(v=>{
     const bal=opBalance(v.id);
     if(bal<v.min){
-      alerts+=`<div class="alert danger"><div class="alert-text"><b>⚠ ${esc(v.name)}</b> · Số dư thu hộ–chi hộ <b>${fmt(bal,v.ccy)}</b> dưới ngưỡng tối thiểu <b>${fmt(v.min,v.ccy)}</b>. Cần bổ sung gấp.</div><button class="btn-sec" onclick="navTo('operations')">Xem chi tiết</button></div>`;
+      alerts+=`<div class="alert danger"><div class="alert-text"><b>⚠ ${esc(v.name)}</b> · Số dư thu hộ–chi hộ <b>${fmt(bal,'USD')}</b> dưới ngưỡng tối thiểu <b>${fmt(v.min,'USD')}</b>. Cần bổ sung gấp.</div><button class="btn-sec" onclick="navTo('operations')">Xem chi tiết</button></div>`;
     } else if(bal<v.min*1.2){
-      alerts+=`<div class="alert"><div class="alert-text"><b>⚡ ${esc(v.name)}</b> · Số dư ${fmt(bal,v.ccy)} gần ngưỡng ${fmt(v.min,v.ccy)}.</div><button class="btn-sec" onclick="navTo('operations')">Xem</button></div>`;
+      alerts+=`<div class="alert"><div class="alert-text"><b>⚡ ${esc(v.name)}</b> · Số dư ${fmt(bal,'USD')} gần ngưỡng ${fmt(v.min,'USD')}.</div><button class="btn-sec" onclick="navTo('operations')">Xem</button></div>`;
     }
   });
   alertsEl.innerHTML=alerts;
