@@ -2689,7 +2689,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='2.99.60';            // bumped on each release
+const APP_VERSION='2.99.61';            // bumped on each release
 
 /* v2.62.0: Token xác thực backend — PHẢI khớp API_TOKEN trong Apps Script (Code.gs).
    Mọi request tới Apps Script tự động được gắn token qua lớp bọc fetch bên dưới.
@@ -20312,6 +20312,22 @@ function _arEditorBody(r,isPayable){
 
   // v1.43.0: Fuel detail block (conditional — shown when expenseType is isFuel)
   let fuelBlock = '';
+  // v2.99.61: Salary block — ô BHXH + TNCN cho loại chi phí Lương (NV nhập tay → auto vào NSNN khi duyệt)
+  let salaryBlock = '';
+  if(isPayable){
+    const isSalaryNow = r.expenseType && _isSalaryExpense(r.expenseType);
+    const bhxhCur = r.bhxhAmount != null ? r.bhxhAmount : '';
+    const pitCur = r.pitAmount != null ? r.pitAmount : '';
+    salaryBlock = `
+      <div id="ar-salary-block" style="margin-top:14px;padding:12px 14px;background:rgba(74,140,90,.06);border-left:3px solid #4a8c5a;${isSalaryNow?'':'display:none'}">
+        <div style="font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:#4a8c5a;font-weight:700;margin-bottom:8px">🏥 Bảo hiểm & thuế lương <span style="color:var(--muted);font-weight:400;text-transform:none">(nhập tay — tự đưa vào bảng kê NSNN khi duyệt)</span></div>
+        <div class="form-grid" style="grid-template-columns:1fr 1fr">
+          <div class="field"><label>🏥 BHXH/BHYT/BHTN nộp cơ quan BHXH</label><input type="number" id="ar-bhxh-amount" value="${bhxhCur}" step="any" placeholder="0 = không có" ${lockedAttr}></div>
+          <div class="field"><label>👤 TNCN khấu trừ nộp NSNN</label><input type="number" id="ar-pit-amount" value="${pitCur}" step="any" placeholder="0 = không có" ${lockedAttr}></div>
+        </div>
+        <div style="font-size:10px;color:var(--muted);font-style:italic;margin-top:6px">Nhập đúng số phải nộp. Khi khoản Lương này được DUYỆT, app tự sinh dòng BHXH (mục B) và TNCN (mục A) trong tab NSNN.</div>
+      </div>`;
+  }
   if(isPayable){
     const isFuelNow = r.expenseType && isExpenseFuel(r.expenseType);
     const fuelKindCur = r.fuelKind || '';
@@ -20487,6 +20503,7 @@ function _arEditorBody(r,isPayable){
     ${advanceBlock}
     ${assetBlock}
     ${dockBlock}
+    ${salaryBlock}
 
     <div style="margin-top:14px;padding-top:10px;border-top:1px solid var(--rule)">
       <div style="font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);font-weight:600;margin-bottom:6px">Giá trị & VAT</div>
@@ -20559,6 +20576,21 @@ function arExpenseTypeChanged(){
   if(dockBlk){
     dockBlk.style.display = (code && isExpenseCapEx(code)) ? 'block' : 'none';
   }
+  // v2.99.61: Salary block (BHXH/BHYT/BHTN + TNCN khấu trừ) — hiện khi loại = Lương
+  const salBlk = document.getElementById('ar-salary-block');
+  if(salBlk){
+    salBlk.style.display = (code && _isSalaryExpense(code)) ? 'block' : 'none';
+  }
+}
+
+/* v2.99.61: nhận diện loại chi phí Lương (để hiện ô BHXH/TNCN trong form AP chung) */
+function _isSalaryExpense(code){
+  if(!code) return false;
+  const et=(S.expenseTypes||[]).find(e=>e.code===code);
+  // đúng mã SALARY, hoặc thuộc nhóm HR nhãn "Lương"
+  if(String(code).toUpperCase()==='SALARY') return true;
+  if(et && (et.code==='SALARY' || /l\u01b0\u01a1ng/i.test(et.label||''))) return true;
+  return false;
 }
 
 /* v2.22.0: Bộ phận giữ TS = Tàu → hiện ô chọn tàu cụ thể */
@@ -21290,6 +21322,13 @@ function saveAr(kind,id){
       dockAssetId = dkEl ? dkEl.value : '';
       if(!dockAssetId){err.textContent='🛠 Chọn TSCĐ được dock / sửa chữa lớn';return;}
     }
+    // v2.99.61: Lương — đọc BHXH + TNCN (nhập tay) để auto sinh NSNN khi duyệt
+    if(expenseType && _isSalaryExpense(expenseType)){
+      const bxEl = document.getElementById('ar-bhxh-amount');
+      const ptEl = document.getElementById('ar-pit-amount');
+      var apBhxhAmount = bxEl ? (+bxEl.value || 0) : 0;
+      var apPitAmount = ptEl ? (+ptEl.value || 0) : 0;
+    }
   }
 
   if(!partner){err.textContent='Nhập tên đối tác';return;}
@@ -21329,6 +21368,9 @@ function saveAr(kind,id){
       updates.assetVesselId = assetVesselId;
       updates.assetAllocationMonths = assetAllocationMonths;
       updates.dockAssetId = dockAssetId;  // v2.25.0
+      // v2.99.61: BHXH + TNCN cho loại Lương (auto sinh NSNN khi duyệt). null nếu không phải lương.
+      updates.bhxhAmount = (typeof apBhxhAmount!=='undefined') ? apBhxhAmount : (r.bhxhAmount||0);
+      updates.pitAmount  = (typeof apPitAmount!=='undefined')  ? apPitAmount  : (r.pitAmount||0);
     }
     Object.assign(r, updates);
     touchRecord(r);  // v1.38.4: track for concurrency merge
@@ -21366,6 +21408,9 @@ function saveAr(kind,id){
       newRec.assetVesselId = assetVesselId;
       newRec.assetAllocationMonths = assetAllocationMonths;
       newRec.dockAssetId = dockAssetId;  // v2.25.0
+      // v2.99.61: BHXH + TNCN cho loại Lương
+      newRec.bhxhAmount = (typeof apBhxhAmount!=='undefined') ? apBhxhAmount : 0;
+      newRec.pitAmount  = (typeof apPitAmount!=='undefined')  ? apPitAmount  : 0;
     }
     S[list].push(newRec);
   }
