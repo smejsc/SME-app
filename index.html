@@ -2691,7 +2691,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='2.99.62';            // bumped on each release
+const APP_VERSION='2.99.65';            // bumped on each release
 
 /* v2.62.0: Token xác thực backend — PHẢI khớp API_TOKEN trong Apps Script (Code.gs).
    Mọi request tới Apps Script tự động được gắn token qua lớp bọc fetch bên dưới.
@@ -4664,7 +4664,7 @@ async function authAction(){
       _suppressAutoSync=true;
       setTimeout(()=>{ _suppressAutoSync=false; }, 5000);
       setTimeout(()=>cloudSync('pull')
-        .then(()=>{ try{ if(pruneDeletedIds(120)>0) saveState(); }catch(e){} })
+        .then(()=>{ try{ let ch=0; if(pruneDeletedIds(120)>0) ch++; if(_healCatalogTombstones()>0) ch++; if(ch) saveState(); }catch(e){} })
         .catch(e=>console.warn('[post-login pull]', e&&e.message))
         .finally(()=>{
           // v2.82.0: đảm bảo presenceStart LUÔN chạy sau login — dù pull có thành công hay không.
@@ -4945,7 +4945,7 @@ const TAB_TO_FIELDS={
    IMPORTANT v1.39.1: bankAccounts/bankSnapshots/loans REMOVED from shared — chỉ user có quyền tab 'banking' mới load. */
 // v1.57.0: auditLog REMOVED from shared sync — stays local only (admin trên 1 máy chính)
 // Trade-off: nếu admin đăng nhập máy khác → audit log empty. Đổi lại: giảm payload size.
-const SHARED_FIELDS=['fxRate','displayCcy','companyInfo','meta','presence','vesselExpenseCats','omProjectExpenseCats','hrExpenseCats','qnExpenseCats','departments','vendors','expenseTypes','revenueTypes','companies','deletedIds','auditLogShared','cashflowConfig'];
+const SHARED_FIELDS=['fxRate','fxRateAt','displayCcy','companyInfo','meta','presence','vesselExpenseCats','omProjectExpenseCats','hrExpenseCats','qnExpenseCats','departments','vendors','expenseTypes','revenueTypes','companies','deletedIds','auditLogShared','cashflowConfig'];
 /* All possible data fields (used by admin or for save-merge) */
 const ALL_DATA_FIELDS=[
   'plans','projects','vessels','onhires','events',
@@ -9166,14 +9166,19 @@ async function cloudSync(mode, opts){
         finalSize = finalBody.length;
       }
 
-      // v2.62.0: backend (Apps Script v1.64.0+) hỗ trợ chia nhỏ dữ liệu (chunking)
-      // nên không còn giới hạn 1 ô 50KB. Nới guard lên 400KB — vẫn dưới giới hạn
-      // POST của Apps Script, chỉ để chặn trường hợp dữ liệu phình bất thường.
-      if(finalSize > 400*1024){
+      // v2.62.0: backend (Apps Script v1.64.0+) hỗ trợ chia nhỏ dữ liệu (chunking,
+      // CHUNK_SIZE=45000 ký tự/ô, không giới hạn số ô) → trần thật là giới hạn POST
+      // của Apps Script (~50MB), KHÔNG phải 400KB.
+      // v2.99.63: nới guard 400KB → 8MB. Dữ liệu thật đã ~900KB sau nén (445 dòng AP
+      // tháng 5 + nền cũ) và còn tăng — 400KB quá thấp, chặn nhầm dữ liệu hợp lệ.
+      // 8MB vẫn rất an toàn dưới trần POST, backend tự chunk (~187 ô). Vượt 8MB mới
+      // là dấu hiệu phình bất thường thực sự.
+      const SYNC_MAX_BYTES = 8*1024*1024;  // 8MB
+      if(finalSize > SYNC_MAX_BYTES){
         const sizeKB = Math.round(finalSize/1024);
         console.error('[sync push] payload too large after compression:', sizeKB, 'KB');
         updateSyncStatus('error', `Payload quá lớn (${sizeKB}KB sau nén)`);
-        toast(`Dữ liệu quá lớn bất thường (${sizeKB}KB) — Liên hệ admin/dev`, 'bad');
+        toast(`Dữ liệu quá lớn bất thường (${sizeKB}KB > 8MB) — Liên hệ admin/dev`, 'bad');
         return;
       }
       const res=await fetchWithTimeout(cfg.scriptUrl,{
@@ -10018,6 +10023,7 @@ function defaultState(){
       'Khác (quản lý chung)'
     ],
     fxRate:25000,
+    fxRateAt:'',   // v2.99.65: thời điểm tỷ giá được đặt — dùng để merge theo bản mới nhất, chống default đè giá thật
     displayCcy:'USD',
     // v2.99.54: cashflowConfig LUÔN có trong defaultState (object) — trước đây thiếu nên
     // sau khi load lại có thể bị coi là undefined/loại bỏ → mất cài đặt lương/BHXH/NSNN dự kiến.
@@ -10098,7 +10104,7 @@ function _recordTimestamp(r){
 // - Local records absent in cloud → keep local (mới thêm bởi NV này)
 // - Cả 2 cùng có → lấy bản có updatedAt mới nhất (last-write-wins ở mức RECORD, không phải array)
 // Returns: {merged, conflicts: [{id, cloudUpdatedAt, localUpdatedAt}]}
-function mergeByID(cloudArr, localArr, idField, skipTombstone){
+function mergeByID(cloudArr, localArr, idField, skipTombstone, fieldName){
   cloudArr=Array.isArray(cloudArr)?cloudArr:[];
   localArr=Array.isArray(localArr)?localArr:[];
   idField=idField||'id';
@@ -10141,8 +10147,18 @@ function mergeByID(cloudArr, localArr, idField, skipTombstone){
   // skipTombstone=true khi đang merge CHÍNH mảng deletedIds (nếu không nó tự xóa chính nó).
   let merged=Object.values(byId).map(x=>x.rec);
   if(!skipTombstone){
-    const tomb=deletedIdSet();
-    merged=merged.filter(r=>!tomb.has(String(r[idField])));
+    // v2.99.64: SỬA LỖI MẤT DANH MỤC DỰ ÁN/TÀU.
+    // Trước đây bộ lọc bia mộ DÙNG CHUNG TOÀN CỤC: một ID bị xóa ở mảng bất kỳ
+    // (vd payable, op_tx, import-undo) sẽ xóa LUÔN bản ghi cùng ID ở mảng khác.
+    // Danh mục nền (projects/vessels/departments/companies/vendors/expenseTypes/
+    // revenueTypes) TUYỆT ĐỐI không bị bia mộ xóa khi merge — chỉ xóa được bằng
+    // thao tác xóa trực tiếp trên chính danh mục đó (lúc đó mảng nguồn đã bỏ phần tử).
+    if(!TOMBSTONE_PROTECTED_FIELDS.has(fieldName)){
+      // Chỉ áp bia mộ ĐÚNG LOẠI (field) cho field này; bia mộ cũ không ghi field
+      // (legacy) vẫn áp như trước để giữ chống "hồi sinh" AP/giao dịch đã xóa.
+      const tomb=deletedIdSetForField(fieldName);
+      merged=merged.filter(r=>!tomb.has(String(r[idField])));
+    }
   }
   return {merged, conflicts};
 }
@@ -10155,20 +10171,47 @@ function mergeByID(cloudArr, localArr, idField, skipTombstone){
    ============================================================ */
 function _deletedIds(){ if(!Array.isArray(S.deletedIds)) S.deletedIds=[]; return S.deletedIds; }
 
+// v2.99.64: Danh mục nền — TUYỆT ĐỐI không cho bia mộ xóa khi merge/sync.
+const TOMBSTONE_PROTECTED_FIELDS=new Set([
+  'projects','vessels','departments','companies','vendors','expenseTypes','revenueTypes'
+]);
+
 // Đánh dấu 1 hoặc nhiều ID là đã xóa. Gọi trong các hàm xóa, TRƯỚC saveState().
-function markDeleted(ids){
+// v2.99.64: thêm tham số `field` (tùy chọn) — ghi rõ ID này thuộc loại dữ liệu nào,
+// để bia mộ chỉ áp ĐÚNG loại đó khi merge (tránh xóa nhầm bản ghi cùng ID ở mảng khác).
+function markDeleted(ids, field){
   const arr=Array.isArray(ids)?ids:[ids];
   const list=_deletedIds();
   const now=new Date().toISOString();
+  const f=(typeof field==='string' && field) ? field : '';
   arr.forEach(id=>{
     if(id==null||id==='') return;
-    if(!list.some(d=>d.id===id)) list.push({id:String(id), at:now});
+    const sid=String(id);
+    const existing=list.find(d=>d.id===sid);
+    if(existing){
+      if(f && !existing.field) existing.field=f;  // bổ sung field nếu bia cũ thiếu
+    } else {
+      list.push(f ? {id:sid, at:now, field:f} : {id:sid, at:now});
+    }
   });
 }
 
-// Tập hợp ID đã xóa (để mergeByID tra cứu nhanh)
+// Tập hợp ID đã xóa (toàn cục — giữ cho tương thích chỗ gọi cũ).
 function deletedIdSet(){
   return new Set(_deletedIds().map(d=>d.id));
+}
+
+// v2.99.64: Tập ID đã xóa ÁP DỤNG CHO field cụ thể:
+//  - Bia mộ có field === field này → áp.
+//  - Bia mộ LEGACY (không ghi field) → vẫn áp (giữ chống hồi sinh AP/giao dịch cũ),
+//    nhưng chỗ gọi đã loại trừ TOMBSTONE_PROTECTED_FIELDS nên danh mục không dính.
+function deletedIdSetForField(field){
+  const s=new Set();
+  _deletedIds().forEach(d=>{
+    if(!d || d.id==null) return;
+    if(!d.field || d.field===field){ s.add(String(d.id)); }
+  });
+  return s;
 }
 
 // Dọn bia mộ cũ hơn N ngày (mặc định 120) — tới lúc đó mọi máy đã đồng bộ xong.
@@ -10183,8 +10226,30 @@ function pruneDeletedIds(days){
   return before-S.deletedIds.length;
 }
 
-// fields: array of state keys to merge (allowed for this user)
-// Returns: {merged: full state, conflictReport: {field: [conflicts]}}
+// v2.99.64: TỰ CHỮA — gỡ khỏi deletedIds những ID đang là danh mục SỐNG
+// (projects/vessels/departments/companies/vendors/expenseTypes/revenueTypes).
+// Lý do: lỗi cũ có thể đã bia-mộ-hóa nhầm ID danh mục (hoặc trùng ID chéo mảng),
+// khiến danh mục bị lọc mất khi sync. Gỡ các bia mộ đó để dứt điểm.
+function _healCatalogTombstones(){
+  const live=new Set();
+  const fields=['projects','vessels','departments','companies','vendors','expenseTypes','revenueTypes'];
+  fields.forEach(f=>{
+    (Array.isArray(S[f])?S[f]:[]).forEach(r=>{ if(r && r.id!=null) live.add(String(r.id)); });
+  });
+  if(live.size===0) return 0;
+  const list=_deletedIds();
+  const before=list.length;
+  S.deletedIds=list.filter(d=>{
+    if(!d || d.id==null) return true;
+    // Nếu ID này đang là danh mục sống → KHÔNG giữ bia mộ (gỡ ra).
+    if(live.has(String(d.id))){
+      // chỉ gỡ khi bia mộ là legacy (không field) hoặc field thuộc nhóm danh mục
+      if(!d.field || TOMBSTONE_PROTECTED_FIELDS.has(d.field)) return false;
+    }
+    return true;
+  });
+  return before-S.deletedIds.length;
+}
 /* v2.49.0: Kiểm tra ngầm — state có "trống bất thường" không.
    Dùng trước khi PUSH để tránh đẩy bản trống đè cloud.
    Trống = không có công ty NÀO và không có công nợ/tàu/tài sản nào.
@@ -10267,24 +10332,45 @@ function mergeStateByFields(cloudFull, localFull, fields){
     // Only merge arrays of objects (records). For other types, last-write-wins (local).
     if(Array.isArray(localFull[f]) && localFull[f].length>0 && typeof localFull[f][0]==='object' && localFull[f][0]!==null && 'id' in localFull[f][0]){
       // v2.40.0: khi merge chính mảng deletedIds, KHÔNG áp bộ lọc tombstone (tránh nó tự xóa chính nó)
-      const {merged:mArr, conflicts}=mergeByID(cloudFull[f], localFull[f], 'id', f==='deletedIds');
+      // v2.99.64: truyền `f` (tên field) → bia mộ áp đúng loại + bảo vệ danh mục nền.
+      const {merged:mArr, conflicts}=mergeByID(cloudFull[f], localFull[f], 'id', f==='deletedIds', f);
       merged[f]=mArr;
       if(conflicts.length>0) conflictReport[f]=conflicts;
-    } else if((f==='fxRate' || f==='displayCcy')){
-      // v2.99.50: SỬA LỖI "tỷ giá tự về 25.000". fxRate/displayCcy chỉ Admin/KTT được đặt,
-      // nhưng trước đây nằm trong SHARED_FIELDS nên MỌI máy NV cũng push → máy NV còn giá trị
-      // mặc định (fxRate=25000) push sau sẽ ĐÈ tỷ giá admin vừa đổi (last-write-wins).
-      // Quy tắc mới: chỉ nhận giá trị từ máy hiện tại nếu máy đó CÓ QUYỀN sửa (admin/KTT);
-      // máy NV thường → GIỮ cloud (không cho đè).
-      let canEditFx=false;
-      try{ canEditFx = (CURRENT_ROLE==='admin') || (typeof canApproveL2==='function' && canApproveL2()); }catch(_){ canEditFx=false; }
-      if(canEditFx && localFull[f]!==undefined && localFull[f]!==null && localFull[f]!==''){
-        merged[f]=localFull[f];   // máy có quyền → dùng giá trị máy này
-      } else if(cloudFull[f]!==undefined && cloudFull[f]!==null && cloudFull[f]!==''){
-        merged[f]=cloudFull[f];   // máy thường → giữ cloud, KHÔNG đè
+    } else if(f==='fxRate' || f==='displayCcy'){
+      // v2.99.65: SỬA TẬN GỐC "tỷ giá tự về 25.000 qua đêm".
+      // NGUYÊN NHÂN THẬT: quy tắc cũ (v2.99.50) "admin → luôn dùng local" khiến nếu
+      // local của admin đang là MẶC ĐỊNH 25000 (vd state bị seed default trước khi pull
+      // xong, hoặc một merge phụ reset), admin push 25000 ĐÈ giá đúng trên cloud.
+      // QUY TẮC MỚI: so theo THỜI ĐIỂM đặt tỷ giá (fxRateAt) — ai đặt SAU thắng,
+      // bất kể vai trò. Default cũ (không có/at cũ) không bao giờ đè giá thật mới hơn.
+      const lAt=Date.parse((localFull.fxRateAt||''))||0;
+      const cAt=Date.parse((cloudFull.fxRateAt||''))||0;
+      const lv=localFull[f], cv=cloudFull[f];
+      const lValid=(lv!==undefined && lv!==null && lv!=='');
+      const cValid=(cv!==undefined && cv!==null && cv!=='');
+      if(lAt && cAt){
+        merged[f] = (lAt>=cAt) ? lv : cv;            // ai mới hơn thắng
+      } else if(cAt && !lAt){
+        merged[f] = cValid ? cv : lv;                // cloud có dấu thời gian, local không → giữ cloud
+      } else if(lAt && !cAt){
+        merged[f] = lValid ? lv : cv;                // local có dấu thời gian → dùng local
       } else {
-        merged[f]=localFull[f];
+        // Cả hai đều KHÔNG có dấu thời gian (dữ liệu cũ trước 2.99.65).
+        // An toàn: nếu giá trị khác nhau và một bên là default → giữ bên KHÁC default.
+        if(f==='fxRate'){
+          const lIsDefault=(+lv===25000), cIsDefault=(+cv===25000);
+          if(cValid && lIsDefault && !cIsDefault) merged[f]=cv;       // local default → giữ cloud
+          else if(lValid && cIsDefault && !lIsDefault) merged[f]=lv;  // cloud default → dùng local
+          else merged[f] = cValid ? cv : lv;                          // mặc định giữ cloud (an toàn hơn)
+        } else {
+          merged[f] = cValid ? cv : lv;
+        }
       }
+    } else if(f==='fxRateAt'){
+      // Giữ dấu thời gian mới nhất của 2 bên (đồng bộ với fxRate đã chọn).
+      const lAt=Date.parse((localFull.fxRateAt||''))||0;
+      const cAt=Date.parse((cloudFull.fxRateAt||''))||0;
+      merged[f] = (lAt>=cAt) ? (localFull[f]||'') : (cloudFull[f]||'');
     } else if(f==='cashflowConfig' && localFull[f] && typeof localFull[f]==='object'
               && cloudFull[f] && typeof cloudFull[f]==='object'){
       // v2.99.49: cashflowConfig là object cấu hình (lương/BHXH/NSNN dự kiến). Gộp theo từng khóa:
@@ -10759,7 +10845,7 @@ function deleteDepartment(id){
   }
   if(!confirm(`Xóa phòng/ban "${d.code} · ${d.name}"?`)) return;
   S.departments=S.departments.filter(x=>x.id!==id);
-  markDeleted(id);
+  markDeleted(id,'departments');
   saveState();
   toast('Đã xóa phòng/ban');
   closeModal();
@@ -11010,7 +11096,7 @@ function hardDeleteExpenseType(id){
   }
   if(!confirm(`Xóa hẳn loại "${t.label}" (${t.code})? KHÔNG thể khôi phục.`)) return;
   S.expenseTypes=S.expenseTypes.filter(x=>x.id!==id);
-  markDeleted(id);
+  markDeleted(id,'expenseTypes');
   saveState();
   toast('Đã xóa hẳn: '+t.code);
   closeModal();
@@ -11214,7 +11300,7 @@ function hardDeleteRevenueType(id){
   }
   if(!confirm(`Xóa hẳn loại "${t.label}" (${t.code})? KHÔNG thể khôi phục.`)) return;
   S.revenueTypes=S.revenueTypes.filter(x=>x.id!==id);
-  markDeleted(id);
+  markDeleted(id,'revenueTypes');
   saveState();
   toast('Đã xóa hẳn: '+t.code);
   closeModal();
@@ -11909,7 +11995,7 @@ function deleteCompany(id){
   if(c.isParent){ toast('Không thể xóa công ty mẹ','bad'); return; }
   if(!confirm(`Xóa công ty "${c.name}"?\n\nLưu ý: các bút toán đã gắn công ty này sẽ cần gán lại (từ v1.74.0).`)) return;
   S.companies = S.companies.filter(x=>x.id!==id);
-  markDeleted(id);
+  markDeleted(id,'companies');
   saveState();
   toast('✓ Đã xóa công ty: '+c.name);
   renderCatalog();
@@ -12042,7 +12128,7 @@ function deleteVendor(id){
   }
   if(!confirm(`Xóa NCC "${v.name}"?`)) return;
   S.vendors = S.vendors.filter(x=>x.id!==id);
-  markDeleted(id);
+  markDeleted(id,'vendors');
   saveState();
   toast('Đã xóa NCC');
   renderCatalog();
@@ -12690,6 +12776,7 @@ function setupFxControls(){
           const nv=Math.max(1,+fxIn.value||25000);
           if(nv===old) return;
           S.fxRate=nv;
+          S.fxRateAt=new Date().toISOString();   // v2.99.65: đánh dấu thời điểm đặt tỷ giá
           saveState();
           renderAll();
           toast('Đã cập nhật tỷ giá: '+nv.toLocaleString('vi-VN')+' VND/USD');
@@ -13763,7 +13850,7 @@ function delProject(id){
   const linked=S.transactions.filter(t=>t.projectId===id).length;
   confirmDelete('dự án này',
     `${esc(p.code)} · ${esc(p.name)}<br>${esc(p.client) || ''} · ${SEGMENTS[p.segment].name}<br>${linked?`<b style="color:var(--bad)">⚠ ${linked} bút toán đang liên kết</b> sẽ bị mất tham chiếu (vẫn giữ trong sổ).`:'Không có bút toán liên kết.'}`,
-    ()=>{S.projects=S.projects.filter(x=>x.id!==id);markDeleted(id);saveState();toast('Đã xóa dự án');renderAll();});
+    ()=>{S.projects=S.projects.filter(x=>x.id!==id);markDeleted(id,'projects');saveState();toast('Đã xóa dự án');renderAll();});
 }
 function editProject(id){
   const p=S.projects.find(x=>x.id===id);if(!p)return;
@@ -13870,7 +13957,7 @@ function delVessel(id){
   const oh=S.onhires.filter(o=>o.vesselId===id).length;
   confirmDelete('tàu này',
     `${esc(v.name)} · ${v.type==='SERVICE'?'Tàu dịch vụ':'Tàu kỹ thuật'} · IMO ${esc(v.imo) || '—'}<br>${oh?`<b style="color:var(--bad)">⚠ ${oh} bản ghi onhire</b> cũng sẽ bị xóa kèm.`:'Không có bản ghi onhire.'}`,
-    ()=>{const ohIds=S.onhires.filter(o=>o.vesselId===id).map(o=>o.id);S.vessels=S.vessels.filter(x=>x.id!==id);S.onhires=S.onhires.filter(o=>o.vesselId!==id);markDeleted([id,...ohIds]);saveState();toast('Đã xóa tàu');renderAll();});
+    ()=>{const ohIds=S.onhires.filter(o=>o.vesselId===id).map(o=>o.id);S.vessels=S.vessels.filter(x=>x.id!==id);S.onhires=S.onhires.filter(o=>o.vesselId!==id);markDeleted([id],'vessels');markDeleted(ohIds,'onhires');saveState();toast('Đã xóa tàu');renderAll();});
 }
 function editVessel(id){
   const v=S.vessels.find(x=>x.id===id);if(!v)return;
@@ -29878,7 +29965,7 @@ function importMergeJSON(ev){
         const file=Array.isArray(fileData[k])?fileData[k]:[];
         if(cur.length===0 && file.length===0) return;
         // cur = "local" (giữ bản mới), file = "cloud" (kho đầy đủ cũ)
-        const {merged}=mergeByID(file, cur, 'id', k==='deletedIds');
+        const {merged}=mergeByID(file, cur, 'id', k==='deletedIds', k);
         plan[k]=merged;
         const added=merged.length - cur.length;
         previewRows.push({k, cur:cur.length, file:file.length, after:merged.length, added});
@@ -30006,7 +30093,7 @@ async function _snapshotPick(fileId, name){
     const cur=Array.isArray(S[k])?S[k]:[];
     const snap=Array.isArray(snapData[k])?snapData[k]:[];
     if(cur.length===0 && snap.length===0) return;
-    const {merged}=mergeByID(snap, cur, 'id', k==='deletedIds');
+    const {merged}=mergeByID(snap, cur, 'id', k==='deletedIds', k);
     plan[k]=merged;
     const added=merged.length-cur.length;
     previewRows.push({k, cur:cur.length, snap:snap.length, after:merged.length, added});
@@ -32992,10 +33079,11 @@ function clearAllData(){
     },true);
 }
 function _clearAllNow(){
-  const prevDisplay=S.displayCcy, prevFx=S.fxRate;
+  const prevDisplay=S.displayCcy, prevFx=S.fxRate, prevFxAt=S.fxRateAt;
   S=defaultState();
-  S.displayCcy=prevDisplay||'USD';
+  S.displayCcy=prevDisplay||"USD";
   S.fxRate=prevFx||25000;
+  S.fxRateAt=prevFxAt||"";
   saveState();
   toast('Đã xóa toàn bộ dữ liệu — sẵn sàng nhập bản thực');
   renderAll();
@@ -33012,10 +33100,11 @@ function seedDemo(){
     ()=>{_seedDemoNow();},false);
 }
 function _seedDemoNow(){
-  const prevDisplay=S.displayCcy, prevFx=S.fxRate;
+  const prevDisplay=S.displayCcy, prevFx=S.fxRate, prevFxAt=S.fxRateAt;
   S=defaultState();
-  S.displayCcy=prevDisplay||'USD';
+  S.displayCcy=prevDisplay||"USD";
   S.fxRate=prevFx||25000;
+  S.fxRateAt=prevFxAt||"";
   S.bankBalance=850000; // legacy single balance (kept for back-compat)
   S.bankBalanceCcy='USD';
   // Multi-account bank list (new model)
