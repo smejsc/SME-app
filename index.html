@@ -2691,7 +2691,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='2.99.80';            // bumped on each release
+const APP_VERSION='2.99.81';            // bumped on each release
 
 /* v2.62.0: Token xác thực backend — PHẢI khớp API_TOKEN trong Apps Script (Code.gs).
    Mọi request tới Apps Script tự động được gắn token qua lớp bọc fetch bên dưới.
@@ -8934,7 +8934,27 @@ async function cloudSync(mode, opts){
         if(_interactive){ try{ toast('Cloud đang ít dữ liệu hơn máy — tạm hoãn tải về để không mất dữ liệu bạn vừa nhập. Hãy Sync (đẩy lên) hoặc báo admin.','bad'); }catch(_){} }
         return;
       }
-      S=filteredCloud;
+      // v2.99.81: SỬA LỖI MẤT THAY ĐỔI VỪA SỬA SAU KHI PULL.
+      // Lỗi cũ: pull GÁN THẲNG S=filteredCloud → mọi bản ghi local vừa sửa nhưng CHƯA push
+      // (vd NV sửa ngày giải ngân khoản vay, lưu local, chưa kịp push) bị BẢN CLOUD CŨ ĐÈ
+      // → "mở lại thấy về giá trị trước sửa". mergeStateByFields đã có ở luồng PUSH nhưng
+      // pull lại không dùng. NAY: pull cũng MERGE theo bản ghi (last-write-wins theo updatedAt) —
+      // bản ghi local mới hơn KHÔNG bị cloud cũ đè; bản chỉ có ở cloud vẫn về đủ.
+      const _localBeforePull = S;  // giữ state local (đã có sửa đổi local) trước khi merge
+      const _pullMergeFields = Array.from(new Set([...ALL_DATA_FIELDS, ...SHARED_FIELDS]));
+      let _pullMerged;
+      try{
+        const mp = mergeStateByFields(
+          Object.assign(defaultState(), filteredCloud),  // cloud làm nền
+          _localBeforePull,                               // local phủ lên nếu mới hơn
+          _pullMergeFields
+        );
+        _pullMerged = mp.merged;
+      }catch(e){
+        console.warn('[pull merge] fallback to cloud:', e&&e.message);
+        _pullMerged = filteredCloud;  // nếu merge lỗi → an toàn dùng cloud (như cũ)
+      }
+      S=_pullMerged;
       S.auditLog = localAuditLog;  // restore local audit log
       S.presence = mergedPresence; // v2.72.0: giữ presence đã gộp
       S.auditLogShared = mergedAudit; // v2.73.0: giữ nhật ký quan trọng đã union
