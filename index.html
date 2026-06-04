@@ -2691,7 +2691,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='2.99.67';            // bumped on each release
+const APP_VERSION='2.99.69';            // bumped on each release
 
 /* v2.62.0: Token xác thực backend — PHẢI khớp API_TOKEN trong Apps Script (Code.gs).
    Mọi request tới Apps Script tự động được gắn token qua lớp bọc fetch bên dưới.
@@ -19870,6 +19870,7 @@ function renderArAp(kind){
     <th></th>
   </tr></thead><tbody>`;
   let sumNet=0,sumVat=0,sumTot=0,sumPaid=0,sumRem=0;
+  let fNet=0,fVat=0,fTot=0,fPaid=0,fRem=0;   // v2.99.69: tổng theo bộ lọc (mọi trạng thái)
   rows.forEach(r=>{
     const rem=arRemaining(r);
     const pd=arPaidTotal(r);
@@ -19878,6 +19879,21 @@ function renderArAp(kind){
     const net=+r.amountNet||+r.amount||0;
     const vat=+r.vatAmount||0;
     const tot=+r.amountGross||+r.amount||0;
+    // v2.99.69: TỔNG THEO BỘ LỌC — cộng MỌI dòng đang hiển thị (bất kể trạng thái),
+    // để soát công nợ theo bộ lọc trạng thái/người nhập/NCC. (Tổng "chỉ đã duyệt" giữ riêng.)
+    if(isAp){
+      fNet+=toDisplay(net,r.ccy||'USD');
+      fVat+=toDisplay(vat,r.ccy||'USD');
+      fTot+=toDisplay(tot,r.ccy||'USD');
+      fPaid+=toDisplay(pd,r.ccy||'USD');
+      fRem+=toDisplay(rem,r.ccy||'USD');
+    } else {
+      fNet+=_toVndFixed(net,r.ccy||'VND');
+      fVat+=_toVndFixed(vat,r.ccy||'VND');
+      fTot+=_toVndFixed(tot,r.ccy||'VND');
+      fPaid+=_toVndFixed(pd,r.ccy||'VND');
+      fRem+=_toVndFixed(rem,r.ccy||'VND');
+    }
     if(wfS==='approved'){
       // v2.99.3: AR luôn quy về VND cho tổng (báo cáo nội bộ DN Việt Nam); AP giữ theo displayCcy như cũ.
       if(isAp){
@@ -19978,6 +19994,20 @@ function renderArAp(kind){
     const neg = v<0;
     return (neg?'-':'') + Math.abs(v).toLocaleString('vi-VN',{maximumFractionDigits:0}) + '<span style="font-size:9px;color:var(--muted);margin-left:2px">₫</span>';
   };
+  // v2.99.69: dòng TỔNG THEO BỘ LỌC — phản ánh đúng tập đang lọc (mọi trạng thái).
+  const _flt=[];
+  if(stFilter){ const _stMap={draft:'Nháp',pending_acc:'Chờ KT',pending_l1:'Trình ký',pending_l2:'Chờ TT',approved:'Đã duyệt',rejected:'Từ chối',unpaid:'Chưa thu',paid:'Đã thu',overdue:'Quá hạn'}; _flt.push(_stMap[stFilter]||stFilter); }
+  if(creatorFilter) _flt.push('NV: '+creatorFilter);
+  if(vendorFilter)  _flt.push('NCC: '+vendorFilter);
+  if(custFilter)    _flt.push('KH: '+custFilter);
+  const _fltLabel = _flt.length ? _flt.join(' · ') : 'Tất cả';
+  h+=`<tr class="total" style="background:rgba(139,90,43,.10)"><td colspan="${colSpan}"><b>TỔNG THEO BỘ LỌC</b> <span style="font-size:10px;color:var(--muted)">[${esc(_fltLabel)}] · ${rows.length} dòng${isAp?'':' · quy đổi VND'}</span></td>
+    <td class="r"><b>${isAp?fmt(fNet):fmtVndTotal(fNet)}</b></td>
+    <td class="r" style="color:var(--muted);font-size:11px">${isAp?fmt(fVat):fmtVndTotal(fVat)}</td>
+    <td class="r"><b>${isAp?fmt(fTot):fmtVndTotal(fTot)}</b></td>
+    <td class="r" style="color:var(--good)"><b>${isAp?fmt(fPaid):fmtVndTotal(fPaid)}</b></td>
+    <td class="r" style="color:${isAp?'var(--bad)':'var(--accent)'}"><b>${isAp?fmt(fRem):fmtVndTotal(fRem)}</b></td>
+    <td colspan="${isAp?3:4}"></td></tr>`;
   h+=`<tr class="total"><td colspan="${colSpan}"><b>CHỈ ĐÃ DUYỆT</b> (vào báo cáo BI)${isAp?'':' <span style="font-size:10px;color:var(--muted);font-style:italic">— Tổng quy đổi VND theo tỷ giá '+(+S.fxRate||25000).toLocaleString('vi-VN')+'</span>'}</td>
     <td class="r"><b>${isAp?fmt(sumNet):fmtVndTotal(sumNet)}</b></td>
     <td class="r" style="color:var(--muted);font-size:11px">${isAp?fmt(sumVat):fmtVndTotal(sumVat)}</td>
@@ -25364,6 +25394,11 @@ function deleteHistoricalRow(id){
 
 /* Aggregate AR + AP by segment for the given date range */
 function bcqtAggregate(range){
+  // v2.99.68: CHỦ ĐÍCH — BCQT (Báo cáo Quản trị nội bộ) tính TẤT CẢ trạng thái,
+  // KỂ CẢ nháp/chờ KT (không lọc wfStatus), để lãnh đạo thấy toàn cảnh phát sinh.
+  // ĐÂY KHÔNG PHẢI LỖI: các báo cáo khác (Dashboard/BI/dòng tiền/chi phí theo loại)
+  // chỉ tính approved — xem approvedTx() & line ~27400. renderBCQT hiển thị nhãn
+  // "⚠ Gồm N khoản CHƯA DUYỆT" để minh bạch. ĐỪNG thêm filter approved vào đây.
   if(!range) return null;
   const { from, to } = range;
   // v1.75.0: Lọc theo công ty — rỗng = tất cả (hợp nhất)
@@ -25514,7 +25549,24 @@ function renderBCQT(){
   const coFilterVal = (document.getElementById('bcqt-company')||{}).value||'';
   const coLabel = coFilterVal ? companyName(coFilterVal) : 'Tất cả công ty (hợp nhất)';
   if(labelEl){
-    labelEl.innerHTML = range ? `📅 <b>Kỳ báo cáo:</b> ${esc(range.label)} · <span style="color:var(--muted)">${range.from} → ${range.to}</span> &nbsp;·&nbsp; 🏛 <b>${esc(coLabel)}</b>` : '⚠ Chọn từ ngày & đến ngày';
+    // v2.99.68: BCQT CỐ Ý gồm TẤT CẢ trạng thái (kể cả nháp/chờ KT) — đây là báo cáo
+    // quản trị nội bộ, muốn thấy toàn cảnh phát sinh. Các báo cáo khác chỉ tính approved.
+    // Hiển thị rõ số khoản CHƯA DUYỆT để người đọc biết con số gồm cả phần chưa duyệt.
+    let _unapproved=0;
+    try{
+      const _r=bcqtGetDateRange();
+      if(_r){
+        const _inRange=x=>x.issueDate && x.issueDate>=_r.from && x.issueDate<=_r.to;
+        const _co=(document.getElementById('bcqt-company')||{}).value||'';
+        const _matchCo=x=>!_co || (x.companyId||(typeof getParentCompanyId==='function'?getParentCompanyId():''))===_co;
+        (S.receivables||[]).forEach(x=>{ if(_inRange(x)&&_matchCo(x)&&wfStatus(x)!=='approved') _unapproved++; });
+        (S.payables||[]).forEach(x=>{ if(_inRange(x)&&_matchCo(x)&&wfStatus(x)!=='approved'&&apCountsInPL(x)) _unapproved++; });
+      }
+    }catch(e){}
+    const _warn = _unapproved>0
+      ? ` &nbsp;·&nbsp; <span style="color:var(--warn);font-weight:600" title="BCQT tính cả khoản chưa duyệt (nháp/chờ KT). Các báo cáo khác chỉ tính đã duyệt.">⚠ Gồm ${_unapproved} khoản CHƯA DUYỆT</span>`
+      : ` &nbsp;·&nbsp; <span style="color:var(--muted)">Gồm mọi trạng thái</span>`;
+    labelEl.innerHTML = range ? `📅 <b>Kỳ báo cáo:</b> ${esc(range.label)} · <span style="color:var(--muted)">${range.from} → ${range.to}</span> &nbsp;·&nbsp; 🏛 <b>${esc(coLabel)}</b>${_warn}` : '⚠ Chọn từ ngày & đến ngày';
   }
   if(!range){
     document.getElementById('bcqt-kpi-cards').innerHTML = '';
