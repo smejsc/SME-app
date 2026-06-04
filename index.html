@@ -2691,7 +2691,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='2.99.76';            // bumped on each release
+const APP_VERSION='2.99.78';            // bumped on each release
 
 /* v2.62.0: Token xác thực backend — PHẢI khớp API_TOKEN trong Apps Script (Code.gs).
    Mọi request tới Apps Script tự động được gắn token qua lớp bọc fetch bên dưới.
@@ -10526,7 +10526,10 @@ const SHARED_AUDIT_ACTIONS=['login','logout','auto_logout','session_expired','lo
   'user_create','user_delete','export_backup','import_backup',
   'delete_ap','delete_ar','delete_fixed_asset','delete_tool','loan_delete','loan_prepay_delete',
   'salary_fund_withdraw_delete','excel_import','import_batch_delete','op_dedupe','ap_dedupe',
-  'mgmt_fee_issue','mgmt_fee_delete','devtools_open'];  // v2.99.47: ghi vết mở DevTools
+  'mgmt_fee_issue','mgmt_fee_delete','devtools_open',
+  // v2.99.78: hành động NV/KT để admin giám sát toàn hệ thống (trước đây KHÔNG ghi shared
+  // → nhật ký toàn hệ thống chỉ thấy admin, không thấy NV thao tác).
+  'save_ap','save_ar','submit_for_approval','kt_check','kt_assign_cost_center'];
 function logAuditEvent(action, detail){
   if(!S.auditLog) S.auditLog=[];
   const ev={
@@ -20043,6 +20046,7 @@ function arSubmit(kind,id){
   if(!wfCanEdit(r)){toast('Không thể gửi duyệt từ trạng thái này','bad');return;}
   wfSubmit(r, kind);  // v1.37.4: pass kind to enable AR fast-track for L1 users
   saveState();renderAll();
+  try{ logAuditEvent('submit_for_approval', {kind, id:r.id, partner:r.partner||'', amount:r.amountGross||r.amount||0, ccy:r.ccy||'', actor:actorName()}); }catch(e){}
   const fastTracked = (kind==='ar' && (isAdmin() || canApproveL1()));
   toast(fastTracked ? '⚡ Fast-track AR — gửi thẳng L2 (admin/BOD duyệt)' : 'Đã gửi → Chờ KT viên kiểm');
 }
@@ -20058,7 +20062,9 @@ function arKtCheck(kind,id){
   const list=kind==='ap'?'payables':'receivables';
   const r=S[list].find(x=>x.id===id);if(!r)return;
   if(wfStatus(r)!=='pending_acc'){toast('Hóa đơn không ở trạng thái Chờ KT kiểm','bad');return;}
-  if(wfCheckAcc(r)){saveState();renderAll();toast('Đã kiểm chứng từ — Trình ký lên cấp L1 (KTT duyệt)');}
+  if(wfCheckAcc(r)){saveState();renderAll();
+    try{ logAuditEvent('kt_check',{kind,id:r.id,partner:r.partner||'',amount:r.amountGross||r.amount||0,ccy:r.ccy||'',actor:actorName()}); }catch(e){}
+    toast('Đã kiểm chứng từ — Trình ký lên cấp L1 (KTT duyệt)');}
 }
 function arApproveL2(kind,id){
   if(!guardAction('approve_l2', {})) return;
@@ -21992,8 +21998,18 @@ function saveAr(kind,id){
       newRec.dockAssetId = dockAssetId;  // v2.25.0
     }
     S[list].push(newRec);
+    var _auditRecId=newRec.id, _auditIsNew=true;
   }
   saveState();closeModal();renderAll();
+  // v2.99.78: ghi audit khi tạo/sửa AP/AR (trước đây KHÔNG log → admin không thấy NV thao tác).
+  try{
+    logAuditEvent(kind==='ap'?'save_ap':'save_ar', {
+      id: (typeof _auditRecId!=='undefined'?_auditRecId:id),
+      isNew: (typeof _auditIsNew!=='undefined'?_auditIsNew:false),
+      partner: partner, amount: amountGross, ccy: ccy,
+      projectId: projectId||'', vesselId: vesselId||'', actor: actorName()
+    });
+  }catch(e){}
   toast(kind==='ap'?'Đã lưu phải trả':((isAdmin()||canCheckAcc())?'Đã lưu phải thu (vào sổ ngay)':'Đã lưu phải thu (chờ KT kiểm)'));
 }
 
@@ -23960,7 +23976,9 @@ function renderDashboard(){
   },0);
   const cost=costAp+costNsnn;
   const m=rev-cost;
-  const planRev=S.plans.filter(p=>p.year===yr).reduce((s,p)=>s+p.revenue,0);
+  // v2.99.77: SỬA — planRev phải quy đổi theo p.ccy (như tab Kế hoạch). Trước đây cộng
+  // thẳng p.revenue bỏ qua ccy → nếu có plan nhập USD bị tính như VND → DT kế hoạch sai.
+  const planRev=S.plans.filter(p=>p.year===yr).reduce((s,p)=>s+toDisplay(+p.revenue||0, p.ccy||'VND'),0);
   const planAch=planRev?(rev/planRev):0;
 
   // Salary Fund KPI (admin only — dashboard is admin-only anyway)
