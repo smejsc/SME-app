@@ -2691,7 +2691,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='2.99.73';            // bumped on each release
+const APP_VERSION='2.99.76';            // bumped on each release
 
 /* v2.62.0: Token xác thực backend — PHẢI khớp API_TOKEN trong Apps Script (Code.gs).
    Mọi request tới Apps Script tự động được gắn token qua lớp bọc fetch bên dưới.
@@ -23927,9 +23927,38 @@ function renderDashboard(){
   alertsEl.innerHTML=alerts;
 
   // KPI: Total rev / cost / margin / projects (only APPROVED transactions enter BI)
-  const txs=approvedTx().filter(t=>new Date(t.date).getFullYear()===yr);
-  const rev=txs.filter(t=>t.type==='REV').reduce((s,t)=>s+txAmt(t),0);
-  const cost=txs.filter(t=>t.type==='COST').reduce((s,t)=>s+txAmt(t),0);
+  // v2.99.75: DOANH THU năm = TOÀN BỘ AR phát sinh trong năm (theo issueDate, KHÔNG lọc
+  // trạng thái — gồm nháp/chờ KT) để cân xứng với cách tính chi phí. NET (chưa VAT).
+  // Áp scope/BOD như báo cáo khác; bỏ khoản đã từ chối.
+  const _arYear=filterBODRecords(scopedRecords(S.receivables||[])).filter(r=>{
+    if(!r || !r.issueDate) return false;
+    if(+String(r.issueDate).slice(0,4)!==yr) return false;
+    if(wfStatus(r)==='rejected') return false;
+    return true;
+  });
+  const rev=_arYear.reduce((s,r)=>s+toDisplay(+r.amountNet||+r.amount||0, r.ccy||'VND'),0);
+  // v2.99.74: CHI PHÍ năm = TOÀN BỘ AP phát sinh trong năm (theo issueDate, KHÔNG lọc
+  // trạng thái — gồm cả nháp/chờ KT/không hóa đơn), + NSNN (BHXH+TNCN) theo kỳ phát sinh.
+  // Lương nhập NET nên cộng thêm BHXH+TNCN KHÔNG trùng. Loại CapEx/PO qua apCountsInPL.
+  // Áp scope/BOD như các báo cáo khác.
+  const _apYear=filterBODRecords(scopedRecords(S.payables||[])).filter(r=>{
+    if(!r || !r.issueDate) return false;
+    if(+String(r.issueDate).slice(0,4)!==yr) return false;
+    if(wfStatus(r)==='rejected') return false;     // bỏ khoản đã từ chối
+    if(!apCountsInPL(r)) return false;             // bỏ CapEx (TSCĐ) + PO (tồn kho)
+    return true;
+  });
+  const costAp=_apYear.reduce((s,r)=>s+toDisplay(+r.amountNet||+r.amount||0, r.ccy||'VND'),0);
+  // NSNN: BHXH (INSURANCE_SOCIAL) + TNCN (PIT) — theo period (kỳ) thuộc năm; fallback dueDate.
+  const _taxRecs=(S.taxes && Array.isArray(S.taxes.records)) ? S.taxes.records : [];
+  const costNsnn=_taxRecs.reduce((s,t)=>{
+    if(!t) return s;
+    if(t.type!=='PIT' && t.type!=='INSURANCE_SOCIAL') return s;
+    const yStr=String(t.period||'').slice(0,4) || String(t.dueDate||'').slice(0,4);
+    if(+yStr!==yr) return s;
+    return s+toDisplay(+t.amount||0, t.ccy||'VND');
+  },0);
+  const cost=costAp+costNsnn;
   const m=rev-cost;
   const planRev=S.plans.filter(p=>p.year===yr).reduce((s,p)=>s+p.revenue,0);
   const planAch=planRev?(rev/planRev):0;
@@ -23978,8 +24007,8 @@ function renderDashboard(){
   const invScopeStr=invScopeParts.join(' · ')||'Chưa có tồn kho';
 
   document.getElementById('kpi-grid').innerHTML=`
-    <div class="kpi"><div class="kpi-label">Doanh thu ${yr}</div><div class="kpi-value">${fmt(rev)}</div><div class="kpi-sub">KH ${fmt(planRev)} · <span class="${planAch>=1?'up':planAch>=.7?'':'down'}">${pct(planAch)}</span></div></div>
-    <div class="kpi"><div class="kpi-label">Chi phí ${yr}</div><div class="kpi-value" style="color:var(--accent)">${fmt(cost)}</div><div class="kpi-sub">${txs.filter(t=>t.type==='COST').length} bút toán</div></div>
+    <div class="kpi"><div class="kpi-label">Doanh thu ${yr}</div><div class="kpi-value">${fmt(rev)}</div><div class="kpi-sub">${_arYear.length} AR · KH ${fmt(planRev)} · <span class="${planAch>=1?'up':planAch>=.7?'':'down'}">${pct(planAch)}</span> <span style="color:var(--muted)">(gồm chưa duyệt)</span></div></div>
+    <div class="kpi"><div class="kpi-label">Chi phí ${yr}</div><div class="kpi-value" style="color:var(--accent)">${fmt(cost)}</div><div class="kpi-sub">${_apYear.length} AP phát sinh${costNsnn>0?` · NSNN: ${fmt(costNsnn)}`:''} <span style="color:var(--muted)">(gồm chưa duyệt)</span></div></div>
     <div class="kpi"><div class="kpi-label">Margin</div><div class="kpi-value" style="color:${m>=0?'var(--good)':'var(--bad)'}">${fmt(m)}</div><div class="kpi-sub">${rev?((m/rev)*100).toFixed(1):0}%</div></div>
     <div class="kpi"><div class="kpi-label">Dự án hoạt động</div><div class="kpi-value">${S.projects.length}</div><div class="kpi-sub">${S.vessels.length} tàu · ${S.opVessels.length} tàu QL</div></div>
     <div class="kpi" style="background:rgba(184,71,46,.04);border-left:3px solid var(--accent);cursor:pointer" onclick="navTo('salary_fund')" title="Click để vào Quỹ TL">
@@ -24026,6 +24055,37 @@ function renderDashboard(){
     });
   });
 
+  // v2.99.76: bổ sung LƯƠNG + NSNN vào "Dự kiến TT tháng này" (trước đây thiếu).
+  // Lương: trả ngày 5 tháng sau cho lương tháng trước → trong THÁNG NÀY sẽ trả lương
+  // của THÁNG TRƯỚC. Bỏ qua nếu đã chi (chống trùng). Quy về display ccy.
+  let salaryDueThisMonth=0;
+  if(typeof _cfMonthlySalaryVnd==='function'){
+    const monthlyVnd=_cfMonthlySalaryVnd();
+    if(monthlyVnd>0){
+      const now=new Date();
+      const payForMonth=new Date(now.getFullYear(), now.getMonth()-1, 1); // lương tháng trước
+      if(typeof _salaryPaidForMonth!=='function' || !_salaryPaidForMonth(payForMonth)){
+        salaryDueThisMonth=toDisplay(monthlyVnd,'VND');
+      }
+    }
+  }
+  // NSNN (BHXH/TNCN + thuế khác) có dueDate rơi vào tháng này, phần chưa nộp.
+  let nsnnDueThisMonth=0;
+  if(S.taxes && Array.isArray(S.taxes.records)){
+    S.taxes.records.forEach(t=>{
+      const remain=(+t.amount||0)-(+t.paidAmount||0);
+      if(remain<=0) return;
+      if((t.dueDate||'').slice(0,7)!==thisMonth) return;
+      nsnnDueThisMonth+=toDisplay(remain, t.ccy||'VND');
+    });
+  }
+  // Fallback NSNN thủ công nếu cấu hình có mà chưa có record thực nào trong tháng.
+  const _manualNsnnVnd=+((S.cashflowConfig||{}).monthlyNsnnVnd)||0;
+  if(_manualNsnnVnd>0 && nsnnDueThisMonth<=0){
+    nsnnDueThisMonth+=toDisplay(_manualNsnnVnd,'VND');
+  }
+  const dueThisMonthTotal=payDueThisMonth+loanDueThisMonth+salaryDueThisMonth+nsnnDueThisMonth;
+
   const accs=S.bankAccounts||[];
   let bankDisp=0;
   if(accs.length){
@@ -24069,8 +24129,8 @@ function renderDashboard(){
       </div>
       <div class="kpi" style="background:${statusOk?'rgba(61,107,61,.06)':'rgba(168,54,43,.08)'}">
         <div class="kpi-label">Dự kiến TT tháng này</div>
-        <div class="kpi-value" style="color:var(--warn);font-size:20px">${fmt(payDueThisMonth+loanDueThisMonth)}</div>
-        <div class="kpi-sub">NCC ${fmt(payDueThisMonth)} + Trả nợ vay ${fmt(loanDueThisMonth)}</div>
+        <div class="kpi-value" style="color:var(--warn);font-size:20px">${fmt(dueThisMonthTotal)}</div>
+        <div class="kpi-sub">NCC ${fmt(payDueThisMonth)} · Lương ${fmt(salaryDueThisMonth)} · NSNN ${fmt(nsnnDueThisMonth)} · Vay ${fmt(loanDueThisMonth)}</div>
       </div>
     </div>
     <div class="kpi-grid" style="margin-top:0;border:none;border-top:1px solid var(--rule)">
