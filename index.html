@@ -2691,7 +2691,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='2.99.83';            // bumped on each release
+const APP_VERSION='2.99.84';            // bumped on each release
 
 /* v2.62.0: Token xác thực backend — PHẢI khớp API_TOKEN trong Apps Script (Code.gs).
    Mọi request tới Apps Script tự động được gắn token qua lớp bọc fetch bên dưới.
@@ -12539,7 +12539,32 @@ function _formatThousands(s){
 }
 function _unformatNumber(s){
   if(s==null||s==='') return 0;
-  return +String(s).replace(/\./g,'').replace(/[^0-9-]/g,'')||0;
+  let str=String(s).trim();
+  // v2.99.84: GIỮ dấu thập phân cho USD (vd 1234.56). Trước đây xóa MỌI dấu chấm
+  // (coi là phân cách nghìn kiểu VN) → mất phần thập phân, không nhập được cent.
+  // Phân biệt: nếu có dấu phẩy → coi phẩy là thập phân (kiểu EU) hiếm dùng; ở đây
+  // tập trung dấu chấm. Quy tắc:
+  //  - Nếu chuỗi có NHIỀU dấu chấm → là phân cách nghìn (1.000.000) → xóa hết chấm.
+  //  - Nếu CHỈ 1 dấu chấm và sau nó có 1–2 chữ số → là dấu THẬP PHÂN → giữ.
+  //  - Nếu chỉ 1 dấu chấm và sau nó đúng 3 chữ số → nhập nhằng (1.234): coi là nghìn (giữ hành vi cũ cho VND).
+  const dotCount=(str.match(/\./g)||[]).length;
+  let result;
+  if(dotCount===1){
+    const after=str.split('.')[1].replace(/[^0-9]/g,'');
+    if(after.length===1 || after.length===2){
+      // thập phân (USD cents) → giữ dấu chấm, bỏ ký tự lạ khác
+      const neg=str.startsWith('-');
+      const cleaned=str.replace(/[^0-9.]/g,'');
+      result=(neg?'-':'')+cleaned;
+    } else {
+      // 3 chữ số sau hoặc khác → phân cách nghìn → bỏ chấm
+      result=str.replace(/\./g,'').replace(/[^0-9-]/g,'');
+    }
+  } else {
+    // 0 hoặc ≥2 dấu chấm → phân cách nghìn → bỏ hết chấm
+    result=str.replace(/\./g,'').replace(/[^0-9-]/g,'');
+  }
+  return +result||0;
 }
 
 // Delegate-style: catch input events on number-like fields and reformat
@@ -20722,7 +20747,7 @@ function _arEditorBody(r,isPayable){
       <div style="font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);font-weight:600;margin-bottom:6px">Giá trị & VAT</div>
       <div class="form-grid" style="grid-template-columns:1.2fr 0.8fr 1fr 1fr 1fr">
         <div class="field"><label>Số tiền chưa VAT *</label><input type="number" id="ar-amount-net" value="${r.amountNet!=null?r.amountNet:(r.amount||0)}" step="any" oninput="arRecalcVat()" ${lockedAttr}></div>
-        <div class="field"><label>CCY</label><select id="ar-ccy" onchange="arFuelRecalc()" ${lockedAttr}><option value="USD" ${r.ccy==='USD'?'selected':''}>USD</option><option value="VND" ${(!r.ccy||r.ccy==='VND')?'selected':''}>VND</option></select></div>
+        <div class="field"><label>CCY</label><select id="ar-ccy" onchange="arFuelRecalc();try{arRecalcVat()}catch(e){}" ${lockedAttr}><option value="USD" ${r.ccy==='USD'?'selected':''}>USD</option><option value="VND" ${(!r.ccy||r.ccy==='VND')?'selected':''}>VND</option></select></div>
         <div class="field"><label>% VAT</label><select id="ar-vat-percent" onchange="arRecalcVat()" ${lockedAttr}>
           <option value="0" ${(r.vatPercent==0)?'selected':''}>0% (không VAT)</option>
           <option value="5" ${(r.vatPercent==5)?'selected':''}>5%</option>
@@ -20837,25 +20862,32 @@ function arPartnerCheck(input){
   }
 }
 
+function _arRoundMoney(n){
+  // v2.99.84: VND làm tròn về đồng (số nguyên); ngoại tệ (USD…) giữ 2 số thập phân (cent).
+  const ccyEl=document.getElementById('ar-ccy');
+  const ccy=ccyEl?ccyEl.value:'VND';
+  if(ccy==='VND') return Math.round(n);
+  return Math.round((+n||0)*100)/100;
+}
 function arRecalcVat(){
   // v2.99.51: đọc số qua _unformatNumber để KHÔNG bị lớp format nghìn hiểu nhầm.
-  // v2.99.52: LÀM TRÒN VAT/tổng về số nguyên (đồng) — vì _formatThousands xóa phần thập phân,
-  // nếu để số lẻ (vd 88020.96) sẽ bị bóp thành 8.802.096 (sai gấp 100 lần khi hiển thị).
+  // v2.99.84: làm tròn theo loại tiền — VND về đồng, USD giữ cent (trước đây Math.round
+  // mọi loại → mất phần thập phân USD).
   const net=_unformatNumber(document.getElementById('ar-amount-net').value);
   const vp=document.getElementById('ar-vat-percent').value;
   let vatAmt;
   if(vp==='custom'){
-    vatAmt=Math.round(_unformatNumber(document.getElementById('ar-vat-amount').value));
+    vatAmt=_arRoundMoney(_unformatNumber(document.getElementById('ar-vat-amount').value));
   } else {
-    vatAmt = Math.round(net * (+vp||0) / 100);
+    vatAmt = _arRoundMoney(net * (+vp||0) / 100);
     document.getElementById('ar-vat-amount').value = vatAmt;
   }
-  document.getElementById('ar-amount-gross').value = Math.round(net+vatAmt);
+  document.getElementById('ar-amount-gross').value = _arRoundMoney(net+vatAmt);
 }
 function arRecalcGross(){
   const net=_unformatNumber(document.getElementById('ar-amount-net').value);
-  const vatAmt=Math.round(_unformatNumber(document.getElementById('ar-vat-amount').value));
-  document.getElementById('ar-amount-gross').value = Math.round(net+vatAmt);
+  const vatAmt=_arRoundMoney(_unformatNumber(document.getElementById('ar-vat-amount').value));
+  document.getElementById('ar-amount-gross').value = _arRoundMoney(net+vatAmt);
 }
 
 function openReceivableModal(id){
