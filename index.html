@@ -2691,7 +2691,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='2.99.66';            // bumped on each release
+const APP_VERSION='2.99.67';            // bumped on each release
 
 /* v2.62.0: Token xác thực backend — PHẢI khớp API_TOKEN trong Apps Script (Code.gs).
    Mọi request tới Apps Script tự động được gắn token qua lớp bọc fetch bên dưới.
@@ -31576,7 +31576,9 @@ function excelParseAndPreview(aoa, tpl, type){
     // Skip note rows starting with "*"
     const firstCell=String(row[0]||'').trim();
     if(firstCell.startsWith('*') && firstCell.toUpperCase().includes('BẮT BUỘC')) continue;
-    parsed.push(_excelRowToRecord(row, colMap, tpl));
+    const _rec=_excelRowToRecord(row, colMap, tpl);
+    _rec._excelRow = i+1;   // v2.99.67: số dòng Excel thật (1-based, gồm header) để báo cáo dòng bị bỏ qua
+    parsed.push(_rec);
   }
 
   EXCEL_PARSED_DATA={rows:parsed, tpl, type};
@@ -31836,6 +31838,24 @@ function _excelRowToRecord(row, colMap, tpl){
   return rec;
 }
 
+// v2.99.67: tải báo cáo các dòng bị bỏ qua (Excel mở được, UTF-8 BOM).
+function excelDownloadSkippedReport(){
+  const rep=window._EXCEL_SKIPPED_REPORT;
+  if(!rep || !rep.length){ toast('Không có dòng bị bỏ qua','warn'); return; }
+  const q=s=>'"'+String(s==null?'':s).replace(/"/g,'""')+'"';
+  const lines=[['Dòng Excel','NCC / Đối tác','Lý do bị bỏ qua'].map(q).join(',')];
+  rep.forEach(r=>{ lines.push([r.row, r.ncc, r.reasons].map(q).join(',')); });
+  const csv='\ufeff'+lines.join('\r\n');
+  const blob=new Blob([csv],{type:'text/csv;charset=utf-8'});
+  const url=URL.createObjectURL(blob);
+  const a=document.createElement('a');
+  a.href=url;
+  a.download='bao_cao_dong_bi_bo_qua_'+new Date().toISOString().slice(0,10)+'.csv';
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(()=>URL.revokeObjectURL(url), 1000);
+  toast(`Đã tải báo cáo ${rep.length} dòng bị bỏ qua`,'good');
+}
+
 function excelRenderPreview(){
   if(!EXCEL_PARSED_DATA) return;
   const {rows, tpl, type}=EXCEL_PARSED_DATA;
@@ -31862,14 +31882,52 @@ function excelRenderPreview(){
     <span style="color:var(--warn)">⚠ Có cảnh báo (vẫn import): ${warnCount}</span> ·
     <span style="color:var(--bad)">✕ Bỏ qua (lỗi): ${errCount}</span>
   </div>`;
-  html+='<div class="tbl-scroll" style="max-height:300px;overflow-y:auto;margin-top:10px"><table class="tbl"><thead><tr><th>#</th><th>Trạng thái</th><th>Cảnh báo / Lỗi</th>';
+
+  // v2.99.67: BÁO CÁO DÒNG BỊ BỎ QUA — liệt kê rõ dòng Excel + lý do, có nút tải CSV.
+  const _skipped=rows.filter(r=>r.errors.length>0);
+  if(_skipped.length>0){
+    window._EXCEL_SKIPPED_REPORT=_skipped.map(r=>({
+      row: r._excelRow||'?',
+      ncc: (r.data&&(r.data.partner||r.data.companyName))||'',
+      reasons: r.errors.join(' | ')
+    }));
+    const _skRows=_skipped.map(r=>{
+      const ncc=(r.data&&(r.data.partner||r.data.companyName))||'<span style="color:var(--muted)">—</span>';
+      return `<tr>
+        <td style="font-family:var(--font-mono);text-align:center;color:var(--bad);font-weight:600">${r._excelRow||'?'}</td>
+        <td style="font-size:11px">${esc(String(ncc))}</td>
+        <td style="font-size:11px;color:var(--bad)">${r.errors.map(e=>esc(e)).join('<br>')}</td>
+      </tr>`;
+    }).join('');
+    html+=`<div style="margin-top:10px;border:1px solid var(--bad);border-radius:4px;overflow:hidden">
+      <div style="background:rgba(184,71,46,.1);padding:8px 12px;display:flex;align-items:center;gap:10px">
+        <b style="color:var(--bad)">⚠ ${_skipped.length} dòng sẽ bị bỏ qua</b>
+        <span style="color:var(--muted);font-size:11px">— sửa các dòng dưới rồi upload lại để import đủ</span>
+        <div style="flex:1"></div>
+        <button class="btn-sec" style="font-size:11px" onclick="excelDownloadSkippedReport()">⬇ Tải báo cáo (CSV)</button>
+      </div>
+      <div style="max-height:200px;overflow-y:auto">
+        <table class="tbl" style="width:100%;font-size:12px">
+          <thead><tr>
+            <th style="width:70px;text-align:center">Dòng Excel</th>
+            <th>NCC / Đối tác</th>
+            <th>Lý do bị bỏ qua</th>
+          </tr></thead>
+          <tbody>${_skRows}</tbody>
+        </table>
+      </div>
+    </div>`;
+  } else {
+    window._EXCEL_SKIPPED_REPORT=null;
+  }
+  html+='<div class="tbl-scroll" style="max-height:300px;overflow-y:auto;margin-top:10px"><table class="tbl"><thead><tr><th>Dòng Excel</th><th>Trạng thái</th><th>Cảnh báo / Lỗi</th>';
   tpl.columns.slice(0,5).forEach(c=>{ html+=`<th>${c.label.replace(/\*$/,'')}</th>`; });
   html+='</tr></thead><tbody>';
   rows.forEach((r,i)=>{
     const stClass=r.errors.length?'chip-bad':(r.warnings.length?'chip-warn':'chip-good');
     const stLabel=r.errors.length?'✕ Bỏ qua':(r.warnings.length?'⚠ Có warn':'✓ OK');
     const issues=[...r.errors.map(e=>`<span style="color:var(--bad)">${e}</span>`), ...r.warnings.map(w=>`<span style="color:var(--warn)">${w}</span>`)].join('<br>')||'—';
-    html+=`<tr><td>${i+1}</td><td><span class="chip ${stClass}" style="font-size:10px">${stLabel}</span></td><td style="font-size:11px">${issues}</td>`;
+    html+=`<tr><td>${r._excelRow||(i+1)}</td><td><span class="chip ${stClass}" style="font-size:10px">${stLabel}</span></td><td style="font-size:11px">${issues}</td>`;
     tpl.columns.slice(0,5).forEach(c=>{
       const v=r.data[c.key];
       html+=`<td style="font-size:11px">${v===''||v===null||v===undefined?'<span style="color:var(--muted)">—</span>':v}</td>`;
