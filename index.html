@@ -2691,7 +2691,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='2.99.70';            // bumped on each release
+const APP_VERSION='2.99.73';            // bumped on each release
 
 /* v2.62.0: Token xác thực backend — PHẢI khớp API_TOKEN trong Apps Script (Code.gs).
    Mọi request tới Apps Script tự động được gắn token qua lớp bọc fetch bên dưới.
@@ -4923,19 +4923,19 @@ const TAB_TO_FIELDS={
   plan:           ['plans','projects','vessels','opVessels','receivables','payables'],
   projects:       ['projects'],
   vessels:        ['vessels','onhires','events'],
-  receivables:    ['receivables'],
-  payables:       ['payables'],
-  vessel_expense: ['vessels','payables','vesselExpenseCats','omProjectExpenseCats'],
-  hr_expense:     ['payables','hrExpenseCats','projects'],
-  qn_expense:     ['payables','qnExpenseCats','projects'],
+  receivables:    ['receivables','projects','vessels','opVessels'],
+  payables:       ['payables','projects','vessels','opVessels'],
+  vessel_expense: ['vessels','projects','opVessels','payables','vesselExpenseCats','omProjectExpenseCats'],
+  hr_expense:     ['payables','hrExpenseCats','projects','vessels','opVessels'],
+  qn_expense:     ['payables','qnExpenseCats','projects','vessels','opVessels'],
   banking:        ['bankAccounts','bankSnapshots','loans','cashFunds','cashTxns'],
   cashfund:       ['cashFunds','cashTxns'],
   cashflow:       ['receivables','payables','taxes','bankAccounts','bankSnapshots','loans','cashFunds','cashTxns'],
   salary_fund:    ['salaryFund','receivables','payables'],
   operations:     ['opVessels','opTransactions'],
   inventory:      ['warehouses','invMovements','vessels'],
-  fixed_assets:   ['fixedAssets','payables'],
-  tools:          ['tools','vessels','payables'],
+  fixed_assets:   ['fixedAssets','payables','vessels','projects','opVessels'],
+  tools:          ['tools','vessels','payables','projects','opVessels'],
   catalog:        ['departments','vendors','expenseTypes','revenueTypes','vessels','projects','receivables','payables'],
   reports:        ['plans','projects','vessels','onhires','events','receivables','payables'],
   rates:          ['vessels','onhires','events','receivables','payables'],
@@ -19674,6 +19674,21 @@ function renderAR(){
   const recPendingL2=recAll.filter(r=>wfStatus(r)==='pending_l2').length;
   const payPendingL1=payAll.filter(r=>wfStatus(r)==='pending_l1').length;
   const payPendingL2=payAll.filter(r=>wfStatus(r)==='pending_l2').length;
+  // v2.99.71: đếm thêm "Chờ KT kiểm" (pending_acc) và Nháp — vì import hàng loạt
+  // dừng ở pending_acc, ô "Chờ duyệt" cũ (chỉ L1+L2) không phản ánh → tưởng mất data.
+  const payPendingAcc=payAll.filter(r=>wfStatus(r)==='pending_acc').length;
+  const payDraft=payAll.filter(r=>{const s=wfStatus(r); return s==='draft'||s==='rejected';}).length;
+  const payUnapprovedTotal=payPendingAcc+payPendingL1+payPendingL2;
+  // v2.99.72: "Phải trả còn lại" = TOÀN BỘ khoản còn nợ (gồm cả chưa duyệt) — theo yêu cầu.
+  // Loại trừ khoản đã từ chối (rejected) vì không còn là nghĩa vụ. Tách riêng phần LƯƠNG
+  // (bản ghi thuộc phiếu lương — cờ _payroll, v2.99.62) để ghi chú.
+  const payAllOpen=payAll.filter(r=>wfStatus(r)!=='rejected' && arRemaining(r)>0.0001);
+  const totPayRemAll=payAllOpen.reduce((s,r)=>s+toDisplay(arRemaining(r),r.ccy||'USD'),0);
+  const totPayRemSalary=payAllOpen.filter(r=>r._payroll).reduce((s,r)=>s+toDisplay(arRemaining(r),r.ccy||'USD'),0);
+  const totPayRemOther=totPayRemAll-totPayRemSalary;
+  const payAllOpenCount=payAllOpen.length;
+  const paySalaryCount=payAllOpen.filter(r=>r._payroll).length;
+  const payOverdueAll=payAllOpen.filter(r=>arStatus(r).key==='overdue').reduce((s,r)=>s+toDisplay(arRemaining(r),r.ccy||'USD'),0);
   // Revenue/Cost approved totals
   const totRev=recApproved.reduce((s,r)=>s+toDisplay(+r.amountNet||+r.amount||0,r.ccy||'USD'),0);
   const totCost=payApproved.reduce((s,r)=>s+toDisplay(+r.amountNet||+r.amount||0,r.ccy||'USD'),0);
@@ -19715,8 +19730,8 @@ function renderAR(){
       </div>
       <div class="kpi">
         <div class="kpi-label">Phải trả còn lại</div>
-        <div class="kpi-value" style="color:var(--bad)">${fmt(totPayRem)}</div>
-        <div class="kpi-sub">${payOpen.length} khoản · Quá hạn: ${fmt(payOverdue)}</div>
+        <div class="kpi-value" style="color:var(--bad)">${fmt(totPayRemAll)}</div>
+        <div class="kpi-sub">${payAllOpenCount} khoản (gồm chưa duyệt) · Quá hạn: ${fmt(payOverdueAll)}${totPayRemSalary>0?`<br><span style="color:var(--accent)">trong đó Lương: ${fmt(totPayRemSalary)} (${paySalaryCount}) · Khác: ${fmt(totPayRemOther)}</span>`:''}</div>
       </div>
       <div class="kpi">
         <div class="kpi-label">Dự kiến TT tháng này</div>
@@ -19724,9 +19739,9 @@ function renderAR(){
         <div class="kpi-sub">${thisMonth} · trong tổng ${fmt(totPayRem)}</div>
       </div>
       <div class="kpi">
-        <div class="kpi-label">Chờ duyệt</div>
-        <div class="kpi-value" style="color:var(--warn)">${payPendingL1+payPendingL2}</div>
-        <div class="kpi-sub">Trình ký: ${payPendingL1} · Chờ TT: ${payPendingL2}</div>
+        <div class="kpi-label">Chờ xử lý</div>
+        <div class="kpi-value" style="color:var(--warn)">${payUnapprovedTotal}</div>
+        <div class="kpi-sub">Chờ KT kiểm: ${payPendingAcc} · Trình ký: ${payPendingL1} · Chờ TT: ${payPendingL2}${payDraft?` · Nháp: ${payDraft}`:''}</div>
       </div>`;
   }
 
