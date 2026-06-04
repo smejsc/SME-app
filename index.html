@@ -2691,7 +2691,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='2.99.81';            // bumped on each release
+const APP_VERSION='2.99.83';            // bumped on each release
 
 /* v2.62.0: Token xác thực backend — PHẢI khớp API_TOKEN trong Apps Script (Code.gs).
    Mọi request tới Apps Script tự động được gắn token qua lớp bọc fetch bên dưới.
@@ -19529,6 +19529,9 @@ function _loanMarkPaid(loanId, period){
   }
   // Update loan status if all paid
   if((l.paymentSchedule||[]).every(x=>x.paid)) l.status='closed';
+  // v2.99.83: BẮT BUỘC bump updatedAt — nếu không, merge khi pull (2.99.81) coi bản local
+  // "không mới hơn" cloud → tie-break giữ cloud → MẤT cái tích trả nợ vừa làm.
+  try{ touchRecord(l); }catch(e){ l.updatedAt=new Date().toISOString(); }
   saveState();
   try{ if(typeof renderBanking==='function') renderBanking(); }catch(e){}  // v2.99.80: refresh thẻ tóm tắt (đã trả gốc/còn nợ)
   toast(`Đã đánh dấu trả kỳ ${period}${apCreated}`);
@@ -19553,6 +19556,7 @@ function _loanUnmarkPaid(loanId, period){
     delete p.linkedApId;
   }
   if(l.status==='closed') l.status='active';
+  try{ touchRecord(l); }catch(e){ l.updatedAt=new Date().toISOString(); }  // v2.99.83: để merge giữ thay đổi
   saveState();
   try{ if(typeof renderBanking==='function') renderBanking(); }catch(e){}  // v2.99.80: refresh thẻ tóm tắt
   toast(`Đã bỏ đánh dấu kỳ ${period}${apRemoved}`);
@@ -22165,12 +22169,16 @@ function saveArPayment(kind,id){
   if(bankAccountId) pay.bankAccountId=bankAccountId;
   r.payments=r.payments||[];
   r.payments.push(pay);
+  // v2.99.83: bump updatedAt — nếu không, merge khi pull coi bản local "không mới hơn"
+  // → có thể MẤT khoản thanh toán vừa ghi sau khi đồng bộ.
+  try{ touchRecord(r); }catch(e){ r.updatedAt=new Date().toISOString(); }
   // v1.87.0: cập nhật số dư tài khoản — AR thu thì +, AP trả thì − (chỉ khi qua ngân hàng)
   if(bankAccountId){
     const acc=(S.bankAccounts||[]).find(a=>a.id===bankAccountId);
     if(acc){
       const delta=_arPayAmountInCcy(pay, r.ccy, acc.ccy||'USD');
       acc.balance=(+acc.balance||0) + (kind==='ap' ? -delta : delta);
+      try{ touchRecord(acc); }catch(e){ acc.updatedAt=new Date().toISOString(); }
     }
   }
   saveState();closeModal();renderAll();
@@ -31392,9 +31400,80 @@ function openExcelImport(){
       <div style="font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--bad);font-weight:700;margin-bottom:6px">🧹 Gỡ hàng loạt — tất cả bản ghi từng import Excel</div>
       <div id="xls-bulk-undo-info" style="font-size:12px"></div>
     </div>
+
+    <!-- v2.99.82: Xóa TỪNG LÔ import theo _importBatch (admin dọn lô sai dù do máy khác tạo) -->
+    <div style="margin-top:12px;padding:10px 14px;border:1px solid var(--accent);border-radius:4px;background:rgba(28,58,92,.04)">
+      <div style="font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--accent);font-weight:700;margin-bottom:6px">📋 Các lô import (chọn lô để xóa)</div>
+      <div style="font-size:11px;color:var(--muted);margin-bottom:8px">Liệt kê mọi lô import còn trong dữ liệu (theo mã lô + thời điểm). Xóa lô nào sẽ tạo "bia mộ" → đồng bộ sẽ dọn lô đó trên cloud và mọi máy.</div>
+      <div id="xls-batch-list"></div>
+    </div>
   `;
   openModal('📥 Import Excel hàng loạt', body, '<button class="btn-sec" onclick="closeModal()">Đóng</button>');
   try{ renderExcelImportInfo(); }catch(e){}
+  try{ renderImportBatchList(); }catch(e){}
+}
+
+/* v2.99.82: Liệt kê các lô import (gom theo _importBatch trên payables + receivables).
+   Cho admin xóa đúng 1 lô — kể cả lô do máy NV tạo (sau khi admin pull về). */
+function renderImportBatchList(){
+  const el=document.getElementById('xls-batch-list');
+  if(!el) return;
+  if(!isAdmin() && !canApproveL1() && !canApproveL2()){
+    el.innerHTML='<span style="color:var(--muted)">Chỉ Admin / người duyệt xem được.</span>'; return;
+  }
+  const groups={};  // batchId -> {field, count, ats:[], sample}
+  ['payables','receivables'].forEach(field=>{
+    (S[field]||[]).forEach(r=>{
+      if(!r || !r._importBatch) return;
+      const k=r._importBatch;
+      if(!groups[k]) groups[k]={batchId:k, field, count:0, minAt:'', maxAt:'', sample:''};
+      groups[k].count++;
+      const at=r.createdAt||'';
+      if(at){ if(!groups[k].minAt||at<groups[k].minAt) groups[k].minAt=at;
+              if(!groups[k].maxAt||at>groups[k].maxAt) groups[k].maxAt=at; }
+      if(!groups[k].sample) groups[k].sample=(r.partner||r.desc||'').slice(0,40);
+    });
+  });
+  const list=Object.values(groups).sort((a,b)=>String(b.maxAt).localeCompare(String(a.maxAt)));
+  if(!list.length){ el.innerHTML='<span style="color:var(--muted)">Không tìm thấy lô import nào trong dữ liệu hiện tại. (Nếu lô sai do máy khác tạo và máy này chưa có, hãy Sync/pull về trước.)</span>'; return; }
+  el.innerHTML = list.map(g=>{
+    const when=(()=>{ try{ return new Date(g.maxAt||g.minAt).toLocaleString('vi-VN'); }catch(e){ return g.maxAt||''; } })();
+    const fieldLabel = g.field==='payables'?'Phải trả':'Phải thu';
+    return `<div style="display:flex;justify-content:space-between;align-items:center;gap:10px;padding:7px 0;border-top:1px solid var(--rule)">
+      <div style="font-size:11px;line-height:1.4">
+        <b>${fieldLabel}</b> · <b style="color:var(--bad)">${g.count}</b> bản ghi<br>
+        <span style="font-family:var(--font-mono);font-size:10px;color:var(--muted)">${esc(g.batchId.slice(0,28))}…</span><br>
+        <span style="color:var(--muted)">🕒 ${esc(when)}${g.sample?' · '+esc(g.sample):''}</span>
+      </div>
+      <button class="btn-sec" style="color:var(--bad);border-color:var(--bad);font-size:11px;white-space:nowrap"
+        onclick="deleteImportBatchById('${esc(g.batchId)}','${g.field}')">🗑 Xóa lô này</button>
+    </div>`;
+  }).join('');
+}
+
+/* v2.99.82: Xóa 1 lô import theo batchId + tạo tombstone (đồng bộ dọn mọi máy). */
+function deleteImportBatchById(batchId, field){
+  if(!isAdmin() && !canApproveL1() && !canApproveL2()){ toast('Chỉ Admin / người duyệt','bad'); return; }
+  const arr=S[field];
+  if(!Array.isArray(arr)){ toast('Không tìm thấy dữ liệu','bad'); return; }
+  const victims=arr.filter(r=>r && r._importBatch===batchId);
+  if(!victims.length){ toast('Lô này không còn bản ghi nào','warn'); try{renderImportBatchList();}catch(e){} return; }
+  const fieldLabel = field==='payables'?'Phải trả':'Phải thu';
+  confirmDelete(
+    `lô import (${victims.length} bản ghi ${fieldLabel})`,
+    `Mã lô: <b style="font-family:var(--font-mono);font-size:11px">${esc(batchId)}</b><br>Số bản ghi sẽ xóa: <b style="color:var(--bad)">${victims.length}</b><br><br>⚠ Tạo "bia mộ" để đồng bộ dọn lô này trên cloud và mọi máy. KHÔNG ảnh hưởng dữ liệu nhập tay hay lô khác.<br><br>Sau khi xóa, hãy <b>bấm Sync (push)</b> để đẩy lệnh dọn lên cloud.`,
+    ()=>{
+      const ids=victims.map(r=>r.id).filter(Boolean);
+      S[field]=arr.filter(r=>!(r && r._importBatch===batchId));
+      try{ markDeleted(ids, field); }catch(e){ console.warn('[delBatchById] markDeleted:', e&&e.message); }
+      if(S.lastImportBatch && S.lastImportBatch.batchId===batchId) S.lastImportBatch=null;
+      saveState();
+      try{ logAuditEvent('import_batch_delete',{target:field, batchId, count:victims.length, by:actorName()}); }catch(e){}
+      renderAll();
+      try{ renderImportBatchList(); }catch(e){}
+      toast(`Đã xóa lô ${victims.length} bản ghi. Bấm Sync để dọn trên cloud.`);
+    }
+  );
 }
 
 /* v2.95.0: Tải template chuẩn Seahorse — sinh file Excel với dữ liệu thực tế của DN */
