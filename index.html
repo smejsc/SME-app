@@ -2691,7 +2691,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='2.99.69';            // bumped on each release
+const APP_VERSION='2.99.70';            // bumped on each release
 
 /* v2.62.0: Token xác thực backend — PHẢI khớp API_TOKEN trong Apps Script (Code.gs).
    Mọi request tới Apps Script tự động được gắn token qua lớp bọc fetch bên dưới.
@@ -19926,6 +19926,9 @@ function renderArAp(kind){
       if(canCheckAcc()){
         actionBtns.push(`<button class="icon-btn good" title="Đã kiểm chứng từ → Trình ký lên L1" onclick="arKtCheck('${kind}','${r.id}')">→</button>`);
         actionBtns.push(`<button class="icon-btn danger" title="Thiếu chứng từ — trả lại NV" onclick="arReject('${kind}','${r.id}')">✗</button>`);
+        // v2.99.70: KT CHỈ gán dự án/tàu (cost center) khi NV quên — KHÔNG sửa gì khác.
+        const _missCC = isAp && !r.projectId && !r.vesselId;
+        actionBtns.push(`<button class="icon-btn${_missCC?' warn':''}" title="${_missCC?'⚠ Chưa gán dự án/tàu — bấm để gán':'Gán / đổi dự án-tàu'}" onclick="ktAssignCostCenter('${kind}','${r.id}')">🏷️</button>`);
         actionBtns.push(`<button class="icon-btn" title="Xem chi tiết" onclick="${isAp?'openPayableModal':'openReceivableModal'}('${r.id}')">👁</button>`);
       } else {
         actionBtns.push(`<span style="color:var(--muted);font-size:11px;font-style:italic">Chờ KT kiểm</span>`);
@@ -20063,6 +20066,67 @@ function arReturn(kind,id){
   const r=S[list].find(x=>x.id===id);if(!r)return;
   if(!confirm('Trả về trạng thái Nháp để sửa? (Mất 2 chữ ký duyệt L1+L2)'))return;
   if(wfReturnToDraft(r)){saveState();renderAll();toast('Đã trả về Nháp');}
+}
+
+/* v2.99.70: KT GÁN DỰ ÁN/TÀU khi kiểm hồ sơ (NV quên gán).
+   PHẠM VI HẸP — KT chỉ chọn dự án/tàu vào trường cost center, KHÔNG sửa
+   số tiền/NCC/diễn giải. Chỉ áp ở trạng thái 'Chờ KT kiểm' và cho KT viên.
+   Giữ nguyên mảng (segment) của bản ghi; tàu lọc theo đúng mảng đó. */
+function ktAssignCostCenter(kind,id){
+  if(!canCheckAcc()){toast('Chỉ KT viên được gán dự án/tàu khi kiểm','bad');return;}
+  const list=kind==='ap'?'payables':'receivables';
+  const r=(S[list]||[]).find(x=>x.id===id);
+  if(!r){toast('Không tìm thấy','bad');return;}
+  if(wfStatus(r)!=='pending_acc'){toast('Chỉ gán được khi đang "Chờ KT kiểm"','bad');return;}
+
+  const seg=r.segment||'OTHER';
+  const segLabel=(SEGMENTS[seg]&&SEGMENTS[seg].short)||seg;
+  const projOpts='<option value="">— Không gắn dự án —</option>'+
+    activeOnly(S.projects).map(p=>`<option value="${p.id}" ${p.id===r.projectId?'selected':''}>${esc(p.code)} · ${esc(p.name)} [${(SEGMENTS[p.segment]&&SEGMENTS[p.segment].short)||''}]</option>`).join('');
+  const vesselOpts=_arVesselOptsForSegment(seg, r.vesselId||'');
+  const amt=(+r.amountGross||+r.amount||0);
+
+  const body=`
+    <div style="background:var(--paper-2);border:1px solid var(--rule);padding:10px 12px;margin-bottom:12px;font-size:12px">
+      <div style="display:flex;justify-content:space-between"><span style="color:var(--muted)">NCC</span><b>${esc(r.partner||'—')}</b></div>
+      <div style="display:flex;justify-content:space-between"><span style="color:var(--muted)">Diễn giải</span><span>${esc(r.desc||'—')}</span></div>
+      <div style="display:flex;justify-content:space-between"><span style="color:var(--muted)">Số tiền</span><b style="font-family:var(--font-mono)">${fmtCcy(amt, r.ccy||'VND')}</b></div>
+      <div style="display:flex;justify-content:space-between"><span style="color:var(--muted)">Mảng</span><span>${esc(segLabel)}</span></div>
+    </div>
+    <div style="background:rgba(139,90,43,.06);border-left:3px solid var(--accent);padding:8px 12px;margin-bottom:12px;font-size:11px;color:var(--muted)">
+      🏷️ Chỉ gán <b style="color:var(--ink)">dự án / tàu</b> cho khoản này. Các thông tin khác do NV nhập, KT không sửa ở đây.
+    </div>
+    <div class="field" style="margin-bottom:10px"><label>Dự án</label>
+      <select id="kt-cc-project">${projOpts}</select></div>
+    <div class="field"><label>Tàu</label>
+      <select id="kt-cc-vessel">${vesselOpts}</select></div>
+    <div id="kt-cc-err" style="color:var(--bad);font-size:12px;margin-top:8px"></div>`;
+  const foot=`<button class="btn-sec" onclick="closeModal()">Hủy</button>
+    <button class="btn-primary" onclick="ktSaveCostCenter('${kind}','${id}')">💾 Lưu dự án/tàu</button>`;
+  openModal('🏷️ Gán dự án / tàu (KT kiểm)', body, foot);
+}
+
+function ktSaveCostCenter(kind,id){
+  if(!canCheckAcc()){toast('Không có quyền','bad');return;}
+  const list=kind==='ap'?'payables':'receivables';
+  const r=(S[list]||[]).find(x=>x.id===id);
+  if(!r){toast('Không tìm thấy','bad');return;}
+  if(wfStatus(r)!=='pending_acc'){toast('Trạng thái đã đổi — tải lại','bad');return;}
+  const projEl=document.getElementById('kt-cc-project');
+  const vesEl=document.getElementById('kt-cc-vessel');
+  const newProj=projEl?projEl.value:'';
+  const newVes=vesEl?vesEl.value:'';
+  const oldProj=r.projectId||'', oldVes=r.vesselId||'';
+  if(newProj===oldProj && newVes===oldVes){ closeModal(); toast('Không có thay đổi'); return; }
+  // CHỈ ghi 2 trường cost center — không động field khác.
+  r.projectId=newProj;
+  r.vesselId=newVes;
+  try{ logAuditEvent('kt_assign_cost_center',{target:list, id:r.id, partner:r.partner||'',
+    projectId:newProj, vesselId:newVes, by:actorName()}); }catch(e){}
+  saveState();
+  renderAll();
+  closeModal();
+  toast('Đã gán dự án/tàu — có thể Trình ký');
 }
 
 /* ============================================================
