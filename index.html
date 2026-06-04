@@ -2691,7 +2691,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='2.99.65';            // bumped on each release
+const APP_VERSION='2.99.66';            // bumped on each release
 
 /* v2.62.0: Token xác thực backend — PHẢI khớp API_TOKEN trong Apps Script (Code.gs).
    Mọi request tới Apps Script tự động được gắn token qua lớp bọc fetch bên dưới.
@@ -31624,8 +31624,16 @@ function _excelRowToRecord(row, colMap, tpl){
       if(val && !valid.includes(val)){rec.warnings.push(`${c.key}: mảng không hợp lệ, dùng OTHER`); val='OTHER';}
       if(!val) val='OTHER';
     } else if(c.type==='ccy'){
-      val=(val||'USD').toUpperCase();
-      if(val!=='VND' && val!=='USD'){rec.warnings.push(`${c.key}: CCY không hợp lệ, dùng USD`); val='USD';}
+      // v2.99.66: CCY chỉ hỗ trợ VND/USD. Trước đây giá trị lạ (SGD, EUR...) bị
+      // ÂM THẦM đổi sang USD → SAI số tiền. Nay → LỖI CHẶN, dòng không import,
+      // buộc người dùng quy đổi tay sang VND/USD trước.
+      const _rawCcy=String(val||'').trim().toUpperCase();
+      if(!_rawCcy){ val='USD'; }                       // để trống vẫn mặc định USD
+      else if(_rawCcy==='VND' || _rawCcy==='USD'){ val=_rawCcy; }
+      else {
+        rec.errors.push(`${c.key}: CCY "${_rawCcy}" không hỗ trợ (chỉ VND/USD). Quy đổi sang VND hoặc USD trước khi import.`);
+        val=_rawCcy;  // giữ nguyên để hiển thị trong preview cho dễ nhận ra
+      }
     } else if(c.type==='faGroup'){
       const valid=['REAL_ESTATE','VESSEL','BUILDING','VEHICLE','MACHINE','INTANGIBLE','OTHER'];
       val=(val||'OTHER').toUpperCase().replace(/[\s-]/g,'_');
@@ -31836,6 +31844,17 @@ function excelRenderPreview(){
   const okCount=rows.filter(r=>r.errors.length===0).length;
   const errCount=rows.filter(r=>r.errors.length>0).length;
   const warnCount=rows.filter(r=>r.errors.length===0 && r.warnings.length>0).length;
+  // v2.99.66: phân loại theo trạng thái wfStatus trong file (để nhãn nút khớp thực tế,
+  // tránh hiểu nhầm "Nháp" khi file đặt chuyen_kt/da_duyet).
+  const _normSt=s=>String(s||'').trim().toLowerCase().replace(/[\s\-]/g,'_');
+  const _okRows=rows.filter(r=>r.errors.length===0);
+  const stCount={draft:0, pending_acc:0, approved:0};
+  _okRows.forEach(r=>{
+    const s=_normSt(r.data && r.data.wfStatus);
+    if(s==='chuyen_kt'||s==='chuyenkt'||s==='cho_kt') stCount.pending_acc++;
+    else if(s==='da_duyet'||s==='daduyet'||s==='duyet'||s==='approved') stCount.approved++;
+    else stCount.draft++;
+  });
 
   let html=`<div style="margin-top:10px;padding:10px;background:var(--paper-2);border-left:3px solid var(--accent)">
     <b>Preview: ${rows.length} dòng đã parse</b><br>
@@ -31859,9 +31878,16 @@ function excelRenderPreview(){
   });
   html+='</tbody></table></div>';
   if(okCount>0){
-    html+=`<div style="margin-top:12px;display:flex;gap:10px;justify-content:flex-end">
+    // v2.99.66: nhãn nút theo trạng thái THẬT trong file (không cố định "Nháp").
+    let _stParts=[];
+    if(stCount.pending_acc>0) _stParts.push(`${stCount.pending_acc} Chờ KT`);
+    if(stCount.approved>0)    _stParts.push(`${stCount.approved} Đã duyệt`);
+    if(stCount.draft>0)       _stParts.push(`${stCount.draft} Nháp`);
+    const _stLabel=_stParts.length ? ` — ${_stParts.join(' · ')}` : '';
+    html+=`<div style="margin-top:12px;display:flex;gap:10px;justify-content:flex-end;align-items:center">
+      ${errCount>0?`<span style="color:var(--bad);font-size:12px;margin-right:auto">⚠ ${errCount} dòng bị bỏ qua (có lỗi)</span>`:''}
       <button class="btn-sec" onclick="EXCEL_PARSED_DATA=null;excelRenderPreview();document.getElementById('xls-preview-area').innerHTML=''">Hủy</button>
-      <button class="btn-primary" onclick="excelConfirmImport()">✓ Import ${okCount} bút toán (Nháp)</button>
+      <button class="btn-primary" onclick="excelConfirmImport()">✓ Import ${okCount} bút toán${_stLabel}</button>
     </div>`;
   } else {
     html+='<div style="margin-top:10px;color:var(--bad);text-align:center">⚠ Không có dòng hợp lệ để import. Sửa file và upload lại.</div>';
