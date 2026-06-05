@@ -2692,7 +2692,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.01.01';            // bumped on each release
+const APP_VERSION='3.01.03';            // bumped on each release
 
 /* v2.62.0: Token xác thực backend — PHẢI khớp API_TOKEN trong Apps Script (Code.gs).
    Mọi request tới Apps Script tự động được gắn token qua lớp bọc fetch bên dưới.
@@ -22295,18 +22295,30 @@ function saveAr(kind,id){
 
   if(!partner){err.textContent='Nhập tên đối tác';return;}
   if(amountNet<=0){err.textContent='Số tiền chưa VAT > 0';return;}
-  // v2.74.4: cảnh báo hóa đơn TRÙNG ngay khi lưu — số HĐ + ngày + giá trị + NCC.
-  // Phòng ngừa từ gốc; vẫn cho lưu nếu user xác nhận (có thể là 2 HĐ thật giống nhau).
+  // v3.01.03: cảnh báo hóa đơn TRÙNG — theo SỐ HĐ + NCC (tên chuẩn hóa HOẶC MST).
+  // Lỏng hơn bản cũ (không buộc khớp ngày/giá trị) để bắt sớm trường hợp chi hộ
+  // nhập 2 đầu (AP + Thu/Chi hộ). Vẫn cho lưu nếu user xác nhận.
   if(invoiceNo){
-    const dupKey = invoiceNo.trim().toLowerCase()+'||'+(issueDate||'').trim()+'||'+(amountGross||0)+'||'+partner.trim().toLowerCase();
+    const _norm = (s)=> (typeof normalizeVendorName==='function' ? normalizeVendorName(s||'') : (s||'').trim().toUpperCase());
+    const invKey = invoiceNo.trim().toLowerCase();
+    const myNorm = _norm(partner);
+    const myVendor = (S.vendors||[]).find(v=>v.normalized===myNorm);
+    const myTax = (myVendor && myVendor.taxCode || '').replace(/\s/g,'');
     const dup=(S[list]||[]).find(r=>{
       if(r.id===id) return false;  // bỏ chính bản đang sửa
-      const k=(r.invoiceNo||'').trim().toLowerCase()+'||'+(r.issueDate||'').trim()+'||'+(+r.amountGross||+r.amount||0)+'||'+(r.partner||'').trim().toLowerCase();
-      return k===dupKey;
+      if((r.invoiceNo||'').trim().toLowerCase()!==invKey) return false;  // số HĐ phải giống
+      const rNorm=_norm(r.partner);
+      if(rNorm && myNorm && rNorm===myNorm) return true;  // cùng NCC (tên chuẩn hóa)
+      if(myTax){  // hoặc cùng MST
+        const rVendor=(S.vendors||[]).find(v=>v.normalized===rNorm);
+        const rTax=(rVendor && rVendor.taxCode || '').replace(/\s/g,'');
+        if(rTax && rTax===myTax) return true;
+      }
+      return false;
     });
     if(dup){
-      const ok=confirm(`⚠ Hóa đơn TRÙNG đã tồn tại:\n\nSố HĐ: ${invoiceNo}\nNgày: ${issueDate||'—'}\nNCC/KH: ${partner}\nGiá trị: ${fmt(amountGross,ccy)}\n\nĐã có 1 bản ghi giống hệt (số HĐ + ngày + giá trị + đối tác). Khai trùng sẽ làm sai số thuế.\n\nVẫn muốn lưu?`);
-      if(!ok){ err.textContent='Đã hủy lưu — hóa đơn trùng. Kiểm tra lại số HĐ.'; return; }
+      const ok=confirm(`⚠ CÓ THỂ TRÙNG HÓA ĐƠN:\n\nSố HĐ: ${invoiceNo}\nNCC: ${partner}${myTax?' (MST '+myTax+')':''}\n\nĐã có bản ghi cùng SỐ HĐ + NCC:\n• ${(dup.desc||'—').slice(0,40)}\n• Giá trị: ${fmt(+dup.amountGross||+dup.amount||0,dup.ccy)} · Ngày ${dup.issueDate||'—'}\n\nLưu ý: chi phí chi hộ tàu QL chỉ nên nhập 1 lần. Nếu đã ghi ở "Thu/Chi hộ tàu QL" thì KHÔNG nhập lại ở đây.\n\nVẫn muốn lưu?`);
+      if(!ok){ err.textContent='Đã hủy — nghi trùng số HĐ + NCC. Kiểm tra lại.'; return; }
     }
   }
   // Auto-create or link vendor (NCC master)
@@ -22947,9 +22959,10 @@ function opMgmtFeeIssued(vid){
   return (S.opMgmtFees||[]).filter(f=>f.vesselId===vid).reduce((s,f)=>s+(+f.amount||0),0);
 }
 function opBalance(vid){
-  // Balance = Σ thu hộ − Σ chi hộ − Σ phí NH − Σ phí khác
-  // v2.99.56: SỬA LỖI số dư khổng lồ do cộng LẪN LỘN tiền gốc USD + VND không quy đổi.
-  // Đồng chuẩn của tab QL tàu là USD → phải cộng theo amountUsd (đã quy đổi), KHÔNG cộng t.amount gốc.
+  // Balance = Σ thu hộ − Σ chi hộ (opTransactions) − Σ chi hộ từ AP gắn tàu QL − Σ phí
+  // v2.99.56: cộng theo amountUsd (đã quy đổi), KHÔNG cộng t.amount gốc.
+  // v3.01.02: BỔ SUNG — trừ thêm AP gắn tàu QL (chi hộ chủ tàu), mọi trạng thái duyệt,
+  //           để NV chỉ nhập 1 nơi (AP). Thu hộ (IN) vẫn ở opTransactions.
   const toUsd=(t, raw)=>{
     raw=+raw||0;
     if(raw===0) return 0;
@@ -22958,12 +22971,26 @@ function opBalance(vid){
     const fx=(+t.fxToUsd||0) || (+S.fxRate||0);
     return fx>0 ? raw/fx : raw;
   };
-  return S.opTransactions.filter(t=>t.vesselId===vid).reduce((s,t)=>{
-    // ưu tiên amountUsd đã chuẩn hóa; nếu thiếu thì quy đổi từ amount gốc
+  let bal = S.opTransactions.filter(t=>t.vesselId===vid).reduce((s,t)=>{
     let amtUsd = (+t.amountUsd>0) ? +t.amountUsd : toUsd(t, t.amount);
     const delta = t.type==='IN' ? amtUsd : -amtUsd;
     const fees = toUsd(t, (+t.bankFee||0)) + toUsd(t, (+t.otherFee||0));
     return s + delta - fees;
+  },0);
+  // v3.01.02: trừ AP gắn tàu QL = chi hộ chủ tàu (làm giảm số dư). Dùng amountGross (tiền thực chi).
+  bal += opApChiHo(vid);
+  return bal;
+}
+/* v3.01.02: tổng AP gắn tàu QL (chi hộ) quy USD — trả về số ÂM (giảm số dư). Mọi trạng thái. */
+function opApChiHo(vid){
+  const toUsd=(raw, ccy)=>{
+    raw=+raw||0; if(raw===0) return 0;
+    if((ccy||'USD')==='USD') return raw;
+    const fx=(+S.fxRate||0); return fx>0 ? raw/fx : raw;
+  };
+  return -(S.payables||[]).filter(p=>p.vesselId===vid).reduce((s,p)=>{
+    const amt=+p.amountGross||+p.amount||0;
+    return s + toUsd(amt, p.ccy);
   },0);
 }
 function renderOpVessels(){
@@ -22996,10 +23023,11 @@ function renderOpVessels(){
     const accrued=opMgmtFeeAccrued(v);
     const issued=opMgmtFeeIssued(v.id);
     const canIssue = isAdmin() || canApproveL1() || canApproveL2();
+    const apChiHo = (typeof opApChiHo==='function') ? opApChiHo(v.id) : 0;  // số âm
     html+=`<tr>
       <td><b>${esc(v.name)}</b>${v.managedSince?`<div style="font-size:10px;color:var(--muted)">QL từ ${esc(v.managedSince)} · ${months} tháng</div>`:'<div style="font-size:10px;color:var(--warn)">chưa đặt ngày QL</div>'}</td>
       <td>${esc(v.owner) || '—'}</td>
-      <td class="r num" style="font-weight:600;color:${bal<v.min?'var(--bad)':bal<v.min*1.2?'var(--warn)':'var(--ink)'}" title="Số dư quy đổi USD (đồng chuẩn QL tàu)">${fmt(bal,'USD')}</td>
+      <td class="r num" style="font-weight:600;color:${bal<v.min?'var(--bad)':bal<v.min*1.2?'var(--warn)':'var(--ink)'}" title="Số dư quy đổi USD (đồng chuẩn QL tàu)">${fmt(bal,'USD')}${apChiHo<0?`<div style="font-size:9px;color:var(--muted);font-weight:400" title="Đã gồm chi hộ từ AP gắn tàu QL">gồm chi hộ AP: ${fmt(apChiHo,'USD')}</div>`:''}</td>
       <td class="r num">${fmt(v.min,v.ccy)}</td>
       <td class="r num">${fmt(v.fee,v.ccy)}</td>
       <td class="r num" style="color:var(--muted)" title="${months} tháng × ${fmt(v.fee,v.ccy)}">${accrued>0?fmt(accrued,v.ccy):'—'}</td>
