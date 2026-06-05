@@ -2697,7 +2697,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.01.23';            // bumped on each release
+const APP_VERSION='3.01.24';            // bumped on each release
 
 /* v2.62.0: Token xác thực backend — PHẢI khớp API_TOKEN trong Apps Script (Code.gs).
    Mọi request tới Apps Script tự động được gắn token qua lớp bọc fetch bên dưới.
@@ -31986,6 +31986,12 @@ function deleteImportBatchById(batchId, field){
     `Mã lô: <b style="font-family:var(--font-mono);font-size:11px">${esc(batchId)}</b><br>Số bản ghi sẽ xóa: <b style="color:var(--bad)">${victims.length}</b><br><br>⚠ Tạo "bia mộ" để đồng bộ dọn lô này trên cloud và mọi máy. KHÔNG ảnh hưởng dữ liệu nhập tay hay lô khác.<br><br>Sau khi xóa, hãy <b>bấm Sync (push)</b> để đẩy lệnh dọn lên cloud.`,
     ()=>{
       const ids=victims.map(r=>r.id).filter(Boolean);
+      // v3.01.24: LƯỚI AN TOÀN — lưu bản sao cục bộ TRƯỚC khi xóa, phòng xóa nhầm.
+      try{
+        const rescue={ at:new Date().toISOString(), field, batchId, count:victims.length, records:victims };
+        localStorage.setItem('seahorse_rescue_lastDelete', JSON.stringify(rescue));
+        console.log('[rescue] đã lưu bản sao', victims.length, 'bản ghi vào localStorage (key: seahorse_rescue_lastDelete). Khôi phục bằng restoreLastDelete() nếu xóa nhầm.');
+      }catch(e){ console.warn('[rescue] không lưu được bản sao:', e&&e.message); }
       S[field]=arr.filter(r=>!(r && r._importBatch===batchId));
       try{ markDeleted(ids, field); }catch(e){ console.warn('[delBatchById] markDeleted:', e&&e.message); }
       if(S.lastImportBatch && S.lastImportBatch.batchId===batchId) S.lastImportBatch=null;
@@ -31993,9 +31999,30 @@ function deleteImportBatchById(batchId, field){
       try{ logAuditEvent('import_batch_delete',{target:field, batchId, count:victims.length, by:actorName()}); }catch(e){}
       renderAll();
       try{ renderImportBatchList(); }catch(e){}
-      toast(`Đã xóa lô ${victims.length} bản ghi. Bấm Sync để dọn trên cloud.`);
+      toast(`Đã xóa lô ${victims.length} bản ghi. Bấm Sync để dọn trên cloud. (Đã lưu bản sao phòng hờ)`);
     }
   );
+}
+
+/* v3.01.24: Khôi phục lô vừa xóa từ bản sao cục bộ (gõ restoreLastDelete() trong Console). */
+function restoreLastDelete(){
+  try{
+    const raw=localStorage.getItem('seahorse_rescue_lastDelete');
+    if(!raw){ console.log('Không có bản sao xóa gần nhất.'); return; }
+    const r=JSON.parse(raw);
+    if(!r || !Array.isArray(r.records)){ console.log('Bản sao hỏng.'); return; }
+    const field=r.field; if(!Array.isArray(S[field])) S[field]=[];
+    const have=new Set(S[field].map(x=>x.id));
+    let restored=0;
+    r.records.forEach(rec=>{
+      // gỡ bia mộ của bản này (nếu có) để không bị xóa lại
+      if(Array.isArray(S.deletedIds)) S.deletedIds=S.deletedIds.filter(d=>String(d.id)!==String(rec.id));
+      if(!have.has(rec.id)){ S[field].push(rec); restored++; }
+    });
+    saveState();
+    if(typeof renderAll==='function') renderAll();
+    console.log(`✅ Đã khôi phục ${restored} bản ghi vào ${field} (lô ${r.batchId}, xóa lúc ${r.at}). Bấm Sync để đẩy lên cloud.`);
+  }catch(e){ console.error('restoreLastDelete lỗi:', e); }
 }
 
 /* v2.95.0: Tải template chuẩn Seahorse — sinh file Excel với dữ liệu thực tế của DN */
@@ -32799,6 +32826,37 @@ function excelConfirmImport(){
   try{ logAuditEvent('excel_import',{target:tpl.target, assignee:EXCEL_IMPORT_ASSIGNEE, rows:rows.filter(r=>r.errors.length===0).length}); }catch(e){}
   const validRows=rows.filter(r=>r.errors.length===0);
   if(!validRows.length){toast('Không có dòng hợp lệ','bad');return;}
+
+  // v3.01.24: CHẶN IMPORT LẶP CẢ LÔ — so nội dung file với dữ liệu đang có.
+  // Nếu phần lớn dòng (≥80%) đã tồn tại (cùng NCC/KH + số HĐ + số tiền) → cảnh báo,
+  // vì rất có thể đang import lại file đã import (gây trùng như sự cố muax/ivsx).
+  if(['payables','receivables','opTransactions'].includes(tpl.target)){
+    const existing = (tpl.target==='opTransactions') ? (S.opTransactions||[]) : (S[tpl.target]||[]);
+    const _norm = (s)=> (s==null?'':String(s)).trim().toLowerCase().replace(/\s+/g,'');
+    const keyOf = (partner, inv, amt)=> _norm(partner)+'|'+_norm(inv)+'|'+Math.round(+amt||0);
+    const existKeys = new Set(existing.map(r=>{
+      const partner = r.partner || r.vendor || '';
+      const inv = r.invoiceNo || '';
+      const amt = +r.amountGross || +r.amount || 0;
+      return keyOf(partner, inv, amt);
+    }));
+    let dupCount=0;
+    validRows.forEach(r=>{
+      const d=r.data;
+      const partner = d.partner || d.vendor || d.customer || '';
+      const inv = d.invoiceNo || '';
+      const amt = +d.amountGross || +d.amount || 0;
+      if(existKeys.has(keyOf(partner, inv, amt))) dupCount++;
+    });
+    const dupPct = validRows.length ? (dupCount/validRows.length*100) : 0;
+    if(dupCount>0 && dupPct>=80){
+      const ok = confirm(`⚠ NGHI IMPORT LẶP\n\nFile đang import có ${validRows.length} dòng, trong đó ${dupCount} dòng (${dupPct.toFixed(0)}%) ĐÃ TỒN TẠI trong dữ liệu (trùng NCC/KH + số HĐ + số tiền).\n\nRất có thể bạn đang import lại file đã import → sẽ tạo bản TRÙNG (như sự cố trước).\n\nNếu chắc chắn muốn import (vd file mới tình cờ giống), bấm OK. Nếu không, bấm Cancel.\n\nVẫn import?`);
+      if(!ok){ toast('Đã hủy import — nghi trùng lô.','warn'); return; }
+    } else if(dupCount>0){
+      // trùng một phần — chỉ cảnh báo nhẹ, vẫn cho import
+      console.log(`[import] ${dupCount}/${validRows.length} dòng có vẻ đã tồn tại (trùng một phần)`);
+    }
+  }
 
   // v2.71.3: mỗi LƯỢT import có 1 mã lô DUY NHẤT (kèm giờ + mã ngẫu nhiên), không gộp
   // theo ngày nữa — để "Xóa lô gần nhất" không xóa nhầm lô khác cùng ngày.
@@ -33632,12 +33690,18 @@ function bulkDeleteImportedRecords(key, displayName){
   }).join('\n');
   const more = imported.length>5 ? `\n... và ${imported.length-5} bản ghi khác` : '';
   if(!confirm(`🗑 XÓA HÀNG LOẠT bản ghi import — ${displayName}\n\nApp sẽ xóa ${imported.length} bản ghi có cờ "đã import từ Excel" khỏi "${displayName}".\n\n5 bản ghi đầu:\n${sample}${more}\n\n⚠ Bản ghi nhập tay KHÔNG bị ảnh hưởng. Có thể KHÔI PHỤC bằng cách import lại file Excel.\n\nTiếp tục?`)) return;
+  // v3.01.24: lưới an toàn — lưu bản sao cục bộ trước khi xóa (phòng xóa nhầm như sự cố 977 AR)
+  try{
+    const rescue={ at:new Date().toISOString(), field:key, batchId:'(bulk-all-imported)', count:imported.length, records:imported };
+    localStorage.setItem('seahorse_rescue_lastDelete', JSON.stringify(rescue));
+    console.log('[rescue] đã lưu bản sao', imported.length, 'bản ghi. Khôi phục: restoreLastDelete()');
+  }catch(e){ console.warn('[rescue]', e&&e.message); }
   const deletedIds = imported.map(r=>r.id).filter(Boolean);
-  try{ markDeleted(deletedIds); }catch(e){}
+  try{ markDeleted(deletedIds, key); }catch(e){}  // v3.01.24: kèm field để bia mộ chỉ áp đúng loại
   S[key] = arr.filter(r => !(r && r._importedFromExcel === true));
   try{ logAuditEvent('bulk_delete_imported', {target:key, count:imported.length, by:actorName()}); }catch(e){}
   saveState();
-  toast(`Đã xóa ${imported.length} bản ghi ${displayName}`,'good');
+  toast(`Đã xóa ${imported.length} bản ghi ${displayName} (đã lưu bản sao phòng hờ)`,'good');
   closeModal();
   renderAll();
 }
