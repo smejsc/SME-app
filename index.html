@@ -2691,7 +2691,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='2.99.85';            // bumped on each release
+const APP_VERSION='2.99.87';            // bumped on each release
 
 /* v2.62.0: Token xác thực backend — PHẢI khớp API_TOKEN trong Apps Script (Code.gs).
    Mọi request tới Apps Script tự động được gắn token qua lớp bọc fetch bên dưới.
@@ -12561,6 +12561,27 @@ function _formatThousands(s){
   if(decPart!==null) out += '.' + decPart;   // gắn lại phần thập phân (kể cả rỗng khi gõ dở)
   return (neg?'-':'')+out;
 }
+/* v2.99.87: Chuẩn hóa cột "% VAT" khi import Excel — chấp nhận nhiều dạng nhập:
+     "8" → 8        "0.08" hoặc "0,08" → 8     "10%" → 10
+     "0.1" → 10     "0% (không VAT)" → 0       "" / null → 0
+   Quy tắc cốt lõi: nếu giá trị > 0 và < 1 ⇒ người nhập ghi dạng TỈ LỆ (0.08=8%) ⇒ ×100.
+   (Thuế suất VAT thực tế ở VN: 0/5/8/10 — không có mức <1%, nên <1 chắc chắn là tỉ lệ.) */
+function _parseVatPercent(v){
+  if(v==null) return 0;
+  let s=String(v).trim();
+  if(s==='') return 0;
+  // bóc số đầu tiên (bỏ "%", chữ, khoảng trắng); chấp nhận dấu . hoặc , làm thập phân
+  s=s.replace(',','.');
+  const m=s.match(/-?\d+(\.\d+)?/);
+  if(!m) return 0;
+  let n=parseFloat(m[0]);
+  if(!isFinite(n)||n<=0) return 0;
+  // dạng tỉ lệ (0<n<1) → nhân 100. Vd 0.08→8, 0.1→10, 0.05→5
+  if(n>0 && n<1) n=n*100;
+  // làm tròn nhẹ để khử sai số (0.1*100=10.000000001)
+  n=Math.round(n*100)/100;
+  return n;
+}
 function _unformatNumber(s){
   if(s==null||s==='') return 0;
   let str=String(s).trim();
@@ -20773,11 +20794,21 @@ function _arEditorBody(r,isPayable){
         <div class="field"><label>Số tiền chưa VAT *</label><input type="number" id="ar-amount-net" value="${r.amountNet!=null?r.amountNet:(r.amount||0)}" step="any" oninput="arRecalcVat()" ${lockedAttr}></div>
         <div class="field"><label>CCY</label><select id="ar-ccy" onchange="arFuelRecalc();try{arRecalcVat()}catch(e){}" ${lockedAttr}><option value="USD" ${r.ccy==='USD'?'selected':''}>USD</option><option value="VND" ${(!r.ccy||r.ccy==='VND')?'selected':''}>VND</option></select></div>
         <div class="field"><label>% VAT</label><select id="ar-vat-percent" onchange="arRecalcVat()" ${lockedAttr}>
-          <option value="0" ${(r.vatPercent==0)?'selected':''}>0% (không VAT)</option>
-          <option value="5" ${(r.vatPercent==5)?'selected':''}>5%</option>
-          <option value="8" ${(r.vatPercent==8)?'selected':''}>8%</option>
-          <option value="10" ${(r.vatPercent==null||r.vatPercent==10)?'selected':''}>10%</option>
-          <option value="custom" ${(r.vatPercent==='custom')?'selected':''}>Override tay</option>
+          ${(()=>{
+            // v2.99.86: nếu vatPercent là mức lẻ KHÔNG thuộc {0,5,8,10} (vd 0.1% từ import)
+            // → chọn "Override tay" để GIỮ đúng % + tiền VAT đã lưu, tránh hiển thị nhầm 0%.
+            const vp=r.vatPercent;
+            const isStd = (vp==null)||(vp==0)||(vp==5)||(vp==8)||(vp==10)||(vp==='custom');
+            const useCustom = !isStd;
+            const sel=(v)=> (!useCustom && (v===0?(vp==0):(v==='custom'?(vp==='custom'):vp==v)))?'selected':'';
+            const customLabel = useCustom ? `Override tay (${(+vp)}%)` : 'Override tay';
+            return `
+          <option value="0" ${(!useCustom&&vp==0)?'selected':''}>0% (không VAT)</option>
+          <option value="5" ${(!useCustom&&vp==5)?'selected':''}>5%</option>
+          <option value="8" ${(!useCustom&&vp==8)?'selected':''}>8%</option>
+          <option value="10" ${(!useCustom&&(vp==null||vp==10))?'selected':''}>10%</option>
+          <option value="custom" ${(useCustom||vp==='custom')?'selected':''}>${customLabel}</option>`;
+          })()}
         </select></div>
         <div class="field"><label>Tiền VAT (tự tính)</label><input type="number" id="ar-vat-amount" value="${r.vatAmount||0}" step="any" oninput="arRecalcGross()" ${lockedAttr}></div>
         <div class="field"><label><b>Tổng (sau VAT)</b></label><input type="number" id="ar-amount-gross" value="${r.amountGross||r.amount||0}" step="any" style="background:var(--paper-2);font-weight:600" readonly></div>
@@ -21935,8 +21966,16 @@ function saveAr(kind,id){
   const invoiceNo=invEl?invEl.value.trim():'';
   const amountNet=_unformatNumber(document.getElementById('ar-amount-net').value);
   const vatPercentRaw=document.getElementById('ar-vat-percent').value;
-  const vatPercent=vatPercentRaw==='custom'?'custom':(+vatPercentRaw||0);
+  const amountNetForPct=amountNet;  // dùng để suy ngược % khi custom
   const vatAmount=_unformatNumber(document.getElementById('ar-vat-amount').value);
+  // v2.99.86: khi "Override tay", LƯU % thực (suy ngược từ VAT/net) thay vì chuỗi 'custom'
+  // → giữ đúng thuế suất lẻ (vd 0.1%) cho lần mở sau + báo cáo, không mất thông tin.
+  let vatPercent;
+  if(vatPercentRaw==='custom'){
+    vatPercent = (amountNetForPct>0) ? (Math.round(vatAmount/amountNetForPct*100*10000)/10000) : 0;
+  } else {
+    vatPercent = (+vatPercentRaw||0);
+  }
   const amountGross=_unformatNumber(document.getElementById('ar-amount-gross').value)||(amountNet+vatAmount);
   // Backward-compat: keep "amount" = gross
   const amount=amountGross;
@@ -23062,7 +23101,7 @@ function editOpTx(id){
     d.fxToUsd=fx;
     d.amountUsd = ccy==='USD' ? (+d.amount||0) : (+d.amount||0)/fx;  // v1.89.0: tính lại quy đổi (net)
     // v2.70.0: VAT chỉ Chi hộ; amount=net → tính lại VAT + gross
-    const pct = (d.type==='OUT') ? (+d.vatPercent||0) : 0;
+    const pct = (d.type==='OUT') ? _parseVatPercent(d.vatPercent) : 0;  // v2.99.87
     d.vatPercent = pct;
     d.vatAmount = Math.round((+d.amount||0)*pct/100*100)/100;
     d.amountGross = (+d.amount||0) + d.vatAmount;
@@ -32782,7 +32821,7 @@ function excelConfirmImport(){
       const opFx = opCcy==='USD' ? 1 : (+d.fxToUsd||0);
       const opAmt = +d.amount || 0;
       // v2.70.0: VAT — chỉ Chi hộ; amount nhập = NET (chưa VAT)
-      const opVatPct = isChi ? (+d.vatPercent||0) : 0;
+      const opVatPct = isChi ? _parseVatPercent(d.vatPercent) : 0;  // v2.99.87
       const opVatAmt = Math.round(opAmt*opVatPct/100*100)/100;
       const opGross = opAmt + opVatAmt;
       const opRec = {
@@ -32820,7 +32859,7 @@ function excelConfirmImport(){
     }
 
     const net=+d.amountNet||0;
-    const vatPercent=+d.vatPercent||0;
+    const vatPercent=_parseVatPercent(d.vatPercent);  // v2.99.87: chấp nhận 0.08→8, "10%"→10, "0% (không VAT)"→0
     const vatAmount=Math.round(net*vatPercent/100*100)/100;
     const gross=net+vatAmount;
 
