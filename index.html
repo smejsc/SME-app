@@ -2697,7 +2697,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.01.24';            // bumped on each release
+const APP_VERSION='3.01.25';            // bumped on each release
 
 /* v2.62.0: Token xác thực backend — PHẢI khớp API_TOKEN trong Apps Script (Code.gs).
    Mọi request tới Apps Script tự động được gắn token qua lớp bọc fetch bên dưới.
@@ -9228,6 +9228,42 @@ async function cloudSync(mode, opts){
           }
         }
       }catch(e){ console.warn('[sync push] empty-guard lỗi:', e&&e.message); }
+      // v3.01.25: LƯỚI CHỐNG SỤT GIẢM — chặn push khi 1 mảng quan trọng giảm bất thường
+      // (vd xóa nhầm hàng loạt → autosync đè cloud). So với mốc cao nhất từng thấy (high-water).
+      try{
+        const cfg3=getAuthConfig();
+        const lkc=(cfg3 && cfg3.lastKnownCounts) || {};
+        const watch=['payables','receivables','opTransactions','loans','bankAccounts','projects','vessels','fixedAssets'];
+        const labelMap={payables:'Phải trả',receivables:'Phải thu',opTransactions:'Thu/Chi hộ',loans:'Khoản vay',bankAccounts:'Tài khoản NH',projects:'Dự án',vessels:'Tàu',fixedAssets:'TSCĐ'};
+        const drops=[];
+        watch.forEach(f=>{
+          const was=+lkc[f]||0;
+          const now=(toEncrypt[f]||[]).length;
+          // chỉ cảnh báo nếu trước có đáng kể (>20) và giảm >40%
+          if(was>20 && now < was*0.6){
+            drops.push(`${labelMap[f]||f}: ${was} → ${now} (giảm ${Math.round((1-now/was)*100)}%)`);
+          }
+        });
+        if(drops.length){
+          console.error('[sync push] PHÁT HIỆN SỤT GIẢM:', drops.join(' · '));
+          // Cho phép qua nếu user CHỦ ĐỘNG xác nhận (interactive). Autosync (không interactive) thì CHẶN.
+          const msg='⚠ CẢNH BÁO MẤT DỮ LIỆU\n\nDữ liệu sắp đẩy lên cloud GIẢM MẠNH so với mức từng có:\n\n'+drops.join('\n')+'\n\nNếu bạn VỪA XÓA có chủ đích (vd dọn lô trùng) → OK để tiếp tục đẩy.\nNếu KHÔNG cố ý xóa → bấm Cancel, rồi đăng nhập lại / Pull để lấy data về.\n\nVẫn đẩy lên cloud?';
+          if(_interactive){
+            if(!confirm(msg)){
+              updateSyncStatus('error','Đã hủy push — nghi mất dữ liệu');
+              toast('Đã HỦY đẩy lên cloud. Data cloud được giữ nguyên.','warn');
+              return;
+            }
+            // user đồng ý → cập nhật high-water xuống mức mới để lần sau không hỏi lại
+            try{ watch.forEach(f=>{ if(cfg3.lastKnownCounts) cfg3.lastKnownCounts[f]=(toEncrypt[f]||[]).length; }); setAuthConfig(cfg3); }catch(e){}
+          } else {
+            // autosync: KHÔNG tự đè khi nghi mất data — bắt user mở app xác nhận thủ công
+            updateSyncStatus('error','Tạm dừng autosync — nghi sụt giảm dữ liệu');
+            toast('⚠ Tạm dừng tự đồng bộ: dữ liệu giảm bất thường ('+drops[0]+'...). Mở menu Sync để kiểm tra & xác nhận thủ công.','bad');
+            return;
+          }
+        }
+      }catch(e){ console.warn('[sync push] shrink-guard lỗi:', e&&e.message); }
       const res=await fetchWithTimeout(cfg.scriptUrl,{
         method:'POST',
         headers:{'Content-Type':'text/plain'},
@@ -10347,8 +10383,18 @@ function _updateLastKnownRecordCount(){
     if(total > prev){
       cfg.lastKnownRecordCount = total;
       cfg.lastKnownAt = new Date().toISOString();
-      setAuthConfig(cfg);
     }
+    // v3.01.25: mốc cao nhất TỪNG THẤY của từng mảng quan trọng (high-water) — để phát hiện sụt giảm bất thường khi push.
+    try{
+      const watch=['payables','receivables','opTransactions','loans','bankAccounts','projects','vessels','fixedAssets'];
+      const lkc = (cfg.lastKnownCounts && typeof cfg.lastKnownCounts==='object') ? cfg.lastKnownCounts : {};
+      watch.forEach(f=>{
+        const n=(s[f]||[]).length;
+        if(n > (+lkc[f]||0)) lkc[f]=n;  // chỉ tăng (high-water mark)
+      });
+      cfg.lastKnownCounts = lkc;
+    }catch(e){}
+    setAuthConfig(cfg);
   }catch(e){ console.warn('[updateLastKnown]', e.message); }
 }
 /* v2.76.0: tổng số bản ghi nghiệp vụ chính — để so sánh local vs cloud trước khi push. */
