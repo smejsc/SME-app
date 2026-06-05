@@ -2692,7 +2692,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.01.06';            // bumped on each release
+const APP_VERSION='3.01.08';            // bumped on each release
 
 /* v2.62.0: Token xác thực backend — PHẢI khớp API_TOKEN trong Apps Script (Code.gs).
    Mọi request tới Apps Script tự động được gắn token qua lớp bọc fetch bên dưới.
@@ -15423,6 +15423,7 @@ function renderQnExpense(){renderDeptExpense('qex','qn_expense','page-qn_expense
 
 // Selected IDs across renders (keep persistence within session)
 let APPROVAL_SELECTED=new Set();
+let _apprInitialized=false;  // v3.01.07: đã auto-chọn-tất-cả lần đầu chưa
 
 /* Build the full list of pending records matching current filter.
    Returns array of normalized records: {id, kind:'ar'|'ap', record, label, ...} */
@@ -15606,6 +15607,14 @@ function updateApprovalSummary(){
   cbs.forEach(cb=>{
     cb.checked=APPROVAL_SELECTED.has(cb.dataset.apprId);
   });
+  // v3.01.07: đồng bộ ô "Chọn tất cả" theo thực tế (tích khi chọn hết; gạch ngang khi chọn 1 phần)
+  const masterCb=document.getElementById('appr-select-all');
+  if(masterCb){
+    const cand=approvalGetCandidates();
+    const selCount=cand.filter(c=>APPROVAL_SELECTED.has(c.id)).length;
+    masterCb.checked = (cand.length>0 && selCount===cand.length);
+    masterCb.indeterminate = (selCount>0 && selCount<cand.length);
+  }
 }
 
 function renderApprovalList(){
@@ -15613,10 +15622,12 @@ function renderApprovalList(){
   fillApprovalFilterDropdowns();
 
   const candidates=approvalGetCandidates();
-  // Auto-select all visible candidates by default if APPROVAL_SELECTED is empty
-  if(APPROVAL_SELECTED.size===0 && candidates.length>0){
+  // v3.01.07: chỉ auto chọn tất cả LẦN ĐẦU mở tab — sau đó tôn trọng lựa chọn của user
+  // (trước đây auto chọn lại mỗi lần render → bỏ tích "Chọn tất cả" bị tự tích lại, không chọn lẻ được).
+  if(!_apprInitialized && APPROVAL_SELECTED.size===0 && candidates.length>0){
     candidates.forEach(c=>APPROVAL_SELECTED.add(c.id));
   }
+  _apprInitialized = true;
   // Remove IDs from SELECTED that are no longer in candidates
   const candidateIds=new Set(candidates.map(c=>c.id));
   [...APPROVAL_SELECTED].forEach(id=>{
@@ -26834,11 +26845,14 @@ function renderVesselDrilldown(){
   if(!v){block.innerHTML='<div class="empty">Không tìm thấy tàu.</div>';return;}
 
   const projects=S.projects.filter(p=>p.vesselId===vid);
-  // Aggregate across all transactions linked to vessel (via its projects)
+  const projIds=new Set(projects.map(p=>p.id));
+  // v3.01.08: tính chi phí/doanh thu theo tàu từ CẢ HAI nguồn:
+  //  (1) bút toán gắn DỰ ÁN thuộc tàu này, HOẶC (2) bút toán gắn THẲNG vesselId tàu này
+  //  (gồm AP chi phí gắn tàu không qua dự án — trước đây bị bỏ sót). Mỗi tx qua filter 1 lần → không đếm trùng.
   const allTxs=viewerScopeTx().filter(t=>{
-    if(!t.projectId) return false;
-    const p=S.projects.find(p=>p.id===t.projectId);
-    return p&&p.vesselId===vid;
+    const viaProject = t.projectId && projIds.has(t.projectId);
+    const viaVessel  = t.vesselId === vid;
+    return viaProject || viaVessel;
   });
   const totRevTx=allTxs.filter(t=>t.type==='REV').reduce((s,t)=>s+txAmt(t),0);
   const totCostTx=allTxs.filter(t=>t.type==='COST').reduce((s,t)=>s+txAmt(t),0);
@@ -26881,8 +26895,14 @@ function renderVesselDrilldown(){
   </div>`;
 
   // Project table for this vessel
+  const _directTx0=allTxs.filter(t=>!(t.projectId && projIds.has(t.projectId)) && t.vesselId===vid);
   if(!projects.length){
     html+='<div class="empty">Tàu này chưa được gắn vào dự án nào. Vào module Dự án để gắn.</div>';
+    if(_directTx0.length){
+      const dR=_directTx0.filter(t=>t.type==='REV').reduce((s,t)=>s+txAmt(t),0);
+      const dC=_directTx0.filter(t=>t.type==='COST').reduce((s,t)=>s+txAmt(t),0);
+      html+=`<div class="rep-guide" style="margin-top:8px;background:rgba(184,71,46,.05);border-color:var(--accent)"><span>📌 <b>Chi phí/doanh thu gắn thẳng tàu</b> (không qua dự án — gồm AP chi phí tàu): ${_directTx0.length} bút toán · DT ${fmt(dR)} · CP ${fmt(dC)}. Đã tính vào KPI tổng phía trên.</span></div>`;
+    }
   } else {
     html+=`<table class="tbl">
       <thead><tr>
@@ -26925,6 +26945,13 @@ function renderVesselDrilldown(){
       <td class="r">${pRev?((pRev-pCost)/pRev*100).toFixed(1)+'%':'—'}</td>
       <td></td>
     </tr></tbody></table>`;
+    // v3.01.08: chi phí/doanh thu gắn THẲNG tàu (không qua dự án) — gồm AP chi phí tàu
+    const directTx=allTxs.filter(t=>!(t.projectId && projIds.has(t.projectId)) && t.vesselId===vid);
+    const dRev=directTx.filter(t=>t.type==='REV').reduce((s,t)=>s+txAmt(t),0);
+    const dCost=directTx.filter(t=>t.type==='COST').reduce((s,t)=>s+txAmt(t),0);
+    if(directTx.length){
+      html+=`<div class="rep-guide" style="margin-top:8px;background:rgba(184,71,46,.05);border-color:var(--accent)"><span>📌 <b>Chi phí/doanh thu gắn thẳng tàu</b> (không qua dự án — gồm AP chi phí tàu): ${directTx.length} bút toán · DT ${fmt(dRev)} · CP ${fmt(dCost)}. <b>Đã cộng vào KPI tổng phía trên</b> nhưng không nằm trong bảng dự án.</span></div>`;
+    }
   }
 
   // Revenue trend chart for this vessel (mini chart by year)
