@@ -2692,7 +2692,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.01.03';            // bumped on each release
+const APP_VERSION='3.01.05';            // bumped on each release
 
 /* v2.62.0: Token xác thực backend — PHẢI khớp API_TOKEN trong Apps Script (Code.gs).
    Mọi request tới Apps Script tự động được gắn token qua lớp bọc fetch bên dưới.
@@ -22981,7 +22981,8 @@ function opBalance(vid){
   bal += opApChiHo(vid);
   return bal;
 }
-/* v3.01.02: tổng AP gắn tàu QL (chi hộ) quy USD — trả về số ÂM (giảm số dư). Mọi trạng thái. */
+/* v3.01.02: tổng AP gắn tàu QL (chi hộ) quy USD — trả về số ÂM (giảm số dư). Mọi trạng thái.
+   v3.01.04: dùng NET (chưa VAT) — đồng nhất với "chi hộ ảo" hiện ở tab 06 (VAT là khấu trừ của Seahorse, không đòi chủ tàu). */
 function opApChiHo(vid){
   const toUsd=(raw, ccy)=>{
     raw=+raw||0; if(raw===0) return 0;
@@ -22989,8 +22990,8 @@ function opApChiHo(vid){
     const fx=(+S.fxRate||0); return fx>0 ? raw/fx : raw;
   };
   return -(S.payables||[]).filter(p=>p.vesselId===vid).reduce((s,p)=>{
-    const amt=+p.amountGross||+p.amount||0;
-    return s + toUsd(amt, p.ccy);
+    const net=+p.amountNet||((+p.amountGross||+p.amount||0)-(+p.vatAmount||0))||(+p.amount||0);
+    return s + toUsd(net, p.ccy);
   },0);
 }
 function renderOpVessels(){
@@ -23766,10 +23767,35 @@ function opFeeCcyChanged(){
   wrap.style.display = sel.value==='USD' ? 'none' : '';
 }
 
+/* v3.01.04: biến AP gắn tàu QL thành "chi hộ ảo" (OUT) để tab 06 hiển thị đủ + khớp opBalance.
+   Read-only: không sửa/xóa như opTransaction; hàng có nút mở AP gốc. */
+function _opApVirtualTx(){
+  const opIds=new Set((S.opVessels||[]).map(v=>v.id));
+  return (S.payables||[]).filter(p=>opIds.has(p.vesselId)).map(p=>{
+    const ccy=p.ccy||'USD';
+    const net=+p.amountNet||((+p.amountGross||+p.amount||0)-(+p.vatAmount||0))||(+p.amount||0);
+    const fx=(ccy==='USD')?1:(+S.fxRate||0);
+    const amountUsd=(ccy==='USD')?net:(fx>0?net/fx:net);
+    const pd=(typeof arPaidTotal==='function')?arPaidTotal(p):0;
+    return {
+      id:'apv-'+p.id, _fromAp:true, _apId:p.id,
+      date:(p.issueDate||p.createdAt||'').slice(0,10),
+      vesselId:p.vesselId, type:'OUT',
+      desc:p.desc||'', vendor:p.partner||'', contractNo:'', invoiceNo:p.invoiceNo||'',
+      amount:net, ccy, fxToUsd:fx, amountUsd,
+      vatPercent:+p.vatPercent||0, vatAmount:+p.vatAmount||0,
+      paid:(pd>0.0001), paidDate:'', bankFee:0, otherFee:0,
+      createdBy:p.createdBy||'', createdByDept:p.createdByDept||'',
+      createdAt:p.createdAt||'', updatedAt:p.updatedAt||''
+    };
+  });
+}
 function renderOpTxList(){
   // Scope: NV chỉ thấy giao dịch của tàu QL hộ được gán
   const allowedIds=userAssignedOpVesselIds();
-  const allTxScoped=S.opTransactions.filter(t=>allowedIds.includes(t.vesselId));
+  // v3.01.04: gộp thêm AP gắn tàu QL = chi hộ (OUT ảo) để tab 06 hiện ĐỦ, khớp số dư.
+  const _apVirtual=_opApVirtualTx().filter(t=>allowedIds.includes(t.vesselId));
+  const allTxScoped=S.opTransactions.filter(t=>allowedIds.includes(t.vesselId)).concat(_apVirtual);
   // Populate filters (vessel + month) — chỉ hiện tàu được phép
   const vSel=document.getElementById('op-filter-vessel');
   const mSel=document.getElementById('op-filter-month');
@@ -23883,28 +23909,32 @@ function renderOpTxList(){
         html+=`<tr style="${t.paid?'':'background:rgba(196,138,57,.04)'}">
           <td class="mono">${t.date}</td>
           <td>${v?v.name:'—'}</td>
-          <td>${esc(t.desc) || '—'}</td>
+          <td>${esc(t.desc) || '—'}${t._fromAp?' <span class="chip" style="font-size:9px;background:rgba(83,74,183,.12);color:#534ab7">từ AP</span>':''}${t.createdBy?`<div style="font-size:10px;color:var(--muted)">${esc(t.createdBy)}${t.createdByDept?' · '+esc(t.createdByDept):''}</div>`:''}</td>
           ${chiCols}
           <td class="c"><span class="chip" style="font-size:10px;background:rgba(28,58,92,.08);color:var(--accent);font-weight:600">${esc(ccy)}</span></td>
           <td class="r num"${fxHint}>${fmtCcy(t.amount,ccy)}</td>
           ${type==='OUT'?`<td class="r num" style="font-size:11px;color:var(--muted)" title="VAT đầu vào — Seahorse khấu trừ, không đòi chủ tàu${(+t.vatPercent)?(' · '+(+t.vatPercent)+'%'):''}">${(+t.vatAmount>0)?fmtCcy(+t.vatAmount,ccy):'—'}</td>`:''}
           <td class="r num" style="font-weight:600">${fmtCcy(usd,'USD')}</td>
           <td class="r num mono" style="font-size:11px;color:var(--muted)" title="${feeTooltip}">${feesUsd?fmtCcy(feesUsd,'USD'):'—'}</td>
-          <td class="c">${t.paid
+          <td class="c">${t._fromAp
+            ? (t.paid?`<span class="chip chip-good" style="font-size:10px" title="AP đã trả">✓ TT</span>`:`<span class="chip" style="background:var(--rule);color:var(--muted);font-size:10px" title="AP chưa trả đủ">Chưa</span>`)
+            : (t.paid
             ?(canConfirmPayment()
               ?`<span class="chip chip-good" title="TT ngày ${t.paidDate||'?'}" style="cursor:pointer" onclick="confirmOpPayment('${t.id}')">✓ ${t.paidDate?t.paidDate.slice(5):'TT'}</span>`
               :`<span class="chip chip-good" title="TT ngày ${t.paidDate||'?'}">✓ ${t.paidDate?t.paidDate.slice(5):'TT'}</span>`)
             :(canConfirmPayment()
               ?`<button class="btn-sec" style="padding:3px 8px;font-size:11px" onclick="confirmOpPayment('${t.id}')">Xác nhận</button>`
-              :`<span class="chip" title="Chờ NV có quyền xác nhận TT" style="background:var(--rule);color:var(--muted);font-size:10px">Chờ xác nhận</span>`)}</td>
+              :`<span class="chip" title="Chờ NV có quyền xác nhận TT" style="background:var(--rule);color:var(--muted);font-size:10px">Chờ xác nhận</span>`))}</td>
           <td class="r num" style="color:${v&&bal<v.min?'var(--bad)':'var(--ink)'}">${fmtCcy(bal,'USD')}</td>
           <td><div class="row-actions">
-            ${t.paid
-              ? (canConfirmPayment()
-                ? `<button class="icon-btn" title="Sửa toàn bộ (chỉ người có quyền xác nhận TT)" onclick="editOpFees('${t.id}')">✎</button>`
-                : ``)
-              : `<button class="icon-btn" title="Sửa nội dung" onclick="editOpTx('${t.id}')">✎</button>
-                 <button class="icon-btn danger" title="Xóa" onclick="delOpTx('${t.id}')">✕</button>`}
+            ${t._fromAp
+              ? `<button class="icon-btn" title="Mở khoản AP gốc (sửa ở giao diện Phải trả)" onclick="openPayableModal('${t._apId}')">👁</button>`
+              : (t.paid
+                ? (canConfirmPayment()
+                  ? `<button class="icon-btn" title="Sửa toàn bộ (chỉ người có quyền xác nhận TT)" onclick="editOpFees('${t.id}')">✎</button>`
+                  : ``)
+                : `<button class="icon-btn" title="Sửa nội dung" onclick="editOpTx('${t.id}')">✎</button>
+                   <button class="icon-btn danger" title="Xóa" onclick="delOpTx('${t.id}')">✕</button>`)}
           </div></td>
         </tr>`;
       });
@@ -31247,6 +31277,8 @@ const EXCEL_TEMPLATES={
         aliases:['Paid date','Ngày thanh toán']},
       {key:'wfStatus',    label:'Trạng thái (nhap/chuyen_kt/da_duyet)', required:false, type:'text',
         aliases:['Status','Trạng thái','TT workflow']},
+      {key:'staff',        label:'Nhân viên nhập (tên NV)',              required:false, type:'text',
+        aliases:['NV','Nhân viên','Người nhập','Staff','Employee','Nhân viên nhập','Người lập']},
 
     ]
   }
@@ -33140,7 +33172,9 @@ function excelConfirmImport(){
         bankFee: +d.bankFee || 0,
         otherFee: +d.otherFee || 0,
         feeNote: d.feeNote || '',
-        createdBy: actorName(),
+        createdBy: (d.staff && String(d.staff).trim())
+          || (EXCEL_IMPORT_ASSIGNEE && EXCEL_IMPORT_ASSIGNEE.trim())
+          || actorName(),
         createdByDept: getActorDeptName(),
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
