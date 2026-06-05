@@ -2379,13 +2379,8 @@ body.readonly-mode::before{
           <div class="rep-acc-body">
             <div class="rep-guide"><span><b>Cách đọc:</b> Xem doanh thu, chi phí và lợi nhuận của từng con tàu trong kỳ đã chọn. Tàu có lợi nhuận âm là tàu đang lỗ — cần xem kỹ. So sánh giữa các tàu để biết tàu nào đóng góp nhiều nhất.</span></div>
             <div id="rep-vessel-drill">
-              <div style="margin-bottom:12px">
-                <label style="font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);font-weight:600;display:block;margin-bottom:4px">Chọn tàu</label>
-                <select id="rep-vessel" onchange="renderVesselDrilldown()" style="padding:6px 10px;border:1px solid var(--rule);background:var(--paper);font-size:13px;min-width:240px">
-                  <option value="">— Chọn tàu để xem chi tiết —</option>
-                </select>
-              </div>
-              <div id="rep-vessel-block"></div>
+              <div id="rep-vessel-summary"></div>
+              <div id="rep-vessel-block" style="margin-top:14px"></div>
             </div>
           </div>
         </details>
@@ -2700,7 +2695,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.01.09';            // bumped on each release
+const APP_VERSION='3.01.11';            // bumped on each release
 
 /* v2.62.0: Token xác thực backend — PHẢI khớp API_TOKEN trong Apps Script (Code.gs).
    Mọi request tới Apps Script tự động được gắn token qua lớp bọc fetch bên dưới.
@@ -24665,10 +24660,19 @@ function _renderQuickViewOwnerReport(){
       else if(t._isBudget){ totalBudget += net; budgetCount++; }
       else { totalExpense += net; outCount++; }
     });
-    // Còn lại = thu − chi thực − dự kiến − phí (tự nhất quán trong card, đã quy display CCY).
-    // Khớp opBalance(vid) vì opBalance cũng trừ cả chi thực + dự kiến + phí.
-    const remaining = totalRevenue - totalExpense - totalBudget - totalFee;
-    return {v, totalRevenue, totalExpense, totalBudget, remaining, inCount, outCount, budgetCount, txCount:vtx.length};
+    // v3.01.10: GỘP thêm AP gắn tàu QL = chi hộ (giống tab 06) để dashboard khớp.
+    // AP chi hộ → cộng vào Tổng chi; đếm số AP vào outCount.
+    const apList = (S.payables||[]).filter(p=>p.vesselId===v.id);
+    apList.forEach(p=>{
+      const c = p.ccy || v.ccy || 'VND';
+      const netAp = +p.amountNet || ((+p.amountGross||+p.amount||0)-(+p.vatAmount||0)) || (+p.amount||0);
+      totalExpense += toDisplay(netAp, c);
+      outCount++;
+    });
+    // Còn lại = dùng opBalance(vid) (đã gồm AP chi hộ từ 3.01.02), quy về display CCY.
+    // opBalance trả USD → quy sang display CCY cho nhất quán card.
+    const remaining = toDisplay(opBalance(v.id), 'USD');
+    return {v, totalRevenue, totalExpense, totalBudget, remaining, inCount, outCount, budgetCount, txCount:vtx.length+apList.length};
   }).filter(r => r.txCount > 0);
   if(rows.length === 0) return '';
   const sumRev = rows.reduce((s,r)=>s+r.totalRevenue, 0);
@@ -26598,7 +26602,7 @@ function bcqtAccToggle(details){
   const rep = details.dataset.rep;
   try{
     if(rep==='trend'){ if(typeof renderTrendChart==='function') renderTrendChart(); }
-    else if(rep==='vessel_drill'){ if(typeof fillReportVesselPicker==='function') fillReportVesselPicker(); if(typeof renderVesselDrilldown==='function') renderVesselDrilldown(); }
+    else if(rep==='vessel_drill'){ if(typeof renderVesselDrilldown==='function') renderVesselDrilldown(); }
     else if(rep==='margin'){ if(typeof renderProjectMarginTable==='function') renderProjectMarginTable(); }
     else if(rep==='util'){ if(typeof renderVesselUtilization==='function') renderVesselUtilization(); }
     else if(rep==='pnl_project'){
@@ -26838,17 +26842,79 @@ function hideChartTip(containerId){
 }
 
 /* ============================================================
-   B. VESSEL DRILLDOWN
+   B. VESSEL DRILLDOWN — v3.01.11: bảng tổng mỗi tàu 1 dòng (bỏ dropdown).
+   renderVesselDrilldown(vid) — vid rỗng = vẽ bảng tổng; có vid = chi tiết tàu đó.
    ============================================================ */
-function renderVesselDrilldown(){
-  const repVesselEl=document.getElementById('rep-vessel');
+function _vesselRevCost(vid){
+  // DT/CP theo tàu: gồm tx gắn dự án thuộc tàu HOẶC gắn thẳng vesselId (mỗi tx 1 lần).
+  const projIds=new Set(S.projects.filter(p=>p.vesselId===vid).map(p=>p.id));
+  const txs=viewerScopeTx().filter(t=>(t.projectId && projIds.has(t.projectId)) || t.vesselId===vid);
+  const rev=txs.filter(t=>t.type==='REV').reduce((s,t)=>s+txAmt(t),0);
+  const cost=txs.filter(t=>t.type==='COST').reduce((s,t)=>s+txAmt(t),0);
+  const fuel=txs.filter(t=>t.type==='COST'&&FUEL_CAT_NAMES.includes(t.category)).reduce((s,t)=>s+txAmt(t),0);
+  const histV=histSums(h=>h.vesselId===vid);
+  return {rev:rev+histV.revenue, cost:cost+histV.cost, fuel, txCount:txs.length, hasHist:(histV.revenue>0||histV.cost>0)};
+}
+
+function renderVesselSummaryTable(){
+  const block=document.getElementById('rep-vessel-summary');
+  if(!block) return;
+  const vessels=isViewer()?S.vessels.filter(v=>viewerCanSeeVessel(v.id)):S.vessels;
+  if(!vessels.length){ block.innerHTML='<div class="empty">Chưa có tàu công ty nào. Thêm ở Danh mục → Tàu (nhóm Tàu công ty).</div>'; return; }
+  let sRev=0,sCost=0,sOn=0;
+  const rows=vessels.map(v=>{
+    const {rev,cost}=_vesselRevCost(v.id);
+    const oh=S.onhires.filter(o=>o.vesselId===v.id);
+    const onDays=oh.reduce((s,o)=>s+(+o.on||0),0);
+    sRev+=rev; sCost+=cost; sOn+=onDays;
+    const margin=rev-cost;
+    const unitCost=onDays?cost/onDays:0;  // đơn giá chi phí / ngày khai thác
+    return {v,rev,cost,margin,onDays,unitCost};
+  });
+  const rowHtml=rows.map(r=>{
+    const mPct=r.rev?((r.margin/r.rev)*100).toFixed(1)+'%':'—';
+    return `<tr style="cursor:pointer" onclick="renderVesselDrilldown('${r.v.id}')" title="Bấm xem chi tiết dự án của tàu ${esc(r.v.name)}">
+      <td><b>${esc(r.v.name)}</b> <span style="color:var(--muted);font-size:11px">${r.v.type==='SERVICE'?'DV':'KT'}</span></td>
+      <td class="r num">${fmt(r.rev)}</td>
+      <td class="r num">${fmt(r.cost)}</td>
+      <td class="r num" style="color:${r.margin>=0?'var(--good)':'var(--bad)'};font-weight:600">${fmt(r.margin)}</td>
+      <td class="r num" style="font-size:11px;color:var(--muted)">${mPct}</td>
+      <td class="r num" style="font-size:11px">${r.onDays}</td>
+      <td class="r num">${r.onDays?fmt(r.unitCost):'—'}</td>
+    </tr>`;
+  }).join('');
+  const sMargin=sRev-sCost;
+  block.innerHTML=`
+    <div class="tbl-scroll"><table class="tbl" style="font-size:12px">
+      <thead><tr>
+        <th>Tàu</th>
+        <th class="r" title="Doanh thu tích lũy (gồm gắn thẳng tàu + qua dự án)">Doanh thu</th>
+        <th class="r" title="Chi phí tích lũy (gồm AP gắn tàu + qua dự án)">Chi phí</th>
+        <th class="r">Margin</th>
+        <th class="r">Margin %</th>
+        <th class="r" title="Số ngày Onhire">Ngày KT</th>
+        <th class="r" title="Đơn giá chi phí bình quân = Chi phí / ngày khai thác">Đơn giá CP/ngày</th>
+      </tr></thead><tbody>
+      ${rowHtml}
+      <tr class="total">
+        <td>∑ TỔNG (${rows.length} tàu)</td>
+        <td class="r">${fmt(sRev)}</td>
+        <td class="r">${fmt(sCost)}</td>
+        <td class="r" style="color:${sMargin>=0?'var(--good)':'var(--bad)'}">${fmt(sMargin)}</td>
+        <td class="r">${sRev?((sMargin/sRev)*100).toFixed(1)+'%':'—'}</td>
+        <td class="r">${sOn}</td>
+        <td class="r">${sOn?fmt(sCost/sOn):'—'}</td>
+      </tr>
+      </tbody></table></div>
+    <div style="margin-top:6px;font-size:10px;color:var(--muted);font-style:italic">💡 Bấm tên tàu để xem chi tiết doanh thu/chi phí theo dự án. Chỉ tính bút toán ĐÃ DUYỆT.</div>`;
+}
+
+function renderVesselDrilldown(vid){
   const block=document.getElementById('rep-vessel-block');
-  if(!repVesselEl || !block) return;  // v2.35.0: phần tử chưa render — thoát an toàn
-  const vid=repVesselEl.value;
-  if(!vid){
-    block.innerHTML='<div class="empty">Chọn 1 tàu ở dropdown phía trên để xem báo cáo chi tiết theo dự án.</div>';
-    return;
-  }
+  // Luôn vẽ bảng tổng (mỗi tàu 1 dòng)
+  renderVesselSummaryTable();
+  if(!block) return;
+  if(!vid){ block.innerHTML=''; return; }  // chưa chọn tàu cụ thể → chỉ hiện bảng tổng
   const v=S.vessels.find(x=>x.id===vid);
   if(!v){block.innerHTML='<div class="empty">Không tìm thấy tàu.</div>';return;}
 
