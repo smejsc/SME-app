@@ -804,9 +804,9 @@ body.readonly-mode::before{
         <div class="field"><label>Số ngày dự kiến</label><input type="number" class="num" id="plan-days" step="any" value="0" oninput="_planAutoRevenue()"></div>
         <div class="field"><label>Đơn giá / ngày</label><input type="number" class="num" id="plan-rate" step="any" value="0" oninput="_planAutoRevenue()"></div>
         <div class="field"><label>CCY</label>
-          <select id="plan-ccy"><option>VND</option><option>USD</option></select>
+          <select id="plan-ccy" onchange="['plan-revenue','plan-rate','plan-profit'].forEach(i=>{const e=document.getElementById(i); if(e) e.dispatchEvent(new Event('input'));})"><option>VND</option><option>USD</option></select>
         </div>
-        <div class="field"><label>Doanh thu KH <span style="color:var(--accent);font-size:10px">(= ngày × đơn giá · sửa tay được)</span></label><input type="number" class="num" id="plan-revenue" step="any" value="0" oninput="_planRevenueManual=true"></div>
+        <div class="field"><label>Doanh thu KH <span style="color:var(--accent);font-size:10px">(= ngày × đơn giá · sửa tay được)</span></label><input type="number" class="num" id="plan-revenue" step="any" value="0" oninput="if(!_suppressPlanManual)_planRevenueManual=true"></div>
         <div class="field"><label>Lợi nhuận KH</label><input type="number" class="num" id="plan-profit" step="any" value="0"></div>
       </div>
       <div class="form-actions">
@@ -2691,7 +2691,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='2.99.89';            // bumped on each release
+const APP_VERSION='2.99.91';            // bumped on each release
 
 /* v2.62.0: Token xác thực backend — PHẢI khớp API_TOKEN trong Apps Script (Code.gs).
    Mọi request tới Apps Script tự động được gắn token qua lớp bọc fetch bên dưới.
@@ -12747,17 +12747,26 @@ function _attachNumberHint(inp){
       if(!isFinite(n) || n===0){ hint.textContent=''; return; }
       if(Math.abs(n) < 1000){ hint.textContent=''; return; }
       let ccy = 'VND';
-      const form = inp.closest('.form-grid, form, div');
-      if(form){
-        const ccySel = form.querySelector('select[id*="ccy"], select[id*="-ccy"], select.ccy');
+      // v2.99.90: dò CCY ở phạm vi RỘNG (leo lên modal/form lớn, không chỉ .field cha trực tiếp).
+      // Lỗi cũ: inp.closest('div') chỉ bắt .field bao quanh ô → không thấy select CCY ở .field
+      // anh em → luôn mặc định VND → ô USD vẫn hiện "đồng".
+      let scope = inp.closest('.modal, .modal-body, .form-grid, form');
+      if(!scope) scope = inp.parentNode && inp.parentNode.parentNode;  // leo 2 cấp
+      if(scope){
+        const ccySel = scope.querySelector('select[id*="ccy"], select[id*="-ccy"], select.ccy');
         if(ccySel && ccySel.value) ccy = ccySel.value.toUpperCase();
       }
       const formatted = ccy==='USD'
         ? n.toLocaleString('en-US', {minimumFractionDigits: n%1?2:0, maximumFractionDigits:2}) + ' USD'
         : Math.round(n).toLocaleString('vi-VN') + '₫';
-      const words = (ccy==='USD' && n%1!==0)
-        ? _numberToEnglishWords(Math.floor(n)) + (n%1 ? ' point ' + Math.round((n%1)*100) + ' cents' : '')
-        : _numberToVietnameseWords(Math.round(n));
+      // v2.99.90: USD → đọc tiếng Anh + 'dollars' (kể cả số nguyên); VND → tiếng Việt + 'đồng'.
+      let words;
+      if(ccy==='USD'){
+        words = _numberToEnglishWords(Math.floor(n)) + ' dollars'
+              + (n%1 ? ' ' + Math.round((n%1)*100) + ' cents' : '');
+      } else {
+        words = _numberToVietnameseWords(Math.round(n));
+      }
       hint.innerHTML = `≈ <b>${formatted}</b>${words?' · '+words:''}`;
     });
   };
@@ -13712,6 +13721,7 @@ function _planEntityName(entityRef){
 /* v2.99.89: Doanh thu KH tự tính = số ngày × đơn giá. Nếu user gõ tay vào ô Doanh thu
    thì KHÔNG ghi đè (đặt cờ _planRevenueManual). Cho phép cả 2 cách: tự tính hoặc tự điền. */
 let _planRevenueManual=false;
+let _suppressPlanManual=false;  // v2.99.91: chặn set cờ manual khi auto-tính dispatch input
 function _planAutoRevenue(){
   if(_planRevenueManual) return;  // user đã tự điền → tôn trọng
   try{
@@ -13720,6 +13730,11 @@ function _planAutoRevenue(){
     const revEl=document.getElementById('plan-revenue');
     if(days>0 && rate>0){
       revEl.value = Math.round(days*rate*100)/100;
+      // v2.99.91: kích hoạt format nghìn + cập nhật dòng diễn giải (hint) theo giá trị MỚI.
+      // Tạm đặt cờ _suppressPlanManual để oninput của ô revenue KHÔNG hiểu nhầm là user gõ tay.
+      _suppressPlanManual=true;
+      try{ revEl.dispatchEvent(new Event('input',{bubbles:true})); }catch(e){}
+      _suppressPlanManual=false;
     }
   }catch(e){}
 }
