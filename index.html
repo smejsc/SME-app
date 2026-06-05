@@ -2691,7 +2691,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='2.99.99';            // bumped on each release
+const APP_VERSION='3.01.00';            // bumped on each release
 
 /* v2.62.0: Token xác thực backend — PHẢI khớp API_TOKEN trong Apps Script (Code.gs).
    Mọi request tới Apps Script tự động được gắn token qua lớp bọc fetch bên dưới.
@@ -9061,6 +9061,9 @@ async function cloudSync(mode, opts){
           adminMergeFields.forEach(f=>{
             if(merged[f]!==undefined) S[f]=merged[f];
           });
+          // v2.100.0: onhires là bảng phái sinh từ events — dựng lại sau merge để luôn
+          // khớp events đã merge (events mới là nguồn thật, đã có timestamp bảo vệ).
+          try{ if(typeof syncEventsToOnhires==='function') syncEventsToOnhires(); }catch(e){}
           const conflictFields=Object.keys(conflictReport);
           if(conflictFields.length>0){
             const total=conflictFields.reduce((s,f)=>s+conflictReport[f].length,0);
@@ -9128,6 +9131,8 @@ async function cloudSync(mode, opts){
           allowedFields.forEach(f=>{
             if(merged[f]!==undefined) S[f]=merged[f];
           });
+          // v2.100.0: dựng lại onhires từ events đã merge (giữ nhất quán)
+          try{ if(typeof syncEventsToOnhires==='function') syncEventsToOnhires(); }catch(e){}
           // Report conflicts to user (warning toast)
           const conflictFields=Object.keys(conflictReport);
           if(conflictFields.length>0){
@@ -14653,8 +14658,19 @@ function saveEvent(eid,isEdit){
 
   if(isEdit){
     const idx=S.events.findIndex(x=>x.id===eid);
-    if(idx>=0) S.events[idx]=ev;
+    if(idx>=0){
+      // v2.100.0: giữ createdAt gốc, bump updatedAt → merge nhận đúng bản mới nhất
+      ev.createdAt = S.events[idx].createdAt || S.events[idx].updatedAt || new Date().toISOString();
+      ev.updatedAt = new Date().toISOString();
+      ev.updatedBy = (typeof actorName==='function'?actorName():'');
+      S.events[idx]=ev;
+    }
   } else {
+    // v2.100.0: BẮT BUỘC timestamp cho event mới — nếu thiếu, merge coi ts=0 "không mới"
+    // → event (cùng giá trị nhiên liệu/thời gian nhập tay) bị cloud đè MẤT.
+    ev.createdAt = new Date().toISOString();
+    ev.updatedAt = new Date().toISOString();
+    ev.createdBy = (typeof actorName==='function'?actorName():'');
     S.events.push(ev);
   }
   // Also sync into legacy onhires aggregation for back-compat reports
@@ -20737,10 +20753,11 @@ function _arEditorBody(r,isPayable){
     const fuelQtyCur = r.fuelQty != null ? r.fuelQty : '';
     const fuelUnitCur = r.fuelUnit || 'liter';
     const fuelUnitPriceCur = r.fuelUnitPrice != null ? r.fuelUnitPrice : '';
+    const fuelEventCur = r.fuelEventId || '';
     fuelBlock = `
       <div id="ar-fuel-block" style="margin-top:14px;padding:12px 14px;background:rgba(184,71,46,.06);border-left:3px solid var(--accent);${isFuelNow?'':'display:none'}">
         <div style="font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--accent);font-weight:700;margin-bottom:8px">⛽ Thông tin nhiên liệu <span style="color:var(--bad);font-weight:400">(bắt buộc cho loại isFuel)</span></div>
-        <div style="font-size:11px;color:var(--muted);font-style:italic;margin-bottom:8px">Các trường này sẽ được tự điền vào "Bơm trong kỳ" của event vận hành tàu cùng kỳ.</div>
+        <div style="font-size:11px;color:var(--muted);font-style:italic;margin-bottom:8px">Chọn "Đoạn vận hành" để ghi lượng + đơn giá này vào "Bơm trong kỳ" của event tàu (đè loại nhiên liệu tương ứng).</div>
         <div class="form-grid" style="grid-template-columns:1fr 1fr 1fr 1fr">
           <div class="field">
             <label>Loại nhiên liệu *</label>
@@ -20767,6 +20784,10 @@ function _arEditorBody(r,isPayable){
             <label>Đơn giá / đơn vị *</label>
             <input type="number" id="ar-fuel-unit-price" value="${fuelUnitPriceCur}" step="any" placeholder="VD: 0.85" ${lockedAttr} oninput="arFuelRecalc()">
           </div>
+        </div>
+        <div class="field" style="margin-top:8px">
+          <label>Gắn vào đoạn vận hành (event tàu) <span style="color:var(--muted);font-size:10px;text-transform:none;font-weight:400">— chọn tàu trước</span></label>
+          <select id="ar-fuel-event" ${lockedAttr}><option value="">— Không gắn —</option></select>
         </div>
         <div style="font-size:12px;color:var(--ink-soft);margin-top:8px;padding:8px 10px;background:rgba(255,255,255,.5);border:1px dashed var(--rule)">
           <b>Giá trị tự tính:</b> <span id="ar-fuel-calc-value" style="font-family:var(--font-mono);color:var(--accent);font-weight:600">—</span>
@@ -20899,7 +20920,7 @@ function _arEditorBody(r,isPayable){
       <div class="field company-ui"><label>Công ty *</label><select id="ar-company" ${lockedAttr}>${companyOpts}</select></div>
       <div class="field"><label>Mảng *</label><select id="ar-segment" ${lockedAttr} onchange="_arSegmentChanged()">${segOpts}</select></div>
       <div class="field"><label>Dự án (tùy chọn)</label><select id="ar-project" ${lockedAttr}>${projOpts}</select></div>
-      <div class="field"><label>Tàu (tùy chọn)</label><select id="ar-vessel" ${lockedAttr}>${vesselOpts}</select></div>
+      <div class="field"><label>Tàu (tùy chọn)</label><select id="ar-vessel" ${lockedAttr} onchange="try{_apFuelFillEvents()}catch(e){}">${vesselOpts}</select></div>
     </div>
 
     ${fuelBlock}
@@ -21012,6 +21033,52 @@ function arFuelRecalc(){
   out.textContent = val > 0 ? (val.toLocaleString('vi-VN') + ' ' + ccy) : '—';
 }
 
+/* v3.01.00: điền dropdown "đoạn vận hành" theo tàu đã chọn (ar-vessel) */
+function _apFuelFillEvents(selectedId){
+  const sel=document.getElementById('ar-fuel-event');
+  const vEl=document.getElementById('ar-vessel');
+  if(!sel) return;
+  const vid=vEl?vEl.value:'';
+  const cur=selectedId!=null?selectedId:sel.value;
+  let html='<option value="">— Không gắn —</option>';
+  if(vid){
+    const evs=(S.events||[]).filter(e=>e.vesselId===vid)
+      .sort((a,b)=>new Date(b.startAt||0)-new Date(a.startAt||0));
+    evs.forEach(e=>{
+      const lbl=`${evtType(e.type).label} · ${e.startAt?fmtDateTime(e.startAt):'?'}${e.endAt?(' → '+fmtDateTime(e.endAt)):' → (đang diễn ra)'}`;
+      html+=`<option value="${e.id}" ${e.id===cur?'selected':''}>${esc(lbl)}</option>`;
+    });
+  }
+  sel.innerHTML=html;
+}
+
+/* v3.01.00: ghi lượng+đơn giá nhiên liệu từ AP vào fuelPumped của event (đè đúng loại NL) */
+function _apWriteFuelToEvent(rec){
+  if(!rec || !rec.fuelEventId || !rec.fuelKind) return;
+  const ev=(S.events||[]).find(e=>e.id===rec.fuelEventId);
+  if(!ev) return;
+  if(!ev.fuelPumped) ev.fuelPumped={};
+  ev.fuelPumped[rec.fuelKind] = {
+    unit: rec.fuelUnit || 'liter',
+    phuyLiters: 200,
+    qty: +rec.fuelQty || 0,
+    price: +rec.fuelUnitPrice || 0,
+    unitPrice: +rec.fuelUnitPrice || 0,
+    priceCcy: rec.ccy || 'USD',
+    _fromApId: rec.id
+  };
+  try{ touchRecord(ev); }catch(e){}
+}
+
+/* v3.01.00: gỡ fuelPumped khỏi event khi xóa/đổi liên kết AP (loại NL đó về 0) */
+function _apClearFuelFromEvent(eventId, fuelKind){
+  if(!eventId || !fuelKind) return;
+  const ev=(S.events||[]).find(e=>e.id===eventId);
+  if(!ev || !ev.fuelPumped || !ev.fuelPumped[fuelKind]) return;
+  ev.fuelPumped[fuelKind] = (typeof fuelPumpDefault==='function') ? fuelPumpDefault() : {qty:0,price:0,unitPrice:0,unit:'liter',phuyLiters:200,priceCcy:'USD'};
+  try{ touchRecord(ev); }catch(e){}
+}
+
 /* Live VAT recalculation in modal */
 /* Live check duplicate vendor name as user types */
 function arPartnerCheck(input){
@@ -21083,6 +21150,7 @@ function openPayableModal(id){
               <button class="btn-primary" onclick="saveAr('ap','${id||''}')">${isEdit?'Cập nhật':'Lưu phải trả'}</button>`;
   openModal(isEdit?'Sửa khoản phải trả':'Thêm phải trả',body,foot);
   setTimeout(_arSegmentChanged, 60);  // v1.82.0: áp lọc tàu theo mảng
+  setTimeout(()=>{ try{ _apFuelFillEvents(r.fuelEventId||''); }catch(e){} }, 80);  // v3.01.00: điền dropdown đoạn vận hành
 }
 
 /* ============================================================
@@ -22113,7 +22181,7 @@ function saveAr(kind,id){
 
   // v1.43.0: Expense type + fuel fields (only for AP)
   let expenseType = '';
-  let fuelKind = null, fuelQty = null, fuelUnit = null, fuelUnitPrice = null;
+  let fuelKind = null, fuelQty = null, fuelUnit = null, fuelUnitPrice = null, fuelEventId = '';
   let advanceFundId = null;  // v2.21.0
   let assetDept = null, assetVesselId = null, assetAllocationMonths = null;  // v2.22.0
   let dockAssetId = null;  // v2.25.0
@@ -22136,6 +22204,10 @@ function saveAr(kind,id){
       if(!fuelKind){err.textContent='⛽ Chọn loại nhiên liệu (DO/LO/FW)';return;}
       if(fuelQty<=0){err.textContent='⛽ Số lượng nhiên liệu phải > 0';return;}
       if(fuelUnitPrice<=0){err.textContent='⛽ Đơn giá nhiên liệu phải > 0';return;}
+      // v3.01.00: AP nhiên liệu BẮT BUỘC chọn tàu (để gắn vào đoạn vận hành)
+      if(!vesselId){err.textContent='⛽ Chọn TÀU cho khoản nhiên liệu (để ghi vào On-Offhire)';return;}
+      const feEl = document.getElementById('ar-fuel-event');
+      fuelEventId = feEl ? feEl.value : '';
     }
     // v2.21.0: Ứng quỹ — bắt buộc chọn quỹ nhận tiền ứng
     if(expenseType && isExpenseAdvance(expenseType)){
@@ -22194,11 +22266,16 @@ function saveAr(kind,id){
       updates.fuelQty = fuelQty;
       updates.fuelUnit = fuelUnit;
       updates.fuelUnitPrice = fuelUnitPrice;
+      updates.fuelEventId = fuelEventId;  // v3.01.00: liên kết đoạn vận hành
       updates.advanceFundId = advanceFundId;  // v2.21.0
       updates.assetDept = assetDept;  // v2.22.0
       updates.assetVesselId = assetVesselId;
       updates.assetAllocationMonths = assetAllocationMonths;
       updates.dockAssetId = dockAssetId;  // v2.25.0
+    }
+    // v3.01.00: nếu SỬA mà đổi/bỏ event liên kết → gỡ fuelPumped ở event cũ trước
+    if(kind==='ap' && r.fuelEventId && r.fuelEventId!==fuelEventId){
+      try{ _apClearFuelFromEvent(r.fuelEventId, r.fuelKind); }catch(e){}
     }
     Object.assign(r, updates);
     touchRecord(r);  // v1.38.4: track for concurrency merge
@@ -22231,6 +22308,7 @@ function saveAr(kind,id){
       newRec.fuelQty = fuelQty;
       newRec.fuelUnit = fuelUnit;
       newRec.fuelUnitPrice = fuelUnitPrice;
+      newRec.fuelEventId = fuelEventId;  // v3.01.00
       newRec.advanceFundId = advanceFundId;  // v2.21.0
       newRec.assetDept = assetDept;  // v2.22.0
       newRec.assetVesselId = assetVesselId;
@@ -22239,6 +22317,15 @@ function saveAr(kind,id){
     }
     S[list].push(newRec);
     var _auditRecId=newRec.id, _auditIsNew=true;
+  }
+  // v3.01.00: ghi lượng+đơn giá nhiên liệu vào fuelPumped của event được gắn (đè đúng loại NL)
+  if(kind==='ap'){
+    try{
+      const recSaved = isEdit ? r : S[list][S[list].length-1];
+      if(recSaved && recSaved.fuelEventId && recSaved.fuelKind){
+        _apWriteFuelToEvent(recSaved);
+      }
+    }catch(e){ console.warn('[ap fuel→event]', e&&e.message); }
   }
   saveState();closeModal();renderAll();
   // v2.99.78: ghi audit khi tạo/sửa AP/AR (trước đây KHÔNG log → admin không thấy NV thao tác).
@@ -22632,6 +22719,8 @@ function deleteAr(kind,id){
         {recordId:r.id, partner:r.partner||'', amount:r.amount||0, ccy:r.ccy||'',
          desc:r.desc||'', issueDate:r.issueDate||'', actor:actorName()}); }catch(e){}
       if(kind==='ap'){ try{ _autoCleanupTaxFromAp(r.id); }catch(e){console.warn('autoCleanup tax failed',e);} }  // v2.99.18
+      // v3.01.00: AP nhiên liệu có gắn event → đưa fuelPumped loại đó về 0
+      if(kind==='ap' && r.fuelEventId && r.fuelKind){ try{ _apClearFuelFromEvent(r.fuelEventId, r.fuelKind); }catch(e){} }
       S[list]=S[list].filter(x=>x.id!==id);markDeleted(id);saveState();toast('Đã xóa');renderAll();
     });
 }
