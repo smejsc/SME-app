@@ -2703,7 +2703,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.01.47';            // bumped on each release
+const APP_VERSION='3.01.48';            // bumped on each release
 
 /* v2.62.0: Token xác thực backend — PHẢI khớp API_TOKEN trong Apps Script (Code.gs).
    Mọi request tới Apps Script tự động được gắn token qua lớp bọc fetch bên dưới.
@@ -34523,8 +34523,51 @@ function dedupePayables(){
     <div class="tbl-scroll" style="max-height:50vh"><table class="tbl" style="font-size:12px"><thead><tr><th>Xóa</th><th>Vai trò</th><th>Diễn giải</th><th>Ngày HĐ</th><th>Người nhập</th><th>Nguồn</th><th>Tạo lúc / ID</th><th>Trạng thái</th></tr></thead><tbody>${rows}</tbody></table></div>
   `;
   const foot=`<button class="btn-sec" onclick="closeModal()">Hủy</button>
+              <button class="btn-sec" onclick="_exportApDupesExcel()" style="color:var(--good);border-color:var(--good)">📊 Xuất Excel để NV check</button>
               <button class="btn-primary" style="background:var(--bad)" onclick="_doDedupePayables()">🗑 Xóa các bản đã tick</button>`;
   openModal(`Rà công nợ phải trả trùng · ${groups.length} nhóm`, body, foot);
+}
+/* v3.01.48: Xuất Excel danh sách bản trùng để NV đối chiếu offline (không xóa gì). */
+function _exportApDupesExcel(){
+  const groups=_apDupeGroups();
+  if(!groups.length){ toast('Không có bản trùng để xuất','warn'); return; }
+  if(typeof XLSX==='undefined'){ toast('Thiếu thư viện Excel','bad'); return; }
+  const aoa=[['Nhóm','Số HĐ','NCC','Số tiền','Tiền tệ','Vai trò','Diễn giải','Ngày HĐ','Người nhập','Nguồn','Tạo lúc','ID','Trạng thái','Đã thanh toán']];
+  let gi=0;
+  groups.forEach(g=>{
+    gi++;
+    g.sort((a,b)=>String(a.createdAt||'').localeCompare(String(b.createdAt||'')));
+    g.forEach((r,idx)=>{
+      const paid=(r.payments||[]).reduce((s,p)=>s+(+p.amount||0),0);
+      const src = r.autoSource ? ('Auto:'+r.autoSource)
+        : (r._importedFromExcel||r._importBatch) ? 'Import Excel'
+        : (r._origin || 'Nhập tay');
+      aoa.push([
+        gi,
+        r.invoiceNo||'',
+        r.partner||'',
+        +r.amount||0,
+        r.ccy||'',
+        idx===0?'GIỮ (gốc)':'BẢN DƯ',
+        (r.desc||''),
+        r.issueDate||'',
+        r.createdBy||r.addedBy||'',
+        src,
+        (r.createdAt||'').slice(0,16).replace('T',' '),
+        r.id||'',
+        (r.status==='approved'?'đã duyệt':(r.status||'nháp')),
+        paid>0?paid:0
+      ]);
+    });
+  });
+  const ws=XLSX.utils.aoa_to_sheet(aoa);
+  ws['!cols']=[{wch:6},{wch:18},{wch:30},{wch:16},{wch:8},{wch:12},{wch:40},{wch:12},{wch:12},{wch:16},{wch:18},{wch:16},{wch:12},{wch:14}];
+  const wb=XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, 'AP trùng');
+  const fname=`SM_AP_Trung_${todayISO()}.xlsx`;
+  XLSX.writeFile(wb, fname);
+  toast('Đã xuất: '+fname,'good');
+  try{ logAuditEvent('ap_dupes_export',{groups:groups.length, rows:aoa.length-1}); }catch(e){}
 }
 function _doDedupePayables(){
   const checks=Array.from(document.querySelectorAll('.ap-dup-del:checked'));
