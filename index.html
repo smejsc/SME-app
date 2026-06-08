@@ -450,6 +450,8 @@ body.readonly-mode::before{
 .loan-lender-group summary:hover{background:rgba(28,58,92,.10) !important}
 .loan-lender-group[open] .loan-lender-chevron{transform:rotate(90deg);color:var(--ink) !important}
 .loan-lender-chevron{transition:transform .15s ease}
+.bank-group[open] .bank-group-chevron{transform:rotate(90deg);color:var(--ink) !important}
+.bank-group-chevron{transition:transform .15s ease}
 .rep-guide{display:flex;gap:8px;align-items:flex-start;margin:0 0 14px;padding:9px 12px;background:rgba(28,58,92,.05);border-left:3px solid var(--ink);font-size:11.5px;line-height:1.55;color:var(--ink-soft);border-radius:0 2px 2px 0}
 .rep-guide::before{content:'📖';font-size:13px;line-height:1.3;flex-shrink:0}
 .rep-guide b{color:var(--ink);font-weight:600}
@@ -1646,9 +1648,13 @@ body.readonly-mode::before{
     <div id="loan-filter-bar" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;background:rgba(0,0,0,.02);border:1px solid var(--rule);padding:8px 12px;margin-bottom:10px;font-size:12px">
       <span style="color:var(--muted);font-weight:600">Lọc:</span>
       <label style="display:flex;align-items:center;gap:5px">
-        Ngân hàng
-        <select id="loan-filter-bank" onchange="renderBanking()" style="font-size:12px;padding:3px 6px">
+        Loại vay
+        <select id="loan-filter-term" onchange="renderBanking()" style="font-size:12px;padding:3px 6px">
           <option value="">— Tất cả —</option>
+          <option value="short">Ngắn hạn (&lt;12 kỳ)</option>
+          <option value="medium">Trung hạn (12–60 kỳ)</option>
+          <option value="long">Dài hạn (&gt;60 kỳ)</option>
+          <option value="unscheduled">Chưa phân kỳ</option>
         </select>
       </label>
       <label style="display:flex;align-items:center;gap:5px">
@@ -2697,7 +2703,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.01.30';            // bumped on each release
+const APP_VERSION='3.01.34';            // bumped on each release
 
 /* v2.62.0: Token xác thực backend — PHẢI khớp API_TOKEN trong Apps Script (Code.gs).
    Mọi request tới Apps Script tự động được gắn token qua lớp bọc fetch bên dưới.
@@ -18224,6 +18230,20 @@ function viewCashLedger(fundId){
   openModal('📒 Sổ quỹ — '+esc(f.name),body,'<button class="btn-sec" onclick="closeModal()">Đóng</button>');
 }
 
+/* v3.01.33: Phân loại kỳ hạn vay — ưu tiên l.loanType nếu có, không thì auto theo số kỳ trả.
+   short = ngắn hạn (<12 kỳ), medium = trung hạn (12–60), long = dài hạn (>60),
+   unscheduled = chưa phân kỳ (vd vay không lịch trả cố định). */
+function loanTermType(l){
+  if(!l) return 'unscheduled';
+  if(l.loanType && ['short','medium','long','unscheduled'].includes(l.loanType)) return l.loanType;
+  const n=(l.paymentSchedule||[]).length;
+  if(!n) return 'unscheduled';
+  if(n<12) return 'short';
+  if(n<=60) return 'medium';
+  return 'long';
+}
+const LOAN_TERM_LABELS={short:'Ngắn hạn',medium:'Trung hạn',long:'Dài hạn',unscheduled:'Chưa phân kỳ'};
+
 function renderBanking(){
   if(!document.getElementById('page-banking')) return;
   const accounts = S.bankAccounts||[];
@@ -18302,23 +18322,46 @@ function renderBanking(){
     if(accounts.length===0){
       accBox.innerHTML = '<div style="padding:30px;text-align:center;color:var(--muted);background:var(--paper);border:1px dashed var(--rule)">Chưa có tài khoản. Bấm <b>+ Tài khoản NH</b> để thêm.</div>';
     } else {
-      // Group by bank
+      // v3.01.34: gom NH dạng accordion thu gọn (giống Tín dụng & Vay) — mỗi NH 1 thanh,
+      // bấm để mở/đóng; summary hiện số TK + tổng số dư theo từng tiền tệ.
       const byBank={};
       accounts.forEach(a=>{
         const k=a.bankName||'(Chưa rõ NH)';
         if(!byBank[k]) byBank[k]=[];
         byBank[k].push(a);
       });
+      // sắp xếp NH theo tổng số dư quy USD giảm dần
+      const _balUsd=(a)=>{ const s=bankLatestSnapshot(a.id); const b=s?+s.balance||0:0; return toDisplay(b, a.ccy||'VND'); };
+      const bankEntries=Object.entries(byBank).sort((x,y)=>{
+        const tx=x[1].reduce((s,a)=>s+_balUsd(a),0);
+        const ty=y[1].reduce((s,a)=>s+_balUsd(a),0);
+        return ty-tx;
+      });
       let html='';
-      Object.entries(byBank).forEach(([bank,accs])=>{
-        html+=`<div style="font-family:var(--font-display);font-size:13px;font-weight:600;margin:14px 0 6px;color:var(--accent)">🏦 ${esc(bank)} <span style="font-weight:400;color:var(--muted);font-size:11px">(${accs.length} TK)</span></div>`;
+      bankEntries.forEach(([bank,accs])=>{
+        // tổng số dư theo từng ccy cho NH này
+        const balByCcy={};
+        accs.forEach(a=>{
+          const s=bankLatestSnapshot(a.id);
+          const b=s?+s.balance||0:0;
+          const c=a.ccy||'VND';
+          balByCcy[c]=(balByCcy[c]||0)+b;
+        });
+        const balTxt=Object.entries(balByCcy).filter(([_,v])=>v!==0)
+          .map(([c,v])=>`${v.toLocaleString('vi-VN')} ${c}`).join(' + ') || '0';
+        html+=`<details class="bank-group" style="margin:14px 0 0;border:1px solid var(--rule);border-radius:3px;background:var(--paper)">
+          <summary style="font-family:var(--font-display);font-size:14px;font-weight:700;padding:10px 14px;background:rgba(28,58,92,.06);border-left:4px solid var(--ink);color:var(--ink);cursor:pointer;list-style:none;display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;user-select:none">
+            <span style="display:flex;align-items:center;gap:8px"><span class="bank-group-chevron" style="font-size:10px;width:12px;display:inline-block;color:var(--muted)">▶</span> 🏦 ${esc(bank)} <span style="font-weight:400;color:var(--muted);font-size:11px">(${accs.length} TK)</span></span>
+            <span style="font-size:12px;color:var(--good);font-weight:600">Số dư: ${balTxt}</span>
+          </summary>
+          <div style="padding:6px 8px 10px">`;
         accs.forEach(a=>{
           const snap = bankLatestSnapshot(a.id);
           const bal = snap ? +snap.balance||0 : 0;
           const dateLabel = snap ? snap.date : '(chưa có snapshot)';
           const inactiveStyle = a.isActive===false ? 'opacity:.5;text-decoration:line-through' : '';
           html+=`
-            <div style="display:flex;align-items:center;gap:12px;padding:10px 14px;border:1px solid var(--rule);background:var(--paper);margin-bottom:6px;${inactiveStyle}">
+            <div style="display:flex;align-items:center;gap:12px;padding:10px 14px;border:1px solid var(--rule);background:var(--paper);margin:0 8px 6px;${inactiveStyle}">
               <div style="flex:1;min-width:0">
                 <div style="font-weight:600;font-size:13px">${esc(a.accountName||'(không tên)')}${a.isActive===false?' <span class="chip" style="font-size:9px;background:var(--muted);color:#fff">NGỪNG</span>':''}</div>
                 <div style="font-size:11px;color:var(--muted);font-family:var(--font-mono)">${esc(a.accountNo||'')}${a.branch?' · '+esc(a.branch):''} · ${esc(a.ccy||'')}</div>
@@ -18335,6 +18378,7 @@ function renderBanking(){
               </div>
             </div>`;
         });
+        html+=`</div></details>`;
       });
       accBox.innerHTML = html;
     }
@@ -18406,22 +18450,14 @@ function renderBanking(){
     if(loans.length===0){
       loanBox.innerHTML = '<div style="padding:30px;text-align:center;color:var(--muted);background:var(--paper);border:1px dashed var(--rule)">Chưa có món vay nào. Bấm <b>+ Món vay mới</b> để thêm.</div>';
     } else {
-      // v2.65.0: Đổ danh sách ngân hàng vào dropdown lọc (giữ lựa chọn hiện tại)
-      const bankSel = document.getElementById('loan-filter-bank');
-      if(bankSel){
-        const banks = [...new Set(loans.map(l=>l.bankName||'(Chưa rõ NH)'))].sort();
-        const prevBank = bankSel.value;
-        bankSel.innerHTML = '<option value="">— Tất cả —</option>'
-          + banks.map(b=>`<option value="${esc(b)}">${esc(b)}</option>`).join('');
-        if(banks.includes(prevBank)) bankSel.value = prevBank;
-      }
+      // v3.01.33: bỏ dropdown ngân hàng — thay bằng lọc theo loại vay (kỳ hạn)
       // v2.65.0: Đọc tiêu chí lọc
-      const fBank   = (document.getElementById('loan-filter-bank')||{}).value || '';
+      const fTerm   = (document.getElementById('loan-filter-term')||{}).value || '';
       const fStatus = (document.getElementById('loan-filter-status')||{}).value || '';
       const fText   = ((document.getElementById('loan-filter-text')||{}).value || '').toLowerCase().trim();
-      // v2.65.0: Lọc danh sách khoản vay theo tiêu chí
+      // v3.01.33: lọc danh sách khoản vay theo tiêu chí (loại vay / trạng thái / tìm)
       const loansFiltered = loans.filter(l=>{
-        if(fBank && (l.bankName||'(Chưa rõ NH)') !== fBank) return false;
+        if(fTerm && loanTermType(l) !== fTerm) return false;
         if(fStatus){
           const st = l.status==='closed' ? 'closed'
                    : l.status==='overdue' ? 'overdue' : 'active';
@@ -18446,21 +18482,23 @@ function renderBanking(){
           });
         });
         const remTxt = Object.entries(remByCcy).filter(([_,v])=>v>0).map(([c,v])=>`${v.toLocaleString('vi-VN')} ${c}`).join(' · ') || '0';
-        const intTxt = Object.entries(paidIntByCcy).filter(([_,v])=>v>0).map(([c,v])=>`${v.toLocaleString('vi-VN')} ${c}`).join(' · ') || '0';
-        const filterTag = (fBank||fStatus||fText) ? ' (đang lọc)' : '';
-        cntEl.innerHTML = `<span style="font-weight:500">${(fBank||fStatus||fText)?`Hiển thị ${loansFiltered.length}/${loans.length} khoản vay`:`${loans.length} khoản vay`}</span>
+        // v3.01.33: lãi đã trả — tách rõ VND (vay NH trong nước) và USD (vay ngoại tệ)
+        const intVnd = +paidIntByCcy['VND']||0;
+        const intUsd = +paidIntByCcy['USD']||0;
+        const intOther = Object.entries(paidIntByCcy).filter(([c,v])=>c!=='VND'&&c!=='USD'&&v>0).map(([c,v])=>`${Math.round(v).toLocaleString('vi-VN')} ${c}`).join(' · ');
+        const intParts=[];
+        intParts.push(`<b>${Math.round(intVnd).toLocaleString('vi-VN')} VND</b>`);
+        if(intUsd>0) intParts.push(`<b>${Math.round(intUsd).toLocaleString('vi-VN')} USD</b>`);
+        if(intOther) intParts.push(intOther);
+        const intTxt = intParts.join(' · ');
+        const filterTag = (fTerm||fStatus||fText) ? ' (đang lọc)' : '';
+        cntEl.innerHTML = `<span style="font-weight:500">${(fTerm||fStatus||fText)?`Hiển thị ${loansFiltered.length}/${loans.length} khoản vay`:`${loans.length} khoản vay`}</span>
           <span style="margin-left:14px;color:var(--warn)">📊 Dư nợ gốc${filterTag}: <b>${remTxt}</b></span>
-          <span style="margin-left:14px;color:#2d6a6a">💸 Lãi đã trả: <b>${intTxt}</b></span>`;
+          <span style="margin-left:14px;color:#2d6a6a">💸 Lãi đã trả: ${intTxt}</span>`;
       }
       // v2.99.13: Nhóm 2 cấp — Bên cho vay (lender/bankName) → Loại hạn (auto theo paymentSchedule.length)
       // Loại hạn auto: <12 kỳ = short, 12-60 = medium, >60 = long. Nếu loan có loanType cũ thì ưu tiên dùng.
-      const _autoLoanType = (l) => {
-        const n = (l.paymentSchedule||[]).length;
-        if(!n) return l.loanType || 'unscheduled';  // chưa có lịch (vd vay NN không phân kỳ)
-        if(n < 12) return 'short';
-        if(n <= 60) return 'medium';
-        return 'long';
-      };
+      const _autoLoanType = (l) => loanTermType(l);
       const _lenderIcon = (name) => {
         const n = (name||'').toLowerCase();
         // Heuristic: NH Việt Nam có chữ "bank/NH" hoặc 1 số NH phổ biến
@@ -18587,7 +18625,7 @@ function renderBanking(){
 
 /* v2.65.0: Xóa toàn bộ bộ lọc khoản vay, hiển thị lại tất cả */
 function loanFilterReset(){
-  const b=document.getElementById('loan-filter-bank');   if(b) b.value='';
+  const b=document.getElementById('loan-filter-term');   if(b) b.value='';
   const s=document.getElementById('loan-filter-status'); if(s) s.value='';
   const t=document.getElementById('loan-filter-text');   if(t) t.value='';
   renderBanking();
@@ -27348,7 +27386,8 @@ function hideChartTip(containerId){
    renderVesselDrilldown(vid) — vid rỗng = vẽ bảng tổng; có vid = chi tiết tàu đó.
    ============================================================ */
 function _vesselRevCost(vid){
-  // DT/CP theo tàu: gồm tx gắn dự án thuộc tàu HOẶC gắn thẳng vesselId (mỗi tx 1 lần).
+  // v3.01.31: DT/CP theo tàu — tính bút toán ĐÃ DUYỆT (approved) gắn dự án thuộc tàu HOẶC gắn thẳng vesselId.
+  // (giữ "đã duyệt" làm số chính thức; phần CHƯA duyệt tách riêng qua _vesselExpected*.)
   const projIds=new Set(S.projects.filter(p=>p.vesselId===vid).map(p=>p.id));
   const txs=viewerScopeTx().filter(t=>(t.projectId && projIds.has(t.projectId)) || t.vesselId===vid);
   const rev=txs.filter(t=>t.type==='REV').reduce((s,t)=>s+txAmt(t),0);
@@ -27374,45 +27413,64 @@ function _vesselExpectedRev(vid){
   });
   return {expected:sum, count:n};
 }
+/* v3.01.31: CHI PHÍ CHƯA DUYỆT theo tàu = AP draft/pending (KHÔNG gồm rejected/approved)
+   gắn dự án thuộc tàu HOẶC gắn thẳng vesselId. Lọc qua apCountsInPL (bỏ CapEx/PO tồn kho). */
+function _vesselExpectedCost(vid){
+  const projIds=new Set(S.projects.filter(p=>p.vesselId===vid).map(p=>p.id));
+  let sum=0, n=0;
+  (S.payables||[]).forEach(r=>{
+    const s=wfStatus(r);
+    if(s==='approved'||s==='rejected') return;     // chỉ tính khoản chưa duyệt
+    if(!apCountsInPL(r)) return;                    // bỏ CapEx (Dock/SCL) + PO tồn kho — như mục A đã loại CapEx
+    const viaProject = r.projectId && projIds.has(r.projectId);
+    const viaVessel  = r.vesselId === vid;
+    if(!(viaProject||viaVessel)) return;
+    sum += toDisplay(+r.amountNet||+r.amount||0, r.ccy||'USD');
+    n++;
+  });
+  return {expected:sum, count:n};
+}
 
 function renderVesselSummaryTable(){
   const block=document.getElementById('rep-vessel-summary');
   if(!block) return;
   const vessels=isViewer()?S.vessels.filter(v=>viewerCanSeeVessel(v.id)):S.vessels;
   if(!vessels.length){ block.innerHTML='<div class="empty">Chưa có tàu công ty nào. Thêm ở Danh mục → Tàu (nhóm Tàu công ty).</div>'; return; }
-  let sRev=0,sCost=0,sOn=0,sExpected=0;
+  let sRev=0,sCost=0,sOn=0,sExpected=0,sExpCost=0;
   const rows=vessels.map(v=>{
     const {rev,cost}=_vesselRevCost(v.id);
     const {expected,count:expCount}=_vesselExpectedRev(v.id);
+    const {expected:expCost,count:expCostCount}=_vesselExpectedCost(v.id);
     const oh=S.onhires.filter(o=>o.vesselId===v.id);
     const onDays=oh.reduce((s,o)=>s+(+o.on||0),0);
-    sRev+=rev; sCost+=cost; sOn+=onDays; sExpected+=expected;
-    const margin=rev-cost;
-    const unitCost=onDays?cost/onDays:0;  // đơn giá chi phí / ngày khai thác
-    return {v,rev,cost,margin,onDays,unitCost,expected,expCount};
+    sRev+=rev; sCost+=cost; sOn+=onDays; sExpected+=expected; sExpCost+=expCost;
+    return {v,rev,cost,onDays,expected,expCount,expCost,expCostCount};
   });
   const rowHtml=rows.map(r=>{
-    const totalDT=r.rev+r.expected;            // v3.01.27: tổng DT gồm dự kiến
-    const mTotal=totalDT-r.cost;
+    const totalDT=r.rev+r.expected;            // DT gồm dự kiến
+    const totalCP=r.cost+r.expCost;            // v3.01.31: CP gồm chưa duyệt
+    const mTotal=totalDT-totalCP;
     const mPct=totalDT?((mTotal/totalDT)*100).toFixed(1)+'%':'—';
+    const unitCost=r.onDays?totalCP/r.onDays:0;
     return `<tr style="cursor:pointer" onclick="renderVesselDrilldown('${r.v.id}')" title="Bấm xem chi tiết dự án của tàu ${esc(r.v.name)}">
       <td><b>${esc(r.v.name)}</b> <span style="color:var(--muted);font-size:11px">${r.v.type==='SERVICE'?'DV':'KT'}</span></td>
       <td class="r num"><div style="font-weight:600">${fmt(totalDT)}</div>${r.expected>0.0001?`<div style="font-size:10px;color:var(--good)">đã xuất HĐ ${fmt(r.rev)}</div><div style="font-size:10px;color:var(--warn)">dự kiến ${fmt(r.expected)} (${r.expCount})</div>`:''}</td>
-      <td class="r num">${fmt(r.cost)}</td>
+      <td class="r num"><div style="font-weight:600">${fmt(totalCP)}</div>${r.expCost>0.0001?`<div style="font-size:10px;color:var(--bad)">đã duyệt ${fmt(r.cost)}</div><div style="font-size:10px;color:var(--warn)">chưa duyệt ${fmt(r.expCost)} (${r.expCostCount})</div>`:''}</td>
       <td class="r num" style="color:${mTotal>=0?'var(--good)':'var(--bad)'};font-weight:600">${fmt(mTotal)}</td>
       <td class="r num" style="font-size:11px;color:var(--muted)">${mPct}</td>
       <td class="r num" style="font-size:11px">${r.onDays}</td>
-      <td class="r num">${r.onDays?fmt(r.unitCost):'—'}</td>
+      <td class="r num">${r.onDays?fmt(unitCost):'—'}</td>
     </tr>`;
   }).join('');
   const sTotalDT=sRev+sExpected;
-  const sMargin=sTotalDT-sCost;
+  const sTotalCP=sCost+sExpCost;
+  const sMargin=sTotalDT-sTotalCP;
   block.innerHTML=`
     <div class="tbl-scroll"><table class="tbl" style="font-size:12px">
       <thead><tr>
         <th>Tàu</th>
         <th class="r" title="Tổng doanh thu = Đã xuất HĐ + Dự kiến (chưa xuất HĐ). Gồm gắn thẳng tàu + qua dự án.">Doanh thu (gồm dự kiến)</th>
-        <th class="r" title="Chi phí tích lũy (gồm AP gắn tàu + qua dự án)">Chi phí</th>
+        <th class="r" title="Tổng chi phí = Đã duyệt + Chưa duyệt. Gồm AP gắn tàu + qua dự án. Bỏ CapEx/PO tồn kho.">Chi phí (gồm chưa duyệt)</th>
         <th class="r">Margin</th>
         <th class="r">Margin %</th>
         <th class="r" title="Số ngày Onhire">Ngày KT</th>
@@ -27422,14 +27480,14 @@ function renderVesselSummaryTable(){
       <tr class="total">
         <td>∑ TỔNG (${rows.length} tàu)</td>
         <td class="r"><div>${fmt(sTotalDT)}</div>${sExpected>0.0001?`<div style="font-size:10px;color:var(--good)">đã xuất HĐ ${fmt(sRev)}</div><div style="font-size:10px;color:var(--warn)">dự kiến ${fmt(sExpected)}</div>`:''}</td>
-        <td class="r">${fmt(sCost)}</td>
+        <td class="r"><div>${fmt(sTotalCP)}</div>${sExpCost>0.0001?`<div style="font-size:10px;color:var(--bad)">đã duyệt ${fmt(sCost)}</div><div style="font-size:10px;color:var(--warn)">chưa duyệt ${fmt(sExpCost)}</div>`:''}</td>
         <td class="r" style="color:${sMargin>=0?'var(--good)':'var(--bad)'}">${fmt(sMargin)}</td>
         <td class="r">${sTotalDT?((sMargin/sTotalDT)*100).toFixed(1)+'%':'—'}</td>
         <td class="r">${sOn}</td>
-        <td class="r">${sOn?fmt(sCost/sOn):'—'}</td>
+        <td class="r">${sOn?fmt(sTotalCP/sOn):'—'}</td>
       </tr>
       </tbody></table></div>
-    <div style="margin-top:6px;font-size:10px;color:var(--muted);font-style:italic">💡 Bấm tên tàu để xem chi tiết. <b>Doanh thu = Đã xuất HĐ (đã duyệt) + Dự kiến (chưa xuất HĐ)</b>; dòng nhỏ tách rõ 2 phần. Chi phí chỉ tính bút toán đã duyệt.</div>`;
+    <div style="margin-top:6px;font-size:10px;color:var(--muted);font-style:italic">💡 Bấm tên tàu để xem chi tiết. <b>Doanh thu = Đã xuất HĐ + Dự kiến</b>; <b>Chi phí = Đã duyệt + Chưa duyệt</b>; dòng nhỏ tách rõ. (Chỉ gồm chi phí GẮN tàu/dự án — chi phí chỉ gắn mảng, không gắn tàu, xem ở mục A.)</div>`;
 }
 
 function renderVesselDrilldown(vid){
@@ -27458,6 +27516,7 @@ function renderVesselDrilldown(vid){
   const totRev=totRevTx+histV.revenue;
   const totCost=totCostTx+histV.cost;
   const _vexp=_vesselExpectedRev(vid);  // v3.01.27: DT dự kiến (AR chưa xuất HĐ) theo tàu
+  const _vexpCost=_vesselExpectedCost(vid);  // v3.01.31: CP chưa duyệt theo tàu
   const hasHistV=(histV.revenue>0||histV.cost>0);
   const totFuel=allTxs.filter(t=>t.type==='COST'&&FUEL_CAT_NAMES.includes(t.category)).reduce((s,t)=>s+txAmt(t),0);
   const totOpex=totCost-totFuel;
@@ -27474,7 +27533,7 @@ function renderVesselDrilldown(vid){
     <div class="kpi-grid" style="margin-bottom:18px">
       <div class="kpi"><div class="kpi-label">Tàu</div><div class="kpi-value" style="font-size:22px">${esc(v.name)}</div><div class="kpi-sub">${v.type==='SERVICE'?'Tàu dịch vụ':'Tàu kỹ thuật'} · ${v.dwt?v.dwt.toLocaleString()+' DWT':''} · IMO ${esc(v.imo) || '—'}</div></div>
       <div class="kpi"><div class="kpi-label">Tổng DT (tất cả năm)</div><div class="kpi-value">${fmt(totRev+_vexp.expected)}</div><div class="kpi-sub">${_vexp.expected>0.0001?`đã xuất HĐ ${fmt(totRev)} · dự kiến ${fmt(_vexp.expected)} (${_vexp.count})`:`${projects.length} dự án · ${allTxs.length} bút toán`}</div></div>
-      <div class="kpi"><div class="kpi-label">Margin tích lũy</div><div class="kpi-value" style="color:${(totRev+_vexp.expected)-totCost>=0?'var(--good)':'var(--bad)'}">${fmt((totRev+_vexp.expected)-totCost)}</div><div class="kpi-sub">${(totRev+_vexp.expected)?(((totRev+_vexp.expected)-totCost)/(totRev+_vexp.expected)*100).toFixed(1)+'%':'—'} · gồm DT dự kiến</div></div>
+      <div class="kpi"><div class="kpi-label">Margin tích lũy</div><div class="kpi-value" style="color:${(totRev+_vexp.expected)-(totCost+_vexpCost.expected)>=0?'var(--good)':'var(--bad)'}">${fmt((totRev+_vexp.expected)-(totCost+_vexpCost.expected))}</div><div class="kpi-sub">${(totRev+_vexp.expected)?(((totRev+_vexp.expected)-(totCost+_vexpCost.expected))/(totRev+_vexp.expected)*100).toFixed(1)+'%':'—'} · DT &amp; CP gồm chưa duyệt${_vexpCost.expected>0.0001?` · CP chưa duyệt ${fmt(_vexpCost.expected)}`:''}</div></div>
       <div class="kpi"><div class="kpi-label">Đơn giá BQ</div><div class="kpi-value">${fmt(avgSell)}</div><div class="kpi-sub">Opex/On ${fmt(avgOpex)} · Fuel/On ${fmt(avgFuel)}</div></div>
     </div>
     ${hasHistV?`<div class="rep-guide" style="background:rgba(184,71,46,.06);border-color:var(--accent);margin-bottom:14px"><span>📊 <b>Đã gồm số liệu lịch sử:</b> Tổng DT/Margin của tàu đã cộng số liệu năm cũ (DT ${fmt(histV.revenue)} · CP ${fmt(histV.cost)}). Các bảng dự án chi tiết bên dưới chỉ tính từ bút toán trong app.</span></div>`:''}`;
@@ -28442,10 +28501,12 @@ function renderAgingReport(){
     if(c) arItems.push(c);
   });
 
-  // AP buckets
+  // AP buckets — v3.01.32: tính CẢ chưa duyệt (mọi trạng thái trừ rejected) để thấy hết công nợ,
+  // đồng bộ với mục A. Bỏ CapEx/PO tồn kho (apCountsInPL) như P&L.
   const apItems=[];
   (S.payables||[]).forEach(r=>{
-    if(wfStatus(r)!=='approved') return;
+    if(wfStatus(r)==='rejected') return;
+    if(!apCountsInPL(r)) return;
     if(isViewer() && !viewerCanSeeSegment(r.segment)) return;
     const c=classify(r);
     if(c) apItems.push(c);
@@ -28514,11 +28575,13 @@ function renderAgingReport(){
 
   let html=`<div style="display:grid;grid-template-columns:1fr 1fr;gap:18px">
     <div>
-      <div style="font-family:var(--font-display);font-size:14px;font-weight:600;margin-bottom:10px;color:var(--good)">Phải thu (AR) — ${arItems.length} bản ghi</div>
+      <div style="font-family:var(--font-display);font-size:14px;font-weight:600;margin-bottom:2px;color:var(--good)">Phải thu (AR) — ${arItems.length} bản ghi</div>
+      <div style="font-size:10px;color:var(--muted);font-style:italic;margin-bottom:10px">Chỉ khoản đã xuất HĐ (đã duyệt) còn phải thu</div>
       ${arItems.length?renderTable(arItems,'Phải thu'):'<div class="empty">Không có công nợ phải thu</div>'}
     </div>
     <div>
-      <div style="font-family:var(--font-display);font-size:14px;font-weight:600;margin-bottom:10px;color:var(--accent)">Phải trả (AP) — ${apItems.length} bản ghi</div>
+      <div style="font-family:var(--font-display);font-size:14px;font-weight:600;margin-bottom:2px;color:var(--accent)">Phải trả (AP) — ${apItems.length} bản ghi</div>
+      <div style="font-size:10px;color:var(--muted);font-style:italic;margin-bottom:10px">Gồm cả khoản chưa duyệt (bỏ CapEx/PO tồn kho)</div>
       ${apItems.length?renderTable(apItems,'Phải trả'):'<div class="empty">Không có công nợ phải trả</div>'}
     </div>
   </div>`;
