@@ -2697,7 +2697,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.01.25';            // bumped on each release
+const APP_VERSION='3.01.26';            // bumped on each release
 
 /* v2.62.0: Token xác thực backend — PHẢI khớp API_TOKEN trong Apps Script (Code.gs).
    Mọi request tới Apps Script tự động được gắn token qua lớp bọc fetch bên dưới.
@@ -4670,7 +4670,7 @@ async function authAction(){
       _suppressAutoSync=true;
       setTimeout(()=>{ _suppressAutoSync=false; }, 5000);
       setTimeout(()=>cloudSync('pull')
-        .then(()=>{ try{ let ch=0; if(pruneDeletedIds(120)>0) ch++; if(_healCatalogTombstones()>0) ch++; if(ch) saveState(); }catch(e){} })
+        .then(()=>{ try{ let ch=0; if(pruneDeletedIds(365)>0) ch++; if(_healCatalogTombstones()>0) ch++; if(enforcePurgedBatches()>0) ch++; if(ch) saveState(); }catch(e){} })
         .catch(e=>console.warn('[post-login pull]', e&&e.message))
         .finally(()=>{
           // v2.82.0: đảm bảo presenceStart LUÔN chạy sau login — dù pull có thành công hay không.
@@ -4951,7 +4951,7 @@ const TAB_TO_FIELDS={
    IMPORTANT v1.39.1: bankAccounts/bankSnapshots/loans REMOVED from shared — chỉ user có quyền tab 'banking' mới load. */
 // v1.57.0: auditLog REMOVED from shared sync — stays local only (admin trên 1 máy chính)
 // Trade-off: nếu admin đăng nhập máy khác → audit log empty. Đổi lại: giảm payload size.
-const SHARED_FIELDS=['fxRate','fxRateAt','displayCcy','companyInfo','meta','presence','vesselExpenseCats','omProjectExpenseCats','hrExpenseCats','qnExpenseCats','departments','vendors','expenseTypes','revenueTypes','companies','deletedIds','auditLogShared','cashflowConfig'];
+const SHARED_FIELDS=['fxRate','fxRateAt','displayCcy','companyInfo','meta','presence','vesselExpenseCats','omProjectExpenseCats','hrExpenseCats','qnExpenseCats','departments','vendors','expenseTypes','revenueTypes','companies','deletedIds','purgedBatches','auditLogShared','cashflowConfig'];
 /* All possible data fields (used by admin or for save-merge) */
 const ALL_DATA_FIELDS=[
   'plans','projects','vessels','onhires','events',
@@ -8977,6 +8977,8 @@ async function cloudSync(mode, opts){
         });
         S.cashflowConfig = cc;
       }catch(e){ console.warn('[pull cashflowConfig preserve]', e&&e.message); }
+      // v3.01.26: DIỆT TẬN GỐC — dọn lại mọi lô đã xóa vĩnh viễn (rác từ cloud/snapshot không sống lại)
+      try{ enforcePurgedBatches(); }catch(e){ console.warn('[pull enforcePurged]', e&&e.message); }
       await saveStateEncrypted();
       try{ _updateLastKnownRecordCount(); }catch(e){}  // v2.99.30: cập nhật mốc cao nhất
       renderAll({fromSync:true});
@@ -10139,6 +10141,7 @@ function defaultState(){
     historicalData:[],  // v1.83.0: số liệu lịch sử tổng hợp — [{id,year,kind,segment,vesselId,projectId,companyId,amount,ccy,note}]
     lockedHistYears:[],  // v2.39.0: danh sách năm số liệu lịch sử đã KHÓA SỔ (admin khóa — không sửa/xóa được tới khi mở khóa)
     deletedIds:[],  // v2.40.0: danh sách ID đã xóa (tombstone) — [{id,at}] — chống bản ghi hồi sinh qua sync
+    purgedBatches:[],  // v3.01.26: lô import bị XÓA VĨNH VIỄN — [{batchId,field,at}] — chặn lô rác sống lại từ cloud/snapshot dù bia mộ bị dọn
     meta:{created:new Date().toISOString()}
   };
 }
@@ -10254,6 +10257,57 @@ function mergeByID(cloudArr, localArr, idField, skipTombstone, fieldName){
    ============================================================ */
 function _deletedIds(){ if(!Array.isArray(S.deletedIds)) S.deletedIds=[]; return S.deletedIds; }
 
+/* v3.01.26: PURGED BATCHES — "lô đã xóa thì cấm tồn tại vĩnh viễn".
+   Bền hơn bia mộ theo id: bia mộ có thể bị dọn theo tuổi, nhưng quy tắc "lô X cấm sống"
+   được giữ trong purgedBatches (SHARED_FIELDS, đồng bộ mọi máy) và áp lại sau MỖI pull/mở app/gộp snapshot.
+   Diệt tận gốc tình trạng rác import sống lại từ cloud/snapshot cũ. */
+function _purgedBatches(){ if(!Array.isArray(S.purgedBatches)) S.purgedBatches=[]; return S.purgedBatches; }
+function registerPurgedBatch(batchId, field){
+  if(!batchId) return;
+  const list=_purgedBatches();
+  if(!list.some(p=>p && p.batchId===batchId)){
+    list.push({batchId, field:field||'', at:new Date().toISOString(), by:(typeof actorName==='function'?actorName():'')});
+  }
+}
+/* Quét mọi mảng dữ liệu, xóa sạch bản ghi thuộc lô đã purge. Trả về số bản đã dọn. */
+function enforcePurgedBatches(){
+  const list=_purgedBatches();
+  if(!list.length) return 0;
+  const purgedIds=new Set(list.map(p=>p.batchId));
+  const fields=['payables','receivables','opTransactions'];
+  let removed=0;
+  fields.forEach(f=>{
+    if(!Array.isArray(S[f])) return;
+    const before=S[f].length;
+    const victims=S[f].filter(r=>r && purgedIds.has(r._importBatch));
+    if(victims.length){
+      // bia-mộ-hóa lại cho chắc (chặn merge-by-id) + xóa khỏi mảng
+      try{ markDeleted(victims.map(r=>r.id).filter(Boolean), f); }catch(e){}
+      S[f]=S[f].filter(r=>!(r && purgedIds.has(r._importBatch)));
+      removed += (before - S[f].length);
+    }
+  });
+  if(removed>0) console.log('[enforcePurged] đã dọn lại', removed, 'bản ghi thuộc lô đã xóa vĩnh viễn');
+  return removed;
+}
+/* v3.01.26: Console — xóa VĨNH VIỄN 1 lô theo batchId (hoặc chuỗi con), đăng ký purge + dọn + lưu.
+   Dùng: purgeBatchNow('ivsx')  → cấm lô chứa 'ivsx' sống lại mãi mãi. */
+function purgeBatchNow(batchSub){
+  if(!batchSub){ console.log('Cần truyền batchId hoặc chuỗi con, vd purgeBatchNow("ivsx")'); return; }
+  const fields=['payables','receivables','opTransactions'];
+  const batches=new Set();
+  fields.forEach(f=>{ (S[f]||[]).forEach(r=>{ if(r && r._importBatch && r._importBatch.includes(batchSub)) batches.add(r._importBatch); }); });
+  if(!batches.size){ console.log('Không thấy lô nào chứa:', batchSub, '(có thể đã xóa rồi — vẫn đăng ký purge để chắc)'); }
+  batches.forEach(b=>{
+    fields.forEach(f=>{ const has=(S[f]||[]).some(r=>r&&r._importBatch===b); if(has) registerPurgedBatch(b, f); });
+    registerPurgedBatch(b, '');
+  });
+  const removed=enforcePurgedBatches();
+  saveState();
+  if(typeof renderAll==='function') renderAll();
+  console.log('✅ Đã purge', batches.size, 'lô (chứa "'+batchSub+'"), dọn', removed, 'bản. Bấm Sync để đẩy lên cloud — lô này sẽ KHÔNG sống lại nữa.');
+}
+
 // v2.99.64: Danh mục nền — TUYỆT ĐỐI không cho bia mộ xóa khi merge/sync.
 const TOMBSTONE_PROTECTED_FIELDS=new Set([
   'projects','vessels','departments','companies','vendors','expenseTypes','revenueTypes'
@@ -10297,9 +10351,9 @@ function deletedIdSetForField(field){
   return s;
 }
 
-// Dọn bia mộ cũ hơn N ngày (mặc định 120) — tới lúc đó mọi máy đã đồng bộ xong.
+// Dọn bia mộ cũ hơn N ngày (mặc định 365 — v3.01.26 nâng từ 120 để chống hồi sinh rác kế toán).
 function pruneDeletedIds(days){
-  days=days||120;
+  days=days||365;
   const cutoff=Date.now()-days*86400000;
   const before=_deletedIds().length;
   S.deletedIds=_deletedIds().filter(d=>{
@@ -10554,9 +10608,10 @@ function saveState(){
   try{
     if(Array.isArray(S.auditLogShared) && S.auditLogShared.length>300){ S.auditLogShared=S.auditLogShared.slice(-300); }
     if(Array.isArray(S.auditLog) && S.auditLog.length>100){ S.auditLog=S.auditLog.slice(-100); }
-    // dọn tombstone cũ hơn 45 ngày — bản ghi đã xóa lâu, mọi máy đã đồng bộ xong, không cần giữ bia.
+    // v3.01.26: dọn tombstone cũ hơn 365 ngày (trước là 45 — quá ngắn, gây hồi sinh rác
+    // kế toán khi cloud/snapshot cũ còn bản đã xóa). Kế toán cần giữ bia mộ lâu.
     if(Array.isArray(S.deletedIds) && S.deletedIds.length>0){
-      const cutoff=Date.now() - 45*24*3600*1000;
+      const cutoff=Date.now() - 365*24*3600*1000;
       const before=S.deletedIds.length;
       S.deletedIds=S.deletedIds.filter(d=>{
         if(!d || !d.at) return true;  // không có ngày → giữ cho an toàn
@@ -30926,6 +30981,7 @@ async function _snapshotPick(fileId, name){
     <div style="margin-top:10px;padding:8px 12px;background:rgba(45,106,106,.06);border-left:3px solid var(--good);font-size:11px">Sẽ bổ sung <b>${totalAdded}</b> bản ghi từ snapshot. Field cấu hình (tỷ giá, hiển thị, thông tin công ty...) giữ nguyên hiện tại.</div>`;
   confirmDialog('Khôi phục & GỘP từ snapshot?', body, '', async ()=>{
     Object.keys(plan).forEach(k=>{ S[k]=plan[k]; });
+    try{ enforcePurgedBatches(); }catch(e){}  // v3.01.26: chặn lô rác từ snapshot cũ sống lại
     await saveStateEncrypted();
     try{ _updateLastKnownRecordCount(); }catch(e){}
     renderAll();
@@ -32040,6 +32096,7 @@ function deleteImportBatchById(batchId, field){
       }catch(e){ console.warn('[rescue] không lưu được bản sao:', e&&e.message); }
       S[field]=arr.filter(r=>!(r && r._importBatch===batchId));
       try{ markDeleted(ids, field); }catch(e){ console.warn('[delBatchById] markDeleted:', e&&e.message); }
+      try{ registerPurgedBatch(batchId, field); }catch(e){}  // v3.01.26: cấm lô này sống lại vĩnh viễn
       if(S.lastImportBatch && S.lastImportBatch.batchId===batchId) S.lastImportBatch=null;
       saveState();
       try{ logAuditEvent('import_batch_delete',{target:field, batchId, count:victims.length, by:actorName()}); }catch(e){}
@@ -33744,6 +33801,7 @@ function bulkDeleteImportedRecords(key, displayName){
   }catch(e){ console.warn('[rescue]', e&&e.message); }
   const deletedIds = imported.map(r=>r.id).filter(Boolean);
   try{ markDeleted(deletedIds, key); }catch(e){}  // v3.01.24: kèm field để bia mộ chỉ áp đúng loại
+  try{ const bs=new Set(imported.map(r=>r._importBatch).filter(Boolean)); bs.forEach(b=>registerPurgedBatch(b, key)); }catch(e){}  // v3.01.26: cấm các lô này sống lại
   S[key] = arr.filter(r => !(r && r._importedFromExcel === true));
   try{ logAuditEvent('bulk_delete_imported', {target:key, count:imported.length, by:actorName()}); }catch(e){}
   saveState();
