@@ -2703,7 +2703,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.01.56';            // bumped on each release
+const APP_VERSION='3.01.58';            // bumped on each release
 
 /* v2.62.0: Token xác thực backend — PHẢI khớp API_TOKEN trong Apps Script (Code.gs).
    Mọi request tới Apps Script tự động được gắn token qua lớp bọc fetch bên dưới.
@@ -10453,6 +10453,45 @@ function auditOpVessel(nameSub){
   });
 }
 try{ window.auditOpVessel=auditOpVessel; }catch(e){}
+
+/* v3.01.57: SỬA HÀNG LOẠT op_transactions sai loại tiền/tỷ giá.
+   Quy tắc AN TOÀN (mặc định): chỉ đụng dòng có fxToUsd<=1 (tức chưa quy đổi):
+     - ccy='VND' & fx<=1            → đặt fx = S.fxRate (số tiền giữ nguyên VND, chỉ tính lại USD)
+     - ccy='USD' & fx<=1 & amount>=nguong → coi là VND nhập nhầm: đổi ccy='VND', fx=S.fxRate
+   Dòng USD nhỏ (< nguong) giữ nguyên = USD thật. Mặc định nguong=5000.
+   dryRun=true (mặc định) chỉ in, KHÔNG sửa. Gọi fixOpCcyFx(false) để sửa thật. */
+function fixOpCcyFx(apply, nguong){
+  const dryRun = (apply!==false) ? (apply!==true) : false; // apply===false => sửa thật; mặc định dry
+  const TH = (+nguong>0)?+nguong:5000;
+  const fxRate=+S.fxRate||25000;
+  const ops=S.opTransactions||[];
+  const changes=[];
+  ops.forEach(t=>{
+    const fx=+t.fxToUsd||0; const amt=+t.amount||0; const ccy=t.ccy||'USD';
+    let newCcy=ccy, newFx=fx, reason='';
+    if(ccy==='VND' && fx<=1){ newFx=fxRate; reason='VND fx<=1 → đặt fx='+fxRate; }
+    else if(ccy==='USD' && fx<=1 && amt>=TH){ newCcy='VND'; newFx=fxRate; reason='USD lớn fx=1 → coi là VND'; }
+    if(reason){
+      const newUsd = newCcy==='USD'? amt : amt/newFx;
+      changes.push({t, newCcy, newFx, newUsd, reason, oldUsd:(fx>0?amt/ (ccy==='USD'?1:fx):amt)});
+    }
+  });
+  if(!changes.length){ console.log('✅ Không có dòng nào cần sửa (ngưỡng '+TH+').'); return; }
+  console.log(`${dryRun?'🔎 XEM TRƯỚC':'🛠 SỬA'} — ${changes.length} dòng (ngưỡng USD-lớn = ${TH}):`);
+  changes.forEach(c=>{
+    console.log(`   ${c.t.ccy} ${(+c.t.amount).toLocaleString()} (fx ${c.t.fxToUsd||'?'}) → ${c.newCcy} fx ${c.newFx} = ${c.newUsd.toLocaleString(undefined,{maximumFractionDigits:2})} USD · ${(c.t.desc||'').slice(0,40)} · [${c.reason}]`);
+  });
+  if(dryRun){ console.log('→ Đây chỉ là XEM TRƯỚC. Chạy fixOpCcyFx(false) để SỬA THẬT. Hoặc fixOpCcyFx(false, 3000) để đổi ngưỡng.'); return; }
+  if(typeof isAdmin==='function' && !isAdmin()){ console.log('Chỉ admin được sửa.'); return; }
+  // lưới an toàn
+  try{ localStorage.setItem('seahorse_rescue_opCcyFx', JSON.stringify({at:new Date().toISOString(), before:changes.map(c=>({id:c.t.id,ccy:c.t.ccy,fxToUsd:c.t.fxToUsd,amountUsd:c.t.amountUsd}))})); }catch(e){}
+  changes.forEach(c=>{ c.t.ccy=c.newCcy; c.t.fxToUsd=c.newFx; c.t.amountUsd=c.newUsd; try{touchRecord(c.t);}catch(e){c.t.updatedAt=new Date().toISOString();} });
+  saveState();
+  try{ logAuditEvent('op_ccyfx_bulkfix',{count:changes.length, threshold:TH}); }catch(e){}
+  if(typeof renderAll==='function') renderAll();
+  console.log(`✅ Đã sửa ${changes.length} dòng. Đã lưu bản sao (key seahorse_rescue_opCcyFx). Bấm Sync để đẩy lên cloud.`);
+}
+try{ window.fixOpCcyFx=fixOpCcyFx; }catch(e){}
 
 // v2.99.64: Danh mục nền — TUYỆT ĐỐI không cho bia mộ xóa khi merge/sync.
 const TOMBSTONE_PROTECTED_FIELDS=new Set([
@@ -24551,6 +24590,14 @@ function _opApVirtualTx(){
     };
   });
 }
+function _opClearFilters(){
+  // v3.01.58: bỏ lọc Người nhập + Tháng (giữ lọc Tàu), rồi render lại
+  const cSel=document.getElementById('op-filter-creator');
+  const mSel=document.getElementById('op-filter-month');
+  if(cSel) cSel.value='';
+  if(mSel) mSel.value='';
+  renderOpTxList();
+}
 function renderOpTxList(){
   // Scope: NV chỉ thấy giao dịch của tàu QL hộ được gán
   const allowedIds=userAssignedOpVesselIds();
@@ -24645,7 +24692,13 @@ function renderOpTxList(){
           <th></th>
         </tr></thead><tbody>`;
     if(!rows.length){
-      html+=`<tr><td colspan="7" class="empty">Không có bút toán ${type==='IN'?'thu hộ':'chi hộ'} ${fM?'trong tháng '+fM:''} ${fV?'của tàu này':''}</td></tr>`;
+      // v3.01.58: nếu CÓ bút toán loại này (bỏ lọc người nhập/tháng) nhưng đang bị lọc ẩn → báo rõ
+      const hiddenByFilter = allTxScoped.filter(t=>t.type===type && (!fV||t.vesselId===fV)).length;
+      if(hiddenByFilter>0 && (fC||fM)){
+        html+=`<tr><td colspan="7" class="empty" style="color:var(--warn)">⚠ Có <b>${hiddenByFilter}</b> bút toán ${type==='IN'?'thu hộ':'chi hộ'} nhưng đang bị ẩn bởi bộ lọc${fC?' Người nhập = <b>'+esc(fC)+'</b>':''}${fM?' · Tháng = <b>'+esc(fM)+'</b>':''}. <a onclick="_opClearFilters()" style="color:var(--accent);cursor:pointer;text-decoration:underline">Bỏ lọc để xem tất cả</a></td></tr>`;
+      } else {
+        html+=`<tr><td colspan="7" class="empty">Không có bút toán ${type==='IN'?'thu hộ':'chi hộ'} ${fM?'trong tháng '+fM:''} ${fV?'của tàu này':''}</td></tr>`;
+      }
     } else {
       rows.forEach(t=>{
         const v=S.opVessels.find(x=>x.id===t.vesselId);
