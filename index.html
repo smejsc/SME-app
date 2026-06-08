@@ -2703,7 +2703,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.01.36';            // bumped on each release
+const APP_VERSION='3.01.37';            // bumped on each release
 
 /* v2.62.0: Token xác thực backend — PHẢI khớp API_TOKEN trong Apps Script (Code.gs).
    Mọi request tới Apps Script tự động được gắn token qua lớp bọc fetch bên dưới.
@@ -28757,82 +28757,97 @@ function renderCostBreakdown(){
   const seg=document.getElementById('rep-cost-segment')?.value||'';
   const fx=+S.fxRate||25000;
 
-  // Gather cost data
-  const aggregateForYear=(year)=>{
-    const byCategory={};
-    (S.payables||[]).forEach(r=>{
-      if(wfStatus(r)==='rejected') return;  // v3.01.35: gồm cả chưa duyệt, trừ từ chối
-      if(!r.issueDate || +r.issueDate.slice(0,4)!==year) return;
-      if(seg && r.segment!==seg) return;
-      if(isViewer() && !viewerCanSeeSegment(r.segment)) return;
-      if(!apCountsInPL(r)) return;  // v2.25.0: bỏ chi phí vốn hóa (Dock/SCL)
-      const cat=r.costCategory||'(không phân loại)';
-      const amt=+r.amountNet||+r.amount||0;
-      const usdAmt=r.ccy==='VND'?amt/fx:amt;
-      byCategory[cat]=(byCategory[cat]||0)+usdAmt;
-    });
-    return byCategory;
+  // v3.01.37: MA TRẬN CHI PHÍ — hàng = loại chi phí, cột = mỗi tàu công ty + mỗi dự án O&M + Khác + Tổng.
+  // Bỏ so sánh năm (YoY). Gồm cả chưa duyệt (trừ rejected), bỏ CapEx/PO (apCountsInPL).
+
+  // 1) Định nghĩa các CỘT
+  const vessels = (isViewer()? S.vessels.filter(v=>viewerCanSeeVessel(v.id)) : S.vessels) || [];
+  const omProjects = (S.projects||[]).filter(p=>(p.isOM || p.segment==='OM') && (!isViewer()||viewerCanSeeProject(p.id)));
+  const cols=[];
+  vessels.forEach(v=>cols.push({key:'V:'+v.id, label:v.name, type:'vessel', id:v.id}));
+  omProjects.forEach(p=>cols.push({key:'P:'+p.id, label:(p.code||p.name||'O&M'), type:'project', id:p.id}));
+  cols.push({key:'OTHER', label:'Khác / không gắn', type:'other', id:null});
+
+  // 2) Xác định cột cho 1 bản ghi AP
+  const projById={}; (S.projects||[]).forEach(p=>projById[p.id]=p);
+  const vesselIds=new Set(vessels.map(v=>v.id));
+  const omIds=new Set(omProjects.map(p=>p.id));
+  const colKeyOf=(r)=>{
+    // ưu tiên: O&M project trực tiếp → dự án có tàu → vesselId trực tiếp → khác
+    if(r.projectId && omIds.has(r.projectId)) return 'P:'+r.projectId;
+    if(r.projectId && projById[r.projectId] && projById[r.projectId].vesselId && vesselIds.has(projById[r.projectId].vesselId)) return 'V:'+projById[r.projectId].vesselId;
+    if(r.vesselId && vesselIds.has(r.vesselId)) return 'V:'+r.vesselId;
+    return 'OTHER';
   };
 
-  const thisCats=aggregateForYear(yr);
-  const prevCats=aggregateForYear(yr-1);
-  const sorted=Object.entries(thisCats).sort((a,b)=>b[1]-a[1]);
-  const totThis=sorted.reduce((s,[,v])=>s+v,0);
-  const totPrev=Object.values(prevCats).reduce((s,v)=>s+v,0);
+  // 3) Gom: matrix[cat][colKey] = USD
+  const matrix={};       // cat -> {colKey: usd}
+  const catTotal={};     // cat -> usd
+  const colTotal={};     // colKey -> usd
+  let grandTotal=0;
+  (S.payables||[]).forEach(r=>{
+    if(wfStatus(r)==='rejected') return;
+    if(!r.issueDate || +r.issueDate.slice(0,4)!==yr) return;
+    if(seg && r.segment!==seg) return;
+    if(isViewer() && !viewerCanSeeSegment(r.segment)) return;
+    if(!apCountsInPL(r)) return;
+    const cat=r.costCategory||'(không phân loại)';
+    const amt=+r.amountNet||+r.amount||0;
+    const usd=r.ccy==='VND'?amt/fx:amt;
+    const ck=colKeyOf(r);
+    if(!matrix[cat]) matrix[cat]={};
+    matrix[cat][ck]=(matrix[cat][ck]||0)+usd;
+    catTotal[cat]=(catTotal[cat]||0)+usd;
+    colTotal[ck]=(colTotal[ck]||0)+usd;
+    grandTotal+=usd;
+  });
 
-  if(!sorted.length){
+  const cats=Object.keys(catTotal).sort((a,b)=>catTotal[b]-catTotal[a]);
+  if(!cats.length){
     block.innerHTML='<div class="empty">Không có chi phí năm '+yr+(seg?' · '+SEGMENTS[seg].name:'')+'</div>';
     return;
   }
+  // Ẩn cột rỗng (tổng = 0) để bảng gọn — luôn giữ cột Khác nếu có dữ liệu
+  const visibleCols=cols.filter(c=>(colTotal[c.key]||0)>0.0001);
 
-  const yoyTotPct=totPrev?((totThis-totPrev)/totPrev*100):null;
-
-  // Color palette for bars
   const palette=['#1c3a5c','#b8472e','#4a6b2c','#c5876d','#5a4a8c','#8b3a2a','#6b9a8c','#a08c3a','#5c1c4a','#2a8b8b'];
+  const _m=(usd)=>fmt(usd,'USD');  // usd → display ccy
 
   let html=`
-    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-bottom:14px">
-      <div style="background:var(--paper-2);padding:12px;border:1px solid var(--rule)">
-        <div style="font-family:var(--font-mono);font-size:9px;color:var(--muted);letter-spacing:.12em;text-transform:uppercase">Tổng chi phí ${yr}</div>
-        <div style="font-family:var(--font-display);font-size:16px;font-weight:600;margin-top:4px">${fmt(totThis,'USD')}</div>
-      </div>
-      <div style="background:var(--paper-2);padding:12px;border:1px solid var(--rule)">
-        <div style="font-family:var(--font-mono);font-size:9px;color:var(--muted);letter-spacing:.12em;text-transform:uppercase">Năm trước ${yr-1}</div>
-        <div style="font-family:var(--font-display);font-size:16px;font-weight:600;margin-top:4px;color:var(--muted)">${fmt(totPrev,'USD')}</div>
-      </div>
-      <div style="background:var(--paper-2);padding:12px;border:1px solid var(--rule)">
-        <div style="font-family:var(--font-mono);font-size:9px;color:var(--muted);letter-spacing:.12em;text-transform:uppercase">YoY</div>
-        <div style="font-family:var(--font-display);font-size:16px;font-weight:600;margin-top:4px;color:${yoyTotPct==null?'var(--muted)':yoyTotPct>0?'var(--bad)':'var(--good)'}">${yoyTotPct==null?'—':((yoyTotPct>0?'+':'')+yoyTotPct.toFixed(1)+'%')}</div>
-      </div>
+    <div style="margin-bottom:14px;padding:12px;background:var(--paper-2);border:1px solid var(--rule);display:inline-block">
+      <div style="font-family:var(--font-mono);font-size:9px;color:var(--muted);letter-spacing:.12em;text-transform:uppercase">Tổng chi phí ${yr}${seg?' · '+esc(SEGMENTS[seg].name):''}</div>
+      <div style="font-family:var(--font-display);font-size:18px;font-weight:700;margin-top:4px">${_m(grandTotal)}</div>
+      <div style="font-size:10px;color:var(--muted);margin-top:2px">${cats.length} loại CP · ${visibleCols.length} cột (tàu/dự án) · gồm cả chưa duyệt</div>
     </div>
+    <div class="tbl-scroll" style="overflow-x:auto">
+    <table class="tbl" style="font-size:11px;min-width:${260+visibleCols.length*120}px">
+      <thead><tr>
+        <th style="position:sticky;left:0;background:var(--paper-2);z-index:2">Loại chi phí</th>
+        ${visibleCols.map(c=>`<th class="r" title="${esc(c.label)}">${esc(c.label.length>16?c.label.slice(0,15)+'…':c.label)}</th>`).join('')}
+        <th class="r" style="border-left:2px solid var(--rule)">TỔNG</th>
+        <th class="r">%</th>
+      </tr></thead><tbody>`;
 
-    <table class="tbl">
-      <thead><tr><th>Loại chi phí</th><th class="r">${yr}</th><th class="r">%</th><th class="r">${yr-1}</th><th class="r">YoY</th><th>Phân bổ</th></tr></thead>
-      <tbody>`;
-
-  sorted.forEach(([cat,amt],i)=>{
-    const pct=amt/totThis*100;
-    const prevAmt=prevCats[cat]||0;
-    const yoy=prevAmt?((amt-prevAmt)/prevAmt*100):null;
+  cats.forEach((cat,i)=>{
     const color=palette[i%palette.length];
+    const row=matrix[cat]||{};
+    const pct=grandTotal?catTotal[cat]/grandTotal*100:0;
     html+=`<tr>
-      <td><span style="display:inline-block;width:10px;height:10px;background:${color};margin-right:8px"></span><b>${esc(cat)}</b></td>
-      <td class="r num">${fmt(amt,'USD')}</td>
-      <td class="r num" style="font-weight:600">${pct.toFixed(1)}%</td>
-      <td class="r num" style="color:var(--muted)">${prevAmt?fmt(prevAmt,'USD'):'—'}</td>
-      <td class="r num" style="color:${yoy==null?'var(--muted)':yoy>0?'var(--bad)':'var(--good)'}">${yoy==null?'—':((yoy>0?'+':'')+yoy.toFixed(0)+'%')}</td>
-      <td><div style="background:var(--paper-2);height:14px;width:100%;border:1px solid var(--rule)"><div style="background:${color};height:100%;width:${Math.min(100,pct*2)}%"></div></div></td>
+      <td style="position:sticky;left:0;background:var(--paper);z-index:1"><span style="display:inline-block;width:9px;height:9px;background:${color};margin-right:6px"></span><b>${esc(cat)}</b></td>
+      ${visibleCols.map(c=>{const v=row[c.key]||0; return `<td class="r num" style="${v>0?'':'color:var(--rule)'}">${v>0?_m(v):'·'}</td>`;}).join('')}
+      <td class="r num" style="border-left:2px solid var(--rule);font-weight:600">${_m(catTotal[cat])}</td>
+      <td class="r num" style="color:var(--muted)">${pct.toFixed(1)}%</td>
     </tr>`;
   });
 
-  html+=`<tr style="border-top:2px solid var(--rule);background:rgba(184,71,46,.05)">
-    <td><b>Tổng</b></td>
-    <td class="r num"><b>${fmt(totThis,'USD')}</b></td>
-    <td class="r num"><b>100%</b></td>
-    <td class="r num">${fmt(totPrev,'USD')}</td>
-    <td class="r num">${yoyTotPct==null?'—':((yoyTotPct>0?'+':'')+yoyTotPct.toFixed(1)+'%')}</td>
-    <td></td>
-  </tr></tbody></table>`;
+  // dòng TỔNG mỗi cột
+  html+=`<tr style="border-top:2px solid var(--rule);background:rgba(184,71,46,.05);font-weight:700">
+    <td style="position:sticky;left:0;background:rgba(244,237,228,1);z-index:1"><b>TỔNG</b></td>
+    ${visibleCols.map(c=>`<td class="r num">${(colTotal[c.key]||0)>0?_m(colTotal[c.key]):'·'}</td>`).join('')}
+    <td class="r num" style="border-left:2px solid var(--rule)">${_m(grandTotal)}</td>
+    <td class="r num">100%</td>
+  </tr></tbody></table></div>
+  <div style="margin-top:6px;font-size:10px;color:var(--muted);font-style:italic">💡 Cột "Khác / không gắn" = chi phí chưa gắn tàu/dự án (chỉ gắn mảng). Quy đổi về ${displayCcy()}. Gồm cả khoản chưa duyệt (trừ từ chối), bỏ CapEx/PO tồn kho.</div>`;
 
   block.innerHTML=html;
 }
