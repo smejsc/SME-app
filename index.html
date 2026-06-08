@@ -2707,7 +2707,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.01.76';            // bumped on each release
+const APP_VERSION='3.01.80';            // bumped on each release
 
 /* v2.62.0: Token xác thực backend — PHẢI khớp API_TOKEN trong Apps Script (Code.gs).
    Mọi request tới Apps Script tự động được gắn token qua lớp bọc fetch bên dưới.
@@ -10483,6 +10483,26 @@ function auditOpVessel(nameSub){
   });
 }
 try{ window.auditOpVessel=auditOpVessel; }catch(e){}
+
+/* v3.01.80: ĐỐI CHIẾU chi hộ giữa bảng 'Trạng thái số dư' (breakdown) và sổ chi hộ (opTxUsd).
+   Sau khi thống nhất bộ quy đổi, 2 con số phải KHỚP. Gọi: reconcileOp() */
+function reconcileOp(){
+  (S.opVessels||[]).forEach(v=>{
+    const bd=opBalanceBreakdown(v.id);
+    // sổ chi hộ = opTx OUT + phí (KHÔNG gồm AP) — để so cột "chi hộ opTx" của ledger
+    let ledgerOut=0, ledgerFee=0;
+    (S.opTransactions||[]).filter(t=>t.vesselId===v.id && t.type==='OUT').forEach(t=>{ ledgerOut+=opTxUsd(t); });
+    (S.opTransactions||[]).filter(t=>t.vesselId===v.id).forEach(t=>{ ledgerFee+=opTxFeesUsd(t); });
+    console.log(`%c${v.name} · ${v.owner||''}`,'font-weight:bold');
+    console.log(`  Thu/ứng: ${bd.thu.toLocaleString(undefined,{maximumFractionDigits:2})} USD`);
+    console.log(`  Chi opTx: ${bd.chiOp.toLocaleString(undefined,{maximumFractionDigits:2})} | AP gắn tàu: ${bd.chiAp.toLocaleString(undefined,{maximumFractionDigits:2})} | Phí GD: ${bd.fees.toLocaleString(undefined,{maximumFractionDigits:2})}`);
+    console.log(`  → TỔNG CHI HỘ (breakdown): ${bd.chiTotal.toLocaleString(undefined,{maximumFractionDigits:2})} USD`);
+    console.log(`  (đối chiếu sổ: opTx OUT ${ledgerOut.toLocaleString(undefined,{maximumFractionDigits:2})} + phí ${ledgerFee.toLocaleString(undefined,{maximumFractionDigits:2})} = ${(ledgerOut+ledgerFee).toLocaleString(undefined,{maximumFractionDigits:2})}; còn AP ${bd.chiAp.toLocaleString(undefined,{maximumFractionDigits:2})} hiển thị riêng ở 'gồm AP')`);
+    console.log(`  Phí QL chưa xuất HĐ: ${bd.mgmtPending.toLocaleString(undefined,{maximumFractionDigits:2})} | SỐ DƯ: ${bd.bal.toLocaleString(undefined,{maximumFractionDigits:2})} USD`);
+  });
+  console.log('Lưu ý: "Chi hộ" ở bảng Trạng thái = opTx OUT + AP gắn tàu + phí GD. Sổ chi hộ tab06 nếu đang lọc 1 tàu/tháng sẽ ra số khác tổng.');
+}
+try{ window.reconcileOp=reconcileOp; }catch(e){}
 
 /* v3.01.57: SỬA HÀNG LOẠT op_transactions sai loại tiền/tỷ giá.
    v3.01.59: THÊM chế độ CHỈ-VND (an toàn nhất) — KHÔNG đụng dòng USD nào.
@@ -23842,13 +23862,13 @@ function opMgmtFeeIssued(vid){
 }
 function opBalanceBreakdown(vid){
   // v3.01.65: tách thành phần số dư để hiển thị minh bạch (đều quy USD).
+  // v3.01.80: DÙNG CHUNG opTxUsd/opTxFeesUsd với sổ chi hộ (ledger) để KHỚP số liệu.
   const v=(S.opVessels||[]).find(x=>x.id===vid);
-  const toUsd=(t,raw)=>{ raw=+raw||0; if(!raw)return 0; const ccy=t.ccy||'USD'; if(ccy==='USD')return raw; const fx=(+t.fxToUsd||0)||(+S.fxRate||0); return fx>0?raw/fx:raw; };
   let thu=0, chi=0, fees=0;
   (S.opTransactions||[]).filter(t=>t.vesselId===vid).forEach(t=>{
-    const amtUsd=(+t.amountUsd>0)?+t.amountUsd:toUsd(t,t.amount);
+    const amtUsd=opTxUsd(t);
     if(t.type==='IN') thu+=amtUsd; else chi+=amtUsd;
-    fees += toUsd(t,(+t.bankFee||0)) + toUsd(t,(+t.otherFee||0));
+    fees += opTxFeesUsd(t);
   });
   const apChi = -(typeof opApChiHo==='function'?opApChiHo(vid):0);  // dương = tổng chi hộ AP
   let mgmtPending=0;
@@ -23863,18 +23883,11 @@ function opBalance(vid){
   // v2.99.56: cộng theo amountUsd (đã quy đổi), KHÔNG cộng t.amount gốc.
   // v3.01.02: BỔ SUNG — trừ thêm AP gắn tàu QL (chi hộ chủ tàu), mọi trạng thái duyệt,
   //           để NV chỉ nhập 1 nơi (AP). Thu hộ (IN) vẫn ở opTransactions.
-  const toUsd=(t, raw)=>{
-    raw=+raw||0;
-    if(raw===0) return 0;
-    const ccy=t.ccy||'USD';
-    if(ccy==='USD') return raw;
-    const fx=(+t.fxToUsd||0) || (+S.fxRate||0);
-    return fx>0 ? raw/fx : raw;
-  };
+  // v3.01.80: DÙNG CHUNG opTxUsd/opTxFeesUsd với sổ chi hộ + breakdown để khớp.
   let bal = S.opTransactions.filter(t=>t.vesselId===vid).reduce((s,t)=>{
-    let amtUsd = (+t.amountUsd>0) ? +t.amountUsd : toUsd(t, t.amount);
+    const amtUsd = opTxUsd(t);
     const delta = t.type==='IN' ? amtUsd : -amtUsd;
-    const fees = toUsd(t, (+t.bankFee||0)) + toUsd(t, (+t.otherFee||0));
+    const fees = opTxFeesUsd(t);
     return s + delta - fees;
   },0);
   // v3.01.02: trừ AP gắn tàu QL = chi hộ chủ tàu (làm giảm số dư). Dùng amountGross (tiền thực chi).
@@ -23931,7 +23944,8 @@ function renderOpVessels(){
   }
   if(!visible.length){tbl.innerHTML='<tr><td class="empty">Chưa có tàu quản lý nào ' + (canSeeAllRecords()?'':'(hoặc bạn chưa được phân công)') + '</td></tr>';return;}
   let html=`<thead><tr><th>Tàu · Chủ tàu</th><th class="r">Thu / ứng trước</th><th class="r" title="Tổng chi hộ (chi hộ trực tiếp + AP gắn tàu + phí giao dịch)">Chi hộ</th><th class="r" title="Phí quản lý: đã phát hành HĐ + phần tự tính chưa xuất HĐ">Phí quản lý</th><th class="r">Số dư hiện tại</th><th class="r">Ngưỡng tối thiểu</th><th class="c">Trạng thái</th><th></th></tr></thead><tbody>`;
-  visible.forEach(v=>{
+  const canIssue = isAdmin() || canApproveL1() || canApproveL2();
+  const _rowFor=(v)=>{
     const bal=opBalance(v.id);
     let status,statusCls;
     const minUsd=opMinUsd(v);
@@ -23939,18 +23953,15 @@ function renderOpVessels(){
     else if(bal<minUsd*1.2){status='⚡ GẦN NGƯỠNG';statusCls='chip-warn';}
     else{status='✓ AN TOÀN';statusCls='chip-good';}
     const months=opManagedMonths(v);
-    const accrued=opMgmtFeeAccrued(v);
     const issued=opMgmtFeeIssued(v.id);
-    const canIssue = isAdmin() || canApproveL1() || canApproveL2();
-    const apChiHo = (typeof opApChiHo==='function') ? opApChiHo(v.id) : 0;  // số âm
-    const bd = opBalanceBreakdown(v.id);  // v3.01.65: thành phần số dư
-    html+=`<tr>
+    const bd = opBalanceBreakdown(v.id);
+    return `<tr>
       <td><b>${esc(v.name)}</b>${v.owner?` <span style="color:var(--muted);font-weight:400">· ${esc(v.owner)}</span>`:''}${v.managedSince?`<div style="font-size:10px;color:var(--muted)">QL từ ${esc(v.managedSince)} · ${months} tháng · phí ${fmt(v.fee,v.ccy)}/tháng</div>`:'<div style="font-size:10px;color:var(--warn)">chưa đặt ngày QL</div>'}</td>
       <td class="r num" style="color:var(--good);font-weight:600">${fmtCcy(bd.thu,'USD')}</td>
       <td class="r num" style="color:var(--bad);font-weight:600">−${fmtCcy(bd.chiTotal,'USD')}<div style="font-size:9px;color:var(--muted);font-weight:400;line-height:1.4">${bd.chiAp>0?`gồm AP: ${fmtCcy(bd.chiAp,'USD')}<br>`:''}${bd.fees>0?`phí GD: ${fmtCcy(bd.fees,'USD')}`:''}</div></td>
       <td class="r num">${(issued>0||bd.mgmtPending>0)?`${issued>0?`<div style="color:var(--good);font-weight:600" title="Đã phát hành hóa đơn">${fmt(issued,v.ccy)}<span style="font-size:9px;font-weight:400"> đã PH</span></div>`:''}${bd.mgmtPending>0?`<div style="color:var(--warn);font-size:11px" title="Tự tính — chưa xuất hóa đơn (${months} tháng × ${fmt(v.fee,v.ccy)} − đã PH)">${fmtCcy(bd.mgmtPending,'USD')}<span style="font-size:9px"> tự tính</span></div>`:''}`:'—'}</td>
       <td class="r num" style="font-weight:600;color:${bal<minUsd?'var(--bad)':bal<minUsd*1.2?'var(--warn)':'var(--ink)'}" title="Thu/ứng − Chi hộ − Phí QL. Đồng chuẩn USD.">${fmtCcy(bal,'USD')}<div style="font-size:10px;color:var(--muted);font-weight:400" title="Quy đổi VND theo tỷ giá ${(+S.fxRate||0).toLocaleString('vi-VN')}">≈ ${(bal*(+S.fxRate||0)).toLocaleString('vi-VN',{maximumFractionDigits:0})}₫</div></td>
-      <td class="r num">${fmtCcy(opMinUsd(v),'USD')}</td>
+      <td class="r num">${fmtCcy(minUsd,'USD')}</td>
       <td class="c"><span class="chip ${statusCls}">${status}</span></td>
       <td><div class="row-actions">
         ${canIssue?`<button class="icon-btn" title="Phát hành hóa đơn phí QL" onclick="openMgmtFeeModal('${v.id}')" style="color:var(--accent)">🧾</button>`:''}
@@ -23958,6 +23969,33 @@ function renderOpVessels(){
         <button class="icon-btn danger" title="Xóa" onclick="delOpVessel('${v.id}')">✕</button>
       </div></td>
     </tr>`;
+  };
+  // v3.01.79: nhóm theo CHỦ TÀU + dòng tổng mỗi chủ (ngưỡng gộp = tổng ngưỡng các tàu)
+  const groups={};
+  visible.forEach(v=>{ const k=(v.owner||'(Không rõ chủ tàu)'); (groups[k]=groups[k]||[]).push(v); });
+  const ownerNames=Object.keys(groups).sort((a,b)=>a.localeCompare(b));
+  ownerNames.forEach(owner=>{
+    const vs=groups[owner];
+    vs.forEach(v=>{ html+=_rowFor(v); });
+    // dòng tổng theo chủ tàu — chỉ hiện khi chủ có >1 tàu (1 tàu thì dòng tàu đã đủ)
+    if(vs.length>1){
+      let gThu=0,gChi=0,gBal=0,gMin=0,gMgmt=0;
+      vs.forEach(v=>{ const bd=opBalanceBreakdown(v.id); gThu+=bd.thu; gChi+=bd.chiTotal; gMgmt+=bd.mgmtPending; gBal+=opBalance(v.id); gMin+=opMinUsd(v); });
+      let gStatus,gCls;
+      if(gBal<gMin){gStatus='⚠ DƯỚI NGƯỠNG';gCls='chip-bad';}
+      else if(gBal<gMin*1.2){gStatus='⚡ GẦN NGƯỠNG';gCls='chip-warn';}
+      else{gStatus='✓ AN TOÀN';gCls='chip-good';}
+      html+=`<tr style="background:rgba(28,58,92,.06);border-top:2px solid var(--rule)">
+        <td><b>TỔNG · ${esc(owner)}</b> <span style="font-size:10px;color:var(--muted);font-weight:400">(${vs.length} tàu)</span></td>
+        <td class="r num" style="color:var(--good);font-weight:700">${fmtCcy(gThu,'USD')}</td>
+        <td class="r num" style="color:var(--bad);font-weight:700">−${fmtCcy(gChi,'USD')}</td>
+        <td class="r num" style="color:var(--warn);font-weight:600">${gMgmt>0?fmtCcy(gMgmt,'USD'):'—'}</td>
+        <td class="r num" style="font-weight:700;color:${gBal<gMin?'var(--bad)':gBal<gMin*1.2?'var(--warn)':'var(--ink)'}">${fmtCcy(gBal,'USD')}</td>
+        <td class="r num" style="font-weight:600">${fmtCcy(gMin,'USD')}</td>
+        <td class="c"><span class="chip ${gCls}">${gStatus}</span></td>
+        <td></td>
+      </tr>`;
+    }
   });
   html+='</tbody>';
   tbl.innerHTML=html;
@@ -24849,15 +24887,16 @@ function renderOpTxList(){
           <th>Tàu${type==='OUT'?' · Số HĐ':''}</th>
           <th>Ngày</th>
           <th class="r">Số tiền</th>
+          <th class="c">Trạng thái</th>
           <th></th>
         </tr></thead><tbody>`;
     if(!rows.length){
       // v3.01.58: nếu CÓ bút toán loại này (bỏ lọc người nhập/tháng) nhưng đang bị lọc ẩn → báo rõ
       const hiddenByFilter = allTxScoped.filter(t=>t.type===type && (!fV||t.vesselId===fV)).length;
       if(hiddenByFilter>0 && (fC||fM)){
-        html+=`<tr><td colspan="5" class="empty" style="color:var(--warn)">⚠ Có <b>${hiddenByFilter}</b> bút toán ${type==='IN'?'thu hộ':'chi hộ'} nhưng đang bị ẩn bởi bộ lọc${fC?' Người nhập = <b>'+esc(fC)+'</b>':''}${fM?' · Tháng = <b>'+esc(fM)+'</b>':''}. <a onclick="_opClearFilters()" style="color:var(--accent);cursor:pointer;text-decoration:underline">Bỏ lọc để xem tất cả</a></td></tr>`;
+        html+=`<tr><td colspan="6" class="empty" style="color:var(--warn)">⚠ Có <b>${hiddenByFilter}</b> bút toán ${type==='IN'?'thu hộ':'chi hộ'} nhưng đang bị ẩn bởi bộ lọc${fC?' Người nhập = <b>'+esc(fC)+'</b>':''}${fM?' · Tháng = <b>'+esc(fM)+'</b>':''}. <a onclick="_opClearFilters()" style="color:var(--accent);cursor:pointer;text-decoration:underline">Bỏ lọc để xem tất cả</a></td></tr>`;
       } else {
-        html+=`<tr><td colspan="5" class="empty">Không có bút toán ${type==='IN'?'thu hộ':'chi hộ'} ${fM?'trong tháng '+fM:''} ${fV?'của tàu này':''}</td></tr>`;
+        html+=`<tr><td colspan="6" class="empty">Không có bút toán ${type==='IN'?'thu hộ':'chi hộ'} ${fM?'trong tháng '+fM:''} ${fV?'của tàu này':''}</td></tr>`;
       }
     } else {
       rows.forEach(t=>{
@@ -24905,6 +24944,7 @@ function renderOpTxList(){
           ${col1}${col2}
           <td class="mono" style="font-size:11px">${t.date}</td>
           ${col4}
+          <td class="c">${ttCell}</td>
           <td><div class="row-actions">${actCell}</div></td>
         </tr>`;
       });
@@ -24913,11 +24953,11 @@ function renderOpTxList(){
       html+=`<tr class="total">
         <td colspan="3">TỔNG ${type==='IN'?'THU':'CHI'} ${fM?'· T'+fM.slice(5)+'/'+fM.slice(0,4):'(tất cả)'} <span style="font-weight:400;color:var(--muted);font-size:10px">— quy USD${type==='OUT'?', net + phí':''}${totVatUsd>0?' · VAT ≈'+fmtCcy(totVatUsd,'USD'):''}${(type==='OUT'&&totFees)?' · trong đó phí '+fmtCcy(totFees,'USD'):''}</span></td>
         <td class="r"><b>${fmtCcy(grandTot,'USD')}</b></td>
-        <td colspan="1"></td>
+        <td colspan="2"></td>
       </tr>
       <tr style="font-size:11px;color:var(--muted)">
         <td colspan="3" style="padding-left:24px;font-style:italic">↳ Đã TT: <b style="color:var(--good)">${fmtCcy(totPaid,'USD')}</b> · Chưa TT: <b style="color:var(--warn)">${fmtCcy(totUnpaid,'USD')}</b>${(type==='OUT'&&totFees)?' · Chi (net) '+fmtCcy(totAll,'USD')+' + phí '+fmtCcy(totFees,'USD'):''}</td>
-        <td colspan="2"></td>
+        <td colspan="3"></td>
       </tr>`;
     }
     html+='</tbody></table></div></div></div>';
@@ -24969,12 +25009,9 @@ function openOpReportModal(){
           <option value="en">English (tiếng Anh)</option>
         </select>
       </div>
-      <div class="field">
-        <label>Bao gồm bút toán chưa thanh toán?</label>
-        <select id="rep-incl-unpaid">
-          <option value="1">Có (đầy đủ)</option>
-          <option value="0">Không (chỉ đã TT)</option>
-        </select>
+      <div class="field" style="grid-column:span 2">
+        <label>Phạm vi số liệu</label>
+        <div style="font-size:11px;color:var(--muted);padding:6px 0;line-height:1.5">Báo cáo gồm <b>mọi bút toán phát sinh trong kỳ</b> (theo ngày), không phân biệt đã hay chưa thanh toán. Trạng thái TT chỉ hiển thị để tham khảo ở bảng chi tiết.</div>
       </div>
     </div>
     <div style="margin-top:14px">
@@ -25006,7 +25043,6 @@ function generateOpReport(){
   const to=document.getElementById('rep-to').value;
   const lang=document.getElementById('rep-lang').value;
   const en=(lang==='en'), bi=(lang==='bi'), enOrBi=(lang!=='vi');  // v3.01.75: tiếng Anh hoàn toàn
-  const inclUnpaid=document.getElementById('rep-incl-unpaid').value==='1';
   if(!from||!to){toast('Chọn từ ngày và đến ngày','bad');return;}
   if(from>to){toast('Từ ngày phải ≤ Đến ngày','bad');return;}
   const checked=[...document.querySelectorAll('#modal input[data-vessel-id]:checked')].map(c=>c.dataset.vesselId);
@@ -25127,7 +25163,8 @@ function generateOpReport(){
       }
     });
     // Filter period
-    const period=all.filter(x=>x.date>=from && x.date<=to && (inclUnpaid || x.paid));
+    // v3.01.77: số liệu kỳ = MỌI bút toán theo NGÀY trong kỳ, không phân biệt đã/chưa TT.
+    const period=all.filter(x=>x.date>=from && x.date<=to);
     const inRows=period.filter(x=>x.type==='IN');
     // v2.99.31: tách Chi hộ THỰC (đã/đang chi) vs DỰ KIẾN CHI (_isBudget — chưa phát sinh).
     // Dự kiến VẪN trừ vào tồn cuối kỳ (chủ tàu thấy ngân sách còn lại sau khi trừ cả khoản sắp chi).
