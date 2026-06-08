@@ -2703,7 +2703,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.01.34';            // bumped on each release
+const APP_VERSION='3.01.36';            // bumped on each release
 
 /* v2.62.0: Token xác thực backend — PHẢI khớp API_TOKEN trong Apps Script (Code.gs).
    Mọi request tới Apps Script tự động được gắn token qua lớp bọc fetch bên dưới.
@@ -13350,13 +13350,16 @@ function txAmt(t){return toDisplay(t.amount,t.ccy||'USD');}
    so all existing BI aggregation code works without changes.
    v1.34.1: Filter by viewer scope (segment + vessel + project) if user is Viewer.
             Also filter BOD-only records if user is not BOD/admin. */
-function approvedTx(){
+function approvedTx(includeAll){
+  // v3.01.35: includeAll=true → gồm CẢ chưa duyệt (mọi trạng thái trừ rejected), cho các báo cáo
+  //           theo nguyên tắc "AP/AR gồm cả chưa duyệt/chưa thanh toán". Mặc định: chỉ approved.
   const out=[];
   const viewer = isViewer();
   const canSeeBOD = canSeeBODRecords();
+  const _statusOK = (r)=> includeAll ? (wfStatus(r)!=='rejected') : (wfStatus(r)==='approved');
 
   (S.receivables||[]).forEach(r=>{
-    if(wfStatus(r)!=='approved') return;
+    if(!_statusOK(r)) return;
     // BOD filter
     if(!canSeeBOD){
       if(r.isBODOnly) return;
@@ -13380,11 +13383,12 @@ function approvedTx(){
       ccy:r.ccy||'USD',
       paid:arRemaining(r)<=0.0001,
       vesselId:r.vesselId||null,
+      _approved:wfStatus(r)==='approved',  // v3.01.35: cờ phân biệt khi includeAll
       _source:'ar'
     });
   });
   (S.payables||[]).forEach(r=>{
-    if(wfStatus(r)!=='approved') return;
+    if(!_statusOK(r)) return;
     // BOD filter
     if(!canSeeBOD){
       if(r.isBODOnly) return;
@@ -13409,6 +13413,7 @@ function approvedTx(){
       vesselId:r.vesselId||null,
       isCapEx:isExpenseCapEx(r.expenseType),  // v2.25.0: Dock/SCL — không vào P&L
       inPL:apCountsInPL(r),  // v2.27.0: false nếu CapEx hoặc PO (nhiên liệu tồn kho)
+      _approved:wfStatus(r)==='approved',  // v3.01.35
       _source:'ap'
     });
   });
@@ -13418,6 +13423,22 @@ function approvedTx(){
 /* For Viewer: filter approved transactions by viewer scope (segments, vessels, projects) */
 function viewerScopeTx(){
   let all=approvedTx();
+  if(isViewer()){
+    all=all.filter(t=>{
+      if(!viewerCanSeeSegment(t.segment)) return false;
+      if(t.vesselId && !viewerCanSeeVessel(t.vesselId)) return false;
+      if(t.projectId && !viewerCanSeeProject(t.projectId)) return false;
+      return true;
+    });
+  }
+  return all;
+}
+
+/* v3.01.35: BIẾN THỂ GỒM CẢ CHƯA DUYỆT — dùng cho TẤT CẢ báo cáo tab Báo cáo
+   (nguyên tắc: AP/AR gồm cả chưa duyệt/chưa thanh toán, trừ từ chối). */
+function allTx(){ return approvedTx(true); }
+function viewerScopeAllTx(){
+  let all=approvedTx(true);
   if(isViewer()){
     all=all.filter(t=>{
       if(!viewerCanSeeSegment(t.segment)) return false;
@@ -27284,7 +27305,7 @@ function renderTrendChart(){
   };
   const series=segKeys.map(seg=>{
     const points=ys.map(y=>{
-      const tx=viewerScopeTx().filter(t=>new Date(t.date).getFullYear()===y && t.segment===seg);
+      const tx=viewerScopeAllTx().filter(t=>new Date(t.date).getFullYear()===y && t.segment===seg);
       let rev=tx.filter(t=>t.type==='REV').reduce((s,t)=>s+txAmt(t),0);
       let cost=tx.filter(t=>t.type==='COST').reduce((s,t)=>s+txAmt(t),0);
       // v2.53.1: cộng số liệu lịch sử của năm × mảng này (khi checkbox bật)
@@ -27693,7 +27714,7 @@ function renderProjectMarginTable(){
       })
     : S.projects;
   // For viewer: use viewerScopeTx to compute rev/cost
-  const txAll=viewerScopeTx();
+  const txAll=viewerScopeAllTx();
   const projRev=pid=>txAll.filter(t=>t.projectId===pid&&t.type==='REV').reduce((s,t)=>s+txAmt(t),0);
   const projCost=pid=>txAll.filter(t=>t.projectId===pid&&t.type==='COST').reduce((s,t)=>s+txAmt(t),0);
   projects.forEach(p=>{
@@ -27838,7 +27859,7 @@ function renderProjectPnL(){
   if(!p){block.innerHTML='<div class="empty">Dự án không tồn tại</div>';return;}
 
   // Get all approved tx of this project (viewer-scoped)
-  const txAll=viewerScopeTx().filter(t=>t.projectId===pid);
+  const txAll=viewerScopeAllTx().filter(t=>t.projectId===pid);
   const revTx=txAll.filter(t=>t.type==='REV');
   const costTx=txAll.filter(t=>t.type==='COST');
 
@@ -27875,7 +27896,7 @@ function renderProjectPnL(){
   // Top suppliers (from payables original — find via id)
   const supplierMap={};
   (S.payables||[]).forEach(r=>{
-    if(r.projectId!==pid || wfStatus(r)!=='approved') return;
+    if(r.projectId!==pid || wfStatus(r)==='rejected') return;
     supplierMap[r.partner]=(supplierMap[r.partner]||0)+(+r.amountNet||+r.amount||0);
   });
   const topSuppliers=Object.entries(supplierMap).sort((a,b)=>b[1]-a[1]).slice(0,5);
@@ -28009,7 +28030,7 @@ function renderMMR(){
   const yoyYm=`${y-1}-${String(m).padStart(2,'0')}`;
 
   // Helper: filter approved tx by month
-  const txInMonth=(period)=>viewerScopeTx().filter(t=>t.date && t.date.startsWith(period));
+  const txInMonth=(period)=>viewerScopeAllTx().filter(t=>t.date && t.date.startsWith(period));
 
   const txThis=txInMonth(ym);
   const txPrev=txInMonth(prevYm);
@@ -28055,9 +28076,9 @@ function renderMMR(){
       <div style="margin-bottom:20px">
         <div style="font-family:var(--font-display);font-size:14px;font-weight:600;margin-bottom:10px;color:var(--accent)">A · KPI tổng quan</div>
         <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:10px">
-          ${_mmrKpi('Doanh thu', fmt(revThis,'USD'), revYoYPct, revMoM, 'good')}
-          ${_mmrKpi('Chi phí', fmt(costThis,'USD'), null, costPrev?((costThis-costPrev)/costPrev*100):null, 'bad', true)}
-          ${_mmrKpi('Margin', fmt(marThis,'USD'), null, null, marThis>=0?'good':'bad', false, marPct.toFixed(1)+'%')}
+          ${_mmrKpi('Doanh thu', fmt(revThis), revYoYPct, revMoM, 'good')}
+          ${_mmrKpi('Chi phí', fmt(costThis), null, costPrev?((costThis-costPrev)/costPrev*100):null, 'bad', true)}
+          ${_mmrKpi('Margin', fmt(marThis), null, null, marThis>=0?'good':'bad', false, marPct.toFixed(1)+'%')}
           ${_mmrKpi('Hiệu suất tàu', totDays?utilPct+'%':'—', null, null, utilPct>=80?'good':utilPct>=50?'warn':'bad', false, `${totOn}/${totDays} ngày`)}
         </div>
       </div>
@@ -28079,9 +28100,9 @@ function renderMMR(){
                 const pct=r?(mar/r*100):0;
                 rows+=`<tr>
                   <td>${segmentChip(seg)}</td>
-                  <td class="r num">${fmt(r,'USD')}</td>
-                  <td class="r num">${fmt(c,'USD')}</td>
-                  <td class="r num" style="color:${mar>=0?'var(--good)':'var(--bad)'};font-weight:600">${fmt(mar,'USD')}</td>
+                  <td class="r num">${fmt(r)}</td>
+                  <td class="r num">${fmt(c)}</td>
+                  <td class="r num" style="color:${mar>=0?'var(--good)':'var(--bad)'};font-weight:600">${fmt(mar)}</td>
                   <td class="r num">${r?pct.toFixed(1)+'%':'—'}</td>
                 </tr>`;
               });
@@ -28090,9 +28111,9 @@ function renderMMR(){
             })()}
             <tr style="border-top:2px solid var(--rule);background:rgba(184,71,46,.05)">
               <td><b>Tổng cộng</b></td>
-              <td class="r num"><b>${fmt(revThis,'USD')}</b></td>
-              <td class="r num"><b>${fmt(costThis,'USD')}</b></td>
-              <td class="r num" style="color:${marThis>=0?'var(--good)':'var(--bad)'};font-weight:700">${fmt(marThis,'USD')}</td>
+              <td class="r num"><b>${fmt(revThis)}</b></td>
+              <td class="r num"><b>${fmt(costThis)}</b></td>
+              <td class="r num" style="color:${marThis>=0?'var(--good)':'var(--bad)'};font-weight:700">${fmt(marThis)}</td>
               <td class="r num"><b>${revThis?marPct.toFixed(1)+'%':'—'}</b></td>
             </tr>
           </tbody>
@@ -28145,14 +28166,14 @@ function renderMMR(){
               ${(()=>{
                 const byCust={};
                 (S.receivables||[]).forEach(r=>{
-                  if(wfStatus(r)!=='approved') return;
+                  if(wfStatus(r)==='rejected') return;
                   if(!r.issueDate || !r.issueDate.startsWith(ym)) return;
                   if(isViewer() && !viewerCanSeeSegment(r.segment)) return;
-                  byCust[r.partner]=(byCust[r.partner]||0)+(+r.amountNet||+r.amount||0);
+                  byCust[r.partner]=(byCust[r.partner]||0)+toDisplay(+r.amountNet||+r.amount||0, r.ccy||'USD');
                 });
                 const sorted=Object.entries(byCust).sort((a,b)=>b[1]-a[1]).slice(0,5);
                 if(!sorted.length) return '<tr><td class="empty" colspan="2">Không có doanh thu</td></tr>';
-                return sorted.map(([cust,amt])=>`<tr><td><b>${esc(cust)}</b></td><td class="r num">${fmt(amt,'USD')}</td></tr>`).join('');
+                return sorted.map(([cust,amt])=>`<tr><td><b>${esc(cust)}</b></td><td class="r num">${fmt(amt)}</td></tr>`).join('');
               })()}
             </tbody>
           </table>
@@ -28165,14 +28186,14 @@ function renderMMR(){
               ${(()=>{
                 const bySup={};
                 (S.payables||[]).forEach(r=>{
-                  if(wfStatus(r)!=='approved') return;
+                  if(wfStatus(r)==='rejected') return;
                   if(!r.issueDate || !r.issueDate.startsWith(ym)) return;
                   if(isViewer() && !viewerCanSeeSegment(r.segment)) return;
-                  bySup[r.partner]=(bySup[r.partner]||0)+(+r.amountNet||+r.amount||0);
+                  bySup[r.partner]=(bySup[r.partner]||0)+toDisplay(+r.amountNet||+r.amount||0, r.ccy||'USD');
                 });
                 const sorted=Object.entries(bySup).sort((a,b)=>b[1]-a[1]).slice(0,5);
                 if(!sorted.length) return '<tr><td class="empty" colspan="2">Không có chi phí</td></tr>';
-                return sorted.map(([sup,amt])=>`<tr><td><b>${esc(sup)}</b></td><td class="r num">${fmt(amt,'USD')}</td></tr>`).join('');
+                return sorted.map(([sup,amt])=>`<tr><td><b>${esc(sup)}</b></td><td class="r num">${fmt(amt)}</td></tr>`).join('');
               })()}
             </tbody>
           </table>
@@ -28185,26 +28206,26 @@ function renderMMR(){
         ${(()=>{
           // AR/AP at end of month
           const arOutstanding=(S.receivables||[]).filter(r=>{
-            if(wfStatus(r)!=='approved') return false;
+            if(wfStatus(r)==='rejected') return false;
             if(!r.issueDate || r.issueDate>monthEnd) return false;
             return arRemaining(r)>0.01;
           });
           const apOutstanding=(S.payables||[]).filter(r=>{
-            if(wfStatus(r)!=='approved') return false;
+            if(wfStatus(r)==='rejected') return false;
             if(!r.issueDate || r.issueDate>monthEnd) return false;
             return arRemaining(r)>0.01;
           });
-          const arTot=arOutstanding.reduce((s,r)=>s+arRemaining(r),0);
-          const apTot=apOutstanding.reduce((s,r)=>s+arRemaining(r),0);
+          const arTot=arOutstanding.reduce((s,r)=>s+toDisplay(arRemaining(r), r.ccy||'USD'),0);
+          const apTot=apOutstanding.reduce((s,r)=>s+toDisplay(arRemaining(r), r.ccy||'USD'),0);
           return `<div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
             <div style="background:rgba(76,154,68,.05);padding:14px;border-left:3px solid var(--good)">
               <div style="font-size:11px;color:var(--muted);letter-spacing:.1em;text-transform:uppercase">Phải thu</div>
-              <div style="font-family:var(--font-display);font-size:20px;font-weight:600;color:var(--good);margin-top:4px">${fmt(arTot,'USD')}</div>
+              <div style="font-family:var(--font-display);font-size:20px;font-weight:600;color:var(--good);margin-top:4px">${fmt(arTot)}</div>
               <div style="font-size:11px;color:var(--muted);margin-top:2px">${arOutstanding.length} bản ghi · ${arOutstanding.length?`KH lớn nhất: <b>${arOutstanding.sort((a,b)=>arRemaining(b)-arRemaining(a))[0].partner}</b>`:''}</div>
             </div>
             <div style="background:rgba(184,71,46,.05);padding:14px;border-left:3px solid var(--accent)">
               <div style="font-size:11px;color:var(--muted);letter-spacing:.1em;text-transform:uppercase">Phải trả</div>
-              <div style="font-family:var(--font-display);font-size:20px;font-weight:600;color:var(--accent);margin-top:4px">${fmt(apTot,'USD')}</div>
+              <div style="font-family:var(--font-display);font-size:20px;font-weight:600;color:var(--accent);margin-top:4px">${fmt(apTot)}</div>
               <div style="font-size:11px;color:var(--muted);margin-top:2px">${apOutstanding.length} bản ghi · ${apOutstanding.length?`NCC lớn nhất: <b>${apOutstanding.sort((a,b)=>arRemaining(b)-arRemaining(a))[0].partner}</b>`:''}</div>
             </div>
           </div>`;
@@ -28372,7 +28393,7 @@ function renderCashflowForecast(){
 
   // Assign AR (inflows)
   (S.receivables||[]).forEach(r=>{
-    if(wfStatus(r)!=='approved') return;
+    if(wfStatus(r)==='rejected') return;  // v3.01.35: gồm cả chưa duyệt
     if(isViewer() && !viewerCanSeeSegment(r.segment)) return;
     const remaining=arRemaining(r);
     if(remaining<=0.01) return;
@@ -28392,7 +28413,7 @@ function renderCashflowForecast(){
 
   // Assign AP (outflows)
   (S.payables||[]).forEach(r=>{
-    if(wfStatus(r)!=='approved') return;
+    if(wfStatus(r)==='rejected') return;  // v3.01.35: gồm cả chưa duyệt
     if(isViewer() && !viewerCanSeeSegment(r.segment)) return;
     const remaining=arRemaining(r);
     if(remaining<=0.01) return;
@@ -28495,7 +28516,7 @@ function renderAgingReport(){
   // AR buckets
   const arItems=[];
   (S.receivables||[]).forEach(r=>{
-    if(wfStatus(r)!=='approved') return;
+    if(wfStatus(r)==='rejected') return;
     if(isViewer() && !viewerCanSeeSegment(r.segment)) return;
     const c=classify(r);
     if(c) arItems.push(c);
@@ -28576,7 +28597,7 @@ function renderAgingReport(){
   let html=`<div style="display:grid;grid-template-columns:1fr 1fr;gap:18px">
     <div>
       <div style="font-family:var(--font-display);font-size:14px;font-weight:600;margin-bottom:2px;color:var(--good)">Phải thu (AR) — ${arItems.length} bản ghi</div>
-      <div style="font-size:10px;color:var(--muted);font-style:italic;margin-bottom:10px">Chỉ khoản đã xuất HĐ (đã duyệt) còn phải thu</div>
+      <div style="font-size:10px;color:var(--muted);font-style:italic;margin-bottom:10px">Gồm cả khoản chưa xuất HĐ (mọi trạng thái, trừ từ chối)</div>
       ${arItems.length?renderTable(arItems,'Phải thu'):'<div class="empty">Không có công nợ phải thu</div>'}
     </div>
     <div>
@@ -28613,7 +28634,7 @@ function renderTopCustomers(){
   // Aggregate revenue by customer (USD equivalent)
   const byCust={};
   (S.receivables||[]).forEach(r=>{
-    if(wfStatus(r)!=='approved') return;
+    if(wfStatus(r)==='rejected') return;  // v3.01.35: gồm cả chưa duyệt
     if(!r.issueDate || +r.issueDate.slice(0,4)!==yr) return;
     if(isViewer() && !viewerCanSeeSegment(r.segment)) return;
     const amt=+r.amountNet||+r.amount||0;
@@ -28740,7 +28761,7 @@ function renderCostBreakdown(){
   const aggregateForYear=(year)=>{
     const byCategory={};
     (S.payables||[]).forEach(r=>{
-      if(wfStatus(r)!=='approved') return;
+      if(wfStatus(r)==='rejected') return;  // v3.01.35: gồm cả chưa duyệt, trừ từ chối
       if(!r.issueDate || +r.issueDate.slice(0,4)!==year) return;
       if(seg && r.segment!==seg) return;
       if(isViewer() && !viewerCanSeeSegment(r.segment)) return;
@@ -28845,8 +28866,8 @@ function eventTotalFuelValueDisplay(e){
 }
 
 function vesselYearMetrics(vesselId,year){
-  // Costs/revenue from APPROVED transactions only (BI)
-  const txs=approvedTx().filter(t=>txVesselId(t)===vesselId && new Date(t.date).getFullYear()===year);
+  // v3.01.35: gồm CẢ chưa duyệt (nguyên tắc báo cáo tab Báo cáo)
+  const txs=allTx().filter(t=>txVesselId(t)===vesselId && new Date(t.date).getFullYear()===year);
   const rev=txs.filter(t=>t.type==='REV').reduce((s,t)=>s+txAmt(t),0);
   // v2.27.0: opex chỉ tính COST vào P&L — loại nhiên liệu mua (PO) và CapEx,
   // vì nhiên liệu đã tính riêng từ events bên dưới (tránh tính 2 lần).
