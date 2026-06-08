@@ -2703,7 +2703,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.01.48';            // bumped on each release
+const APP_VERSION='3.01.50';            // bumped on each release
 
 /* v2.62.0: Token xác thực backend — PHẢI khớp API_TOKEN trong Apps Script (Code.gs).
    Mọi request tới Apps Script tự động được gắn token qua lớp bọc fetch bên dưới.
@@ -10342,6 +10342,69 @@ function purgeBatchNow(batchSub){
   if(typeof renderAll==='function') renderAll();
   console.log('✅ Đã purge', batches.size, 'lô (chứa "'+batchSub+'"), dọn', removed, 'bản. Bấm Sync để đẩy lên cloud — lô này sẽ KHÔNG sống lại nữa.');
 }
+
+/* v3.01.49: CHẨN ĐOÁN AP lãi vay auto bị TRÙNG KỲ — chỉ ĐẾM & LIỆT KÊ, không xóa.
+   Trùng = cùng linkedLoanId + linkedSchedulePeriod (loại bản rejected). */
+function checkLoanInterestDupes(){
+  const aps=(S.payables||[]).filter(r=>r && r.autoSource==='loan_interest' && wfStatus(r)!=='rejected');
+  const byKey={};
+  aps.forEach(r=>{
+    const k=(r.linkedLoanId||'?')+'||K'+(r.linkedSchedulePeriod!=null?r.linkedSchedulePeriod:'?');
+    (byKey[k]=byKey[k]||[]).push(r);
+  });
+  const dupeGroups=Object.entries(byKey).filter(([,g])=>g.length>1);
+  console.log('===== AP LÃI VAY AUTO =====');
+  console.log('Tổng AP lãi vay auto:', aps.length);
+  console.log('Số kỳ bị trùng (>1 bản):', dupeGroups.length);
+  let extra=0, extraAmt=0;
+  dupeGroups.forEach(([k,g])=>{
+    g.sort((a,b)=>String(a.createdAt||'').localeCompare(String(b.createdAt||'')));
+    const loan=(S.loans||[]).find(l=>l.id===g[0].linkedLoanId);
+    const lname=loan?(loan.contractNo||loan.bankName||g[0].linkedLoanId):g[0].linkedLoanId;
+    extra += g.length-1;
+    g.slice(1).forEach(r=>{ extraAmt += +r.amount||0; });
+    console.log(`• ${lname} · Kỳ ${g[0].linkedSchedulePeriod}: ${g.length} bản — số tiền ${(+g[0].amount||0).toLocaleString()} ${g[0].ccy||''}`);
+    g.forEach((r,i)=>console.log(`    ${i===0?'GIỮ ':'DƯ  '} #${(r.id||'').slice(-6)} · tạo ${(r.createdAt||'').slice(0,16)} · ${r.createdBy||''}`));
+  });
+  console.log(`→ Số bản DƯ cần dọn: ${extra} · Tổng tiền dư (sẽ thoát khỏi báo cáo nếu dọn): ${extraAmt.toLocaleString()}`);
+  console.log('Để dọn an toàn, chạy: cleanLoanInterestDupes()  (giữ bản cũ nhất mỗi kỳ, gỡ link đúng)');
+  return {totalAuto:aps.length, dupeGroups:dupeGroups.length, extraRecords:extra, extraAmount:extraAmt};
+}
+
+/* v3.01.49: DỌN AN TOÀN AP lãi vay trùng kỳ — giữ bản TẠO SỚM NHẤT mỗi kỳ,
+   xóa các bản dư, và cập nhật linkedApId của kỳ lịch trả về bản giữ lại. */
+function cleanLoanInterestDupes(){
+  if(typeof isAdmin==='function' && !isAdmin()){ console.log('Chỉ admin được dọn'); return; }
+  const aps=(S.payables||[]).filter(r=>r && r.autoSource==='loan_interest' && wfStatus(r)!=='rejected');
+  const byKey={};
+  aps.forEach(r=>{
+    const k=(r.linkedLoanId||'?')+'||K'+(r.linkedSchedulePeriod!=null?r.linkedSchedulePeriod:'?');
+    (byKey[k]=byKey[k]||[]).push(r);
+  });
+  const dupeGroups=Object.entries(byKey).filter(([,g])=>g.length>1);
+  if(!dupeGroups.length){ console.log('✅ Không có AP lãi vay trùng kỳ.'); return; }
+  const removeIds=[];
+  dupeGroups.forEach(([k,g])=>{
+    g.sort((a,b)=>String(a.createdAt||'').localeCompare(String(b.createdAt||'')));
+    const keep=g[0];
+    // cập nhật link ở kỳ lịch trả → trỏ về bản giữ
+    const loan=(S.loans||[]).find(l=>l.id===keep.linkedLoanId);
+    if(loan){
+      const sched=(loan.paymentSchedule||[]).find(x=>x.period===keep.linkedSchedulePeriod);
+      if(sched) sched.linkedApId=keep.id;
+      try{ touchRecord(loan); }catch(e){ loan.updatedAt=new Date().toISOString(); }
+    }
+    g.slice(1).forEach(r=>removeIds.push(r.id));
+  });
+  S.payables=(S.payables||[]).filter(r=>!removeIds.includes(r.id));
+  try{ markDeleted(removeIds); }catch(e){}
+  saveState();
+  try{ logAuditEvent('loan_interest_dedupe',{removed:removeIds.length, groups:dupeGroups.length}); }catch(e){}
+  if(typeof renderAll==='function') renderAll();
+  console.log(`✅ Đã dọn ${removeIds.length} AP lãi vay dư (${dupeGroups.length} kỳ trùng) · giữ bản cũ nhất mỗi kỳ · đã gỡ link đúng. Bấm Sync để đẩy lên cloud.`);
+  return removeIds.length;
+}
+try{ window.checkLoanInterestDupes=checkLoanInterestDupes; window.cleanLoanInterestDupes=cleanLoanInterestDupes; }catch(e){}
 
 // v2.99.64: Danh mục nền — TUYỆT ĐỐI không cho bia mộ xóa khi merge/sync.
 const TOMBSTONE_PROTECTED_FIELDS=new Set([
@@ -19987,6 +20050,12 @@ function _loanMarkPaid(loanId, period){
   if(!l)return;
   const p=(l.paymentSchedule||[]).find(x=>x.period===period);
   if(!p)return;
+  // v3.01.50: nếu kỳ ĐÃ trả rồi → không tạo AP lần nữa (chặn trùng do bấm 2 lần / render lại nút).
+  if(p.paid){
+    toast(`Kỳ ${period} đã được đánh dấu trả rồi`,'warn');
+    viewLoanSchedule(loanId);
+    return;
+  }
   p.paid=true;
   p.paidDate=todayISO();
   // v1.34: AUTO-CREATE AP record for interest (if interest > 0)
