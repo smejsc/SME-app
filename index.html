@@ -2703,7 +2703,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.01.38';            // bumped on each release
+const APP_VERSION='3.01.41';            // bumped on each release
 
 /* v2.62.0: Token xác thực backend — PHẢI khớp API_TOKEN trong Apps Script (Code.gs).
    Mọi request tới Apps Script tự động được gắn token qua lớp bọc fetch bên dưới.
@@ -14248,7 +14248,7 @@ function editProject(id){
   });
 }
 function projectRev(pid){return allTx().filter(t=>t.projectId===pid&&t.type==='REV').reduce((s,t)=>s+txAmt(t),0);}
-function projectCost(pid){return allTx().filter(t=>t.projectId===pid&&t.type==='COST').reduce((s,t)=>s+txAmt(t),0);}
+function projectCost(pid){return allTx().filter(t=>t.projectId===pid&&t.type==='COST'&&t.inPL!==false).reduce((s,t)=>s+txAmt(t),0);}
 function renderProjects(){
   const tbl=document.getElementById('prj-table');
   if(!S.projects.length){tbl.innerHTML='<tr><td class="empty">Chưa có dự án</td></tr>';return;}
@@ -27307,7 +27307,7 @@ function renderTrendChart(){
     const points=ys.map(y=>{
       const tx=viewerScopeAllTx().filter(t=>new Date(t.date).getFullYear()===y && t.segment===seg);
       let rev=tx.filter(t=>t.type==='REV').reduce((s,t)=>s+txAmt(t),0);
-      let cost=tx.filter(t=>t.type==='COST').reduce((s,t)=>s+txAmt(t),0);
+      let cost=tx.filter(t=>t.type==='COST'&&t.inPL!==false).reduce((s,t)=>s+txAmt(t),0);
       // v2.53.1: cộng số liệu lịch sử của năm × mảng này (khi checkbox bật)
       const hh=histSums(h=>+h.year===y && (h.segment||'OTHER')===seg);
       rev+=hh.revenue; cost+=hh.cost;
@@ -27412,7 +27412,7 @@ function _vesselRevCost(vid){
   const projIds=new Set(S.projects.filter(p=>p.vesselId===vid).map(p=>p.id));
   const txs=viewerScopeTx().filter(t=>(t.projectId && projIds.has(t.projectId)) || t.vesselId===vid);
   const rev=txs.filter(t=>t.type==='REV').reduce((s,t)=>s+txAmt(t),0);
-  const cost=txs.filter(t=>t.type==='COST').reduce((s,t)=>s+txAmt(t),0);
+  const cost=txs.filter(t=>t.type==='COST'&&t.inPL!==false).reduce((s,t)=>s+txAmt(t),0);
   const fuel=txs.filter(t=>t.type==='COST'&&FUEL_CAT_NAMES.includes(t.category)).reduce((s,t)=>s+txAmt(t),0);
   const histV=histSums(h=>h.vesselId===vid);
   return {rev:rev+histV.revenue, cost:cost+histV.cost, fuel, txCount:txs.length, hasHist:(histV.revenue>0||histV.cost>0)};
@@ -27531,7 +27531,7 @@ function renderVesselDrilldown(vid){
     return viaProject || viaVessel;
   });
   const totRevTx=allTxs.filter(t=>t.type==='REV').reduce((s,t)=>s+txAmt(t),0);
-  const totCostTx=allTxs.filter(t=>t.type==='COST').reduce((s,t)=>s+txAmt(t),0);
+  const totCostTx=allTxs.filter(t=>t.type==='COST'&&t.inPL!==false).reduce((s,t)=>s+txAmt(t),0);
   // v2.53.1: cộng số liệu lịch sử của tàu này (khi checkbox "Gồm số liệu lịch sử" bật)
   const histV=histSums(h=>h.vesselId===vid);
   const totRev=totRevTx+histV.revenue;
@@ -27716,7 +27716,7 @@ function renderProjectMarginTable(){
   // For viewer: use viewerScopeTx to compute rev/cost
   const txAll=viewerScopeAllTx();
   const projRev=pid=>txAll.filter(t=>t.projectId===pid&&t.type==='REV').reduce((s,t)=>s+txAmt(t),0);
-  const projCost=pid=>txAll.filter(t=>t.projectId===pid&&t.type==='COST').reduce((s,t)=>s+txAmt(t),0);
+  const projCost=pid=>txAll.filter(t=>t.projectId===pid&&t.type==='COST'&&t.inPL!==false).reduce((s,t)=>s+txAmt(t),0);
   projects.forEach(p=>{
     // v2.53.0: cộng số liệu lịch sử của dự án (khi checkbox "Gồm số liệu lịch sử" bật)
     const hist=histSums(h=>h.projectId===p.id);
@@ -28041,7 +28041,8 @@ function renderMMR(){
 
   // ===== A. KPI =====
   const sumRev=arr=>arr.filter(t=>t.type==='REV').reduce((s,t)=>s+txAmt(t),0);
-  const sumCost=arr=>arr.filter(t=>t.type==='COST').reduce((s,t)=>s+txAmt(t),0);
+  // v3.01.39: CP loại bỏ bút toán không vào P&L (PO tồn kho/CapEx) — đồng nhất với mục A.
+  const sumCost=arr=>arr.filter(t=>t.type==='COST'&&t.inPL!==false).reduce((s,t)=>s+txAmt(t),0);
 
   const revThis=sumRev(txThis), costThis=sumCost(txThis), marThis=revThis-costThis;
   const revPrev=sumRev(txPrev), costPrev=sumCost(txPrev);
@@ -28192,6 +28193,7 @@ function renderMMR(){
                   if(wfStatus(r)==='rejected') return;
                   if(!r.issueDate || !r.issueDate.startsWith(ym)) return;
                   if(isViewer() && !viewerCanSeeSegment(r.segment)) return;
+                  if(!apCountsInPL(r)) return;  // v3.01.39: bỏ PO/CapEx — đồng nhất P&L
                   bySup[r.partner]=(bySup[r.partner]||0)+toDisplay(+r.amountNet||+r.amount||0, r.ccy||'USD');
                 });
                 const sorted=Object.entries(bySup).sort((a,b)=>b[1]-a[1]).slice(0,5);
@@ -28220,17 +28222,33 @@ function renderMMR(){
           });
           const arTot=arOutstanding.reduce((s,r)=>s+toDisplay(arRemaining(r), r.ccy||'USD'),0);
           const apTot=apOutstanding.reduce((s,r)=>s+toDisplay(arRemaining(r), r.ccy||'USD'),0);
+          // v3.01.41: tách rõ thành phần để giải thích chênh lệch với "chi phí kỳ"
+          const _yr=y;  // năm báo cáo
+          // AP — Đầu tư TSCĐ (CapEx: dock/SCL/mua tài sản) còn nợ
+          const apCapex=apOutstanding.filter(r=>isExpenseCapEx(r.expenseType)).reduce((s,r)=>s+toDisplay(arRemaining(r), r.ccy||'USD'),0);
+          const apCapexCount=apOutstanding.filter(r=>isExpenseCapEx(r.expenseType)).length;
+          // AP — nợ cũ (hóa đơn năm trước năm báo cáo) còn nợ
+          const apOld=apOutstanding.filter(r=>+(r.issueDate||'').slice(0,4)<_yr).reduce((s,r)=>s+toDisplay(arRemaining(r), r.ccy||'USD'),0);
+          const apOldCount=apOutstanding.filter(r=>+(r.issueDate||'').slice(0,4)<_yr).length;
+          // AR — phải thu của năm cũ còn lại
+          const arOld=arOutstanding.filter(r=>+(r.issueDate||'').slice(0,4)<_yr).reduce((s,r)=>s+toDisplay(arRemaining(r), r.ccy||'USD'),0);
+          const arOldCount=arOutstanding.filter(r=>+(r.issueDate||'').slice(0,4)<_yr).length;
           return `<div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
             <div style="background:rgba(76,154,68,.05);padding:14px;border-left:3px solid var(--good)">
               <div style="font-size:11px;color:var(--muted);letter-spacing:.1em;text-transform:uppercase">Phải thu</div>
               <div style="font-family:var(--font-display);font-size:20px;font-weight:600;color:var(--good);margin-top:4px">${fmt(arTot)}</div>
               <div style="font-size:11px;color:var(--muted);margin-top:2px">${arOutstanding.length} bản ghi · ${arOutstanding.length?`KH lớn nhất: <b>${arOutstanding.sort((a,b)=>arRemaining(b)-arRemaining(a))[0].partner}</b>`:''}</div>
+              ${arOld>0.0001?`<div style="font-size:11px;color:var(--accent);margin-top:4px;border-top:1px dashed var(--rule);padding-top:4px">↳ trong đó phải thu năm cũ (trước ${_yr}): <b>${fmt(arOld)}</b> (${arOldCount})</div>`:''}
             </div>
             <div style="background:rgba(184,71,46,.05);padding:14px;border-left:3px solid var(--accent)">
               <div style="font-size:11px;color:var(--muted);letter-spacing:.1em;text-transform:uppercase">Phải trả</div>
               <div style="font-family:var(--font-display);font-size:20px;font-weight:600;color:var(--accent);margin-top:4px">${fmt(apTot)}</div>
               <div style="font-size:11px;color:var(--muted);margin-top:2px">${apOutstanding.length} bản ghi · ${apOutstanding.length?`NCC lớn nhất: <b>${apOutstanding.sort((a,b)=>arRemaining(b)-arRemaining(a))[0].partner}</b>`:''}</div>
+              ${(apCapex>0.0001||apOld>0.0001)?`<div style="font-size:11px;color:var(--accent);margin-top:4px;border-top:1px dashed var(--rule);padding-top:4px">${apCapex>0.0001?`↳ Đầu tư TSCĐ (tàu/máy móc/dock): <b>${fmt(apCapex)}</b> (${apCapexCount})<br>`:''}${apOld>0.0001?`↳ Nợ cũ (hóa đơn trước ${_yr}): <b>${fmt(apOld)}</b> (${apOldCount})`:''}</div>`:''}
             </div>
+          </div>
+          <div style="font-size:10px;color:var(--muted);font-style:italic;margin-top:8px;line-height:1.5">
+            ℹ️ Đây là <b>số dư công nợ còn lại</b> (tiền còn phải thu/trả) đến cuối tháng — KHÁC "Chi phí kỳ" ở mục A/J. Số này là <b>gross (gồm VAT)</b>, <b>cộng dồn mọi năm</b>, gồm cả <b>đầu tư TSCĐ (CapEx)</b> và <b>nợ cũ năm trước</b> — nên thường lớn hơn chi phí hoạt động phát sinh trong kỳ. Các dòng "↳" ở trên tách rõ phần làm nên chênh lệch đó.
           </div>`;
         })()}
       </div>
