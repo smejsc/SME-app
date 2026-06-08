@@ -2703,7 +2703,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.01.54';            // bumped on each release
+const APP_VERSION='3.01.55';            // bumped on each release
 
 /* v2.62.0: Token xác thực backend — PHẢI khớp API_TOKEN trong Apps Script (Code.gs).
    Mọi request tới Apps Script tự động được gắn token qua lớp bọc fetch bên dưới.
@@ -10405,6 +10405,42 @@ function cleanLoanInterestDupes(){
   return removeIds.length;
 }
 try{ window.checkLoanInterestDupes=checkLoanInterestDupes; window.cleanLoanInterestDupes=cleanLoanInterestDupes; }catch(e){}
+
+/* v3.01.55: CHẨN ĐOÁN số dư chủ tàu — đối chiếu opBalance vs các thành phần,
+   liệt kê AP gắn tàu QL (chi hộ) đáng ngờ (ccy=USD số lớn / fx sai). Chỉ in, không sửa.
+   Dùng: auditOpVessel('AFALINA')  hoặc  auditOpVessel()  để xem tất cả tàu QL. */
+function auditOpVessel(nameSub){
+  const vessels=(S.opVessels||[]).filter(v=>!nameSub || (v.name||'').toLowerCase().includes(String(nameSub).toLowerCase()));
+  if(!vessels.length){ console.log('Không tìm thấy tàu QL khớp:', nameSub); return; }
+  const fxRate=+S.fxRate||25000;
+  const toUsd=(raw,ccy)=>{ raw=+raw||0; if(!raw) return 0; if((ccy||'USD')==='USD') return raw; return raw/fxRate; };
+  vessels.forEach(v=>{
+    console.log('\n===== TÀU QL:', v.name, '(chủ:', v.owner||'?', ') =====');
+    // Thu/chi hộ từ opTransactions
+    const ops=(S.opTransactions||[]).filter(t=>t.vesselId===v.id);
+    let inUsd=0,outUsd=0,feesUsd=0;
+    ops.forEach(t=>{
+      const amtUsd=(+t.amountUsd>0)?+t.amountUsd:toUsd(t.amount,t.ccy);
+      if(t.type==='IN') inUsd+=amtUsd; else outUsd+=amtUsd;
+      feesUsd+=toUsd(t.bankFee,t.ccy)+toUsd(t.otherFee,t.ccy);
+    });
+    console.log(`Thu hộ (IN): ${inUsd.toLocaleString()} USD · Chi hộ (opTx OUT): ${outUsd.toLocaleString()} USD · Phí: ${feesUsd.toLocaleString()} USD`);
+    // AP gắn tàu QL = chi hộ
+    const aps=(S.payables||[]).filter(p=>p.vesselId===v.id);
+    let apUsd=0;
+    console.log(`-- AP gắn tàu (${aps.length} khoản) --`);
+    aps.forEach(p=>{
+      const net=+p.amountNet||((+p.amountGross||+p.amount||0)-(+p.vatAmount||0))||(+p.amount||0);
+      const u=toUsd(net,p.ccy); apUsd+=u;
+      const flag = (p.ccy==='USD' && u>5000) ? '  ⚠ NGỜ (USD lớn — kiểm tra import)' : '';
+      console.log(`   ${p.ccy||'?'} ${net.toLocaleString()} → ${u.toLocaleString()} USD · ${(p.desc||p.partner||'').slice(0,40)}${flag}`);
+    });
+    console.log(`Tổng chi hộ AP: ${apUsd.toLocaleString()} USD`);
+    const bal = inUsd - outUsd - feesUsd - apUsd;
+    console.log(`→ SỐ DƯ (opBalance) = IN − OUT − Phí − AP = ${bal.toLocaleString()} USD  | Ngưỡng tối thiểu: ${(+v.min||0).toLocaleString()} USD`);
+  });
+}
+try{ window.auditOpVessel=auditOpVessel; }catch(e){}
 
 // v2.99.64: Danh mục nền — TUYỆT ĐỐI không cho bia mộ xóa khi merge/sync.
 const TOMBSTONE_PROTECTED_FIELDS=new Set([
