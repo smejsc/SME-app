@@ -2697,7 +2697,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.01.28';            // bumped on each release
+const APP_VERSION='3.01.30';            // bumped on each release
 
 /* v2.62.0: Token xác thực backend — PHẢI khớp API_TOKEN trong Apps Script (Code.gs).
    Mọi request tới Apps Script tự động được gắn token qua lớp bọc fetch bên dưới.
@@ -15692,6 +15692,16 @@ function toggleApprovalRow(id){
   updateApprovalSummary();
 }
 
+/* v3.01.30: chọn/bỏ CẢ PHIẾU trong bảng phê duyệt — tích mọi dòng cùng batchId đang chờ duyệt. */
+function _apprToggleBatch(batchId, checked){
+  const candidates=approvalGetCandidates();
+  candidates.filter(c=>c.record.batchId===batchId).forEach(c=>{
+    if(checked) APPROVAL_SELECTED.add(c.id);
+    else APPROVAL_SELECTED.delete(c.id);
+  });
+  renderApprovalList();
+}
+
 function toggleSelectAllApproval(){
   const checked=document.getElementById('appr-select-all').checked;
   const candidates=approvalGetCandidates();
@@ -15820,8 +15830,54 @@ function renderApprovalList(){
     <th class="r">Số tiền</th>
     <th></th>
   </tr></thead><tbody>`;
+  candidates.forEach(c=>{c._r=c.record;});
+  // v3.01.30: gộp theo phiếu (batchId) — candidate có record cùng batchId ≥2 → 1 dòng tổng.
+  const _candRecs=candidates.map(c=>c.record);
+  const _batchCount={};
+  _candRecs.forEach(r=>{ if(r.batchId) _batchCount[r.batchId]=(_batchCount[r.batchId]||0)+1; });
+  const _seenB={};
   candidates.forEach(c=>{
     const r=c.record;
+    const b=r.batchId;
+    // === DÒNG TỔNG PHIẾU (≥2 dòng cùng batch trong danh sách chờ duyệt) ===
+    if(b && _batchCount[b]>=2){
+      if(_seenB[b]) return;
+      _seenB[b]=true;
+      const grp=candidates.filter(x=>x.record.batchId===b);
+      const ids=grp.map(x=>x.id);
+      const agg=_aggBatch(grp.map(x=>x.record));
+      const allChecked=ids.every(id=>APPROVAL_SELECTED.has(id));
+      const entityLabel=(()=>{
+        const f=grp[0].record;
+        if(f.vesselId){const v=S.vessels.find(x=>x.id===f.vesselId);return v?`⛵ ${esc(v.name)}`:'?';}
+        if(f.projectId){const p=S.projects.find(x=>x.id===f.projectId);return p?(p.isOM?'⚙ ':'')+p.code:'?';}
+        return '—';
+      })();
+      let dueCell = agg.dueDate ? `<div style="color:var(--muted)">hạn ${agg.dueDate}</div>` : '';
+      if(agg.dueDate){
+        const diffDays=Math.round((new Date(agg.dueDate)-new Date(todayISO()))/86400000);
+        if(diffDays<0) dueCell+=`<div style="color:var(--bad);font-weight:600">⚠ quá hạn ${Math.abs(diffDays)} ngày</div>`;
+        else if(diffDays<=7) dueCell+=`<div style="color:var(--warn);font-weight:600">⏳ còn ${diffDays} ngày</div>`;
+      }
+      const openB=`onclick="openBatchDetail('${grp[0].kind}','${b}')"`;
+      h+=`<tr style="cursor:pointer;background:rgba(83,74,183,.05)">
+        <td class="c"><input type="checkbox" ${allChecked?'checked':''} title="Chọn/bỏ cả phiếu (${ids.length} dòng)" onchange="_apprToggleBatch('${b}',this.checked)" onclick="event.stopPropagation()"></td>
+        <td ${openB} style="max-width:280px">
+          <div style="font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${esc(agg.partner)||''}">🗂 ${esc(agg.partner) || '—'} <span style="font-size:10px;color:#534ab7;font-weight:700">[${agg.count} dòng]</span></div>
+          <div style="font-size:11px;color:var(--muted)">Phiếu nhiều dòng · bấm xem/duyệt cả phiếu</div>
+          ${grp[0].record.createdBy?`<div style="font-size:10px;color:var(--muted)">${esc(grp[0].record.createdBy)}</div>`:''}
+        </td>
+        <td ${openB} style="font-size:11px">
+          <span class="chip chip-${grp[0].kindClass}" style="font-size:10px">${grp[0].kindLabel}</span>
+          <div style="margin-top:2px;color:var(--muted)">${entityLabel}</div>
+        </td>
+        <td class="mono" style="font-size:11px" ${openB}>${agg.issueDate||'—'}${dueCell}</td>
+        <td class="r num" ${openB}><b>${fmt(agg.gross, agg.ccy)}</b><div style="font-size:9px;color:var(--muted)">tổng ${agg.count} dòng</div></td>
+        <td><div class="row-actions"><button class="icon-btn" title="Xem/duyệt cả phiếu" onclick="openBatchDetail('${grp[0].kind}','${b}')">👁</button></div></td>
+      </tr>`;
+      return;
+    }
+    // === DÒNG LẺ (như cũ) ===
     const checked=APPROVAL_SELECTED.has(c.id)?'checked':'';
     let entityLabel='—';
     if(r.vesselId){
@@ -20147,6 +20203,248 @@ function renderAR(){
   renderArAp('ap');
 }
 
+/* ============================================================
+   v3.01.30: GỘP PHIẾU NHIỀU DÒNG (batchId) — hiển thị 1 dòng/phiếu
+   Dùng cho bảng AP, AR và Phê duyệt. Phiếu có ≥2 dòng cùng batchId
+   sẽ gộp thành 1 dòng tổng; phiếu 1 dòng / bản lẻ hiện như cũ.
+   ============================================================ */
+/* Gom danh sách record thành các "đơn vị hiển thị":
+   { kind:'single', r }  hoặc  { kind:'batch', batchId, recs, agg{...} }
+   Giữ nguyên thứ tự: vị trí của batch = vị trí bản ghi ĐẦU TIÊN của batch trong list. */
+function _groupByBatch(records){
+  const batchCount={};
+  records.forEach(r=>{ if(r.batchId) batchCount[r.batchId]=(batchCount[r.batchId]||0)+1; });
+  const seen={};
+  const units=[];
+  records.forEach(r=>{
+    const b=r.batchId;
+    if(b && batchCount[b]>=2){
+      if(seen[b]) return;            // batch đã đẩy 1 dòng tổng rồi → bỏ qua dòng sau
+      seen[b]=true;
+      const recs=records.filter(x=>x.batchId===b);
+      units.push({kind:'batch', batchId:b, recs, agg:_aggBatch(recs)});
+    } else {
+      units.push({kind:'single', r});
+    }
+  });
+  return units;
+}
+/* Tổng hợp 1 phiếu: net/vat/gross/paid/rem + trạng thái chung + hạn TT sớm nhất. */
+function _aggBatch(recs){
+  const first=recs[0]||{};
+  let net=0,vat=0,gross=0,paid=0,rem=0;
+  recs.forEach(r=>{
+    net  += +r.amountNet||+r.amount||0;
+    vat  += +r.vatAmount||0;
+    gross+= +r.amountGross||+r.amount||0;
+    paid += arPaidTotal(r);
+    rem  += arRemaining(r);
+  });
+  const statuses=[...new Set(recs.map(r=>wfStatus(r)))];
+  const status=statuses.length===1?statuses[0]:'_mixed';
+  // hạn TT sớm nhất (để cảnh báo quá hạn)
+  const dues=recs.map(r=>r.dueDate).filter(Boolean).sort();
+  const dueDate=dues[0]||'';
+  return {net,vat,gross,paid,rem,status,statuses,dueDate,
+    partner:first.partner||'', ccy:first.ccy||'USD', issueDate:first.issueDate||'',
+    segment:first.segment||'', createdBy:first.createdBy||'', createdByDept:first.createdByDept||'',
+    companyId:first.companyId, count:recs.length};
+}
+/* Trạng thái vòng đời gộp cho phiếu (badge) — ưu tiên trạng thái "thấp nhất" để người duyệt thấy việc cần làm. */
+function _batchWfLabel(agg){
+  if(agg.status==='_mixed') return '<span class="chip chip-warn" title="Các dòng khác trạng thái">Hỗn hợp</span>';
+  const s=WF_STATES[agg.status]||WF_STATES.draft;
+  return `<span class="chip ${s.chip}">${s.short}</span>`;
+}
+
+/* v3.01.30: render 1 DÒNG TỔNG cho phiếu nhiều dòng (gộp theo batchId). */
+function _renderBatchRow(u, isAp, kind){
+  const a=u.agg, recs=u.recs, batchId=u.batchId;
+  const first=recs[0]||{};
+  const segLabel=a.segment&&SEGMENTS[a.segment]?SEGMENTS[a.segment].short:'—';
+  const segChip=SEGMENTS[a.segment]?SEGMENTS[a.segment].chip:'';
+  // số HĐ: nếu mọi dòng cùng 1 số HĐ → hiện số đó; khác nhau → "nhiều HĐ"
+  const invs=[...new Set(recs.map(r=>(r.invoiceNo||'').trim()).filter(Boolean))];
+  const invLabel=invs.length===0?'—':(invs.length===1?invs[0]:`${invs.length} số HĐ`);
+  const dueM=first.dueMonth?`<div style="font-size:10px;color:var(--accent)">DK ${isAp?'trả':'thu'}: ${esc(first.dueMonth)}</div>`:'';
+  const open=`onclick="openBatchDetail('${kind}','${batchId}')"`;
+  // badge trạng thái
+  const wfBadgeHtml=_batchWfLabel(a);
+  // value cell: AR luôn quy VND; AP theo ccy phiếu
+  let valCell;
+  if(isAp){
+    valCell=`<div style="font-weight:700">${fmt(a.gross,a.ccy)}</div>
+      ${a.paid>0?`<div style="font-size:11px;color:var(--good)">đã trả ${fmt(a.paid,a.ccy)}</div>`:''}
+      <div style="font-size:11px;color:${a.rem>0?'var(--bad)':'var(--muted)'}">${a.rem>0?'còn '+fmt(a.rem,a.ccy):'đã đủ'}</div>
+      <div style="font-size:9px;color:var(--muted)">net ${fmt(a.net,a.ccy)}${a.vat>0?' · vat '+fmt(a.vat,a.ccy):''}</div>`;
+  } else {
+    const _v=(x)=>{ if(x==null||isNaN(x)||x===0) return '0'; const fx=+S.fxRate||25000; const amt=(a.ccy&&a.ccy!=='VND')?x*fx:x; return Math.round(amt).toLocaleString('vi-VN')+'₫'; };
+    valCell=`<div style="font-weight:700">${_v(a.gross)}</div>
+      ${a.paid>0?`<div style="font-size:10px;color:var(--good)">đã thu ${_v(a.paid)}</div>`:''}
+      <div style="font-size:11px;color:${a.rem>0?'var(--accent)':'var(--good)'};font-weight:600">${a.rem>0?'còn '+_v(a.rem):'✓ đã đủ'}</div>
+      <div style="font-size:9px;color:var(--muted);white-space:nowrap">net ${_v(a.net)}${a.vat>0?' · vat '+_v(a.vat):''}</div>`;
+  }
+  // status cell: AR dùng lifecycle, AP dùng wf badge
+  let statusCell;
+  if(isAp){
+    statusCell=`<div>${wfBadgeHtml}</div>`;
+  } else {
+    // AR: nếu approved → lifecycle theo rem; chưa duyệt → Chưa xuất HĐ
+    const lc = a.status==='approved' ? (a.rem<=0.0001?{label:'Đã thu',chip:'chip-good'}:{label:'Đã xuất HĐ',chip:'chip-warn'}) : (a.status==='_mixed'?{label:'Hỗn hợp',chip:'chip-warn'}:{label:'Chưa xuất HĐ',chip:''});
+    statusCell=`<span class="chip ${lc.chip}" style="font-size:10px">${lc.label}</span>`;
+  }
+  const companyChip=(!isAp && !HIDE_COMPANY_COL)?`<div style="margin-top:2px"><span class="chip" style="background:#534ab7;color:#fff;font-size:9px">${esc(companyCode(a.companyId)||companyCode(getParentCompanyId()))}</span></div>`:'';
+  const rowBg='background:rgba(83,74,183,.05)';  // nền tím nhạt phân biệt dòng gộp
+  return `<tr style="${rowBg}">
+    <td ${open} style="cursor:pointer;line-height:1.4">
+      <div style="font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:240px" title="${esc(a.partner)||''}">🗂 ${esc(a.partner) || '—'} <span style="font-size:10px;color:#534ab7;font-weight:700">[${a.count} dòng]</span></div>
+      <div style="font-size:11px;color:var(--muted)">Phiếu nhiều dòng · bấm để xem/sửa cả phiếu</div>
+      ${isAp?`<div style="font-size:10px;color:var(--muted)">${esc(a.createdBy)||'—'}${a.createdByDept?' · '+esc(a.createdByDept):''}</div>`:companyChip}
+    </td>
+    <td ${open} style="cursor:pointer;line-height:1.4">
+      <span class="chip ${segChip}" style="font-size:10px">${segLabel}</span>
+      <div class="mono" style="font-size:11px;margin-top:2px">${esc(invLabel)}</div>
+    </td>
+    <td class="mono" ${open} style="cursor:pointer;font-size:11px;line-height:1.4">
+      <div>${a.issueDate||'—'}</div>
+      <div style="color:var(--muted)">→ ${a.dueDate||'—'}</div>
+      ${dueM}
+    </td>
+    <td class="r num" ${open} style="cursor:pointer;line-height:1.4">${valCell}</td>
+    <td class="c" style="line-height:1.5">${statusCell}</td>
+    <td><div class="row-actions">
+      <button class="icon-btn" title="Xem / sửa / duyệt cả phiếu" onclick="openBatchDetail('${kind}','${batchId}')">👁</button>
+    </div></td>
+  </tr>`;
+}
+
+/* MỞ CHI TIẾT PHIẾU — xem mọi dòng, sửa/xóa từng dòng, duyệt/từ chối cả phiếu. */
+function openBatchDetail(kind, batchId){
+  const list=kind==='ap'?'payables':'receivables';
+  const recs=(S[list]||[]).filter(r=>r.batchId===batchId);
+  if(!recs.length){ toast('Không tìm thấy phiếu','bad'); return; }
+  const agg=_aggBatch(recs);
+  const fxNote = '';
+  const _money=(x,ccy)=>fmt(x,ccy||agg.ccy);
+  const lineRows=recs.map((r,i)=>{
+    const wfS=wfStatus(r);
+    const st=(WF_STATES[wfS]||WF_STATES.draft);
+    const net=+r.amountNet||+r.amount||0, vat=+r.vatAmount||0, gross=+r.amountGross||+r.amount||0;
+    const cc=costCenterLabel(r.costCenterType,r.costCenterId)|| (r.vesselId?anyVesselName(r.vesselId):'') || (r.projectId?((S.projects.find(p=>p.id===r.projectId)||{}).code||''):'') || '—';
+    const editable=wfCanEdit(r)||isAdmin();
+    return `<tr>
+      <td class="row-idx">${i+1}</td>
+      <td>${esc(r.desc||'—')}<div style="font-size:10px;color:var(--muted)">${esc(cc)}${r.expenseType?' · '+esc(r.expenseType):''}</div></td>
+      <td class="num mono">${_money(net)}</td>
+      <td class="num mono" style="color:var(--muted)">${vat>0?_money(vat):'—'}</td>
+      <td class="num mono"><b>${_money(gross)}</b></td>
+      <td><span class="chip ${st.chip}" style="font-size:9px">${st.short}</span></td>
+      <td class="c" style="white-space:nowrap">
+        <button class="icon-btn" title="Xem/sửa dòng này" onclick="closeModal();${kind==='ap'?'openPayableModal':'openReceivableModal'}('${r.id}')">✎</button>
+        ${editable?`<button class="icon-btn danger" title="Xóa dòng này" onclick="_batchDeleteLine('${kind}','${batchId}','${r.id}')">✕</button>`:''}
+      </td>
+    </tr>`;
+  }).join('');
+
+  // Nút duyệt/từ chối cả phiếu — hiện theo quyền + trạng thái chung
+  let batchActions='';
+  const allPendingAcc=recs.every(r=>wfStatus(r)==='pending_acc');
+  const allPendingL1 =recs.every(r=>wfStatus(r)==='pending_l1');
+  const allPendingL2 =recs.every(r=>wfStatus(r)==='pending_l2');
+  const anyDraft=recs.some(r=>{const s=wfStatus(r);return s==='draft'||s==='rejected';});
+  if(anyDraft){
+    batchActions+=`<button class="btn-primary" onclick="_batchSubmitAll('${kind}','${batchId}')">→ Gửi duyệt cả phiếu</button>`;
+  }
+  if(allPendingAcc && canCheckAcc()){
+    batchActions+=`<button class="btn-primary" onclick="_batchApproveAll('${kind}','${batchId}','acc')">✓ Đã kiểm chứng từ → Trình ký (cả phiếu)</button>`;
+  }
+  if(allPendingL1 && canApproveL1()){
+    batchActions+=`<button class="btn-primary" onclick="_batchApproveAll('${kind}','${batchId}','l1')">✓ Duyệt L1 cả phiếu</button>`;
+  }
+  if(allPendingL2 && canApproveL2()){
+    batchActions+=`<button class="btn-primary" onclick="_batchApproveAll('${kind}','${batchId}','l2')">✓ Duyệt L2 cả phiếu</button>`;
+  }
+  const canReject=recs.some(r=>['pending_acc','pending_l1','pending_l2'].includes(wfStatus(r)));
+  if(canReject && (canCheckAcc()||canApproveL1()||canApproveL2()||isAdmin())){
+    batchActions+=`<button class="btn-sec" style="background:var(--bad);color:#fff;border-color:var(--bad)" onclick="_batchRejectAll('${kind}','${batchId}')">✗ Từ chối cả phiếu</button>`;
+  }
+
+  const ccLabel=costCenterLabel(recs[0].costCenterType,recs[0].costCenterId)||'—';
+  const body=`
+    <style>
+      .bd-dt{width:100%;border-collapse:collapse;font-size:12px}
+      .bd-dt th{background:var(--paper-2);padding:6px;text-align:left;font-size:10px;text-transform:uppercase;color:var(--muted);border-bottom:1px solid var(--rule);white-space:nowrap}
+      .bd-dt td{padding:5px 6px;border-bottom:1px solid rgba(0,0,0,.05);vertical-align:top}
+      .bd-dt .num{text-align:right} .bd-dt .mono{font-family:var(--font-mono)}
+      .bd-dt .row-idx{width:24px;text-align:center;color:var(--muted);font-family:var(--font-mono)}
+    </style>
+    <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:10px;font-size:12px">
+      <div><span style="color:var(--muted);font-size:10px">ĐỐI TÁC</span><br><b>${esc(agg.partner)||'—'}</b></div>
+      <div><span style="color:var(--muted);font-size:10px">NGÀY PHIẾU</span><br><b>${esc(agg.issueDate)||'—'}</b></div>
+      <div><span style="color:var(--muted);font-size:10px">SỐ DÒNG</span><br><b>${agg.count}</b></div>
+      <div><span style="color:var(--muted);font-size:10px">ĐƠN VỊ TIỀN</span><br><b>${esc(agg.ccy)}</b></div>
+    </div>
+    <div style="border:1px solid var(--rule);max-height:42vh;overflow:auto;margin-bottom:10px">
+      <table class="bd-dt">
+        <thead><tr><th class="row-idx">#</th><th>Diễn giải · CC</th><th class="num">Net</th><th class="num">VAT</th><th class="num">Tổng</th><th>TT</th><th class="c">Thao tác</th></tr></thead>
+        <tbody>${lineRows}</tbody>
+      </table>
+    </div>
+    <div style="padding:10px 12px;background:var(--paper-2);border:1px solid var(--rule);font-size:12px">
+      <div style="display:flex;justify-content:space-between"><span>Tổng Net</span><b class="mono">${_money(agg.net)}</b></div>
+      <div style="display:flex;justify-content:space-between;color:var(--muted)"><span>Tổng VAT</span><span class="mono">${agg.vat>0?_money(agg.vat):'—'}</span></div>
+      <div style="display:flex;justify-content:space-between;border-top:1px solid var(--rule);margin-top:6px;padding-top:6px;font-weight:700"><span>TỔNG PHIẾU (gross)</span><span class="mono">${_money(agg.gross)}</span></div>
+      ${agg.paid>0.0001?`<div style="display:flex;justify-content:space-between;color:var(--good)"><span>Đã ${kind==='ap'?'trả':'thu'}</span><span class="mono">${_money(agg.paid)}</span></div>`:''}
+      ${agg.rem>0.0001?`<div style="display:flex;justify-content:space-between;color:var(--bad)"><span>Còn lại</span><span class="mono">${_money(agg.rem)}</span></div>`:''}
+    </div>
+    ${batchActions?`<div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap">${batchActions}</div>`:''}`;
+  openModal('🗂 Chi tiết phiếu nhiều dòng · '+esc(batchId.slice(-6)), body,
+    `<button class="btn-sec" onclick="closeModal()">Đóng</button>`);
+}
+/* Xóa 1 dòng trong phiếu (có xác nhận) */
+function _batchDeleteLine(kind,batchId,id){
+  if(!confirm('Xóa dòng này khỏi phiếu? (các dòng khác giữ nguyên)')) return;
+  deleteAr(kind,id);
+  // mở lại chi tiết nếu phiếu còn dòng
+  const list=kind==='ap'?'payables':'receivables';
+  setTimeout(()=>{ if((S[list]||[]).some(r=>r.batchId===batchId)) openBatchDetail(kind,batchId); else closeModal(); }, 50);
+}
+/* Gửi duyệt cả phiếu */
+function _batchSubmitAll(kind,batchId){
+  const list=kind==='ap'?'payables':'receivables';
+  const recs=(S[list]||[]).filter(r=>r.batchId===batchId && (wfStatus(r)==='draft'||wfStatus(r)==='rejected'));
+  if(!recs.length){toast('Không có dòng nào để gửi duyệt','warn');return;}
+  recs.forEach(r=>{ try{ wfSubmit(r,kind); }catch(e){} });
+  saveState();renderAll();closeModal();
+  toast(`Đã gửi duyệt cả phiếu (${recs.length} dòng)`,'good');
+}
+/* Duyệt cả phiếu theo cấp */
+function _batchApproveAll(kind,batchId,level){
+  const list=kind==='ap'?'payables':'receivables';
+  const recs=(S[list]||[]).filter(r=>r.batchId===batchId);
+  let ok=0,fail=0;
+  recs.forEach(r=>{
+    try{
+      if(level==='acc' && wfStatus(r)==='pending_acc'){ wfCheckAcc(r)?ok++:fail++; }
+      else if(level==='l1' && wfStatus(r)==='pending_l1'){ wfApproveL1(r)?ok++:fail++; }
+      else if(level==='l2' && wfStatus(r)==='pending_l2'){ wfApproveL2(r)?ok++:fail++; }
+    }catch(e){ fail++; }
+  });
+  saveState();renderAll();closeModal();
+  toast(`Đã duyệt ${ok} dòng cả phiếu${fail?` · ${fail} lỗi`:''}`,ok?'good':'warn');
+}
+/* Từ chối cả phiếu */
+function _batchRejectAll(kind,batchId){
+  const reason=prompt('Lý do từ chối cả phiếu (áp cho mọi dòng):','');
+  if(reason===null) return;
+  const list=kind==='ap'?'payables':'receivables';
+  const recs=(S[list]||[]).filter(r=>r.batchId===batchId && ['pending_acc','pending_l1','pending_l2'].includes(wfStatus(r)));
+  let n=0;
+  recs.forEach(r=>{ try{ if(wfReject(r,reason)) n++; }catch(e){} });
+  saveState();renderAll();closeModal();
+  toast(`Đã từ chối ${n} dòng cả phiếu`,'warn');
+}
+
 /* Render either AR or AP table with workflow */
 function renderArAp(kind){
   const isAp=kind==='ap';
@@ -20289,7 +20587,25 @@ function renderArAp(kind){
   </tr></thead><tbody>`;
   let sumNet=0,sumVat=0,sumTot=0,sumPaid=0,sumRem=0;
   let fNet=0,fVat=0,fTot=0,fPaid=0,fRem=0;   // v2.99.69: tổng theo bộ lọc (mọi trạng thái)
+  // v3.01.30: TỔNG tính trên TỪNG bản ghi (không gộp) để số liệu không đổi.
   rows.forEach(r=>{
+    const rem=arRemaining(r), pd=arPaidTotal(r), wfS=wfStatus(r);
+    const net=+r.amountNet||+r.amount||0, vat=+r.vatAmount||0, tot=+r.amountGross||+r.amount||0;
+    if(isAp){
+      fNet+=toDisplay(net,r.ccy||'USD'); fVat+=toDisplay(vat,r.ccy||'USD'); fTot+=toDisplay(tot,r.ccy||'USD'); fPaid+=toDisplay(pd,r.ccy||'USD'); fRem+=toDisplay(rem,r.ccy||'USD');
+    } else {
+      fNet+=_toVndFixed(net,r.ccy||'VND'); fVat+=_toVndFixed(vat,r.ccy||'VND'); fTot+=_toVndFixed(tot,r.ccy||'VND'); fPaid+=_toVndFixed(pd,r.ccy||'VND'); fRem+=_toVndFixed(rem,r.ccy||'VND');
+    }
+    if(wfS==='approved'){
+      if(isAp){ sumNet+=toDisplay(net,r.ccy||'USD'); sumVat+=toDisplay(vat,r.ccy||'USD'); sumTot+=toDisplay(tot,r.ccy||'USD'); sumPaid+=toDisplay(pd,r.ccy||'USD'); sumRem+=toDisplay(rem,r.ccy||'USD'); }
+      else { sumNet+=_toVndFixed(net,r.ccy||'VND'); sumVat+=_toVndFixed(vat,r.ccy||'VND'); sumTot+=_toVndFixed(tot,r.ccy||'VND'); sumPaid+=_toVndFixed(pd,r.ccy||'VND'); sumRem+=_toVndFixed(rem,r.ccy||'VND'); }
+    }
+  });
+  // v3.01.30: RENDER — gộp phiếu nhiều dòng (batchId ≥2 dòng) thành 1 dòng tổng.
+  const _units=_groupByBatch(rows);
+  _units.forEach(u=>{
+    if(u.kind==='batch'){ h+=_renderBatchRow(u, isAp, kind); return; }
+    const r=u.r;
     const rem=arRemaining(r);
     const pd=arPaidTotal(r);
     const st=arStatus(r);
@@ -20297,41 +20613,10 @@ function renderArAp(kind){
     const net=+r.amountNet||+r.amount||0;
     const vat=+r.vatAmount||0;
     const tot=+r.amountGross||+r.amount||0;
-    // v2.99.69: TỔNG THEO BỘ LỌC — cộng MỌI dòng đang hiển thị (bất kể trạng thái),
-    // để soát công nợ theo bộ lọc trạng thái/người nhập/NCC. (Tổng "chỉ đã duyệt" giữ riêng.)
-    if(isAp){
-      fNet+=toDisplay(net,r.ccy||'USD');
-      fVat+=toDisplay(vat,r.ccy||'USD');
-      fTot+=toDisplay(tot,r.ccy||'USD');
-      fPaid+=toDisplay(pd,r.ccy||'USD');
-      fRem+=toDisplay(rem,r.ccy||'USD');
-    } else {
-      fNet+=_toVndFixed(net,r.ccy||'VND');
-      fVat+=_toVndFixed(vat,r.ccy||'VND');
-      fTot+=_toVndFixed(tot,r.ccy||'VND');
-      fPaid+=_toVndFixed(pd,r.ccy||'VND');
-      fRem+=_toVndFixed(rem,r.ccy||'VND');
-    }
-    if(wfS==='approved'){
-      // v2.99.3: AR luôn quy về VND cho tổng (báo cáo nội bộ DN Việt Nam); AP giữ theo displayCcy như cũ.
-      if(isAp){
-        sumNet+=toDisplay(net,r.ccy||'USD');
-        sumVat+=toDisplay(vat,r.ccy||'USD');
-        sumTot+=toDisplay(tot,r.ccy||'USD');
-        sumPaid+=toDisplay(pd,r.ccy||'USD');
-        sumRem+=toDisplay(rem,r.ccy||'USD');
-      } else {
-        sumNet+=_toVndFixed(net,r.ccy||'VND');
-        sumVat+=_toVndFixed(vat,r.ccy||'VND');
-        sumTot+=_toVndFixed(tot,r.ccy||'VND');
-        sumPaid+=_toVndFixed(pd,r.ccy||'VND');
-        sumRem+=_toVndFixed(rem,r.ccy||'VND');
-      }
-    }
-    const segLabel=r.segment&&SEGMENTS[r.segment]?SEGMENTS[r.segment].short:'—';
     const proj=r.projectId?S.projects.find(p=>p.id===r.projectId):null;
     const vesselNm=anyVesselName(r.vesselId);
     const link=proj?proj.code:(vesselNm||'');
+    const segLabel=r.segment&&SEGMENTS[r.segment]?SEGMENTS[r.segment].short:'—';
 
     // Workflow action buttons
     const actionBtns=[];
@@ -22526,8 +22811,14 @@ function saveAr(kind,id){
     const myNorm = _norm(partner);
     const myVendor = (S.vendors||[]).find(v=>v.normalized===myNorm);
     const myTax = (myVendor && myVendor.taxCode || '').replace(/\s/g,'');
+    // v3.01.29: bản đang sửa thuộc phiếu nào (batchId) — để bỏ qua các DÒNG ANH EM
+    // cùng phiếu nhiều dòng (chúng hợp lệ trùng NCC + số HĐ vì là các dòng chi phí
+    // của cùng 1 hóa đơn, không phải nhập trùng).
+    const myRec = id ? (S[list]||[]).find(x=>x.id===id) : null;
+    const myBatch = myRec && myRec.batchId ? myRec.batchId : '';
     const dup=(S[list]||[]).find(r=>{
       if(r.id===id) return false;  // bỏ chính bản đang sửa
+      if(myBatch && r.batchId===myBatch) return false;  // v3.01.29: bỏ dòng cùng phiếu nhiều dòng
       if((r.invoiceNo||'').trim().toLowerCase()!==invKey) return false;  // số HĐ phải giống
       const rNorm=_norm(r.partner);
       if(rNorm && myNorm && rNorm===myNorm) return true;  // cùng NCC (tên chuẩn hóa)
@@ -22539,7 +22830,17 @@ function saveAr(kind,id){
       return false;
     });
     if(dup){
-      const ok=confirm(`⚠ CÓ THỂ TRÙNG HÓA ĐƠN:\n\nSố HĐ: ${invoiceNo}\nNCC: ${partner}${myTax?' (MST '+myTax+')':''}\n\nĐã có bản ghi cùng SỐ HĐ + NCC:\n• ${(dup.desc||'—').slice(0,40)}\n• Giá trị: ${fmt(+dup.amountGross||+dup.amount||0,dup.ccy)} · Ngày ${dup.issueDate||'—'}\n\nLưu ý: chi phí chi hộ tàu QL chỉ nên nhập 1 lần. Nếu đã ghi ở "Thu/Chi hộ tàu QL" thì KHÔNG nhập lại ở đây.\n\nVẫn muốn lưu?`);
+      // v3.01.29: đếm tổng số bản trùng (khác phiếu) để cảnh báo rõ hơn
+      const dupCount=(S[list]||[]).filter(r=>{
+        if(r.id===id) return false;
+        if(myBatch && r.batchId===myBatch) return false;
+        if((r.invoiceNo||'').trim().toLowerCase()!==invKey) return false;
+        const rNorm=_norm(r.partner);
+        if(rNorm && myNorm && rNorm===myNorm) return true;
+        if(myTax){ const rV=(S.vendors||[]).find(v=>v.normalized===rNorm); const rT=(rV&&rV.taxCode||'').replace(/\s/g,''); if(rT&&rT===myTax) return true; }
+        return false;
+      }).length;
+      const ok=confirm(`⚠ CÓ THỂ TRÙNG HÓA ĐƠN:\n\nSố HĐ: ${invoiceNo}\nNCC: ${partner}${myTax?' (MST '+myTax+')':''}\n\nĐã có ${dupCount} bản ghi (khác phiếu) cùng SỐ HĐ + NCC, ví dụ:\n• ${(dup.desc||'—').slice(0,40)}\n• Giá trị: ${fmt(+dup.amountGross||+dup.amount||0,dup.ccy)} · Ngày ${dup.issueDate||'—'}\n\n(Các dòng CÙNG một phiếu nhiều dòng KHÔNG bị tính là trùng.)\nLưu ý: chi phí chi hộ tàu QL chỉ nên nhập 1 lần. Nếu đã ghi ở "Thu/Chi hộ tàu QL" thì KHÔNG nhập lại ở đây.\n\nVẫn muốn lưu?`);
       if(!ok){ err.textContent='Đã hủy — nghi trùng số HĐ + NCC. Kiểm tra lại.'; return; }
     }
   }
