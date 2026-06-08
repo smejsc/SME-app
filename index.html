@@ -2697,7 +2697,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.01.27';            // bumped on each release
+const APP_VERSION='3.01.28';            // bumped on each release
 
 /* v2.62.0: Token xác thực backend — PHẢI khớp API_TOKEN trong Apps Script (Code.gs).
    Mọi request tới Apps Script tự động được gắn token qua lớp bọc fetch bên dưới.
@@ -21355,13 +21355,22 @@ function openReceivableModal(id){
   const r=isEdit?S.receivables.find(x=>x.id===id):{ccy:'USD',issueDate:todayISO(),payments:[]};
   if(isEdit && !r){toast('Không tìm thấy','bad');return;}
   const body=_arEditorBody(r,false);
-  const foot=`<button class="btn-sec" onclick="closeModal()">Hủy</button>
-              <button class="btn-primary" onclick="saveAr('ar','${id||''}')">${isEdit?'Cập nhật':'Lưu phải thu'}</button>`;
+  // v3.01.28: AR THÊM MỚI — 2 nút lưu: "Lưu dự kiến" (Chưa xuất HĐ) vs "Xuất hóa đơn" (lưu + duyệt).
+  // Khi SỬA — giữ 1 nút "Cập nhật" như cũ (đổi trạng thái xuất HĐ qua nút ngoài bảng).
+  let foot;
+  if(isEdit){
+    foot=`<button class="btn-sec" onclick="closeModal()">Hủy</button>
+          <button class="btn-primary" onclick="saveAr('ar','${id}')">Cập nhật</button>`;
+  } else {
+    foot=`<button class="btn-sec" onclick="closeModal()">Hủy</button>
+          <button class="btn-sec" onclick="saveArDraft()" title="Lưu là Doanh thu dự kiến — CHƯA phát hóa đơn">📋 Lưu dự kiến</button>
+          <button class="btn-primary" onclick="saveArAndIssue('')" title="Lưu + phát hóa đơn ngay (Đã xuất HĐ)" style="background:var(--good);border-color:var(--good)">🧾 Xuất hóa đơn</button>`;
+  }
   openModal(isEdit?'Sửa khoản phải thu':'Thêm phải thu',body,foot);
   setTimeout(_arSegmentChanged, 60);  // v1.82.0: áp lọc tàu theo mảng
 }
-/* v3.01.27: PHÁT HÓA ĐƠN — mở modal phải thu cho sửa giá trị, lưu xong TỰ DUYỆT (đã xuất HĐ).
-   Dùng cho AR đang "Chưa xuất HĐ" (draft/rejected). */
+/* v3.01.27: PHÁT HÓA ĐƠN cho khoản ĐANG Chưa xuất HĐ (từ nút 🧾 ngoài bảng) —
+   mở modal cho sửa giá trị, lưu xong tự duyệt. */
 function arIssueInvoice(id){
   const r=S.receivables.find(x=>x.id===id);
   if(!r){toast('Không tìm thấy khoản phải thu','bad');return;}
@@ -21372,13 +21381,30 @@ function arIssueInvoice(id){
   openModal('Phát hóa đơn — kiểm/sửa giá trị trước khi xuất',body,foot);
   setTimeout(_arSegmentChanged, 60);
 }
-/* Lưu giá trị (như saveAr) rồi đẩy trạng thái → approved (đã xuất HĐ). */
+/* v3.01.28: LƯU DỰ KIẾN — AR thêm mới, ép trạng thái Chưa xuất HĐ (draft) kể cả KTT/Admin. */
+function saveArDraft(){
+  window._LAST_SAVED_AR_ID = null;
+  window._AR_FORCE_DRAFT = true;
+  try{ saveAr('ar',''); } finally { window._AR_FORCE_DRAFT = false; }
+  if(window._LAST_SAVED_AR_ID){
+    toast('📋 Đã lưu Doanh thu dự kiến (Chưa xuất HĐ)','good');
+  }
+}
+/* v3.01.27/28: PHÁT HÓA ĐƠN — lưu (sửa giá nếu cần) rồi đẩy trạng thái → approved (đã xuất HĐ).
+   id='' → đang THÊM MỚI; id có giá trị → đang phát HĐ cho khoản Chưa xuất HĐ. */
 function saveArAndIssue(id){
-  saveAr('ar', id);  // lưu mọi thay đổi giá trị; nếu lỗi validate, saveAr đã đặt ar-err và return
-  // saveAr đóng modal khi thành công → nếu modal còn mở nghĩa là có lỗi, dừng.
-  const stillOpen=document.getElementById('ar-err');
-  if(stillOpen && stillOpen.textContent && stillOpen.textContent.trim()){ return; }
-  const r=S.receivables.find(x=>x.id===id);
+  window._LAST_SAVED_AR_ID = null;
+  saveAr('ar', id);  // lưu; nếu lỗi validate, saveAr đặt ar-err và return (modal còn mở)
+  // Nếu modal còn mở (ar-err còn hiển thị có nội dung) → lỗi validate, dừng.
+  const errEl=document.getElementById('ar-err');
+  if(errEl && errEl.textContent && errEl.textContent.trim()){ return; }
+  // Xác định bản ghi vừa thao tác:
+  const targetId = id || window._LAST_SAVED_AR_ID;
+  if(!targetId){
+    // không lưu được (lỗi validate, thêm mới) → dừng.
+    return;
+  }
+  const r=S.receivables.find(x=>x.id===targetId);
   if(!r){return;}
   if(wfStatus(r)!=='approved'){
     const nowIso=new Date().toISOString();
@@ -21391,10 +21417,10 @@ function saveArAndIssue(id){
     r.approvedL2By=tag; r.approvedL2At=nowIso;
     r.rejectedBy='';r.rejectedAt='';r.rejectReason='';r.rejectedAtLevel=null;
     touchRecord(r);
-    try{ logAuditEvent('ar_issue_invoice',{recordId:r.id,partner:r.partner||'',amount:r.amountGross||r.amount||0,ccy:r.ccy||'',actor:actorName(),note:'Phát hóa đơn — chuyển Chưa xuất HĐ → Đã xuất HĐ (approved)'}); }catch(e){}
+    try{ logAuditEvent('ar_issue_invoice',{recordId:r.id,partner:r.partner||'',amount:r.amountGross||r.amount||0,ccy:r.ccy||'',actor:actorName(),note:'Phát hóa đơn — Đã xuất HĐ (approved)'}); }catch(e){}
     saveState();renderAll();
-    toast('🧾 Đã phát hóa đơn — chuyển sang "Đã xuất HĐ"','good');
   }
+  toast('🧾 Đã phát hóa đơn — trạng thái "Đã xuất HĐ"','good');
 }
 function openPayableModal(id){
   const isEdit=!!id;
@@ -22551,7 +22577,8 @@ function saveAr(kind,id){
     // ở trạng thái 'approved' (đã duyệt). Lý do: AR là HĐ xuất bán, KTT đã phát hành HĐ thực
     // thì coi như đã duyệt nội bộ — không cần workflow nhiều cấp như AP.
     // NV thường nhập AR vẫn qua workflow để KTT kiểm.
-    const arFastTrack = (kind==='ar' && (isAdmin() || canCheckAcc()));
+    // v3.01.28: _AR_FORCE_DRAFT — khi user bấm "Lưu dự kiến", ép trạng thái draft kể cả KTT/Admin.
+    const arFastTrack = (kind==='ar' && !window._AR_FORCE_DRAFT && (isAdmin() || canCheckAcc()));
     const histTag = arFastTrack ? '(KTT nhập trực tiếp — '+actorName()+')' : '';
     const nowIso = new Date().toISOString();
     const newRec = {
@@ -22583,6 +22610,7 @@ function saveAr(kind,id){
       newRec.dockAssetId = dockAssetId;  // v2.25.0
     }
     S[list].push(newRec);
+    window._LAST_SAVED_AR_ID = newRec.id;  // v3.01.28: để saveArDraft / saveArAndIssue lấy id bản mới
     var _auditRecId=newRec.id, _auditIsNew=true;
   }
   // v3.01.00: ghi lượng+đơn giá nhiên liệu vào fuelPumped của event được gắn (đè đúng loại NL)
