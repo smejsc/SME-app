@@ -2703,7 +2703,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.01.58';            // bumped on each release
+const APP_VERSION='3.01.63';            // bumped on each release
 
 /* v2.62.0: Token xác thực backend — PHẢI khớp API_TOKEN trong Apps Script (Code.gs).
    Mọi request tới Apps Script tự động được gắn token qua lớp bọc fetch bên dưới.
@@ -10309,7 +10309,7 @@ function enforcePurgedBatches(){
   const list=_purgedBatches();
   if(!list.length) return 0;
   const purgedIds=new Set(list.map(p=>p.batchId));
-  const fields=['payables','receivables','opTransactions'];
+  const fields=['payables','receivables','opTransactions','transactions','revenues','cashTxns'];  // v3.01.63: phủ thêm doanh thu/giao dịch
   let removed=0;
   fields.forEach(f=>{
     if(!Array.isArray(S[f])) return;
@@ -10329,7 +10329,7 @@ function enforcePurgedBatches(){
    Dùng: purgeBatchNow('ivsx')  → cấm lô chứa 'ivsx' sống lại mãi mãi. */
 function purgeBatchNow(batchSub){
   if(!batchSub){ console.log('Cần truyền batchId hoặc chuỗi con, vd purgeBatchNow("ivsx")'); return; }
-  const fields=['payables','receivables','opTransactions'];
+  const fields=['payables','receivables','opTransactions','transactions','revenues','cashTxns'];  // v3.01.63
   const batches=new Set();
   fields.forEach(f=>{ (S[f]||[]).forEach(r=>{ if(r && r._importBatch && r._importBatch.includes(batchSub)) batches.add(r._importBatch); }); });
   if(!batches.size){ console.log('Không thấy lô nào chứa:', batchSub, '(có thể đã xóa rồi — vẫn đăng ký purge để chắc)'); }
@@ -10455,14 +10455,19 @@ function auditOpVessel(nameSub){
 try{ window.auditOpVessel=auditOpVessel; }catch(e){}
 
 /* v3.01.57: SỬA HÀNG LOẠT op_transactions sai loại tiền/tỷ giá.
-   Quy tắc AN TOÀN (mặc định): chỉ đụng dòng có fxToUsd<=1 (tức chưa quy đổi):
-     - ccy='VND' & fx<=1            → đặt fx = S.fxRate (số tiền giữ nguyên VND, chỉ tính lại USD)
-     - ccy='USD' & fx<=1 & amount>=nguong → coi là VND nhập nhầm: đổi ccy='VND', fx=S.fxRate
-   Dòng USD nhỏ (< nguong) giữ nguyên = USD thật. Mặc định nguong=5000.
-   dryRun=true (mặc định) chỉ in, KHÔNG sửa. Gọi fixOpCcyFx(false) để sửa thật. */
-function fixOpCcyFx(apply, nguong){
-  const dryRun = (apply!==false) ? (apply!==true) : false; // apply===false => sửa thật; mặc định dry
+   v3.01.59: THÊM chế độ CHỈ-VND (an toàn nhất) — KHÔNG đụng dòng USD nào.
+   Quy tắc:
+     - vndOnly=true (KHUYẾN NGHỊ): chỉ sửa dòng ccy='VND' & fxToUsd<=1 → đặt fx=S.fxRate.
+       (các khoản USD giữ NGUYÊN — vì bạn xác nhận USD đều đúng.)
+     - vndOnly=false (cũ): còn đổi USD-fx1-số-lớn → VND (CHỈ dùng nếu chắc).
+   dryRun mặc định = true (chỉ in). Gọi:
+     fixOpCcyFx()                → xem trước, chế độ CHỈ-VND
+     fixOpCcyFx(false)           → SỬA THẬT, chế độ CHỈ-VND
+     fixOpCcyFx(false, 0, false) → SỬA THẬT, chế độ cũ (đụng cả USD) */
+function fixOpCcyFx(apply, nguong, vndOnly){
+  const dryRun = (apply!==false);
   const TH = (+nguong>0)?+nguong:5000;
+  const onlyVnd = (vndOnly!==false);  // mặc định CHỈ-VND
   const fxRate=+S.fxRate||25000;
   const ops=S.opTransactions||[];
   const changes=[];
@@ -10470,28 +10475,102 @@ function fixOpCcyFx(apply, nguong){
     const fx=+t.fxToUsd||0; const amt=+t.amount||0; const ccy=t.ccy||'USD';
     let newCcy=ccy, newFx=fx, reason='';
     if(ccy==='VND' && fx<=1){ newFx=fxRate; reason='VND fx<=1 → đặt fx='+fxRate; }
-    else if(ccy==='USD' && fx<=1 && amt>=TH){ newCcy='VND'; newFx=fxRate; reason='USD lớn fx=1 → coi là VND'; }
+    else if(!onlyVnd && ccy==='USD' && fx<=1 && amt>=TH){ newCcy='VND'; newFx=fxRate; reason='USD lớn fx=1 → coi là VND'; }
     if(reason){
       const newUsd = newCcy==='USD'? amt : amt/newFx;
-      changes.push({t, newCcy, newFx, newUsd, reason, oldUsd:(fx>0?amt/ (ccy==='USD'?1:fx):amt)});
+      changes.push({t, newCcy, newFx, newUsd, reason});
     }
   });
-  if(!changes.length){ console.log('✅ Không có dòng nào cần sửa (ngưỡng '+TH+').'); return; }
-  console.log(`${dryRun?'🔎 XEM TRƯỚC':'🛠 SỬA'} — ${changes.length} dòng (ngưỡng USD-lớn = ${TH}):`);
+  if(!changes.length){ console.log('✅ Không có dòng nào cần sửa'+(onlyVnd?' (chế độ CHỈ-VND)':'')+'.'); return; }
+  console.log(`${dryRun?'🔎 XEM TRƯỚC':'🛠 SỬA'}${onlyVnd?' [CHỈ-VND]':' [gồm USD]'} — ${changes.length} dòng:`);
   changes.forEach(c=>{
-    console.log(`   ${c.t.ccy} ${(+c.t.amount).toLocaleString()} (fx ${c.t.fxToUsd||'?'}) → ${c.newCcy} fx ${c.newFx} = ${c.newUsd.toLocaleString(undefined,{maximumFractionDigits:2})} USD · ${(c.t.desc||'').slice(0,40)} · [${c.reason}]`);
+    console.log(`   ${c.t.ccy} ${(+c.t.amount).toLocaleString()} (fx ${c.t.fxToUsd||'?'}) → ${c.newCcy} fx ${c.newFx} = ${c.newUsd.toLocaleString(undefined,{maximumFractionDigits:2})} USD · ${(c.t.desc||'').slice(0,44)} · [${c.reason}]`);
   });
-  if(dryRun){ console.log('→ Đây chỉ là XEM TRƯỚC. Chạy fixOpCcyFx(false) để SỬA THẬT. Hoặc fixOpCcyFx(false, 3000) để đổi ngưỡng.'); return; }
+  if(dryRun){ console.log('→ XEM TRƯỚC. Chạy fixOpCcyFx(false) để SỬA THẬT (chế độ CHỈ-VND, không đụng USD).'); return; }
   if(typeof isAdmin==='function' && !isAdmin()){ console.log('Chỉ admin được sửa.'); return; }
-  // lưới an toàn
   try{ localStorage.setItem('seahorse_rescue_opCcyFx', JSON.stringify({at:new Date().toISOString(), before:changes.map(c=>({id:c.t.id,ccy:c.t.ccy,fxToUsd:c.t.fxToUsd,amountUsd:c.t.amountUsd}))})); }catch(e){}
   changes.forEach(c=>{ c.t.ccy=c.newCcy; c.t.fxToUsd=c.newFx; c.t.amountUsd=c.newUsd; try{touchRecord(c.t);}catch(e){c.t.updatedAt=new Date().toISOString();} });
   saveState();
-  try{ logAuditEvent('op_ccyfx_bulkfix',{count:changes.length, threshold:TH}); }catch(e){}
+  try{ logAuditEvent('op_ccyfx_bulkfix',{count:changes.length, onlyVnd}); }catch(e){}
   if(typeof renderAll==='function') renderAll();
   console.log(`✅ Đã sửa ${changes.length} dòng. Đã lưu bản sao (key seahorse_rescue_opCcyFx). Bấm Sync để đẩy lên cloud.`);
 }
 try{ window.fixOpCcyFx=fixOpCcyFx; }catch(e){}
+
+/* v3.01.60: ĐỌC THÔ dữ liệu op_transaction để kiểm tra trạng thái lưu thật (không qua quy đổi hiển thị).
+   Dùng: inspectOp('Bank Fee')  hoặc  inspectOp('318124')  — tìm theo diễn giải/số tiền. */
+function inspectOp(kw){
+  const k=String(kw||'').toLowerCase().replace(/[.,\s]/g,'');
+  const hits=(S.opTransactions||[]).filter(t=>{
+    const d=(t.desc||'').toLowerCase();
+    const a=String(t.amount||'').replace(/[.,]/g,'');
+    return d.includes(String(kw||'').toLowerCase()) || a.includes(k);
+  });
+  if(!hits.length){ console.log('Không tìm thấy bút toán khớp:', kw); return; }
+  hits.forEach(t=>{
+    console.log('-------------------------------');
+    console.log('id:', t.id, '| ngày:', t.date, '| tàu:', (S.opVessels.find(v=>v.id===t.vesselId)||{}).name);
+    console.log('desc:', t.desc);
+    console.log('ccy:', t.ccy, '| amount:', t.amount, '| fxToUsd:', t.fxToUsd, '| amountUsd:', t.amountUsd);
+    console.log('type:', t.type, '| paid:', t.paid, '| updatedAt:', t.updatedAt, '| updatedBy:', t.updatedBy);
+    // quy đổi USD app ĐANG dùng để tính số dư:
+    try{ console.log('→ opTxUsd() hiện tính:', opTxUsd(t), 'USD'); }catch(e){}
+  });
+  console.log('-------------------------------');
+  console.log('LƯU Ý: nếu fxToUsd=1 mà ccy=VND → dữ liệu gốc còn sai (dù hiển thị đúng). Chạy fixOpCcyFx(false) để chuẩn hóa.');
+}
+try{ window.inspectOp=inspectOp; }catch(e){}
+
+/* v3.01.63: CHẨN ĐOÁN máy còn sót bản ghi rác (đã xóa nơi khác nhưng máy này vẫn giữ).
+   Triệu chứng: máy chậm/đơ + còn mấy trăm dòng đã xóa. Lệnh CHỈ ĐẾM, không sửa.
+   Dùng: diagDirtyData() */
+function diagDirtyData(){
+  const fields=['receivables','payables','transactions','revenues','opTransactions'];
+  console.log('===== CHẨN ĐOÁN DỮ LIỆU MÁY NÀY =====');
+  console.log('Tổng deletedIds (bia mộ):', (S.deletedIds||[]).length, '| purgedBatches:', (S.purgedBatches||[]).length);
+  const delSet=new Set((S.deletedIds||[]).map(d=>d.id));
+  fields.forEach(f=>{
+    const arr=S[f]; if(!Array.isArray(arr)) return;
+    const imported=arr.filter(r=>r&&r._importedFromExcel===true).length;
+    const stillDeleted=arr.filter(r=>r&&delSet.has(r.id)).length;  // có bia mộ nhưng VẪN còn trong mảng = chưa dọn
+    const batches={};
+    arr.forEach(r=>{ if(r&&r._importBatch){ batches[r._importBatch]=(batches[r._importBatch]||0)+1; } });
+    console.log(`\n[${f}] tổng ${arr.length} dòng · import Excel: ${imported} · CÓ bia mộ nhưng còn sống: ${stillDeleted}`);
+    Object.keys(batches).forEach(b=>console.log(`    lô ${b}: ${batches[b]} dòng`));
+  });
+  console.log('\n→ Nếu "CÓ bia mộ nhưng còn sống" > 0: máy này chưa áp bia mộ. Chạy applyTombstonesNow() để dọn.');
+  console.log('→ Nếu còn "lô import" rác: chạy purgeBatchNow("<mã lô>") cho từng lô; rồi Sync.');
+}
+try{ window.diagDirtyData=diagDirtyData; }catch(e){}
+
+/* v3.01.63: ÉP áp bia mộ ngay trên máy này — xóa khỏi mọi mảng các bản ghi có ID nằm trong deletedIds.
+   An toàn: chỉ xóa bản đã có bia mộ (tức đã bị xóa chính thức nơi khác). Có lưới rescue. */
+function applyTombstonesNow(){
+  const delSet=new Set((S.deletedIds||[]).map(d=>d.id));
+  if(!delSet.size){ console.log('Không có bia mộ nào.'); return; }
+  const fields=['receivables','payables','transactions','revenues','opTransactions','events','onhires','cashTxns'];
+  const removed={}; const rescue=[];
+  fields.forEach(f=>{
+    const arr=S[f]; if(!Array.isArray(arr)) return;
+    const keep=[]; let n=0;
+    arr.forEach(r=>{ if(r&&delSet.has(r.id)){ rescue.push({field:f,rec:r}); n++; } else keep.push(r); });
+    if(n>0){ S[f]=keep; removed[f]=n; }
+  });
+  const total=Object.values(removed).reduce((s,x)=>s+x,0);
+  if(!total){ console.log('✅ Không còn bản ghi nào trùng bia mộ — máy này đã sạch.'); return; }
+  try{ localStorage.setItem('seahorse_rescue_applyTomb', JSON.stringify({at:new Date().toISOString(), records:rescue})); }catch(e){}
+  saveState();
+  if(typeof renderAll==='function') renderAll();
+  console.log('✅ Đã dọn', total, 'bản ghi trùng bia mộ:', removed, '\nĐã lưu bản sao (seahorse_rescue_applyTomb). Bấm Sync (push) để đồng bộ. Khôi phục nếu cần: restoreApplyTomb()');
+}
+try{ window.applyTombstonesNow=applyTombstonesNow; }catch(e){}
+function restoreApplyTomb(){
+  try{ const r=JSON.parse(localStorage.getItem('seahorse_rescue_applyTomb')||'null'); if(!r||!r.records){console.log('Không có bản sao.');return;}
+    r.records.forEach(x=>{ if(!Array.isArray(S[x.field]))S[x.field]=[]; if(!S[x.field].some(y=>y.id===x.rec.id)){ if(Array.isArray(S.deletedIds))S.deletedIds=S.deletedIds.filter(d=>String(d.id)!==String(x.rec.id)); S[x.field].push(x.rec);} });
+    saveState(); if(typeof renderAll==='function')renderAll(); console.log('✅ Đã khôi phục', r.records.length, 'bản ghi.');
+  }catch(e){ console.log('Lỗi:', e&&e.message); }
+}
+try{ window.restoreApplyTomb=restoreApplyTomb; }catch(e){}
 
 // v2.99.64: Danh mục nền — TUYỆT ĐỐI không cho bia mộ xóa khi merge/sync.
 const TOMBSTONE_PROTECTED_FIELDS=new Set([
@@ -24688,16 +24767,15 @@ function renderOpTxList(){
           <th>Ngày</th>
           <th class="r">Số tiền</th>
           <th class="r" title="Số dư sau — USD, đồng chuẩn backcharge chủ tàu">Số dư sau</th>
-          <th class="c">Trạng thái</th>
           <th></th>
         </tr></thead><tbody>`;
     if(!rows.length){
       // v3.01.58: nếu CÓ bút toán loại này (bỏ lọc người nhập/tháng) nhưng đang bị lọc ẩn → báo rõ
       const hiddenByFilter = allTxScoped.filter(t=>t.type===type && (!fV||t.vesselId===fV)).length;
       if(hiddenByFilter>0 && (fC||fM)){
-        html+=`<tr><td colspan="7" class="empty" style="color:var(--warn)">⚠ Có <b>${hiddenByFilter}</b> bút toán ${type==='IN'?'thu hộ':'chi hộ'} nhưng đang bị ẩn bởi bộ lọc${fC?' Người nhập = <b>'+esc(fC)+'</b>':''}${fM?' · Tháng = <b>'+esc(fM)+'</b>':''}. <a onclick="_opClearFilters()" style="color:var(--accent);cursor:pointer;text-decoration:underline">Bỏ lọc để xem tất cả</a></td></tr>`;
+        html+=`<tr><td colspan="6" class="empty" style="color:var(--warn)">⚠ Có <b>${hiddenByFilter}</b> bút toán ${type==='IN'?'thu hộ':'chi hộ'} nhưng đang bị ẩn bởi bộ lọc${fC?' Người nhập = <b>'+esc(fC)+'</b>':''}${fM?' · Tháng = <b>'+esc(fM)+'</b>':''}. <a onclick="_opClearFilters()" style="color:var(--accent);cursor:pointer;text-decoration:underline">Bỏ lọc để xem tất cả</a></td></tr>`;
       } else {
-        html+=`<tr><td colspan="7" class="empty">Không có bút toán ${type==='IN'?'thu hộ':'chi hộ'} ${fM?'trong tháng '+fM:''} ${fV?'của tàu này':''}</td></tr>`;
+        html+=`<tr><td colspan="6" class="empty">Không có bút toán ${type==='IN'?'thu hộ':'chi hộ'} ${fM?'trong tháng '+fM:''} ${fV?'của tàu này':''}</td></tr>`;
       }
     } else {
       rows.forEach(t=>{
@@ -24751,19 +24829,19 @@ function renderOpTxList(){
           <td class="mono" style="font-size:11px">${t.date}</td>
           ${col4}
           <td class="r num" style="font-weight:600;color:${v&&bal<v.min?'var(--bad)':'var(--ink)'}">${fmtCcy(bal,'USD')}</td>
-          <td class="c">${ttCell}</td>
           <td><div class="row-actions">${actCell}</div></td>
         </tr>`;
       });
-      // Totals (USD)
+      // Totals (USD) — v3.01.61: TỔNG CHI HỘ gồm cả PHÍ (NH + khác). Tổng thu giữ nguyên.
+      const grandTot = (type==='OUT') ? (totAll + totFees) : totAll;
       html+=`<tr class="total">
-        <td colspan="3">TỔNG ${type==='IN'?'THU':'CHI'} ${fM?'· T'+fM.slice(5)+'/'+fM.slice(0,4):'(tất cả)'} <span style="font-weight:400;color:var(--muted);font-size:10px">— quy USD${type==='OUT'?', net':''}${totVatUsd>0?' · VAT ≈'+fmtCcy(totVatUsd,'USD'):''}${totFees?' · phí '+fmtCcy(totFees,'USD'):''}</span></td>
-        <td class="r"><b>${fmtCcy(totAll,'USD')}</b></td>
-        <td colspan="3"></td>
+        <td colspan="3">TỔNG ${type==='IN'?'THU':'CHI'} ${fM?'· T'+fM.slice(5)+'/'+fM.slice(0,4):'(tất cả)'} <span style="font-weight:400;color:var(--muted);font-size:10px">— quy USD${type==='OUT'?', net + phí':''}${totVatUsd>0?' · VAT ≈'+fmtCcy(totVatUsd,'USD'):''}${(type==='OUT'&&totFees)?' · trong đó phí '+fmtCcy(totFees,'USD'):''}</span></td>
+        <td class="r"><b>${fmtCcy(grandTot,'USD')}</b></td>
+        <td colspan="2"></td>
       </tr>
       <tr style="font-size:11px;color:var(--muted)">
-        <td colspan="3" style="padding-left:24px;font-style:italic">↳ Đã TT: <b style="color:var(--good)">${fmtCcy(totPaid,'USD')}</b> · Chưa TT: <b style="color:var(--warn)">${fmtCcy(totUnpaid,'USD')}</b></td>
-        <td colspan="4"></td>
+        <td colspan="3" style="padding-left:24px;font-style:italic">↳ Đã TT: <b style="color:var(--good)">${fmtCcy(totPaid,'USD')}</b> · Chưa TT: <b style="color:var(--warn)">${fmtCcy(totUnpaid,'USD')}</b>${(type==='OUT'&&totFees)?' · Chi (net) '+fmtCcy(totAll,'USD')+' + phí '+fmtCcy(totFees,'USD'):''}</td>
+        <td colspan="3"></td>
       </tr>`;
     }
     html+='</tbody></table></div></div></div>';
@@ -24778,11 +24856,17 @@ function renderOpTxList(){
    ============================================================ */
 function openOpReportModal(){
   if(!S.opVessels.length){toast('Chưa có tàu quản lý','bad');return;}
-  // Default period: current month
+  // v3.01.62: kỳ mặc định BAO TRÙM dữ liệu thật (sớm nhất → hôm nay), tránh cứng tháng hiện tại
+  //  khiến báo cáo trống khi dữ liệu ở tháng trước. Vẫn cho chọn tháng/khoảng tùy ý.
   const now=new Date();
+  const today=now.toISOString().slice(0,10);
+  // gồm cả ngày của opTransactions và AP gắn tàu QL (chi hộ)
+  const opDates=(S.opTransactions||[]).map(x=>x.date).filter(Boolean);
+  const apDates=(S.payables||[]).filter(p=>p.vesselId && (S.opVessels||[]).some(v=>v.id===p.vesselId)).map(p=>p.issueDate||p.date).filter(Boolean);
+  const allDates=opDates.concat(apDates).sort();
+  const firstDay = allDates.length ? allDates[0] : (now.toISOString().slice(0,7)+'-01');
+  const lastDay = today;
   const ym=now.toISOString().slice(0,7);
-  const firstDay=ym+'-01';
-  const lastDay=new Date(now.getFullYear(),now.getMonth()+1,0).toISOString().slice(0,10);
   const vesselChecks=S.opVessels.map(v=>
     `<label style="display:flex;align-items:center;gap:8px;padding:5px 0;cursor:pointer">
       <input type="checkbox" data-vessel-id="${v.id}" checked> <span><b>${esc(v.name)}</b> ${v.owner?'· '+v.owner:''}</span>
@@ -24925,7 +25009,9 @@ function generateOpReport(){
     if(!v) return;
     // v1.89.0: báo cáo backcharge — tổng hợp theo USD (đồng chuẩn QL vận hành)
     // Opening balance: sum of all tx before `from` for this vessel (USD)
-    const all=S.opTransactions.filter(x=>x.vesselId===vid).sort((a,b)=>a.date.localeCompare(b.date));
+    // v3.01.62: GỘP cả AP gắn tàu QL (chi hộ ảo) để báo cáo khớp opBalance / số dư thật.
+    const _apV=_opApVirtualTx().filter(x=>x.vesselId===vid);
+    const all=S.opTransactions.filter(x=>x.vesselId===vid).concat(_apV).sort((a,b)=>(a.date||'').localeCompare(b.date||''));
     let openBal=0;
     all.forEach(x=>{
       if(x.date<from){
