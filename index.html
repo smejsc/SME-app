@@ -2703,7 +2703,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.01.45';            // bumped on each release
+const APP_VERSION='3.01.47';            // bumped on each release
 
 /* v2.62.0: Token xác thực backend — PHẢI khớp API_TOKEN trong Apps Script (Code.gs).
    Mọi request tới Apps Script tự động được gắn token qua lớp bọc fetch bên dưới.
@@ -20041,6 +20041,14 @@ function _loanUnmarkPaid(loanId, period){
 function _loanCreateInterestAP(loan, scheduleEntry){
   if(!loan || !scheduleEntry) return null;
   if((+scheduleEntry.interest||0) <= 0) return null;
+  // v3.01.47: CHẶN sinh trùng — nếu đã có AP lãi vay cho đúng khoản vay này + đúng kỳ này → không tạo nữa.
+  const _dup=(S.payables||[]).find(p=>p && p.autoSource==='loan_interest'
+    && p.linkedLoanId===loan.id && p.linkedSchedulePeriod===scheduleEntry.period
+    && wfStatus(p)!=='rejected');
+  if(_dup){
+    try{ logAuditEvent('loan_interest_ap_dup_skip',{loanId:loan.id, period:scheduleEntry.period, existingId:_dup.id}); }catch(e){}
+    return _dup.id;  // trả về bản đã có, không tạo bản dư
+  }
   const partner = (loan.bankName||'').trim();
   if(!partner) return null;
   // Get or create vendor from bank name
@@ -32817,39 +32825,40 @@ function downloadSeahorseTemplate(kind){
     wsIntro['!cols']=[{wch:32},{wch:88}];
     XLSX.utils.book_append_sheet(wb, wsIntro, 'Hướng dẫn KTT');
 
-    // SHEET: CP YTD TỔNG HỢP — sample đầy đủ 2 nhóm
+    // SHEET: CP YTD TỔNG HỢP — sample đầy đủ 3 nhóm (gắn tàu / gắn dự án / cả hai / CP chung)
     const ap2 = [
-      ['Đối tượng — Mã Tàu/Mã DA (TRỐNG = CP chung)','Loại CP — code *','Số tiền (NET chưa VAT) *','% VAT (mặc định 0)','Tiền tệ (mặc định VND)','Diễn giải (tự sinh nếu trống)','Kỳ kết thúc (mặc định 2026-05-29)'],
-      // Nhóm 1: gắn tàu
-      ['PACIFIC-STAR','PORT',225000000,0,'VND','','2026-05-29'],
-      ['PACIFIC-STAR','AGENCY',81000000,0,'VND','','2026-05-29'],
-      ['PACIFIC-STAR','REPAIR',640000000,10,'VND','','2026-05-29'],
-      ['PACIFIC-STAR','INSURANCE',800000000,10,'VND','Bảo hiểm H&M cả năm 2026','2026-01-05'],
-      ['GEOSUPORTER','PORT',180000000,0,'VND','','2026-05-29'],
-      ['GEOSUPORTER','PARTS',95000000,10,'VND','','2026-05-29'],
-      ['SEAHORSE-KEYSTONE','BUNKER_PO',1250000000,8,'VND','Tổng nhiên liệu YTD','2026-05-29'],
-      // Nhóm 2: CP chung công ty (Đối tượng TRỐNG)
-      ['','OFFICE',25000000,8,'VND','VPP văn phòng YTD','2026-05-29'],
-      ['','UTIL',18000000,10,'VND','Điện/Nước/Internet VP','2026-05-29'],
-      ['','RENT',350000000,10,'VND','Thuê VP Vũng Tàu YTD','2026-05-29'],
-      ['','ENTERTAIN',45000000,10,'VND','Tiếp khách YTD','2026-05-29'],
-      ['','TRAVEL',88000000,10,'VND','Công tác BOD/QL YTD','2026-05-29'],
-      ['','BANK_FEE',12000000,0,'VND','Phí NH YTD','2026-05-29'],
-      ['','TAX_NSNN',180000000,0,'VND','Thuế môn bài + nộp NSNN','2026-05-29'],
-      ['','OTHER',32000000,0,'VND','CP khác','2026-05-29'],
+      ['Tàu (tên — tùy chọn)','Mã dự án (tùy chọn)','Loại CP — code *','Số tiền (NET chưa VAT) *','% VAT (mặc định 0)','Tiền tệ (mặc định VND)','Diễn giải (tự sinh nếu trống)','Kỳ kết thúc (mặc định 2026-05-29)'],
+      // Nhóm 1: chỉ gắn TÀU
+      ['PACIFIC-STAR','','PORT',225000000,0,'VND','','2026-05-29'],
+      ['PACIFIC-STAR','','AGENCY',81000000,0,'VND','','2026-05-29'],
+      ['PACIFIC-STAR','','REPAIR',640000000,10,'VND','','2026-05-29'],
+      ['PACIFIC-STAR','','INSURANCE',800000000,10,'VND','Bảo hiểm H&M cả năm 2026','2026-01-05'],
+      ['GEOSUPORTER','','PORT',180000000,0,'VND','','2026-05-29'],
+      ['SEAHORSE-KEYSTONE','','BUNKER_PO',1250000000,8,'VND','Tổng nhiên liệu YTD','2026-05-29'],
+      // Nhóm 2: gắn CẢ TÀU LẪN DỰ ÁN (vd CP dự án chạy trên tàu)
+      ['GEOSUPORTER','GM-2026-01HQ','PARTS',95000000,10,'VND','Vật tư job khảo sát trên GEOSUPORTER','2026-05-29'],
+      ['PACIFIC-STAR','OM-2024-1181','REPAIR',120000000,10,'VND','Sửa chữa phục vụ dự án O&M','2026-05-29'],
+      // Nhóm 3: chỉ gắn DỰ ÁN (không gắn tàu)
+      ['','OM-2024-1181','AGENCY',45000000,0,'VND','Phí đại lý dự án O&M','2026-05-29'],
+      // Nhóm 4: CP chung công ty (để TRỐNG cả hai)
+      ['','','OFFICE',25000000,8,'VND','VPP văn phòng YTD','2026-05-29'],
+      ['','','RENT',350000000,10,'VND','Thuê VP Vũng Tàu YTD','2026-05-29'],
+      ['','','TAX_NSNN',180000000,0,'VND','Thuế môn bài + nộp NSNN','2026-05-29'],
+      ['','','OTHER',32000000,0,'VND','CP khác','2026-05-29'],
     ];
     const wsAp = XLSX.utils.aoa_to_sheet(ap2);
-    wsAp['!cols']=[{wch:38},{wch:18},{wch:18},{wch:12},{wch:14},{wch:36},{wch:18}];
+    wsAp['!cols']=[{wch:22},{wch:18},{wch:18},{wch:18},{wch:12},{wch:14},{wch:38},{wch:18}];
     XLSX.utils.book_append_sheet(wb, wsAp, 'CP YTD TỔNG HỢP');
 
     // SHEET: Mapping FAST → App
     const mapAoa = [['Cột trong FAST','Cột trong template','Ghi chú mapping']];
     const mappings = [
-      ['Mã đơn hàng / Mã công trình / Mã tàu','Đối tượng — Mã Tàu HOẶC Mã DA','Khớp với sheet "Tàu (live)" hoặc "Dự án (live)". TRỐNG = CP chung công ty.'],
+      ['Mã tàu / phương tiện','Tàu (tên)','Khớp tên tàu ở sheet "Tàu (live)". Để trống nếu CP không gắn tàu.'],
+      ['Mã đơn hàng / Mã công trình','Mã dự án','Khớp mã ở sheet "Dự án (live)". Có thể điền CÙNG dòng với Tàu (CP của dự án chạy trên tàu). TRỐNG cả Tàu lẫn Dự án = CP chung công ty.'],
       ['Tài khoản chi phí (6411/6412/6271/642x...)','Loại CP — code','6411→PORT, 6412→AGENCY, 6413→REPAIR, 6414→INSURANCE, 6271→PARTS, 6421→OFFICE, 6422→RENT, 6423→UTIL, 6425→ENTERTAIN, 6427→TRAVEL, 6428→OTHER'],
       ['SUM(Phát sinh nợ trong kỳ)','Số tiền (NET chưa VAT)','Tổng các bút toán Nợ cho cặp Đối tượng × Loại CP'],
       ['Thuế suất GTGT','% VAT','Nếu trộn nhiều VAT% trong cùng nhóm → đặt 0 hoặc lấy trung bình'],
-      ['','Diễn giải','Tự sinh: "Tổng hợp YTD đến [kỳ] · [Tên loại CP] · [Đối tượng hoặc CP chung công ty]"'],
+      ['','Diễn giải','Tự sinh: "Tổng hợp YTD đến [kỳ] · [Tên loại CP] · [Tàu · Dự án hoặc CP chung công ty]"'],
     ];
     mappings.forEach(m=>mapAoa.push(m));
     const wsMap = XLSX.utils.aoa_to_sheet(mapAoa);
@@ -34483,18 +34492,26 @@ function dedupePayables(){
   groups.forEach(g=>{
     gi++;
     g.sort((a,b)=>String(a.createdAt||'').localeCompare(String(b.createdAt||'')));
-    rows+=`<tr style="background:rgba(28,58,92,.05)"><td colspan="6" style="font-weight:600;padding:6px 8px">Nhóm ${gi}: HĐ ${esc(g[0].invoiceNo||'')} · ${esc(g[0].partner||'')} · ${fmt(g[0].amount,g[0].ccy)} — ${g.length} bản</td></tr>`;
+    rows+=`<tr style="background:rgba(28,58,92,.05)"><td colspan="8" style="font-weight:600;padding:6px 8px">Nhóm ${gi}: HĐ ${esc(g[0].invoiceNo||'')} · ${esc(g[0].partner||'')} · ${fmt(g[0].amount,g[0].ccy)} — ${g.length} bản</td></tr>`;
     g.forEach((r,idx)=>{
       const paid=(r.payments||[]).reduce((s,p)=>s+(+p.amount||0),0);
       const wfTxt=(r.status==='approved')?'<span style="color:var(--good)">đã duyệt</span>':(r.status||'nháp');
       const warn=(paid>0||r.status==='approved');
       const keepDefault=idx===0;  // giữ bản cũ nhất mặc định
+      // v3.01.47: cột chẩn đoán nguồn gốc bản dư
+      const srcTxt = r.autoSource ? `<span style="color:#534ab7">⚙ Auto (${esc(r.autoSource)})</span>`
+        : (r._importedFromExcel||r._importBatch) ? `<span style="color:var(--accent)">📥 Import Excel</span>`
+        : (r._origin ? `<span style="color:var(--muted)">${esc(r._origin)}</span>` : '✍ Nhập tay');
+      const ctime = (r.createdAt||'').slice(0,16).replace('T',' ');
+      const idTail = (r.id||'').slice(-6);
       rows+=`<tr style="border-bottom:1px solid rgba(0,0,0,.05)">
         <td style="padding:4px 8px"><input type="checkbox" class="ap-dup-del" data-id="${r.id}" ${keepDefault?'':'checked'}></td>
         <td style="font-size:11px">${idx===0?'<b style="color:var(--good)">GIỮ (gốc)</b>':'bản dư'}</td>
-        <td style="font-size:11px">${esc((r.desc||'').slice(0,40))}</td>
+        <td style="font-size:11px">${esc((r.desc||'').slice(0,36))}</td>
         <td style="font-size:11px;font-family:var(--font-mono)">${esc(r.issueDate||'')}</td>
         <td style="font-size:11px">${esc(r.createdBy||r.addedBy||'')}</td>
+        <td style="font-size:11px">${srcTxt}</td>
+        <td style="font-size:10px;font-family:var(--font-mono);color:var(--muted)">${esc(ctime)}<br>#${esc(idTail)}</td>
         <td style="font-size:11px">${wfTxt}${paid>0?` · <span style="color:var(--warn)">đã TT ${fmt(paid,r.ccy)}</span>`:''}</td>
       </tr>`;
     });
@@ -34503,7 +34520,7 @@ function dedupePayables(){
   const body=`
     <div style="font-size:12px;color:var(--muted);margin-bottom:10px">Tick các bản <b>dư</b> để xóa (mặc định giữ bản tạo sớm nhất mỗi nhóm). Trùng = cùng <b>số HĐ + NCC + số tiền</b>.</div>
     ${anyWarn?'<div style="font-size:11px;color:var(--warn);margin-bottom:8px;padding:6px 10px;background:rgba(196,138,57,.08);border-left:3px solid var(--warn)">⚠ Một số bản trùng đã có thanh toán hoặc đã duyệt. Cân nhắc kỹ trước khi xóa — xóa sẽ mất cả lịch sử thanh toán của bản đó.</div>':''}
-    <div class="tbl-scroll" style="max-height:50vh"><table class="tbl" style="font-size:12px"><thead><tr><th>Xóa</th><th>Vai trò</th><th>Diễn giải</th><th>Ngày HĐ</th><th>Người nhập</th><th>Trạng thái</th></tr></thead><tbody>${rows}</tbody></table></div>
+    <div class="tbl-scroll" style="max-height:50vh"><table class="tbl" style="font-size:12px"><thead><tr><th>Xóa</th><th>Vai trò</th><th>Diễn giải</th><th>Ngày HĐ</th><th>Người nhập</th><th>Nguồn</th><th>Tạo lúc / ID</th><th>Trạng thái</th></tr></thead><tbody>${rows}</tbody></table></div>
   `;
   const foot=`<button class="btn-sec" onclick="closeModal()">Hủy</button>
               <button class="btn-primary" style="background:var(--bad)" onclick="_doDedupePayables()">🗑 Xóa các bản đã tick</button>`;
