@@ -2703,7 +2703,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.01.53';            // bumped on each release
+const APP_VERSION='3.01.54';            // bumped on each release
 
 /* v2.62.0: Token xác thực backend — PHẢI khớp API_TOKEN trong Apps Script (Code.gs).
    Mọi request tới Apps Script tự động được gắn token qua lớp bọc fetch bên dưới.
@@ -24350,14 +24350,18 @@ function saveOpEditFull(id){
   const vatPercent = isChi ? (+(document.getElementById('op-edit-vat-percent')?.value)||0) : 0;
   const vatAmount = Math.round(amount*vatPercent/100*100)/100;
   const amountGross = amount + vatAmount;
-  // v3.01.52: cho phép SỬA loại tiền của bút toán (vd import sai USD/VND)
+  // v3.01.52/54: cho phép SỬA loại tiền của bút toán (vd import sai USD/VND)
   const ccyEl=document.getElementById('op-edit-ccy');
   const ccyT = ccyEl ? ccyEl.value : (t.ccy||'USD');
+  let txFx = +t.fxToUsd||0;
   let amountUsd;
-  if(ccyT==='USD'){ amountUsd = amount; }
-  else if(ccyT==='VND'){ const fx=(+t.fxToUsd>0?+t.fxToUsd:(+S.fxRate||25000)); amountUsd = amount/fx; }
-  else { amountUsd = (+t.fxToUsd>0)?amount/(+t.fxToUsd):amount; }
-  Object.assign(t,{date,vesselId,type,amount,ccy:ccyT,amountUsd,desc,paidDate,bankFee,otherFee,feeCcy,feeFxToUsd,feeNote,vendor,contractNo,invoiceNo,vatPercent,vatAmount,amountGross});
+  if(ccyT==='USD'){ txFx=1; amountUsd = amount; }
+  else if(ccyT==='VND'){
+    if(txFx<=1) txFx=(+S.fxRate||25000);  // fxToUsd=1 cho VND là sai → dùng tỷ giá hệ thống
+    amountUsd = amount/txFx;
+  }
+  else { if(txFx<=0) txFx=(+S.fxRate||25000); amountUsd = amount/txFx; }
+  Object.assign(t,{date,vesselId,type,amount,ccy:ccyT,fxToUsd:txFx,amountUsd,desc,paidDate,bankFee,otherFee,feeCcy,feeFxToUsd,feeNote,vendor,contractNo,invoiceNo,vatPercent,vatAmount,amountGross});
   touchRecord(t);  // v1.38.4
   saveState();closeModal();renderAll();toast('Đã cập nhật');
 }
@@ -24444,9 +24448,15 @@ function opTxUsd(t){
   if((t.ccy||'USD')==='USD') return amt;
   // v2.71.1: amountUsd đã lưu chỉ dùng khi > 0. Bản ghi import/cũ thiếu tỷ giá hay bị
   // lưu amountUsd=0 (vd VND chưa nhập tỷ giá) thì PHẢI quy đổi lại, không trả 0 sai lệch.
-  if(t.amountUsd!=null && !isNaN(+t.amountUsd) && +t.amountUsd>0) return +t.amountUsd;
-  // Quy đổi: ưu tiên tỷ giá của chính dòng; nếu thiếu, dùng tỷ giá chung của app (S.fxRate)
-  const fx=(+t.fxToUsd||0) || (+S.fxRate||0);
+  if(t.amountUsd!=null && !isNaN(+t.amountUsd) && +t.amountUsd>0){
+    // v3.01.54: nếu amountUsd lưu sẵn BẰNG đúng amount gốc (dấu hiệu fxToUsd=1 sai cho VND)
+    //  thì BỎ QUA giá trị lưu, quy đổi lại theo tỷ giá thật → tránh coi 318.124 VND = 318.124 USD.
+    if(!((t.ccy==='VND') && Math.abs(+t.amountUsd - amt) < 0.01)) return +t.amountUsd;
+  }
+  // Quy đổi: ưu tiên tỷ giá của chính dòng (nếu HỢP LỆ); nếu thiếu/sai, dùng tỷ giá chung của app (S.fxRate)
+  let fx=(+t.fxToUsd||0);
+  if(t.ccy==='VND' && fx<=1) fx=0;  // fxToUsd=1 cho VND là sai → bỏ, dùng fxRate
+  if(fx<=0) fx=(+S.fxRate||0);
   return fx>0 ? amt/fx : 0;  // không có tỷ giá nào → 0 (tránh cộng nhầm tiền gốc VND vào USD)
 }
 function opTxFeesUsd(t){
