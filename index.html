@@ -1177,12 +1177,12 @@ body.readonly-mode::before{
       <div class="section-title"><span class="tag">↘</span>Sổ phải thu</div>
       <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
         <input type="text" id="ar-quick-search" oninput="renderAR()" placeholder="🔍 Tìm: KH · số HĐ · diễn giải · số tiền…" style="padding:6px 10px;border:1px solid var(--rule);background:var(--paper);font-size:12px;min-width:240px;flex:1">
-        <select id="ar-filter-status" onchange="renderAR()" style="padding:6px 10px;border:1px solid var(--rule);background:var(--paper);font-family:var(--font-mono);font-size:12px" title="Lọc theo tình trạng thu tiền">
+        <select id="ar-filter-status" onchange="renderAR()" style="padding:6px 10px;border:1px solid var(--rule);background:var(--paper);font-family:var(--font-mono);font-size:12px" title="Lọc theo vòng đời hóa đơn / thu tiền">
           <option value="">Mọi tình trạng</option>
-          <option value="unpaid">Chưa thu</option>
-          <option value="paid">Đã thu</option>
-          <option value="overdue">Quá hạn (chưa thu)</option>
-          <option value="draft">— Nháp (chưa duyệt) —</option>
+          <option value="draft">📝 Chưa xuất HĐ (DT dự kiến)</option>
+          <option value="unpaid">🧾 Đã xuất HĐ — chưa thu</option>
+          <option value="paid">✓ Đã thu</option>
+          <option value="overdue">⚠ Quá hạn (chưa thu)</option>
           <option value="rejected">— Từ chối —</option>
         </select>
         <select id="ar-filter-company" class="company-ui" onchange="renderAR()" style="padding:6px 10px;border:1px solid var(--rule);background:var(--paper);font-family:var(--font-mono);font-size:12px;min-width:150px" title="Lọc theo công ty">
@@ -2697,7 +2697,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.01.26';            // bumped on each release
+const APP_VERSION='3.01.27';            // bumped on each release
 
 /* v2.62.0: Token xác thực backend — PHẢI khớp API_TOKEN trong Apps Script (Code.gs).
    Mọi request tới Apps Script tự động được gắn token qua lớp bọc fetch bên dưới.
@@ -7484,6 +7484,35 @@ function wfBadge(r){
     else if(r.status==='pending_l2') title=`L1 đã duyệt bởi ${esc(r.approvedL1By) || '?'} ${r.approvedL1At?r.approvedL1At.slice(0,10):''}\n→ Chờ L2 phê duyệt thanh toán.`;
   }
   return `<span class="chip ${s.chip}" title="${title.replace(/"/g,'&quot;')}">${s.short}</span>`;
+}
+
+/* v3.01.27: AR LIFECYCLE — nhãn nghiệp vụ phải thu (Doanh thu).
+   draft/rejected  = Chưa xuất HĐ  (Doanh thu DỰ KIẾN — chưa phát hóa đơn)
+   approved + còn nợ = Đã xuất HĐ   (đã phát hóa đơn, chờ thu tiền)
+   approved + thu đủ = Đã thu       (đã nhận tiền)
+   Trả về { key, label, chip, color, note }. */
+function arLifecycle(r){
+  const wfS=wfStatus(r);
+  if(wfS!=='approved'){
+    return {key:'expected',label:'Chưa xuất HĐ',chip:'',color:'var(--accent)',
+      note:'Doanh thu dự kiến — chưa phát hóa đơn'};
+  }
+  const rem=(typeof arRemaining==='function')?arRemaining(r):0;
+  if(rem<=0.0001){
+    return {key:'collected',label:'Đã thu',chip:'chip-good',color:'var(--good)',
+      note:'Đã phát hóa đơn & nhận đủ tiền'};
+  }
+  return {key:'invoiced',label:'Đã xuất HĐ',chip:'chip-warn',color:'var(--warn)',
+    note:'Đã phát hóa đơn — chờ thu tiền'};
+}
+/* Badge AR thay cho wfBadge (chỉ dùng ở bảng phải thu) */
+function arLifecycleBadge(r){
+  const lc=arLifecycle(r);
+  let title=lc.note;
+  if(r && wfStatus(r)==='approved'){
+    title=`${lc.note}.\nXuất HĐ bởi ${esc(r.approvedL2By||r.approvedL1By||'?')} ${(r.approvedL2At||r.approvedL1At||'').slice(0,10)}`;
+  }
+  return `<span class="chip ${lc.chip}" title="${title.replace(/"/g,'&quot;')}">${lc.label}</span>`;
 }
 
 function canApproveL1(){
@@ -20061,26 +20090,29 @@ function renderAR(){
   // AR KPI block
   const arK=document.getElementById('ar-kpi');
   if(arK){
+    // v3.01.27: DT dự kiến = AR chưa xuất HĐ (draft/rejected, chưa từ chối hẳn vẫn coi là dự kiến)
+    const recExpected=recAll.filter(r=>{const s=wfStatus(r); return s!=='approved' && s!=='rejected';});
+    const totExpected=recExpected.reduce((s,r)=>s+toDisplay(+r.amountNet||+r.amount||0,r.ccy||'USD'),0);
     arK.innerHTML=`
       <div class="kpi">
         <div class="kpi-label">Doanh thu đã thu</div>
         <div class="kpi-value" style="color:var(--good)">${fmt(totCollected)}</div>
-        <div class="kpi-sub">${_collectedCount} hợp đồng đã nhận tiền</div>
+        <div class="kpi-sub">${_collectedCount} hóa đơn đã nhận tiền</div>
       </div>
       <div class="kpi">
-        <div class="kpi-label">Phải thu còn lại</div>
+        <div class="kpi-label">Đã xuất HĐ — còn phải thu</div>
         <div class="kpi-value" style="color:var(--accent)">${fmt(totRecRem)}</div>
-        <div class="kpi-sub">${recOpen.length} khoản · Quá hạn: ${fmt(recOverdue)}</div>
+        <div class="kpi-sub">${recOpen.length} hóa đơn · Quá hạn: ${fmt(recOverdue)}</div>
       </div>
       <div class="kpi">
-        <div class="kpi-label">Chờ duyệt</div>
-        <div class="kpi-value" style="color:var(--warn)">${recPendingL1+recPendingL2}</div>
-        <div class="kpi-sub">Trình ký: ${recPendingL1} · Chờ TT: ${recPendingL2}</div>
+        <div class="kpi-label">DT dự kiến (chưa xuất HĐ)</div>
+        <div class="kpi-value" style="color:var(--warn)">${fmt(totExpected)}</div>
+        <div class="kpi-sub">${recExpected.length} khoản · chưa phát hóa đơn</div>
       </div>
       <div class="kpi">
-        <div class="kpi-label">Tổng PT (gồm chưa duyệt)</div>
+        <div class="kpi-label">Tổng phải thu</div>
         <div class="kpi-value">${recAll.length}</div>
-        <div class="kpi-sub">bút toán phải thu</div>
+        <div class="kpi-sub">gồm dự kiến + đã xuất HĐ</div>
       </div>`;
   }
 
@@ -20304,7 +20336,12 @@ function renderArAp(kind){
     // Workflow action buttons
     const actionBtns=[];
     if(wfS==='draft' || wfS==='rejected'){
-      actionBtns.push(`<button class="icon-btn good" title="Gửi duyệt L1" onclick="arSubmit('${kind}','${r.id}')">→</button>`);
+      if(isAp){
+        actionBtns.push(`<button class="icon-btn good" title="Gửi duyệt L1" onclick="arSubmit('${kind}','${r.id}')">→</button>`);
+      } else {
+        // v3.01.27: AR — nút "Phát hóa đơn": mở modal cho sửa giá, lưu xong tự duyệt (= đã xuất HĐ)
+        actionBtns.push(`<button class="icon-btn good" title="Phát hóa đơn (sửa giá nếu cần → xuất HĐ)" onclick="arIssueInvoice('${r.id}')" style="font-weight:700">🧾</button>`);
+      }
       actionBtns.push(`<button class="icon-btn" title="Sửa" onclick="${isAp?'openPayableModal':'openReceivableModal'}('${r.id}')">✎</button>`);
       actionBtns.push(`<button class="icon-btn danger" title="Xóa" onclick="deleteAr('${kind}','${r.id}')">✕</button>`);
     } else if(wfS==='pending_acc'){
@@ -20339,7 +20376,7 @@ function renderArAp(kind){
       }
       actionBtns.push(`<button class="icon-btn" title="Xem chi tiết / payments" onclick="${isAp?'openPayableModal':'openReceivableModal'}('${r.id}')">👁</button>`);
       if(isAdmin()||canApproveL2()){
-        actionBtns.push(`<button class="icon-btn warn" title="Trả về Nháp để sửa" onclick="arReturn('${kind}','${r.id}')">↶</button>`);
+        actionBtns.push(`<button class="icon-btn warn" title="${isAp?'Trả về Nháp để sửa':'Hủy hóa đơn → về Chưa xuất HĐ (sửa lại)'}" onclick="arReturn('${kind}','${r.id}')">↶</button>`);
       }
     }
 
@@ -20412,8 +20449,8 @@ function renderArAp(kind){
         return s;
       })()}</td>
       <td class="c" style="line-height:1.5">
-        <span class="chip ${st.cls}" style="font-size:10px">${st.label}</span>
-        <div style="margin-top:3px">${wfBadge(r)}</div>
+        ${arLifecycleBadge(r)}
+        ${wfS==='approved'?`<div style="margin-top:3px"><span class="chip ${st.cls}" style="font-size:10px">${st.label}</span></div>`:''}
         ${tickCell}
       </td>
       <td><div class="row-actions">${actionBtns.join('')}</div></td>
@@ -20429,7 +20466,7 @@ function renderArAp(kind){
   };
   // v2.99.69: dòng TỔNG THEO BỘ LỌC — phản ánh đúng tập đang lọc (mọi trạng thái).
   const _flt=[];
-  if(stFilter){ const _stMap={draft:'Nháp',pending_acc:'Chờ KT',pending_l1:'Trình ký',pending_l2:'Chờ TT',approved:'Đã duyệt',rejected:'Từ chối',unpaid:'Chưa thu',paid:'Đã thu',overdue:'Quá hạn'}; _flt.push(_stMap[stFilter]||stFilter); }
+  if(stFilter){ const _stMap={draft: isAp?'Nháp':'Chưa xuất HĐ',pending_acc:'Chờ KT',pending_l1:'Trình ký',pending_l2:'Chờ TT',approved:'Đã duyệt',rejected:'Từ chối',unpaid: isAp?'Chưa thu':'Đã xuất HĐ — chưa thu',paid:'Đã thu',overdue:'Quá hạn'}; _flt.push(_stMap[stFilter]||stFilter); }
   if(creatorFilter) _flt.push('NV: '+creatorFilter);
   if(vendorFilter)  _flt.push('NCC: '+vendorFilter);
   if(custFilter)    _flt.push('KH: '+custFilter);
@@ -21322,6 +21359,42 @@ function openReceivableModal(id){
               <button class="btn-primary" onclick="saveAr('ar','${id||''}')">${isEdit?'Cập nhật':'Lưu phải thu'}</button>`;
   openModal(isEdit?'Sửa khoản phải thu':'Thêm phải thu',body,foot);
   setTimeout(_arSegmentChanged, 60);  // v1.82.0: áp lọc tàu theo mảng
+}
+/* v3.01.27: PHÁT HÓA ĐƠN — mở modal phải thu cho sửa giá trị, lưu xong TỰ DUYỆT (đã xuất HĐ).
+   Dùng cho AR đang "Chưa xuất HĐ" (draft/rejected). */
+function arIssueInvoice(id){
+  const r=S.receivables.find(x=>x.id===id);
+  if(!r){toast('Không tìm thấy khoản phải thu','bad');return;}
+  if(wfStatus(r)==='approved'){toast('Khoản này đã xuất hóa đơn rồi','warn');return;}
+  const body=_arEditorBody(r,false);
+  const foot=`<button class="btn-sec" onclick="closeModal()">Hủy</button>
+              <button class="btn-primary" onclick="saveArAndIssue('${id}')" style="background:var(--good);border-color:var(--good)">🧾 Xuất hóa đơn (duyệt)</button>`;
+  openModal('Phát hóa đơn — kiểm/sửa giá trị trước khi xuất',body,foot);
+  setTimeout(_arSegmentChanged, 60);
+}
+/* Lưu giá trị (như saveAr) rồi đẩy trạng thái → approved (đã xuất HĐ). */
+function saveArAndIssue(id){
+  saveAr('ar', id);  // lưu mọi thay đổi giá trị; nếu lỗi validate, saveAr đã đặt ar-err và return
+  // saveAr đóng modal khi thành công → nếu modal còn mở nghĩa là có lỗi, dừng.
+  const stillOpen=document.getElementById('ar-err');
+  if(stillOpen && stillOpen.textContent && stillOpen.textContent.trim()){ return; }
+  const r=S.receivables.find(x=>x.id===id);
+  if(!r){return;}
+  if(wfStatus(r)!=='approved'){
+    const nowIso=new Date().toISOString();
+    r.status='approved';
+    r.submittedBy=r.submittedBy||actorName();
+    r.submittedAt=r.submittedAt||nowIso;
+    const tag='(Phát hóa đơn — '+actorName()+')';
+    r.accCheckedBy=tag; r.accCheckedAt=nowIso;
+    r.approvedL1By=tag; r.approvedL1At=nowIso;
+    r.approvedL2By=tag; r.approvedL2At=nowIso;
+    r.rejectedBy='';r.rejectedAt='';r.rejectReason='';r.rejectedAtLevel=null;
+    touchRecord(r);
+    try{ logAuditEvent('ar_issue_invoice',{recordId:r.id,partner:r.partner||'',amount:r.amountGross||r.amount||0,ccy:r.ccy||'',actor:actorName(),note:'Phát hóa đơn — chuyển Chưa xuất HĐ → Đã xuất HĐ (approved)'}); }catch(e){}
+    saveState();renderAll();
+    toast('🧾 Đã phát hóa đơn — chuyển sang "Đã xuất HĐ"','good');
+  }
 }
 function openPayableModal(id){
   const isEdit=!!id;
@@ -26956,39 +27029,60 @@ function _vesselRevCost(vid){
   return {rev:rev+histV.revenue, cost:cost+histV.cost, fuel, txCount:txs.length, hasHist:(histV.revenue>0||histV.cost>0)};
 }
 
+/* v3.01.27: DOANH THU DỰ KIẾN theo tàu = AR CHƯA xuất HĐ (draft/pending, KHÔNG gồm rejected/approved)
+   gắn dự án thuộc tàu HOẶC gắn thẳng vesselId. Quy đổi displayCcy như approvedTx. */
+function _vesselExpectedRev(vid){
+  const projIds=new Set(S.projects.filter(p=>p.vesselId===vid).map(p=>p.id));
+  let sum=0, n=0;
+  (S.receivables||[]).forEach(r=>{
+    const s=wfStatus(r);
+    if(s==='approved'||s==='rejected') return;     // chỉ tính khoản chưa xuất HĐ
+    const viaProject = r.projectId && projIds.has(r.projectId);
+    const viaVessel  = r.vesselId === vid;
+    if(!(viaProject||viaVessel)) return;
+    sum += toDisplay(+r.amountNet||+r.amount||0, r.ccy||'USD');
+    n++;
+  });
+  return {expected:sum, count:n};
+}
+
 function renderVesselSummaryTable(){
   const block=document.getElementById('rep-vessel-summary');
   if(!block) return;
   const vessels=isViewer()?S.vessels.filter(v=>viewerCanSeeVessel(v.id)):S.vessels;
   if(!vessels.length){ block.innerHTML='<div class="empty">Chưa có tàu công ty nào. Thêm ở Danh mục → Tàu (nhóm Tàu công ty).</div>'; return; }
-  let sRev=0,sCost=0,sOn=0;
+  let sRev=0,sCost=0,sOn=0,sExpected=0;
   const rows=vessels.map(v=>{
     const {rev,cost}=_vesselRevCost(v.id);
+    const {expected,count:expCount}=_vesselExpectedRev(v.id);
     const oh=S.onhires.filter(o=>o.vesselId===v.id);
     const onDays=oh.reduce((s,o)=>s+(+o.on||0),0);
-    sRev+=rev; sCost+=cost; sOn+=onDays;
+    sRev+=rev; sCost+=cost; sOn+=onDays; sExpected+=expected;
     const margin=rev-cost;
     const unitCost=onDays?cost/onDays:0;  // đơn giá chi phí / ngày khai thác
-    return {v,rev,cost,margin,onDays,unitCost};
+    return {v,rev,cost,margin,onDays,unitCost,expected,expCount};
   });
   const rowHtml=rows.map(r=>{
-    const mPct=r.rev?((r.margin/r.rev)*100).toFixed(1)+'%':'—';
+    const totalDT=r.rev+r.expected;            // v3.01.27: tổng DT gồm dự kiến
+    const mTotal=totalDT-r.cost;
+    const mPct=totalDT?((mTotal/totalDT)*100).toFixed(1)+'%':'—';
     return `<tr style="cursor:pointer" onclick="renderVesselDrilldown('${r.v.id}')" title="Bấm xem chi tiết dự án của tàu ${esc(r.v.name)}">
       <td><b>${esc(r.v.name)}</b> <span style="color:var(--muted);font-size:11px">${r.v.type==='SERVICE'?'DV':'KT'}</span></td>
-      <td class="r num">${fmt(r.rev)}</td>
+      <td class="r num"><div style="font-weight:600">${fmt(totalDT)}</div>${r.expected>0.0001?`<div style="font-size:10px;color:var(--good)">đã xuất HĐ ${fmt(r.rev)}</div><div style="font-size:10px;color:var(--warn)">dự kiến ${fmt(r.expected)} (${r.expCount})</div>`:''}</td>
       <td class="r num">${fmt(r.cost)}</td>
-      <td class="r num" style="color:${r.margin>=0?'var(--good)':'var(--bad)'};font-weight:600">${fmt(r.margin)}</td>
+      <td class="r num" style="color:${mTotal>=0?'var(--good)':'var(--bad)'};font-weight:600">${fmt(mTotal)}</td>
       <td class="r num" style="font-size:11px;color:var(--muted)">${mPct}</td>
       <td class="r num" style="font-size:11px">${r.onDays}</td>
       <td class="r num">${r.onDays?fmt(r.unitCost):'—'}</td>
     </tr>`;
   }).join('');
-  const sMargin=sRev-sCost;
+  const sTotalDT=sRev+sExpected;
+  const sMargin=sTotalDT-sCost;
   block.innerHTML=`
     <div class="tbl-scroll"><table class="tbl" style="font-size:12px">
       <thead><tr>
         <th>Tàu</th>
-        <th class="r" title="Doanh thu tích lũy (gồm gắn thẳng tàu + qua dự án)">Doanh thu</th>
+        <th class="r" title="Tổng doanh thu = Đã xuất HĐ + Dự kiến (chưa xuất HĐ). Gồm gắn thẳng tàu + qua dự án.">Doanh thu (gồm dự kiến)</th>
         <th class="r" title="Chi phí tích lũy (gồm AP gắn tàu + qua dự án)">Chi phí</th>
         <th class="r">Margin</th>
         <th class="r">Margin %</th>
@@ -26998,15 +27092,15 @@ function renderVesselSummaryTable(){
       ${rowHtml}
       <tr class="total">
         <td>∑ TỔNG (${rows.length} tàu)</td>
-        <td class="r">${fmt(sRev)}</td>
+        <td class="r"><div>${fmt(sTotalDT)}</div>${sExpected>0.0001?`<div style="font-size:10px;color:var(--good)">đã xuất HĐ ${fmt(sRev)}</div><div style="font-size:10px;color:var(--warn)">dự kiến ${fmt(sExpected)}</div>`:''}</td>
         <td class="r">${fmt(sCost)}</td>
         <td class="r" style="color:${sMargin>=0?'var(--good)':'var(--bad)'}">${fmt(sMargin)}</td>
-        <td class="r">${sRev?((sMargin/sRev)*100).toFixed(1)+'%':'—'}</td>
+        <td class="r">${sTotalDT?((sMargin/sTotalDT)*100).toFixed(1)+'%':'—'}</td>
         <td class="r">${sOn}</td>
         <td class="r">${sOn?fmt(sCost/sOn):'—'}</td>
       </tr>
       </tbody></table></div>
-    <div style="margin-top:6px;font-size:10px;color:var(--muted);font-style:italic">💡 Bấm tên tàu để xem chi tiết doanh thu/chi phí theo dự án. Chỉ tính bút toán ĐÃ DUYỆT.</div>`;
+    <div style="margin-top:6px;font-size:10px;color:var(--muted);font-style:italic">💡 Bấm tên tàu để xem chi tiết. <b>Doanh thu = Đã xuất HĐ (đã duyệt) + Dự kiến (chưa xuất HĐ)</b>; dòng nhỏ tách rõ 2 phần. Chi phí chỉ tính bút toán đã duyệt.</div>`;
 }
 
 function renderVesselDrilldown(vid){
@@ -27034,6 +27128,7 @@ function renderVesselDrilldown(vid){
   const histV=histSums(h=>h.vesselId===vid);
   const totRev=totRevTx+histV.revenue;
   const totCost=totCostTx+histV.cost;
+  const _vexp=_vesselExpectedRev(vid);  // v3.01.27: DT dự kiến (AR chưa xuất HĐ) theo tàu
   const hasHistV=(histV.revenue>0||histV.cost>0);
   const totFuel=allTxs.filter(t=>t.type==='COST'&&FUEL_CAT_NAMES.includes(t.category)).reduce((s,t)=>s+txAmt(t),0);
   const totOpex=totCost-totFuel;
@@ -27049,8 +27144,8 @@ function renderVesselDrilldown(vid){
   let html=`
     <div class="kpi-grid" style="margin-bottom:18px">
       <div class="kpi"><div class="kpi-label">Tàu</div><div class="kpi-value" style="font-size:22px">${esc(v.name)}</div><div class="kpi-sub">${v.type==='SERVICE'?'Tàu dịch vụ':'Tàu kỹ thuật'} · ${v.dwt?v.dwt.toLocaleString()+' DWT':''} · IMO ${esc(v.imo) || '—'}</div></div>
-      <div class="kpi"><div class="kpi-label">Tổng DT (tất cả năm)</div><div class="kpi-value">${fmt(totRev)}</div><div class="kpi-sub">${projects.length} dự án · ${allTxs.length} bút toán</div></div>
-      <div class="kpi"><div class="kpi-label">Margin tích lũy</div><div class="kpi-value" style="color:${totRev-totCost>=0?'var(--good)':'var(--bad)'}">${fmt(totRev-totCost)}</div><div class="kpi-sub">${totRev?((totRev-totCost)/totRev*100).toFixed(1)+'%':'—'}</div></div>
+      <div class="kpi"><div class="kpi-label">Tổng DT (tất cả năm)</div><div class="kpi-value">${fmt(totRev+_vexp.expected)}</div><div class="kpi-sub">${_vexp.expected>0.0001?`đã xuất HĐ ${fmt(totRev)} · dự kiến ${fmt(_vexp.expected)} (${_vexp.count})`:`${projects.length} dự án · ${allTxs.length} bút toán`}</div></div>
+      <div class="kpi"><div class="kpi-label">Margin tích lũy</div><div class="kpi-value" style="color:${(totRev+_vexp.expected)-totCost>=0?'var(--good)':'var(--bad)'}">${fmt((totRev+_vexp.expected)-totCost)}</div><div class="kpi-sub">${(totRev+_vexp.expected)?(((totRev+_vexp.expected)-totCost)/(totRev+_vexp.expected)*100).toFixed(1)+'%':'—'} · gồm DT dự kiến</div></div>
       <div class="kpi"><div class="kpi-label">Đơn giá BQ</div><div class="kpi-value">${fmt(avgSell)}</div><div class="kpi-sub">Opex/On ${fmt(avgOpex)} · Fuel/On ${fmt(avgFuel)}</div></div>
     </div>
     ${hasHistV?`<div class="rep-guide" style="background:rgba(184,71,46,.06);border-color:var(--accent);margin-bottom:14px"><span>📊 <b>Đã gồm số liệu lịch sử:</b> Tổng DT/Margin của tàu đã cộng số liệu năm cũ (DT ${fmt(histV.revenue)} · CP ${fmt(histV.cost)}). Các bảng dự án chi tiết bên dưới chỉ tính từ bút toán trong app.</span></div>`:''}`;
