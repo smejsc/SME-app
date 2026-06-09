@@ -2715,7 +2715,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.01.99';            // bumped on each release
+const APP_VERSION='3.01.103';            // bumped on each release
 
 /* v2.62.0: Token xác thực backend — PHẢI khớp API_TOKEN trong Apps Script (Code.gs).
    Mọi request tới Apps Script tự động được gắn token qua lớp bọc fetch bên dưới.
@@ -9705,12 +9705,22 @@ function isExpenseCapEx(typeCode){
    Tất cả báo cáo chi phí/P&L/BCQT/MMR phải lọc qua hàm này.
    - Loại CapEx (Dock/SCL) KHÔNG vào P&L (cộng vào TSCĐ).
    - v2.27.0: Loại PO/tồn kho (BUNKER_PO) KHÔNG vào P&L lúc mua —
-     chi phí nhiên liệu lấy từ tiêu thụ thực tế (events Tab 03). */
+     chi phí nhiên liệu lấy từ tiêu thụ thực tế (events Tab 03).
+   - v3.01.101: AP gắn TÀU QUẢN LÝ HỘ (opVessels) = CHI HỘ chủ tàu → KHÔNG vào P&L công ty.
+     Nguyên tắc: mảng QL Tàu (VESSEL_MGMT) không phát sinh chi phí của công ty; toàn bộ là chi hộ
+     (đã phản ánh ở Tab 06, trừ vào số dư chủ tàu). */
 function apCountsInPL(r){
   if(!r) return false;
   if(isExpenseCapEx(r.expenseType)) return false;
   if(isExpensePO(r.expenseType)) return false;
+  if(_isOpManagedAp(r)) return false;  // chi hộ tàu QL hộ — không vào P&L
   return true;
+}
+
+/* v3.01.101: AP này có gắn tàu thuộc danh sách quản lý hộ (opVessels) không? */
+function _isOpManagedAp(r){
+  if(!r || !r.vesselId) return false;
+  return (S.opVessels||[]).some(v=>v && v.id===r.vesselId);
 }
 
 /* v2.21.0: AP loại Ứng quỹ được duyệt xong → cộng tiền vào quỹ + ghi sổ quỹ.
@@ -14736,16 +14746,21 @@ function _renderPlanPerf(yr){
       // v2.68.0: KH Doanh thu phải quy đổi về đơn vị màn hình (toDisplay) trước khi cộng
       const planR=S.plans.filter(p=>p.year===yr&&p.segment===seg).reduce((s,p)=>s+toDisplay(p.revenue,p.ccy),0);
       const actR=txs.filter(t=>t.type==='REV'&&t.segment===seg).reduce((s,t)=>s+txAmt(t),0);
-      const actC=txs.filter(t=>t.type==='COST'&&t.segment===seg).reduce((s,t)=>s+txAmt(t),0);
+      const actC=txs.filter(t=>t.type==='COST'&&t.segment===seg&&t.inPL!==false).reduce((s,t)=>s+txAmt(t),0);
       const m=actR-actC;
       const ach=planR?actR/planR:0;
       if(planR===0&&actR===0&&actC===0) return;
-      segHtml+=`<tr>
+      // v3.01.102: mảng QL Tàu KHÔNG được có chi phí — nếu actC>0 là SAI nguyên tắc → cảnh báo đỏ
+      const mgmtViolation = (seg==='VESSEL_MGMT' && actC>0);
+      const costCell = actC>0
+        ? `<a onclick="showSegmentCostDetail('${seg}',${yr})" style="cursor:pointer;color:${mgmtViolation?'var(--bad)':'var(--accent)'};text-decoration:underline dotted;font-weight:${mgmtViolation?'700':'400'}" title="${mgmtViolation?'⚠ SAI nguyên tắc — mảng này không được có chi phí. Bấm xem chi tiết phiếu cần kiểm/sửa.':'Xem chi tiết các phiếu cấu thành chi phí mảng này'}">${mgmtViolation?'⚠ ':''}${fmt(actC)}</a>`
+        : fmt(actC);
+      segHtml+=`<tr${mgmtViolation?' style="background:rgba(184,71,46,.06)"':''}>
         <td>${segmentChip(seg)}</td>
         <td class="r num">${fmt(planR)}</td>
         <td class="r num">${fmt(actR)}</td>
         <td class="r"><span class="mono ${ach>=1?'up':ach>=.7?'':'down'}">${pct(ach)}</span></td>
-        <td class="r num">${fmt(actC)}</td>
+        <td class="r num">${costCell}</td>
         <td class="r num" style="color:${m>=0?'var(--good)':'var(--bad)'}">${fmt(m)}</td>
         <td class="r"><span class="mono">${actR?((m/actR)*100).toFixed(1):0}%</span></td>
         <td><div class="progress-bar"><div class="progress-fill" style="width:${Math.min(100,ach*100)}%;background:${ach>=1?'var(--good)':'var(--accent)'}"></div></div></td>
@@ -14782,7 +14797,7 @@ function _renderPlanPerf(yr){
       }
       if(!entityRef || !entityMap[entityRef]) return;
       if(t.type==='REV') entityMap[entityRef].actRev += txAmt(t);
-      else if(t.type==='COST') entityMap[entityRef].actCost += txAmt(t);
+      else if(t.type==='COST' && t.inPL!==false) entityMap[entityRef].actCost += txAmt(t);
     });
     const entityKeys=Object.keys(entityMap);
     if(entityKeys.length===0){
@@ -14812,6 +14827,58 @@ function _renderPlanPerf(yr){
       entEl.innerHTML=html;
     }
   }
+}
+
+/* v3.01.100: Truy nguồn — chi tiết các phiếu cấu thành CP Thực hiện của 1 mảng (năm yr).
+   Lấy bút toán COST từ approvedTx (đã theo logic ghi nhận hiện hành) gắn segment, join về phiếu gốc. */
+function showSegmentCostDetail(seg, yr){
+  const txs=(typeof approvedTx==='function')?approvedTx():[];
+  const items=txs.filter(t=>t.type==='COST' && t.inPL!==false && t.segment===seg && new Date(t.date).getFullYear()===yr);
+  // join về record gốc để lấy NCC, số HĐ, loại CP, trạng thái
+  const byId={}; (S.payables||[]).forEach(r=>{ byId[r.id]=r; });
+  const isMgmtSeg = (seg==='VESSEL_MGMT');  // v3.01.102: mảng KHÔNG được có phát sinh
+  const rows=items.map(t=>{
+    const r=byId[t.id]||{};
+    const et=r.expenseType?(getExpenseType(r.expenseType)||{}):{};
+    const etLabel=et.label?((et.icon?et.icon+' ':'')+et.label):(r.expenseType||'—');
+    const st=r.status||'draft';
+    const stMap={draft:'Nháp',pending_acc:'Chờ KT',pending_l1:'Trình ký',pending_l2:'Chờ L2',approved:'Đã duyệt',rejected:'Từ chối'};
+    const obj = t.vesselId ? ('🚢 '+(anyVesselName(t.vesselId)||'')) : (t.projectId?('📁 '+(((S.projects||[]).find(p=>p.id===t.projectId)||{}).code||'')):'');
+    return {t,r,etLabel,stTxt:stMap[st]||st, obj, amt:txAmt(t)};
+  }).sort((a,b)=>(b.t.date||'').localeCompare(a.t.date||''));
+  const total=rows.reduce((s,x)=>s+x.amt,0);
+  let body;
+  if(!rows.length){
+    body=isMgmtSeg
+      ? `<div class="help-callout tip" style="margin:0">✓ Đúng nguyên tắc — mảng QL Tàu KHÔNG có phát sinh chi phí công ty trong năm ${yr}. (Mọi chi cho tàu quản lý hộ là chi hộ chủ tàu, nằm ở Tab 06.)</div>`
+      : `<div class="help-callout info" style="margin:0">Không có phiếu chi phí nào thuộc mảng này trong năm ${yr}.</div>`;
+  } else {
+    const tr=rows.map((x,i)=>`<tr${isMgmtSeg?' style="background:rgba(184,71,46,.06)"':''}>
+      <td class="c" style="font-size:11px">${i+1}</td>
+      <td style="font-size:11px">${esc((x.t.date||'').slice(0,10))}</td>
+      <td>${esc(x.r.partner||'')}<div style="font-size:11px;color:var(--muted)">${esc(x.t.desc||x.r.desc||'')}</div></td>
+      <td style="font-size:11px">${esc(x.etLabel)}</td>
+      <td style="font-size:11px">${esc(x.obj)}</td>
+      <td style="font-size:10px"><span style="color:${x.r.status==='rejected'?'var(--bad)':(x.r.status==='approved'?'var(--good)':'var(--muted)')}">${esc(x.stTxt)}</span></td>
+      <td class="r" style="font-family:var(--font-mono);white-space:nowrap">${fmt(x.amt)}</td>
+      <td class="c">${x.r.id?`<button class="icon-btn" title="Mở phiếu gốc để kiểm/sửa" onclick="closeModal();openPayableModal('${x.r.id}')">👁</button>`:''}</td>
+    </tr>`).join('');
+    const warnBlock = isMgmtSeg
+      ? `<div class="help-callout danger" style="margin:0 0 10px"><b>⚠ Sai nguyên tắc:</b> mảng QL Tàu KHÔNG được có chi phí công ty — toàn bộ chi cho tàu quản lý hộ phải là <b>chi hộ</b> (gắn tàu QL hộ → tự vào Tab 06, không vào P&L). ${rows.length} phiếu dưới đây đang gán mảng "QL vận hành tàu" nhưng KHÔNG gắn tàu QL hộ nên lọt vào P&L. Bấm 👁 mở từng phiếu để: (a) gắn đúng tàu QL hộ (AFALINA/KATRAN…) nếu là chi hộ, hoặc (b) đổi mảng cho đúng nếu là chi phí công ty thật.</div>`
+      : `<div class="help-callout warn" style="margin:0 0 10px">Chi phí gồm MỌI trạng thái (trừ từ chối) theo nguyên tắc ghi nhận ngay. Cột "Trạng thái" cho biết tiến độ hồ sơ của từng phiếu.</div>`;
+    body=`<div style="font-size:12.5px">
+      <div style="margin:0 0 10px;color:var(--muted)">Mảng <b>${esc((SEGMENTS[seg]||{}).name||seg)}</b> · năm ${yr} · ${rows.length} phiếu chi phí</div>
+      ${warnBlock}
+      <div style="max-height:48vh;overflow:auto;border:1px solid var(--rule)">
+        <table class="tbl" style="font-size:12px">
+          <thead><tr><th class="c">#</th><th>Ngày</th><th>NCC / Diễn giải</th><th>Loại CP</th><th>Tàu/Dự án</th><th>Trạng thái</th><th class="r">Số tiền</th><th></th></tr></thead>
+          <tbody>${tr}</tbody>
+        </table>
+      </div>
+      <div style="text-align:right;margin-top:10px;font-weight:700">Tổng CP mảng: ${fmt(total)}</div>
+    </div>`;
+  }
+  openModal('🔎 Chi tiết chi phí mảng · '+((SEGMENTS[seg]||{}).short||seg), body, `<button class="btn-sec" onclick="closeModal()">Đóng</button>`);
 }
 
 /* ============================================================
@@ -21327,7 +21394,15 @@ function renderArAp(kind){
     }
     return true;
   });
-  if(!rows.length){
+  // v3.01.103: AP — tách bút toán BOD_ONLY khỏi danh sách thường; gom thành 1 dòng tổng riêng.
+  // BOD không hiển thị như phiếu thường; chỉ admin/người có cờ BOD thấy dòng tổng + chi tiết.
+  let _bodRows=[];
+  if(isAp){
+    const _isBod = (r)=> r && (r.isBODOnly || isExpenseBODOnly(r.expenseType));
+    _bodRows = rows.filter(_isBod);
+    rows = rows.filter(r=>!_isBod(r));
+  }
+  if(!rows.length && !(isAp && _bodRows.length && canSeeBODRecords())){
     tEl.innerHTML='<tr><td class="empty">Không có bản ghi phù hợp filter</td></tr>';
     return;
   }
@@ -21535,6 +21610,14 @@ function renderArAp(kind){
       <td colspan="3"><b>CHỈ ĐÃ DUYỆT</b> <span style="font-size:10px;color:var(--muted)">(vào báo cáo BI)</span></td>
       <td class="r"><div><b>${fmt(sumTot)}</b></div><div style="font-size:10px;color:var(--good)">đã trả ${fmt(sumPaid)}</div><div style="font-size:10px;color:var(--bad)">còn ${fmt(sumRem)}</div></td>
       <td colspan="2"></td></tr>`;
+    // v3.01.103: dòng TỔNG bút toán nội bộ BOD — chỉ admin/người có cờ BOD thấy
+    if(_bodRows.length && canSeeBODRecords()){
+      let bodTot=0; _bodRows.forEach(r=>{ bodTot+=toDisplay(+r.amountGross||+r.amount||0, r.ccy||'USD'); });
+      h+=`<tr class="total" style="background:rgba(28,58,92,.10);cursor:pointer" onclick="showBodApDetail()" title="Bấm xem chi tiết / sửa / xóa các bút toán nội bộ BOD">
+        <td colspan="3"><b>🔒 BÚT TOÁN NỘI BỘ BOD</b> <span style="font-size:10px;color:var(--muted)">${_bodRows.length} bút toán · không hiện ở sổ thường · đã vào P&L · bấm để xem chi tiết</span></td>
+        <td class="r"><b>${fmt(bodTot)}</b></td>
+        <td class="c" colspan="2"><span style="color:var(--accent);text-decoration:underline dotted;font-size:11px">🔎 Chi tiết</span></td></tr>`;
+    }
   } else {
   h+=`<tr class="total" style="background:rgba(139,90,43,.10)">
     <td colspan="3"><b>TỔNG THEO BỘ LỌC</b> <span style="font-size:10px;color:var(--muted)">[${esc(_fltLabel)}] · ${rows.length} dòng · quy đổi VND</span></td>
@@ -21542,6 +21625,56 @@ function renderArAp(kind){
     <td colspan="2"></td></tr>`;
   }
   h+='</tbody>';tEl.innerHTML=h;
+}
+
+/* v3.01.103: Modal chi tiết bút toán nội bộ BOD (AP loại BOD_ONLY) — xem / sửa / xóa tại đây.
+   Chỉ admin/người có cờ BOD mở được. BOD không hiện ở sổ AP thường, chỉ có 1 dòng tổng. */
+function showBodApDetail(){
+  if(!canSeeBODRecords()){ toast('Chỉ admin / thành viên BOD xem được','bad'); return; }
+  const _isBod=(r)=> r && (r.isBODOnly || isExpenseBODOnly(r.expenseType));
+  const items=scopedRecords(S.payables||[]).filter(r=>!r._isBudget && _isBod(r))
+    .sort((a,b)=>(b.issueDate||'').localeCompare(a.issueDate||''));
+  let total=0; items.forEach(r=>{ total+=toDisplay(+r.amountGross||+r.amount||0, r.ccy||'USD'); });
+  const stMap={draft:'Nháp',pending_acc:'Chờ KT',pending_l1:'Trình ký',pending_l2:'Chờ L2',approved:'Đã duyệt',rejected:'Từ chối'};
+  let body;
+  if(!items.length){
+    body=`<div class="help-callout info" style="margin:0">Chưa có bút toán nội bộ BOD nào.</div>`;
+  } else {
+    const tr=items.map((r,i)=>{
+      const obj = r.vesselId?('🚢 '+(anyVesselName(r.vesselId)||'')):(r.projectId?('📁 '+(((S.projects||[]).find(p=>p.id===r.projectId)||{}).code||'')):'');
+      const canDel = (typeof wfCanDelete==='function') ? wfCanDelete(r) : isAdmin();
+      return `<tr>
+        <td class="c" style="font-size:11px">${i+1}</td>
+        <td style="font-size:11px">${esc((r.issueDate||'').slice(0,10))}</td>
+        <td>${esc(r.partner||'')}<div style="font-size:11px;color:var(--muted)">${esc(r.desc||'')}</div></td>
+        <td style="font-size:11px">${esc(obj)}</td>
+        <td style="font-size:10px"><span style="color:${r.status==='rejected'?'var(--bad)':(r.status==='approved'?'var(--good)':'var(--muted)')}">${esc(stMap[r.status||'draft']||r.status)}</span></td>
+        <td class="r" style="font-family:var(--font-mono);white-space:nowrap">${fmt(toDisplay(+r.amountGross||+r.amount||0, r.ccy||'USD'))}</td>
+        <td class="c" style="white-space:nowrap">
+          <button class="icon-btn" title="Sửa" onclick="closeModal();openPayableModal('${r.id}')">✎</button>
+          ${canDel?`<button class="icon-btn danger" title="Xóa" onclick="_bodApDelete('${r.id}')">✕</button>`:''}
+        </td>
+      </tr>`;
+    }).join('');
+    body=`<div style="font-size:12.5px">
+      <div class="help-callout info" style="margin:0 0 10px">🔒 Bút toán nội bộ BOD — KHÔNG hiển thị trong sổ Phải trả thường (chỉ admin/BOD thấy). Đã ghi thẳng vào P&L. Sửa/xóa ngay tại đây.</div>
+      <div style="max-height:50vh;overflow:auto;border:1px solid var(--rule)">
+        <table class="tbl" style="font-size:12px">
+          <thead><tr><th class="c">#</th><th>Ngày</th><th>NCC / Diễn giải</th><th>Tàu/Dự án</th><th>Trạng thái</th><th class="r">Số tiền</th><th class="c">Thao tác</th></tr></thead>
+          <tbody>${tr}</tbody>
+        </table>
+      </div>
+      <div style="text-align:right;margin-top:10px;font-weight:700">Tổng BOD: ${fmt(total)}</div>
+    </div>`;
+  }
+  openModal('🔒 Bút toán nội bộ BOD', body, `<button class="btn-sec" onclick="closeModal()">Đóng</button><button class="btn-sec" onclick="closeModal();openMultiRowModal('ap')" title="Nhập phiếu nhiều dòng — chọn loại BOD_ONLY">+ Thêm BOD (phiếu nhiều dòng)</button>`);
+}
+function _bodApDelete(id){
+  const r=(S.payables||[]).find(x=>x.id===id);
+  if(!r){ toast('Không tìm thấy','bad'); return; }
+  deleteAr('ap', id);
+  // mở lại modal nếu còn bút toán BOD
+  setTimeout(()=>{ const _isBod=(x)=>x&&(x.isBODOnly||isExpenseBODOnly(x.expenseType)); if((S.payables||[]).some(x=>!x._isBudget&&_isBod(x))) showBodApDetail(); else closeModal(); }, 60);
 }
 
 /* === Workflow actions for AR/AP === */
