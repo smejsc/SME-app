@@ -870,6 +870,7 @@ body.readonly-mode::before{
         <button class="btn-sec" onclick="resetForm(['dock-budget','dock-note']);document.getElementById('dock-asset').value='';">Xóa form</button>
         <span class="hint">Mỗi đợt = một lần Dock/SCL. Đợt gọn trong 1 năm: để năm bắt đầu = năm kết thúc. Đợt kéo dài qua năm: nhập khoảng (VD 2028→2029). Thực chi cộng tất cả phiếu Dock/SCL đã duyệt của tài sản trong khoảng năm đó.</span>
       </div>
+      <div id="dock-unlinked-warn" style="margin-top:14px"></div>
       <div class="tbl-scroll" style="margin-top:14px"><table class="tbl" id="dock-plan-table"></table></div>
     </div>
   </div>
@@ -2104,6 +2105,7 @@ body.readonly-mode::before{
           <option value="LIQUIDATED">Đã thanh lý</option>
         </select>
         <button class="btn-sec" onclick="assetImport('fixedAssets')" title="Import danh sách TSCĐ từ Excel" style="font-size:12px">📥 Import Excel</button>
+        <button class="btn-sec" onclick="openDockLinkTool()" title="v3.01.94: Quét phiếu Dock/SCL đã duyệt chưa gắn TSCĐ → gán & cộng nguyên giá" style="font-size:12px">🛠 Gán phiếu Dock</button>
         <button class="btn-sec" onclick="assetExportExcel('fa')" title="Xuất sổ TSCĐ ra Excel" style="font-size:12px">📊 Xuất Excel</button>
         <button class="btn-sec" onclick="assetExportPdf('fa')" title="Xuất sổ TSCĐ ra PDF" style="font-size:12px">📄 Xuất PDF</button>
       </div>
@@ -2713,7 +2715,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.01.93';            // bumped on each release
+const APP_VERSION='3.01.95';            // bumped on each release
 
 /* v2.62.0: Token xác thực backend — PHẢI khớp API_TOKEN trong Apps Script (Code.gs).
    Mọi request tới Apps Script tự động được gắn token qua lớp bọc fetch bên dưới.
@@ -9812,12 +9814,28 @@ function reverseAssetFromTools(r){
   delete r._assetToolId;
 }
 
+/* v3.01.94: Suy ra TSCĐ (group VESSEL) từ vesselId của phiếu — dùng khi import từ FAST
+   chỉ có Loại chi phí=Dock + tên tàu, KHÔNG có dockAssetId. Một tàu sở hữu liên kết
+   1 TSCĐ qua asset.vesselId. Trả về id TSCĐ khớp, hoặc '' nếu không có/không chắc. */
+function _resolveDockAssetFromVessel(vesselId){
+  if(!vesselId) return '';
+  const matches=(S.fixedAssets||[]).filter(a=>a && a.vesselId===vesselId && (a.group==='VESSEL'||!a.group));
+  if(matches.length===1) return matches[0].id;
+  // nhiều TSCĐ cùng trỏ 1 tàu (hiếm) → không tự đoán, để gán thủ công
+  return '';
+}
+
 /* v2.25.0: AP loại Dock/SCL được duyệt xong → cộng tiền vào nguyên giá TSCĐ.
    Không vào P&L. Idempotent qua cờ r._dockApplied. */
 function applyDockToAsset(r){
   if(!r || r._dockApplied) return;
   if(r.status!=='approved') return;
   if(!r.expenseType || !isExpenseCapEx(r.expenseType)) return;
+  // v3.01.94: thiếu dockAssetId (vd import từ FAST) → tự suy từ tàu gắn phiếu
+  if(!r.dockAssetId && r.vesselId){
+    const guess=_resolveDockAssetFromVessel(r.vesselId);
+    if(guess){ r.dockAssetId=guess; r._dockAssetAutoLinked=true; }
+  }
   if(!r.dockAssetId) return;
   const fa=(S.fixedAssets||[]).find(a=>a.id===r.dockAssetId);
   if(!fa) return;
@@ -9855,6 +9873,85 @@ function reverseDockFromAsset(r){
   }
   r._dockApplied=false;
   delete r._dockAmount;
+}
+
+/* v3.01.94: CÔNG CỤ gán phiếu Dock/SCL chưa liên kết TSCĐ.
+   Quét AP loại CapEx (Dock/SCL) đã duyệt mà CHƯA cộng vào nguyên giá (_dockApplied!=true).
+   Mỗi phiếu: gợi ý TSCĐ theo tàu (asset.vesselId), cho chọn lại, rồi Gán → cộng nguyên giá. */
+function _dockUnlinkedAps(){
+  return (S.payables||[]).filter(r=>
+    r && r.status==='approved' && isExpenseCapEx(r.expenseType) && !r._dockApplied
+  );
+}
+function openDockLinkTool(){
+  if(!isAdmin() && !canApproveL2() && !canEditCatalog()){
+    toast('Cần quyền Admin / KTT / duyệt L2','bad');return;
+  }
+  const aps=_dockUnlinkedAps();
+  const vesselAssets=(S.fixedAssets||[]).filter(a=>a && (a.group==='VESSEL'||!a.group));
+  const assetOpts=(cur)=>'<option value="">— Chọn TSCĐ —</option>'+
+    (S.fixedAssets||[]).slice().sort((a,b)=>String(a.code||'').localeCompare(String(b.code||'')))
+      .map(a=>`<option value="${a.id}" ${a.id===cur?'selected':''}>${esc((a.code?a.code+' · ':'')+(a.name||a.id))}</option>`).join('');
+
+  if(!aps.length){
+    openModal('🛠 Gán phiếu Dock/SCL', `<div style="padding:8px 2px;font-size:13px;line-height:1.6">
+      <div class="help-callout tip" style="margin:0">Không có phiếu Dock/SCL nào đang chờ gán. Mọi phiếu Dock đã duyệt đều đã cộng vào nguyên giá TSCĐ. ✓</div>
+    </div>`, `<button class="btn-sec" onclick="closeModal()">Đóng</button>`);
+    return;
+  }
+
+  const rows=aps.map((r,i)=>{
+    const guess=r.vesselId?_resolveDockAssetFromVessel(r.vesselId):'';
+    const vName=r.vesselId?(anyVesselName(r.vesselId)||'(tàu?)'):'(không gắn tàu)';
+    const amt=fmt(r.amount, r.ccy||'USD');
+    return `<tr>
+      <td style="font-size:11px;color:var(--muted)">${esc((r.issueDate||'').slice(0,10))}</td>
+      <td>${esc(r.partner||'')}<div style="font-size:11px;color:var(--muted)">${esc(r.desc||'')}</div></td>
+      <td style="font-size:11px">🚢 ${esc(vName)}</td>
+      <td style="text-align:right;white-space:nowrap;font-family:var(--font-mono)">${amt}</td>
+      <td><select id="dlink-${i}" style="padding:4px 6px;border:1px solid var(--rule);font-size:11px;min-width:170px">${assetOpts(guess)}</select></td>
+    </tr>`;
+  }).join('');
+
+  const autoCount=aps.filter(r=>r.vesselId&&_resolveDockAssetFromVessel(r.vesselId)).length;
+  const body=`<div style="font-size:12.5px;line-height:1.55">
+    <div class="help-callout info" style="margin:0 0 12px">
+      Tìm thấy <b>${aps.length}</b> phiếu Dock/SCL đã duyệt nhưng <b>chưa cộng vào nguyên giá TSCĐ</b>.
+      ${autoCount?`Trong đó <b>${autoCount}</b> phiếu đã tự gợi ý TSCĐ theo tàu (cột chọn bên dưới đã điền sẵn).`:''}
+      Kiểm tra cột TSCĐ, sửa nếu cần, rồi bấm <b>Gán &amp; cộng nguyên giá</b>.
+    </div>
+    <div style="max-height:48vh;overflow:auto;border:1px solid var(--rule)">
+      <table class="tbl" style="font-size:12px">
+        <thead><tr><th>Ngày</th><th>NCC / Diễn giải</th><th>Tàu</th><th style="text-align:right">Số tiền</th><th>TSCĐ được dock</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>
+    <div class="help-callout warn" style="margin:12px 0 0">Phiếu để trống TSCĐ sẽ bị bỏ qua. Có thể chạy lại công cụ này bất cứ lúc nào.</div>
+  </div>`;
+  const foot=`<button class="btn-sec" onclick="closeModal()">Hủy</button>
+    <button class="btn-primary" onclick="_doDockLink(${aps.length})">Gán &amp; cộng nguyên giá</button>`;
+  openModal('🛠 Gán phiếu Dock/SCL vào TSCĐ', body, foot);
+  // lưu danh sách id theo thứ tự để _doDockLink lấy đúng
+  window._DOCK_LINK_IDS = aps.map(r=>r.id);
+}
+function _doDockLink(n){
+  const ids=window._DOCK_LINK_IDS||[];
+  let done=0, skipped=0;
+  for(let i=0;i<n;i++){
+    const sel=document.getElementById('dlink-'+i);
+    const assetId=sel?sel.value:'';
+    const r=(S.payables||[]).find(x=>x.id===ids[i]);
+    if(!r){ skipped++; continue; }
+    if(!assetId){ skipped++; continue; }
+    r.dockAssetId=assetId;
+    try{ applyDockToAsset(r); done++; }
+    catch(e){ console.warn('applyDockToAsset failed', e); skipped++; }
+    touchRecord(r);
+  }
+  saveState();
+  closeModal();
+  renderAll();
+  toast(`✓ Đã gán ${done} phiếu Dock vào TSCĐ${skipped?` · bỏ qua ${skipped}`:''}`, done?'good':'warn');
 }
 
 /* v1.43.0: Get list of fuel-type expense codes */
@@ -14217,6 +14314,53 @@ function dockActualSpent(assetId, yearFrom, yearTo){
   return sumByCcy;  // {USD:.., VND:..}
 }
 
+/* v3.01.95: Danh sách chi tiết các phiếu Dock đã gom vào 1 đợt kế hoạch (assetId + khoảng năm) */
+function dockSpentDetail(assetId, yearFrom, yearTo){
+  const yf=+yearFrom, yt=+yearTo;
+  return (S.payables||[]).filter(r=>{
+    if(r.status!=='approved') return false;
+    if(!r.expenseType || !isExpenseCapEx(r.expenseType)) return false;
+    if(r.dockAssetId!==assetId) return false;
+    const d=r.issueDate||r.createdAt||'';
+    const yr=parseInt(String(d).slice(0,4),10);
+    return !(isNaN(yr) || yr<yf || yr>yt);
+  }).sort((a,b)=>(a.issueDate||'').localeCompare(b.issueDate||''));
+}
+
+/* v3.01.95: Mở modal chi tiết phiếu Dock của 1 đợt kế hoạch */
+function showDockSpentDetail(planId){
+  const p=(S.dockPlans||[]).find(x=>x.id===planId);
+  if(!p){toast('Không tìm thấy đợt','bad');return;}
+  const yf=p.yearFrom, yt=p.yearTo||p.yearFrom;
+  const items=dockSpentDetail(p.assetId, yf, yt);
+  const sums={};
+  items.forEach(r=>{const c=r.ccy||'USD';sums[c]=(sums[c]||0)+(+r.amount||0);});
+  const totTxt=Object.keys(sums).length?Object.keys(sums).map(c=>fmt(sums[c],c)).join(' · '):'—';
+  let body;
+  if(!items.length){
+    body=`<div class="help-callout info" style="margin:0">Chưa có phiếu Dock/SCL nào đã duyệt được gom vào đợt này. Nếu đã import từ FAST, kiểm tra phiếu đã gắn đúng TSCĐ chưa (nút <b>🛠 Gán phiếu Dock</b> ở Tab 09 Tài sản).</div>`;
+  } else {
+    const rows=items.map((r,i)=>`<tr>
+      <td class="c" style="font-size:11px">${i+1}</td>
+      <td style="font-size:11px">${esc((r.issueDate||'').slice(0,10))}</td>
+      <td>${esc(r.partner||'')}<div style="font-size:11px;color:var(--muted)">${esc(r.desc||'')}</div></td>
+      <td style="font-size:11px">${esc(r.invoiceNo||'')}</td>
+      <td class="r" style="font-family:var(--font-mono);white-space:nowrap">${fmt(r.amount,r.ccy||'USD')}</td>
+    </tr>`).join('');
+    body=`<div style="font-size:12.5px">
+      <div style="margin:0 0 10px;color:var(--muted)">Tài sản: <b>${esc(p.assetName)}</b> · Năm ${yf===yt?yf:yf+'–'+yt} · ${items.length} phiếu</div>
+      <div style="max-height:50vh;overflow:auto;border:1px solid var(--rule)">
+        <table class="tbl" style="font-size:12px">
+          <thead><tr><th class="c">#</th><th>Ngày</th><th>NCC / Diễn giải</th><th>Số HĐ</th><th class="r">Số tiền</th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>
+      <div style="text-align:right;margin-top:10px;font-weight:700">Tổng thực chi: ${totTxt}</div>
+    </div>`;
+  }
+  openModal('🛠 Chi tiết thực chi Dock/SCL', body, `<button class="btn-sec" onclick="closeModal()">Đóng</button>`);
+}
+
 function addDockPlan(){
   if(!canEditCatalog()){toast('Chỉ Admin / Kế toán / KTT','bad');return;}
   const kind=document.getElementById('dock-kind').value;
@@ -14276,6 +14420,21 @@ function editDockPlan(id){
 }
 
 function renderDockPlanList(){
+  // v3.01.95: cảnh báo phiếu Dock đã duyệt CHƯA gắn TSCĐ (sẽ không vào cột Thực chi)
+  const warnEl=document.getElementById('dock-unlinked-warn');
+  if(warnEl){
+    const unlinked=(typeof _dockUnlinkedAps==='function')?_dockUnlinkedAps():[];
+    if(unlinked.length){
+      const sums={};
+      unlinked.forEach(r=>{const c=r.ccy||'USD';sums[c]=(sums[c]||0)+(+r.amount||0);});
+      const totTxt=Object.keys(sums).map(c=>fmt(sums[c],c)).join(' · ');
+      const canFix=isAdmin()||canApproveL2()||canEditCatalog();
+      warnEl.innerHTML=`<div class="rep-guide" style="background:rgba(184,71,46,.06);border-left-color:var(--accent)">
+        <span><b>⚠ Có ${unlinked.length} phiếu Dock/SCL đã duyệt chưa gắn TSCĐ</b> (tổng ${totTxt}) — các phiếu này CHƯA cộng vào cột "Thực chi" bên dưới và chưa vào nguyên giá TSCĐ.
+        ${canFix?'Bấm <b>🛠 Gán phiếu Dock</b> ở Tab 09 Tài sản để liên kết.':'Báo Admin/KTT gán giúp.'}</span>
+      </div>`;
+    } else warnEl.innerHTML='';
+  }
   const tbl=document.getElementById('dock-plan-table');
   if(!tbl) return;
   const rows=(S.dockPlans||[]).slice().sort((a,b)=>(a.yearFrom-b.yearFrom)||(a.kind<b.kind?-1:1));
@@ -14285,7 +14444,7 @@ function renderDockPlanList(){
   }
   const thisYear=new Date().getFullYear();
   let html='<thead><tr><th>Loại</th><th>Tài sản</th><th class="c">Năm DK</th>'
-    +'<th class="r">Dự toán</th><th class="r">Thực chi</th><th class="r">Chênh lệch</th>'
+    +'<th class="r">Dự toán</th><th class="r">Thực chi</th><th class="r">% &amp; Chênh lệch</th>'
     +'<th>Trạng thái</th><th>Ghi chú</th><th></th></tr></thead><tbody>';
   rows.forEach(p=>{
     const yf=p.yearFrom, yt=p.yearTo||p.yearFrom;
@@ -14294,23 +14453,37 @@ function renderDockPlanList(){
     const sameCcy=spent[p.ccy]||0;
     const otherCcy=Object.keys(spent).filter(c=>c!==p.ccy && spent[c]>0);
     const diff=sameCcy-(p.budget||0);
+    const hasSpent=sameCcy>0 || otherCcy.length>0;
     let statusTxt, statusColor;
     if(yf>thisYear){ statusTxt='Chưa tới hạn'; statusColor='var(--muted)'; }
     else if(thisYear>=yf && thisYear<=yt){ statusTxt='Đang trong kỳ'; statusColor='var(--ink)'; }
     else { statusTxt='Đã qua'; statusColor='var(--muted)'; }
+    // v3.01.95: % hoàn thành dự toán + thanh tiến độ
+    const budget=+p.budget||0;
+    const pct=budget>0 ? (sameCcy/budget*100) : (sameCcy>0?100:0);
+    const pctClamp=Math.max(0,Math.min(100,pct));
+    const barColor = pct>100?'var(--bad)':(pct>=90?'var(--warn)':'var(--good)');
+    const pctTxt = budget>0 ? pct.toFixed(0)+'%' : (sameCcy>0?'—':'0%');
     let diffTxt, diffColor;
     if(sameCcy===0){ diffTxt='— chưa có chi'; diffColor='var(--muted)'; }
     else if(diff>0){ diffTxt='▲ Vượt '+fmt(diff,p.ccy); diffColor='var(--bad)'; }
     else if(diff<0){ diffTxt='▼ Dưới '+fmt(-diff,p.ccy); diffColor='var(--good)'; }
     else { diffTxt='= Khớp'; diffColor='var(--good)'; }
+    const pctCell=`<div style="font-weight:700;color:${barColor};font-size:11px">${pctTxt}</div>
+      <div style="height:5px;background:var(--rule);border-radius:3px;overflow:hidden;margin:3px 0 2px">
+        <div style="height:100%;width:${pctClamp}%;background:${barColor}"></div></div>
+      <div style="font-size:10px;color:${diffColor};font-weight:600">${diffTxt}</div>`;
+    const spentCell = hasSpent
+      ? `<a onclick="showDockSpentDetail('${p.id}')" style="cursor:pointer;color:var(--accent);text-decoration:underline dotted" title="Xem chi tiết các phiếu Dock đã gom">${sameCcy>0?fmt(sameCcy,p.ccy):'—'}${otherCcy.length?`<br><span style="font-size:9px;color:var(--muted)">+ ${otherCcy.map(c=>fmt(spent[c],c)).join(', ')}</span>`:''}</a>`
+      : '<span style="color:var(--muted)">—</span>';
     const overBudget=sameCcy>0 && diff>0;
     html+=`<tr${overBudget?' style="background:rgba(184,71,46,.06)"':''}>
       <td>${DOCK_KIND_LABELS[p.kind]||esc(p.kind)}</td>
       <td>${esc(p.assetName)}</td>
       <td class="c">${yrTxt}</td>
       <td class="r">${fmt(p.budget,p.ccy)}</td>
-      <td class="r">${sameCcy>0?fmt(sameCcy,p.ccy):'—'}${otherCcy.length?`<br><span style="font-size:9px;color:var(--muted)">+ ${otherCcy.map(c=>fmt(spent[c],c)).join(', ')}</span>`:''}</td>
-      <td class="r" style="color:${diffColor};font-weight:600">${diffTxt}</td>
+      <td class="r">${spentCell}</td>
+      <td class="r">${pctCell}</td>
       <td><span style="color:${statusColor};font-size:11px">${statusTxt}</span></td>
       <td style="font-size:10px;color:var(--muted)">${esc(p.note||'')}</td>
       <td><div class="row-actions">
@@ -34913,6 +35086,11 @@ function excelConfirmImport(){
         record.segment = (v && v.segment) || (p && p.segment) || 'OTHER';
       }
     }
+    // v3.01.94: Import Dock/SCL có Loại CP=Dock + tàu → tự gán dockAssetId từ TSCĐ của tàu
+    if(tpl.target==='payables' && isExpenseCapEx(record.expenseType) && record.vesselId && !record.dockAssetId){
+      const _da=_resolveDockAssetFromVessel(record.vesselId);
+      if(_da){ record.dockAssetId=_da; record._dockAssetAutoLinked=true; }
+    }
     touchRecord(record);
 
     // v1.43.0: Fuel fields for AP (only if applicable)
@@ -34952,6 +35130,10 @@ function excelConfirmImport(){
         _apImportSeen.add(dupKey);
       }
       S.payables.push(record);
+      // v3.01.94: import set status='approved' → cộng ngay vào nguyên giá TSCĐ nếu là Dock/SCL
+      if(record.status==='approved' && isExpenseCapEx(record.expenseType)){
+        try{ applyDockToAsset(record); }catch(e){console.warn('applyDockToAsset (import) failed',e);}
+      }
     }
     created++;
   });
