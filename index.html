@@ -2707,7 +2707,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.01.81';            // bumped on each release
+const APP_VERSION='3.01.84';            // bumped on each release
 
 /* v2.62.0: Token xác thực backend — PHẢI khớp API_TOKEN trong Apps Script (Code.gs).
    Mọi request tới Apps Script tự động được gắn token qua lớp bọc fetch bên dưới.
@@ -2848,7 +2848,27 @@ async function checkForUpdate(){
     if(versionGT(data.version, APP_VERSION)){
       // New version available — force full reload
       console.log('[update] new version '+data.version+' > '+APP_VERSION+', forcing update...');
-      toast('🔄 Phát hiện bản mới v' + data.version + ' — đang cập nhật...', 'good');
+      toast('🔄 Phát hiện bản mới v' + data.version + ' — đang lưu & đồng bộ trước khi cập nhật...', 'good');
+      // v3.01.83: LƯU + ĐẨY SYNC TRƯỚC KHI RELOAD để không mất dữ liệu NV đang nhập.
+      // Step 0a: lưu state hiện tại xuống localStorage (đồng bộ, chờ xong).
+      try{
+        if(CRYPTO_KEY && typeof saveStateEncrypted==='function'){
+          await saveStateEncrypted();
+          console.log('[update] state đã lưu trước khi cập nhật');
+        }
+      }catch(e){ console.warn('[update] lưu state trước reload lỗi:', e&&e.message); }
+      // Step 0b: đẩy lên cloud (có timeout 8s để không treo nếu mạng chậm).
+      try{
+        const cfg=(typeof getAuthConfig==='function')?getAuthConfig():null;
+        if(CRYPTO_KEY && cfg && cfg.scriptUrl && navigator.onLine){
+          clearTimeout(_autoSyncTimer);  // hủy push hẹn giờ, đẩy ngay bây giờ
+          await Promise.race([
+            cloudSync('push'),
+            new Promise(r=>setTimeout(r, 8000))   // tối đa chờ 8s
+          ]);
+          console.log('[update] đã đồng bộ lên cloud trước khi cập nhật');
+        }
+      }catch(e){ console.warn('[update] sync trước reload lỗi:', e&&e.message); }
       // Step 1: Unregister all Service Workers (force fresh fetch)
       if('serviceWorker' in navigator){
         try{
@@ -2866,9 +2886,10 @@ async function checkForUpdate(){
         }catch(e){console.warn('[update] cache clear:',e);}
       }
       // Step 3: Wait briefly then force reload
+      toast('✅ Đã lưu & đồng bộ — đang tải bản mới v'+data.version+'...', 'good');
       setTimeout(() => {
         window.location.reload(true);
-      }, 1200);
+      }, 800);
     }
   }catch(e){
     console.log('[update] check skipped:',e.message);
@@ -10198,7 +10219,7 @@ function defaultState(){
     ],
     vendors:[],  // [{id, code, name (display), normalized (IN HOA, không dấu, không space), taxCode, address, contact, note, createdAt, createdBy}]
     companies:[  // v1.73.0: đa công ty — [{id, code, name, taxCode, address, isParent, note, createdAt}]
-      {id:'CO-PARENT', code:'SEAHORSE', name:'Seahorse Marine & Energy JSC', taxCode:'', address:'Vũng Tàu', isParent:true, note:'Công ty mẹ', createdAt:new Date().toISOString()}
+      {id:'CO-PARENT', code:'SEAHORSE', name:'Seahorse Marine & Energy JSC', taxCode:'', address:'Vũng Tàu', isParent:true, note:'Công ty mẹ', createdAt:'2025-01-01T00:00:00.000Z'}
     ],
     expenseTypes:[],  // v1.30.1: admin-manageable. Auto-populated from DEFAULT_EXPENSE_TYPES on admin login.
     revenueTypes:[],  // v1.30.4: admin-manageable. Auto-populated from DEFAULT_REVENUE_TYPES on admin login.
@@ -10503,6 +10524,25 @@ function reconcileOp(){
   console.log('Lưu ý: "Chi hộ" ở bảng Trạng thái = opTx OUT + AP gắn tàu + phí GD. Sổ chi hộ tab06 nếu đang lọc 1 tàu/tháng sẽ ra số khác tổng.');
 }
 try{ window.reconcileOp=reconcileOp; }catch(e){}
+
+/* v3.01.84: dọn xung đột sync lặp ở mảng companies — chuẩn hóa createdAt của các công ty
+   (đặc biệt CO-PARENT) về mốc cố định để local/cloud khớp timestamp, hết "conflicts: companies".
+   Chạy 1 lần trên máy ADMIN: fixCompanyTimestamp() → tự lưu + đẩy sync. */
+function fixCompanyTimestamp(){
+  if(!isAdmin()){ console.warn('Chỉ admin chạy được'); return; }
+  let n=0;
+  (S.companies||[]).forEach(c=>{
+    if(!c) return;
+    const fixed = c.id==='CO-PARENT' ? '2025-01-01T00:00:00.000Z' : (c.createdAt||'2025-01-01T00:00:00.000Z');
+    if(c.createdAt!==fixed){ c.createdAt=fixed; n++; }
+    if(c.updatedAt){ delete c.updatedAt; n++; }  // bỏ updatedAt để không tự coi là "mới"
+  });
+  saveState();
+  console.log(`[fixCompanyTimestamp] chuẩn hóa ${n} trường. Đang đẩy sync...`);
+  try{ clearTimeout(_autoSyncTimer); cloudSync('push'); }catch(e){ console.error(e); }
+  console.log('Xong. Theo dõi log sync — "conflicts: companies" sẽ không còn xuất hiện ở các lần sau.');
+}
+try{ window.fixCompanyTimestamp=fixCompanyTimestamp; }catch(e){}
 
 /* v3.01.57: SỬA HÀNG LOẠT op_transactions sai loại tiền/tỷ giá.
    v3.01.59: THÊM chế độ CHỈ-VND (an toàn nhất) — KHÔNG đụng dòng USD nào.
@@ -25070,7 +25110,7 @@ function generateOpReport(){
     sumOut:'Total disbursements',
     sumBudget:'Committed costs (not yet incurred)',
     expenseBudget:'COMMITTED COSTS',
-    budgetNote:'Costs committed for the period but not yet incurred; deducted from the available balance so the Owners may arrange funds in advance.',
+    budgetNote:'Estimated costs for the period — not yet incurred. Shown for the Owners’ information and charged on an actual-incurred basis; deducted from the available balance for planning only and NOT included in the commercial invoice.',
     sumFee:'Bank & remittance charges',
     mgmtFee:'Management fee',
     sigOwner:'For and on behalf of the Owners',
@@ -25094,7 +25134,7 @@ function generateOpReport(){
     sumOut:'Tổng chi hộ · Total disbursements',
     sumBudget:'Dự kiến chi (chưa phát sinh) · Estimated costs (not yet incurred)',
     expenseBudget:'BẢNG DỰ KIẾN CHI · ESTIMATED COSTS',
-    budgetNote:'Khoản dự kiến chi trong kỳ — chưa phát sinh thực, đã trừ vào ngân sách còn lại để chủ tàu chủ động nguồn · Estimated costs for the period — not yet incurred, deducted from remaining budget so the owner can plan funds.',
+    budgetNote:'Khoản dự kiến chi trong kỳ — sẽ tính theo thực tế phát sinh; chỉ trừ vào ngân sách còn lại để chủ tàu chủ động nguồn, KHÔNG tính vào Commercial Invoice · Estimated costs — charged on an actual-incurred basis; for planning only, NOT included in the commercial invoice.',
     sumFee:'Tổng phí · Total fees',
     mgmtFee:'Phí quản lý · Management fee',
     sigOwner:'Chủ tàu · Vessel Owner',
@@ -25117,7 +25157,7 @@ function generateOpReport(){
     sumIn:'Tổng thu hộ', sumOut:'Tổng chi hộ', sumFee:'Tổng phí',
     sumBudget:'Dự kiến chi (chưa phát sinh)',
     expenseBudget:'BẢNG DỰ KIẾN CHI',
-    budgetNote:'Khoản dự kiến chi trong kỳ — chưa phát sinh thực, đã trừ vào ngân sách còn lại để chủ tàu chủ động nguồn.',
+    budgetNote:'Khoản dự kiến chi trong kỳ — sẽ tính theo thực tế phát sinh; chỉ trừ vào ngân sách còn lại để chủ tàu chủ động nguồn, KHÔNG tính vào Commercial Invoice.',
     mgmtFee:'Phí quản lý',
     sigOwner:'Chủ tàu', sigCo:'Đại diện công ty',
     signDate:'Ngày ký',
@@ -25179,7 +25219,7 @@ function generateOpReport(){
       if(x.type==='IN') sumIn+=opTxUsd(x);
       else if(x._isBudget) sumBudget+=opTxUsd(x);
       else sumOut+=opTxUsd(x);
-      sumFee+=opTxFeesUsd(x);
+      if(!x._isBudget) sumFee+=opTxFeesUsd(x);   // v3.01.82: phí của dòng dự kiến KHÔNG tính (chưa phát sinh)
     });
     const closeBal=openBal+sumIn-sumOut-sumBudget-sumFee;
 
@@ -25284,7 +25324,7 @@ function generateOpReport(){
           <tr><td class="lbl" style="padding:8pt 12pt">${t.openBal}</td><td class="r" style="padding:8pt 12pt;font-size:13pt">${fmtMoney(openBal,'USD')}</td></tr>
           <tr style="background:rgba(45,106,106,.04)"><td class="lbl" style="padding:8pt 12pt"><b>(+) ${t.sumIn}</b><br><span style="font-size:9pt;color:#666">${inRows.length} ${en?"entries":"bút toán"}</span></td><td class="r" style="padding:8pt 12pt;font-size:13pt;color:#2d6a6a"><b>${fmtMoney(sumIn,'USD')}</b></td></tr>
           <tr style="background:rgba(184,71,46,.04)"><td class="lbl" style="padding:8pt 12pt"><b>(−) ${t.sumOut}</b><br><span style="font-size:9pt;color:#666">${outRows.length} ${en?"entries":"bút toán"}</span></td><td class="r" style="padding:8pt 12pt;font-size:13pt;color:#a8362b"><b>${fmtMoney(sumOut,'USD')}</b></td></tr>
-          ${budgetRows.length?`<tr style="background:rgba(196,138,57,.05)"><td class="lbl" style="padding:8pt 12pt"><b>(−) ${t.sumBudget}</b><br><span style="font-size:9pt;color:#666">${budgetRows.length} ${en?'item(s)':'khoản'} · ${enOrBi?'estimated, not yet incurred':'dự kiến, chưa phát sinh'}</span></td><td class="r" style="padding:8pt 12pt;font-size:12pt;color:#8a5a1e"><span style="font-size:9pt;font-style:italic">~ </span>${fmtMoney(sumBudget,'USD')}</td></tr>`:''}
+          ${budgetRows.length?`<tr style="background:rgba(196,138,57,.05)"><td class="lbl" style="padding:8pt 12pt"><b>(−) ${t.sumBudget}</b><br><span style="font-size:9pt;color:#666">${budgetRows.length} ${en?'item(s)':'khoản'} · ${en?'charged on actual basis — not in invoice':enOrBi?'sẽ tính theo thực tế · không vào invoice':'sẽ tính theo thực tế phát sinh · không vào invoice'}</span></td><td class="r" style="padding:8pt 12pt;font-size:12pt;color:#8a5a1e"><span style="font-size:9pt;font-style:italic">~ </span>${fmtMoney(sumBudget,'USD')}</td></tr>`:''}
           <tr><td class="lbl" style="padding:8pt 12pt">(−) ${t.sumFee}<br><span style="font-size:9pt;color:#666">${en?"Bank &amp; other fees":"Phí NH + phí khác"}</span></td><td class="r" style="padding:8pt 12pt">${fmtMoney(sumFee,'USD')}</td></tr>
           <tr style="background:rgba(196,138,57,.06)"><td class="lbl" style="padding:8pt 12pt"><b>${t.mgmtFee}</b><br><span style="font-size:9pt;color:#666">${mgmtFeeInfo.has?(en?'Invoiced':'Đã xuất HĐ · đã cấn trừ quỹ'):(en?'Estimated — not yet invoiced':mgmtFeeInfo.note)}</span></td><td class="r" style="padding:8pt 12pt;font-size:12pt;color:#8a5a1e">${mgmtFeeInfo.has?'':'<span style="font-size:9pt;font-style:italic">~ </span>'}${fmtMoney(mgmtFeeInfo.amountUsd, 'USD')}</td></tr>
           <tr class="grand" style="background:rgba(28,58,92,.08);border-top:2pt solid #1c3a5c"><td class="lbl" style="padding:12pt;font-size:14pt"><b>${t.closeBal}</b></td><td class="r" style="padding:12pt;font-size:16pt;color:${closeBal<0?'#a8362b':'#2d6a6a'}"><b>${fmtMoney(closeBal,'USD')}</b></td></tr>
@@ -25460,7 +25500,7 @@ function generateOpReport(){
       ${amtWords?`<div style="margin-top:8pt;font-size:9.5pt;font-style:italic;color:#555">Amount in words: <b style="color:#1c3a5c">${amtWords.charAt(0).toUpperCase()+amtWords.slice(1)}</b>.</div>`:''}
 
       <div style="margin-top:18pt;padding:10pt 14pt;background:#f4f0e6;border-left:3pt solid #b8472e;font-size:9pt;color:#555;line-height:1.5">
-        <b style="color:#1c3a5c">Terms &amp; Notes:</b> This invoice is issued in respect of the vessel management account and is subject to the Owners’ confirmation of the attached statement. Disbursements represent sums advanced by the Managers on the Owners’ account and are reimbursable in full. Payment is due within fifteen (15) days of the invoice date by telegraphic transfer to the bank account advised separately, with all bank charges for the remitter’s account. All amounts are expressed in United States Dollars (USD).
+        <b style="color:#1c3a5c">Terms &amp; Notes:</b> This invoice is issued in respect of the vessel management account and is subject to the Owners’ confirmation of the attached statement. Disbursements represent sums advanced by the Managers on the Owners’ account and are reimbursable in full. Payment is due within fifteen (15) days of the invoice date by telegraphic transfer to the bank account advised separately, with all bank charges for the remitter’s account. All amounts are expressed in United States Dollars (USD). Estimated/committed costs not yet incurred are excluded from this invoice and will be charged on an actual-incurred basis.
       </div>
 
       <div class="pr-sign" style="margin-top:30pt">
