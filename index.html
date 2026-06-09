@@ -2717,7 +2717,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.02.09';            // bumped on each release
+const APP_VERSION='3.02.13';            // bumped on each release
 
 /* v2.62.0: Token xác thực backend — PHẢI khớp API_TOKEN trong Apps Script (Code.gs).
    Mọi request tới Apps Script tự động được gắn token qua lớp bọc fetch bên dưới.
@@ -5155,6 +5155,7 @@ function openSettings(){
         <div style="display:flex;gap:8px;margin-top:4px;flex-wrap:wrap">
           <button class="btn-sec" onclick="showAuditLog()" style="font-size:11px">📋 Xem nhật ký (máy này)</button>
           ${CURRENT_ROLE==='admin'?`<button class="btn-sec" onclick="showSystemAuditLog()" style="font-size:11px;border-color:var(--accent);color:var(--accent)">🌐 Nhật ký toàn hệ thống (${(S.auditLogShared||[]).length})</button>`:''}
+          ${CURRENT_ROLE==='admin'?`<button class="btn-sec" onclick="showUserUsage()" style="font-size:11px;border-color:var(--ink);color:var(--ink)">👥 Người dùng đã sử dụng</button>`:''}
           <button class="btn-sec" onclick="exportAuditLog()" style="font-size:11px">⬇ Export CSV</button>
         </div>
         <div style="font-size:11px;color:var(--muted);font-style:italic;margin-top:4px">Nhật ký "máy này" lưu cục bộ (200 sự kiện). "Toàn hệ thống" gộp các sự kiện quan trọng (đăng nhập/duyệt/xóa…) từ mọi máy qua đồng bộ — lọc theo ngày + NV.</div>
@@ -11590,6 +11591,81 @@ function _exportSysAuditLog(){
   a.download='nhat-ky-toan-he-thong-'+todayISO()+'.csv';
   a.click();
   toast('Đã xuất CSV nhật ký toàn hệ thống','good');
+}
+
+/* v3.02.12: Bảng "Người dùng đã sử dụng" — tổng hợp theo từng NV:
+   danh sách user (authConfig) + số thao tác (auditLogShared) + lần online cuối (presence).
+   Hiện cả NV chưa từng dùng. Chỉ admin. */
+let _userUsageRows=[];
+function showUserUsage(){
+  if(CURRENT_ROLE!=='admin'){ toast('Chỉ admin xem được','bad'); return; }
+  const cfg=getAuthConfig()||{};
+  const users=[{name:'admin',fullName:'Quản trị (Admin)',role:'admin'},...(cfg.users||[]).filter(u=>u.active!==false)];
+  const log=[...(S.auditLogShared||[]),...(S.auditLog||[])];
+  const pres=S.presence||{};
+  const deptName=id=>{const d=(S.departments||[]).find(x=>x.id===id);return d?d.name:'';};
+  // gom thao tác theo actor (không phân biệt hoa thường)
+  const cnt={}, last={}, logins={};
+  log.forEach(e=>{
+    const a=(e.actor||e.by||e.user||'').toString(); if(!a) return;
+    const k=a.toLowerCase();
+    cnt[k]=(cnt[k]||0)+1;
+    const t=e.ts||e.at||e.time;
+    if(t&&(!last[k]||String(t)>String(last[k]))) last[k]=t;
+    if(e.action==='login') logins[k]=(logins[k]||0)+1;
+  });
+  const rows=users.map(u=>{
+    const k=(u.name||'').toLowerCase();
+    const p=pres[u.name]||pres[k]||{};
+    return {
+      name:u.name, fullName:u.fullName||'', dept:deptName(u.departmentId),
+      role:u.role||(u.name==='admin'?'admin':'NV'),
+      acts:cnt[k]||0, logins:logins[k]||0,
+      lastAct:last[k]||'', online:p.lastSeen||''
+    };
+  }).sort((a,b)=>b.acts-a.acts);
+  _userUsageRows=rows;
+  const used=rows.filter(r=>r.acts>0).length;
+  const unused=rows.filter(r=>r.acts===0);
+  let body=`<div style="font-size:11px;color:var(--muted);margin-bottom:8px">
+    ${rows.length} người dùng trong hệ thống · ${used} đã dùng · ${unused.length} chưa dùng.
+    Số liệu lấy từ nhật ký (~300 sự kiện gần nhất) + dấu online. Chạy sau khi đồng bộ để đầy đủ nhất.</div>`;
+  body+='<div style="max-height:54vh;overflow-y:auto"><table class="tbl" style="font-size:11px"><thead><tr>'
+      +'<th>NV</th><th>Tên thật</th><th>Bộ phận</th><th>Vai trò</th><th class="r">Thao tác</th><th class="r">Lần login</th><th>Gần nhất</th><th>Online cuối</th></tr></thead><tbody>';
+  rows.forEach(r=>{
+    const dim = r.acts===0 ? 'opacity:.55' : '';
+    body+=`<tr style="${dim}">
+      <td><b>${esc(r.name)}</b></td>
+      <td>${esc(r.fullName)||'<span style="color:var(--bad);font-style:italic">—</span>'}</td>
+      <td style="font-size:10px">${esc(r.dept)}</td>
+      <td><span class="chip" style="font-size:9px">${esc(r.role)}</span></td>
+      <td class="r num" style="font-weight:600">${r.acts}</td>
+      <td class="r num">${r.logins||'—'}</td>
+      <td class="mono" style="font-size:10px;white-space:nowrap">${r.lastAct?new Date(r.lastAct).toLocaleString('vi-VN'):'<span style="color:var(--muted)">— chưa dùng —</span>'}</td>
+      <td class="mono" style="font-size:10px;white-space:nowrap;color:var(--muted)">${r.online?new Date(r.online).toLocaleString('vi-VN'):'—'}</td>
+    </tr>`;
+  });
+  body+='</tbody></table></div>';
+  if(unused.length) body+=`<div style="font-size:11px;color:var(--muted);font-style:italic;margin-top:8px">⚠ Chưa dùng (${unused.length}): ${unused.map(r=>esc(r.name)).join(', ')}</div>`;
+  openModal('👥 Người dùng đã sử dụng', body,
+    `<button class="btn-sec" onclick="_exportUserUsage()">⬇ Export CSV</button>
+     <button class="btn-sec" onclick="closeModal()">Đóng</button>`);
+}
+function _exportUserUsage(){
+  const rows=_userUsageRows||[];
+  const esc2=s=>'"'+String(s==null?'':s).replace(/"/g,'""')+'"';
+  let csv='\uFEFFNV,Ten that,Bo phan,Vai tro,So thao tac,Lan login,Gan nhat,Online cuoi\n';
+  rows.forEach(r=>{
+    csv+=[esc2(r.name),esc2(r.fullName),esc2(r.dept),esc2(r.role),r.acts,r.logins,
+      esc2(r.lastAct?new Date(r.lastAct).toLocaleString('vi-VN'):''),
+      esc2(r.online?new Date(r.online).toLocaleString('vi-VN'):'')].join(',')+'\n';
+  });
+  const blob=new Blob([csv],{type:'text/csv;charset=utf-8'});
+  const a=document.createElement('a');
+  a.href=URL.createObjectURL(blob);
+  a.download='nguoi-dung-da-su-dung-'+todayISO()+'.csv';
+  a.click();
+  toast('Đã xuất CSV danh sách người dùng','good');
 }
 
 /* ============================================================
@@ -23303,13 +23379,25 @@ function _renderMrLine(l, i){
 function _mrFmtNum(n){
   n = +n || 0;
   if(n===0) return '0';
-  return n.toLocaleString('vi-VN');  // 1.200.000 (Vietnamese style)
+  // v3.02.13: giữ phần thập phân (USD cents). Nhóm nghìn kiểu VN, tối đa 2 số lẻ.
+  const hasFrac = Math.abs(n % 1) > 1e-9;
+  return n.toLocaleString('vi-VN', hasFrac ? {minimumFractionDigits:2, maximumFractionDigits:2} : {maximumFractionDigits:0});
 }
 function _mrParseNum(s){
-  if(!s) return 0;
-  // Remove all non-digit except minus sign at start
-  const cleaned = String(s).replace(/[^\d.,-]/g,'').replace(/[.,]/g,'');
-  return +cleaned || 0;
+  if(s===null||s===undefined||s==='') return 0;
+  // v3.02.13: GIỮ dấu thập phân cho USD (vd 23.10). Trước đây xóa mọi chấm/phẩy → mất phần lẻ.
+  // Dùng chung quy tắc với _unformatNumber: 1 dấu chấm + 1–2 chữ số sau = thập phân; còn lại = phân cách nghìn.
+  if(typeof _unformatNumber==='function') return _unformatNumber(s);
+  let str=String(s).trim();
+  const dotCount=(str.match(/\./g)||[]).length;
+  if(dotCount===1){
+    const after=str.split('.')[1].replace(/[^0-9]/g,'');
+    if(after.length===1||after.length===2){
+      const neg=str.startsWith('-');
+      return (+(neg?'-':'')+str.replace(/[^0-9.]/g,''))||0;
+    }
+  }
+  return +String(s).replace(/[.,]/g,'').replace(/[^0-9-]/g,'')||0;
 }
 function _mrFmtFocus(input){
   // Show raw number on focus for editing
