@@ -2715,7 +2715,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.01.96';            // bumped on each release
+const APP_VERSION='3.01.97';            // bumped on each release
 
 /* v2.62.0: Token xác thực backend — PHẢI khớp API_TOKEN trong Apps Script (Code.gs).
    Mọi request tới Apps Script tự động được gắn token qua lớp bọc fetch bên dưới.
@@ -7983,6 +7983,9 @@ function wfReject(r,reason){
   r.rejectedAt=new Date().toISOString();
   r.rejectReason=reason||'';
   r.rejectedAtLevel=at;
+  // v3.01.97: TỪ CHỐI → gỡ vốn hóa đã cộng (Dock/CCDC) vì rejected không vào P&L/TSCĐ
+  try{ if(r._dockApplied) reverseDockFromAsset(r); }catch(e){console.warn('reverseDock on reject',e);}
+  try{ if(r._assetApplied) reverseAssetFromTools(r); }catch(e){console.warn('reverseAsset on reject',e);}
   try{ _autoCleanupTaxFromAp(r.id); }catch(e){console.warn('autoCleanup tax failed',e);}  // v2.99.18
   try{ logAuditEvent('reject',{recordId:r.id,partner:r.partner||r.desc,level:at,reason:reason||''}); }catch(e){}
   touchRecord(r);  // v2.61.0: timestamp cho sync
@@ -9777,7 +9780,8 @@ function _genAssetCode(category, dept, vesselId){
 }
 function applyAssetToTools(r){
   if(!r || r._assetApplied) return;
-  if(r.status!=='approved') return;
+  // v3.01.97: vốn hóa NGAY khi nhập (không chờ duyệt). Chỉ bỏ qua nếu bị TỪ CHỐI.
+  if(r.status==='rejected') return;
   const cat = r.expenseType ? expenseAssetCategory(r.expenseType) : '';
   if(!cat) return;
   if(!r.assetDept) return;
@@ -9829,7 +9833,8 @@ function _resolveDockAssetFromVessel(vesselId){
    Không vào P&L. Idempotent qua cờ r._dockApplied. */
 function applyDockToAsset(r){
   if(!r || r._dockApplied) return;
-  if(r.status!=='approved') return;
+  // v3.01.97: cộng nguyên giá TSCĐ NGAY khi nhập (không chờ duyệt). Chỉ bỏ qua nếu TỪ CHỐI.
+  if(r.status==='rejected') return;
   if(!r.expenseType || !isExpenseCapEx(r.expenseType)) return;
   // v3.01.94: thiếu dockAssetId (vd import từ FAST) → tự suy từ tàu gắn phiếu
   if(!r.dockAssetId && r.vesselId){
@@ -13933,7 +13938,8 @@ function approvedTx(includeAll){
     });
   });
   (S.payables||[]).forEach(r=>{
-    if(!_statusOK(r)) return;
+    // v3.01.97: CHI PHÍ (AP) ghi nhận NGAY khi nhập — KHÔNG phụ thuộc trạng thái duyệt.
+    // Nháp/chờ duyệt/đã duyệt/từ chối chỉ là nhãn theo dõi hồ sơ. (AR vẫn theo _statusOK ở trên.)
     // BOD filter
     if(!canSeeBOD){
       if(r.isBODOnly) return;
@@ -23702,6 +23708,19 @@ function saveAr(kind,id){
       }
     }catch(e){ console.warn('[ap fuel→event]', e&&e.message); }
   }
+  // v3.01.97: VỐN HÓA NGAY khi lưu AP (không chờ duyệt) — Dock→nguyên giá TSCĐ, CCDC/MMTB→tạo món tài sản.
+  // Sửa: reverse trước rồi apply lại theo loại mới (chống cộng trùng / đổi loại).
+  if(kind==='ap'){
+    try{
+      const recSaved = isEdit ? r : S[list][S[list].length-1];
+      if(recSaved){
+        try{ if(recSaved._dockApplied) reverseDockFromAsset(recSaved); }catch(e){}
+        try{ if(recSaved._assetApplied) reverseAssetFromTools(recSaved); }catch(e){}
+        try{ applyDockToAsset(recSaved); }catch(e){console.warn('applyDockToAsset (save) failed',e);}
+        try{ applyAssetToTools(recSaved); }catch(e){console.warn('applyAssetToTools (save) failed',e);}
+      }
+    }catch(e){ console.warn('[ap capitalize on save]', e&&e.message); }
+  }
   saveState();closeModal();renderAll();
   // v2.99.78: ghi audit khi tạo/sửa AP/AR (trước đây KHÔNG log → admin không thấy NV thao tác).
   try{
@@ -24096,6 +24115,11 @@ function deleteAr(kind,id){
       if(kind==='ap'){ try{ _autoCleanupTaxFromAp(r.id); }catch(e){console.warn('autoCleanup tax failed',e);} }  // v2.99.18
       // v3.01.00: AP nhiên liệu có gắn event → đưa fuelPumped loại đó về 0
       if(kind==='ap' && r.fuelEventId && r.fuelKind){ try{ _apClearFuelFromEvent(r.fuelEventId, r.fuelKind); }catch(e){} }
+      // v3.01.97: AP đã vốn hóa ngay khi nhập → gỡ khỏi nguyên giá TSCĐ / xóa món CCDC khi xóa phiếu
+      if(kind==='ap'){
+        try{ if(r._dockApplied) reverseDockFromAsset(r); }catch(e){console.warn('reverseDock on delete',e);}
+        try{ if(r._assetApplied) reverseAssetFromTools(r); }catch(e){console.warn('reverseAsset on delete',e);}
+      }
       S[list]=S[list].filter(x=>x.id!==id);markDeleted(id);saveState();toast('Đã xóa');renderAll();
     });
 }
