@@ -2715,7 +2715,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.01.103';            // bumped on each release
+const APP_VERSION='3.02.02';            // bumped on each release
 
 /* v2.62.0: Token xác thực backend — PHẢI khớp API_TOKEN trong Apps Script (Code.gs).
    Mọi request tới Apps Script tự động được gắn token qua lớp bọc fetch bên dưới.
@@ -10755,6 +10755,30 @@ function reconcileOp(){
   console.log('Lưu ý: "Chi hộ" ở bảng Trạng thái = opTx OUT + AP gắn tàu + phí GD. Sổ chi hộ tab06 nếu đang lọc 1 tàu/tháng sẽ ra số khác tổng.');
 }
 try{ window.reconcileOp=reconcileOp; }catch(e){}
+
+/* v3.02.02: Console — soi chi tiết bút toán BOD (BOD_ONLY) thực tế trong dữ liệu,
+   in projectId/vesselId/segment/status để chẩn đoán vì sao có/không vào báo cáo. */
+function inspectBod(){
+  const _isBod=(r)=> r && (r.isBODOnly || isExpenseBODOnly(r.expenseType));
+  const aps=(S.payables||[]).filter(_isBod);
+  const ars=(S.receivables||[]).filter(_isBod);
+  console.log(`%c=== BÚT TOÁN BOD: ${aps.length} chi phí (AP), ${ars.length} doanh thu (AR) ===`,'font-weight:bold');
+  const dump=(r,kind)=>{
+    const proj=r.projectId?(S.projects||[]).find(p=>p.id===r.projectId):null;
+    console.log(
+      `[${kind}] ${(r.issueDate||'').slice(0,10)} | ${r.partner||''} | ${(r.desc||'').slice(0,40)}`,
+      `\n   status=${r.status||'draft'} | segment=${r.segment||'-'} | ccy=${r.ccy} | amount=${(+r.amountGross||+r.amount||0).toLocaleString()}`,
+      `\n   vesselId=${r.vesselId||'(không)'} ${r.vesselId?'→ '+(anyVesselName(r.vesselId)||'?'):''}`,
+      `\n   projectId=${r.projectId||'(KHÔNG GẮN DỰ ÁN)'} ${proj?'→ '+proj.code+' · '+proj.name:''}`,
+      `\n   inPL=${apCountsInPL(r)} ${apCountsInPL(r)?'':'(BỊ LOẠI khỏi P&L: CapEx/PO/chi hộ tàu QL hộ)'}`
+    );
+  };
+  aps.forEach(r=>dump(r,'AP'));
+  ars.forEach(r=>dump(r,'AR'));
+  console.log('Mẹo: nếu projectId=(KHÔNG GẮN DỰ ÁN) → bút toán KHÔNG hiện ở "E. P&L chi tiết theo dự án". Sửa bút toán để gắn dự án.');
+  console.log('Nếu inPL=false → bút toán không vào P&L (do gắn tàu quản lý hộ / loại CapEx / PO).');
+}
+try{ window.inspectBod=inspectBod; }catch(e){}
 
 /* v3.01.84: dọn xung đột sync lặp ở mảng companies — chuẩn hóa createdAt của các công ty
    (đặc biệt CO-PARENT) về mốc cố định để local/cloud khớp timestamp, hết "conflicts: companies".
@@ -21641,7 +21665,9 @@ function showBodApDetail(){
     body=`<div class="help-callout info" style="margin:0">Chưa có bút toán nội bộ BOD nào.</div>`;
   } else {
     const tr=items.map((r,i)=>{
-      const obj = r.vesselId?('🚢 '+(anyVesselName(r.vesselId)||'')):(r.projectId?('📁 '+(((S.projects||[]).find(p=>p.id===r.projectId)||{}).code||'')):'');
+      const _vName = r.vesselId ? ('🚢 '+(anyVesselName(r.vesselId)||'')) : '';
+      const _pName = r.projectId ? ('📁 '+(((S.projects||[]).find(p=>p.id===r.projectId)||{}).code||'')) : '';
+      const obj = [_vName,_pName].filter(Boolean).join('<br>') || '<span style="color:var(--muted)">— không gắn —</span>';
       const canDel = (typeof wfCanDelete==='function') ? wfCanDelete(r) : isAdmin();
       return `<tr>
         <td class="c" style="font-size:11px">${i+1}</td>
@@ -29006,7 +29032,8 @@ function renderProjectPnL(){
   const supplierMap={};
   (S.payables||[]).forEach(r=>{
     if(r.projectId!==pid || wfStatus(r)==='rejected') return;
-    supplierMap[r.partner]=(supplierMap[r.partner]||0)+(+r.amountNet||+r.amount||0);
+    // v3.02.01: quy đổi về đơn vị hiển thị (toDisplay) — tránh cộng lẫn nhiều loại tiền + double-convert khi fmt
+    supplierMap[r.partner]=(supplierMap[r.partner]||0)+toDisplay(+r.amountNet||+r.amount||0, r.ccy||'USD');
   });
   const topSuppliers=Object.entries(supplierMap).sort((a,b)=>b[1]-a[1]).slice(0,5);
 
@@ -29022,15 +29049,15 @@ function renderProjectPnL(){
       </div>
       <div style="background:var(--paper-2);padding:14px;border:1px solid var(--rule);text-align:right">
         <div style="font-family:var(--font-mono);font-size:10px;color:var(--muted);letter-spacing:.12em;text-transform:uppercase">Doanh thu</div>
-        <div style="font-family:var(--font-display);font-size:20px;font-weight:600;color:var(--good);margin-top:4px">${fmt(totRev,p.ccy)}</div>
+        <div style="font-family:var(--font-display);font-size:20px;font-weight:600;color:var(--good);margin-top:4px">${fmt(totRev)}</div>
       </div>
       <div style="background:var(--paper-2);padding:14px;border:1px solid var(--rule);text-align:right">
         <div style="font-family:var(--font-mono);font-size:10px;color:var(--muted);letter-spacing:.12em;text-transform:uppercase">Chi phí</div>
-        <div style="font-family:var(--font-display);font-size:20px;font-weight:600;color:var(--bad);margin-top:4px">${fmt(totCost,p.ccy)}</div>
+        <div style="font-family:var(--font-display);font-size:20px;font-weight:600;color:var(--bad);margin-top:4px">${fmt(totCost)}</div>
       </div>
       <div style="background:var(--paper-2);padding:14px;border:2px solid ${margin>=0?'var(--good)':'var(--bad)'};text-align:right">
         <div style="font-family:var(--font-mono);font-size:10px;color:var(--muted);letter-spacing:.12em;text-transform:uppercase">Margin</div>
-        <div style="font-family:var(--font-display);font-size:20px;font-weight:700;color:${margin>=0?'var(--good)':'var(--bad)'};margin-top:4px">${fmt(margin,p.ccy)}</div>
+        <div style="font-family:var(--font-display);font-size:20px;font-weight:700;color:${margin>=0?'var(--good)':'var(--bad)'};margin-top:4px">${fmt(margin)}</div>
         <div style="font-family:var(--font-mono);font-size:12px;color:${margin>=0?'var(--good)':'var(--bad)'}">${marginPct.toFixed(1)}%</div>
       </div>
     </div>
@@ -29053,9 +29080,9 @@ function renderProjectPnL(){
       const mar=d.rev-d.cost;
       html+=`<tr>
         <td class="mono">${m}</td>
-        <td class="r num">${d.rev?fmt(d.rev,p.ccy):'—'}</td>
-        <td class="r num">${d.cost?fmt(d.cost,p.ccy):'—'}</td>
-        <td class="r num" style="color:${mar>=0?'var(--good)':'var(--bad)'};font-weight:600">${fmt(mar,p.ccy)}</td>
+        <td class="r num">${d.rev?fmt(d.rev):'—'}</td>
+        <td class="r num">${d.cost?fmt(d.cost):'—'}</td>
+        <td class="r num" style="color:${mar>=0?'var(--good)':'var(--bad)'};font-weight:600">${fmt(mar)}</td>
       </tr>`;
     });
   }
@@ -29074,7 +29101,7 @@ function renderProjectPnL(){
       const pct=totCost?(amt/totCost*100):0;
       html+=`<tr>
         <td>${esc(cat)}</td>
-        <td class="r num">${fmt(amt,p.ccy)}</td>
+        <td class="r num">${fmt(amt)}</td>
         <td class="r num" style="color:var(--muted)">${pct.toFixed(1)}%</td>
       </tr>`;
     });
@@ -29094,7 +29121,7 @@ function renderProjectPnL(){
       const pct=totCost?(amt/totCost*100):0;
       html+=`<tr>
         <td><b>${esc(sup)}</b></td>
-        <td class="r num">${fmt(amt,p.ccy)}</td>
+        <td class="r num">${fmt(amt)}</td>
         <td class="r num" style="color:var(--muted)">${pct.toFixed(1)}%</td>
       </tr>`;
     });
