@@ -2715,7 +2715,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.01.97';            // bumped on each release
+const APP_VERSION='3.01.98';            // bumped on each release
 
 /* v2.62.0: Token xác thực backend — PHẢI khớp API_TOKEN trong Apps Script (Code.gs).
    Mọi request tới Apps Script tự động được gắn token qua lớp bọc fetch bên dưới.
@@ -9884,8 +9884,9 @@ function reverseDockFromAsset(r){
    Quét AP loại CapEx (Dock/SCL) đã duyệt mà CHƯA cộng vào nguyên giá (_dockApplied!=true).
    Mỗi phiếu: gợi ý TSCĐ theo tàu (asset.vesselId), cho chọn lại, rồi Gán → cộng nguyên giá. */
 function _dockUnlinkedAps(){
+  // v3.01.97: vốn hóa ngay khi nhập → phiếu Dock chưa gắn TSCĐ ở MỌI trạng thái (trừ rejected) đều cần gán
   return (S.payables||[]).filter(r=>
-    r && r.status==='approved' && isExpenseCapEx(r.expenseType) && !r._dockApplied
+    r && r.status!=='rejected' && isExpenseCapEx(r.expenseType) && !r._dockApplied
   );
 }
 function openDockLinkTool(){
@@ -9899,19 +9900,8 @@ function openDockLinkTool(){
       .map(a=>`<option value="${a.id}" ${a.id===cur?'selected':''}>${esc((a.code?a.code+' · ':'')+(a.name||a.id))}</option>`).join('');
 
   if(!aps.length){
-    // v3.01.96: phân biệt — có thể có phiếu Dock CHƯA duyệt (chưa đủ điều kiện gán)
-    const pendingDock=(S.payables||[]).filter(r=>
-      r && isExpenseCapEx(r.expenseType) && r.status!=='approved'
-    );
-    let msg;
-    if(pendingDock.length){
-      const sums={};
-      pendingDock.forEach(r=>{const c=r.ccy||'USD';sums[c]=(sums[c]||0)+(+r.amount||0);});
-      const totTxt=Object.keys(sums).map(c=>fmt(sums[c],c)).join(' · ');
-      msg=`<div class="help-callout warn" style="margin:0">Không có phiếu Dock <b>đã duyệt</b> nào chờ gán. Tuy nhiên có <b>${pendingDock.length}</b> phiếu Dock/SCL <b>chưa duyệt xong</b> (tổng ${totTxt}). Phiếu chỉ cộng vào nguyên giá TSCĐ <b>sau khi được duyệt L2</b>. Hãy hoàn tất phê duyệt ở Tab 04 → Phải trả, rồi quay lại gán (hoặc app sẽ tự gắn nếu phiếu đã có tàu).</div>`;
-    } else {
-      msg=`<div class="help-callout tip" style="margin:0">Không có phiếu Dock/SCL nào đang chờ gán. Mọi phiếu Dock đã duyệt đều đã cộng vào nguyên giá TSCĐ. ✓</div>`;
-    }
+    // v3.01.97: vốn hóa ngay khi nhập → nếu rỗng nghĩa là mọi phiếu Dock (mọi trạng thái) đã liên kết TSCĐ
+    const msg=`<div class="help-callout tip" style="margin:0">Không có phiếu Dock/SCL nào đang chờ gán. Mọi phiếu Dock (trừ phiếu bị từ chối) đều đã liên kết TSCĐ và cộng vào nguyên giá. ✓</div>`;
     openModal('🛠 Gán phiếu Dock/SCL', `<div style="padding:8px 2px;font-size:13px;line-height:1.6">${msg}</div>`, `<button class="btn-sec" onclick="closeModal()">Đóng</button>`);
     return;
   }
@@ -14314,12 +14304,13 @@ function _dockAssetFill(){
   if(prev) sel.value=prev;
 }
 
-/* Tổng chi thực tế ET-DOCK đã duyệt của 1 tài sản trong khoảng năm [yearFrom..yearTo] */
+/* Tổng chi thực tế Dock/SCL của 1 tài sản trong khoảng năm [yearFrom..yearTo].
+   v3.01.97: tính MỌI trạng thái trừ rejected (đồng nhất với vốn hóa ngay khi nhập). */
 function dockActualSpent(assetId, yearFrom, yearTo){
   let sumByCcy={};
   const yf=+yearFrom, yt=+yearTo;
   (S.payables||[]).forEach(r=>{
-    if(r.status!=='approved') return;
+    if(r.status==='rejected') return;
     if(!r.expenseType || !isExpenseCapEx(r.expenseType)) return;
     if(r.dockAssetId!==assetId) return;
     const d=r.issueDate||r.createdAt||'';
@@ -14335,7 +14326,7 @@ function dockActualSpent(assetId, yearFrom, yearTo){
 function dockSpentDetail(assetId, yearFrom, yearTo){
   const yf=+yearFrom, yt=+yearTo;
   return (S.payables||[]).filter(r=>{
-    if(r.status!=='approved') return false;
+    if(r.status==='rejected') return false;  // v3.01.97: mọi trạng thái trừ rejected
     if(!r.expenseType || !isExpenseCapEx(r.expenseType)) return false;
     if(r.dockAssetId!==assetId) return false;
     const d=r.issueDate||r.createdAt||'';
@@ -35165,9 +35156,10 @@ function excelConfirmImport(){
         _apImportSeen.add(dupKey);
       }
       S.payables.push(record);
-      // v3.01.94: import set status='approved' → cộng ngay vào nguyên giá TSCĐ nếu là Dock/SCL
-      if(record.status==='approved' && isExpenseCapEx(record.expenseType)){
+      // v3.01.97: vốn hóa NGAY khi import (mọi trạng thái trừ rejected) — Dock→nguyên giá, CCDC/MMTB→tạo món
+      if(record.status!=='rejected'){
         try{ applyDockToAsset(record); }catch(e){console.warn('applyDockToAsset (import) failed',e);}
+        try{ applyAssetToTools(record); }catch(e){console.warn('applyAssetToTools (import) failed',e);}
       }
     }
     created++;
