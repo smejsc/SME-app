@@ -2715,7 +2715,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.01.98';            // bumped on each release
+const APP_VERSION='3.01.99';            // bumped on each release
 
 /* v2.62.0: Token xác thực backend — PHẢI khớp API_TOKEN trong Apps Script (Code.gs).
    Mọi request tới Apps Script tự động được gắn token qua lớp bọc fetch bên dưới.
@@ -23345,6 +23345,7 @@ async function _mrSave(targetStatus){
   // Anything else passes through (draft etc.)
   let resolvedStatus = targetStatus;
   let isFastTrack = false;
+  let isBodFastTrack = false;  // v3.01.99: phiếu BOD_ONLY chi thẳng, không qua duyệt
   if(targetStatus==='submit' || targetStatus==='pending_acc' || targetStatus==='pending_l1'){
     if(s.mode==='ar' && (isAdmin() || canApproveL1())){
       resolvedStatus = 'pending_l2';
@@ -23352,6 +23353,13 @@ async function _mrSave(targetStatus){
     } else {
       resolvedStatus = 'pending_acc';
     }
+  }
+  // v3.01.99: BOD-only — bút toán nội bộ BOD chi THẲNG vào sổ (approved ngay), bỏ qua phê duyệt.
+  // Điều kiện: TẤT CẢ dòng có số tiền > 0 đều là BOD_ONLY, và người tạo là admin.
+  const allBodLines = validLines.length>0 && validLines.every(l=>isExpenseBODOnly(l.expenseType) || isRevenueBODOnly(l.revenueType));
+  if(allBodLines && isAdmin()){
+    resolvedStatus = 'approved';
+    isBodFastTrack = true;
   }
 
   // Permission check
@@ -23445,11 +23453,13 @@ async function _mrSave(targetStatus){
         submittedBy: resolvedStatus !== 'draft' ? me : '',
         submittedAt: resolvedStatus !== 'draft' ? nowISO : '',
         // v1.37.4: Fast-track AR fills accChecked + approvedL1 with marker
-        accCheckedBy: isFastTrack ? (me+' (fast-track AR)') : '',
-        accCheckedAt: isFastTrack ? nowISO : '',
-        approvedL1By: isFastTrack ? (me+' (fast-track AR)') : '',
-        approvedL1At: isFastTrack ? nowISO : '',
-        approvedL2By:'', approvedL2At:'',
+        accCheckedBy: isFastTrack ? (me+' (fast-track AR)') : (isBodFastTrack ? (me+' (BOD nội bộ)') : ''),
+        accCheckedAt: (isFastTrack||isBodFastTrack) ? nowISO : '',
+        approvedL1By: isFastTrack ? (me+' (fast-track AR)') : (isBodFastTrack ? (me+' (BOD nội bộ)') : ''),
+        approvedL1At: (isFastTrack||isBodFastTrack) ? nowISO : '',
+        // v3.01.99: BOD-only chi thẳng → điền cả L2 (đã duyệt hoàn toàn)
+        approvedL2By: isBodFastTrack ? (me+' (BOD nội bộ)') : '',
+        approvedL2At: isBodFastTrack ? nowISO : '',
         rejectedBy:'', rejectedAt:'', rejectReason:'', rejectedAtLevel:0,
         createdBy: me,
         createdByDept: getActorDeptName() || '',   // v1.65.0: bộ phận NV lúc nhập (sign phiếu)
@@ -23467,7 +23477,8 @@ async function _mrSave(targetStatus){
     }catch(e){}
     closeModal();
     let statusLabel = 'Nháp';
-    if(isFastTrack) statusLabel = '⚡ Fast-track → L2 (admin/BOD duyệt)';
+    if(isBodFastTrack) statusLabel = '🔒 BOD nội bộ — chi thẳng (đã ghi sổ, không qua duyệt)';
+    else if(isFastTrack) statusLabel = '⚡ Fast-track → L2 (admin/BOD duyệt)';
     else if(resolvedStatus==='pending_acc') statusLabel = 'Chờ KT viên kiểm';
     else if(resolvedStatus==='pending_l2') statusLabel = 'Chờ L2';
     toast(`✓ Đã lưu ${created} dòng (${statusLabel}) · batchId: ${batchId.slice(-6)}`);
