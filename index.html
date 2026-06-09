@@ -2715,7 +2715,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.02.02';            // bumped on each release
+const APP_VERSION='3.02.06';            // bumped on each release
 
 /* v2.62.0: Token xác thực backend — PHẢI khớp API_TOKEN trong Apps Script (Code.gs).
    Mọi request tới Apps Script tự động được gắn token qua lớp bọc fetch bên dưới.
@@ -23826,16 +23826,20 @@ function saveAr(kind,id){
     // NV thường nhập AR vẫn qua workflow để KTT kiểm.
     // v3.01.28: _AR_FORCE_DRAFT — khi user bấm "Lưu dự kiến", ép trạng thái draft kể cả KTT/Admin.
     const arFastTrack = (kind==='ar' && !window._AR_FORCE_DRAFT && (isAdmin() || canCheckAcc()));
-    const histTag = arFastTrack ? '(KTT nhập trực tiếp — '+actorName()+')' : '';
+    // v3.02.03: AP loại BOD_ONLY (admin nhập) → chi thẳng vào sổ (approved ngay), bỏ qua phê duyệt.
+    const apBodFastTrack = (kind==='ap' && isAdmin() && isExpenseBODOnly(expenseType));
+    const fastTrack = arFastTrack || apBodFastTrack;
+    const histTag = arFastTrack ? '(KTT nhập trực tiếp — '+actorName()+')'
+                  : (apBodFastTrack ? '('+actorName()+' — BOD nội bộ)' : '');
     const nowIso = new Date().toISOString();
     const newRec = {
       id:uid(),
       partner,vendorId,desc,invoiceNo,amountNet,vatPercent,vatAmount,amountGross,amount,ccy,segment,companyId,projectId,vesselId,issueDate,dueDate,dueMonth,dueAmount,
       payments:[],
-      status: arFastTrack ? 'approved' : 'draft',
-      submittedBy: arFastTrack ? actorName() : '', submittedAt: arFastTrack ? nowIso : '',
-      approvedL1By: arFastTrack ? histTag : '', approvedL1At: arFastTrack ? nowIso : '',
-      approvedL2By: arFastTrack ? histTag : '', approvedL2At: arFastTrack ? nowIso : '',
+      status: fastTrack ? 'approved' : 'draft',
+      submittedBy: fastTrack ? actorName() : '', submittedAt: fastTrack ? nowIso : '',
+      approvedL1By: fastTrack ? histTag : '', approvedL1At: fastTrack ? nowIso : '',
+      approvedL2By: fastTrack ? histTag : '', approvedL2At: fastTrack ? nowIso : '',
       rejectedBy:'',rejectedAt:'',rejectReason:'',rejectedAtLevel:null,
       createdBy:actorName(),
       createdByDept: getActorDeptName(),  // v1.45.0: snapshot dept name at creation
@@ -29020,13 +29024,24 @@ function renderProjectPnL(){
   });
   const months=Object.keys(byMonth).sort();
 
-  // Cost breakdown by category
-  const byCostCat={};
+  // Cost breakdown by LOẠI CHI PHÍ (expenseType) — v3.02.04: gom theo loại CP, không theo diễn giải.
+  // v3.02.05: gom theo CODE để mở chi tiết được; label (có icon) để hiển thị.
+  const _apById={}; (S.payables||[]).forEach(r=>{ _apById[r.id]=r; });
+  const byCostCat={};   // code → {label, amt}
   costTx.forEach(t=>{
-    const cat=t.category||t.desc||'(không phân loại)';
-    byCostCat[cat]=(byCostCat[cat]||0)+txAmt(t);
+    const r=_apById[t.id];
+    let code, label;
+    if(r && r.expenseType){
+      const et=getExpenseType(r.expenseType)||{};
+      code = r.expenseType;
+      label = et.label ? ((et.icon?et.icon+' ':'')+et.label) : r.expenseType;
+    } else {
+      code = '__NONE__'; label = '(không phân loại)';
+    }
+    if(!byCostCat[code]) byCostCat[code]={label, amt:0};
+    byCostCat[code].amt += txAmt(t);
   });
-  const sortedCats=Object.entries(byCostCat).sort((a,b)=>b[1]-a[1]);
+  const sortedCats=Object.entries(byCostCat).sort((a,b)=>b[1].amt-a[1].amt);
 
   // Top suppliers (from payables original — find via id)
   const supplierMap={};
@@ -29097,11 +29112,11 @@ function renderProjectPnL(){
   if(!sortedCats.length){
     html+='<tr><td class="empty" colspan="3">Chưa có chi phí</td></tr>';
   } else {
-    sortedCats.forEach(([cat,amt])=>{
-      const pct=totCost?(amt/totCost*100):0;
+    sortedCats.forEach(([code,o])=>{
+      const pct=totCost?(o.amt/totCost*100):0;
       html+=`<tr>
-        <td>${esc(cat)}</td>
-        <td class="r num">${fmt(amt)}</td>
+        <td><a onclick="showProjectCostByType('${pid}','${code}')" style="cursor:pointer;color:var(--accent);text-decoration:underline dotted" title="Xem chi tiết từng phiếu trong loại này — sửa được">${esc(o.label)}</a></td>
+        <td class="r num">${fmt(o.amt)}</td>
         <td class="r num" style="color:var(--muted)">${pct.toFixed(1)}%</td>
       </tr>`;
     });
@@ -29131,11 +29146,70 @@ function renderProjectPnL(){
   block.innerHTML=html;
 }
 
-/* ============================================================
-   F. MONTHLY MANAGEMENT REPORT (MMR)
-   Tổng hợp KPI 1 tháng cho BGD: KPI, P&L theo mảng, Hiệu suất tàu,
-   Top KH, Top NCC, Công nợ, Sự kiện bất thường
-   ============================================================ */
+/* v3.02.05: Chi tiết từng phiếu trong 1 LOẠI chi phí của 1 dự án — bấm từ bảng "Chi phí theo loại".
+   Cho sửa từng phiếu (mở modal phải trả). Lọc đúng theo projectId + expenseType. */
+function showProjectCostByType(pid, code){
+  const p=(S.projects||[]).find(x=>x.id===pid);
+  const txs=viewerScopeAllTx().filter(t=>t.projectId===pid && t.type==='COST');
+  const _apById={}; (S.payables||[]).forEach(r=>{ _apById[r.id]=r; });
+  // lọc theo code (hoặc nhóm không phân loại)
+  const items=txs.filter(t=>{
+    const r=_apById[t.id];
+    const c = (r && r.expenseType) ? r.expenseType : '__NONE__';
+    return c===code;
+  }).map(t=>({t, r:_apById[t.id]||{}, amt:txAmt(t)}))
+    .sort((a,b)=>(b.t.date||'').localeCompare(a.t.date||''));
+  const et=(code!=='__NONE__')?(getExpenseType(code)||{}):{};
+  const typeLabel=et.label?((et.icon?et.icon+' ':'')+et.label):(code==='__NONE__'?'(không phân loại)':code);
+  const total=items.reduce((s,x)=>s+x.amt,0);
+  const stMap={draft:'Nháp',pending_acc:'Chờ KT',pending_l1:'Trình ký',pending_l2:'Chờ L2',approved:'Đã duyệt',rejected:'Từ chối'};
+  let body;
+  if(!items.length){
+    body=`<div class="help-callout info" style="margin:0">Không có phiếu nào trong loại này.</div>`;
+  } else {
+    const tr=items.map((x,i)=>{
+      const r=x.r;
+      const canDel=(typeof wfCanDelete==='function')?wfCanDelete(r):isAdmin();
+      const vNm=r.vesselId?(' · 🚢 '+(anyVesselName(r.vesselId)||'')):'';
+      return `<tr>
+        <td class="c" style="font-size:11px">${i+1}</td>
+        <td style="font-size:11px">${esc((x.t.date||'').slice(0,10))}</td>
+        <td>${esc(r.partner||'')}<div style="font-size:11px;color:var(--muted)">${esc(r.desc||x.t.desc||'')}${vNm}</div></td>
+        <td style="font-size:11px">${esc(r.invoiceNo||'')}</td>
+        <td style="font-size:10px"><span style="color:${r.status==='rejected'?'var(--bad)':(r.status==='approved'?'var(--good)':'var(--muted)')}">${esc(stMap[r.status||'draft']||r.status)}</span></td>
+        <td class="r" style="font-family:var(--font-mono);white-space:nowrap">${fmt(x.amt)}</td>
+        <td class="c" style="white-space:nowrap">
+          ${r.id?`<button class="icon-btn" title="Sửa phiếu" onclick="closeModal();openPayableModal('${r.id}')">✎</button>`:''}
+          ${(r.id&&canDel)?`<button class="icon-btn danger" title="Xóa phiếu" onclick="_projCostDelete('${r.id}','${pid}','${code}')">✕</button>`:''}
+        </td>
+      </tr>`;
+    }).join('');
+    body=`<div style="font-size:12.5px">
+      <div style="margin:0 0 10px;color:var(--muted)">Dự án <b>${esc(p?p.code:pid)}</b> · Loại <b>${esc(typeLabel)}</b> · ${items.length} phiếu</div>
+      <div style="max-height:50vh;overflow:auto;border:1px solid var(--rule)">
+        <table class="tbl" style="font-size:12px">
+          <thead><tr><th class="c">#</th><th>Ngày</th><th>NCC / Diễn giải</th><th>Số HĐ</th><th>Trạng thái</th><th class="r">Số tiền</th><th class="c">Thao tác</th></tr></thead>
+          <tbody>${tr}</tbody>
+        </table>
+      </div>
+      <div style="text-align:right;margin-top:10px;font-weight:700">Tổng loại "${esc(typeLabel)}": ${fmt(total)}</div>
+    </div>`;
+  }
+  openModal('🔎 Chi tiết loại chi phí · '+typeLabel, body, `<button class="btn-sec" onclick="closeModal()">Đóng</button>`);
+}
+function _projCostDelete(id, pid, code){
+  const r=(S.payables||[]).find(x=>x.id===id);
+  if(!r){ toast('Không tìm thấy','bad'); return; }
+  deleteAr('ap', id);
+  // mở lại chi tiết loại nếu còn phiếu
+  setTimeout(()=>{
+    const _apById={}; (S.payables||[]).forEach(x=>{ _apById[x.id]=x; });
+    const still=viewerScopeAllTx().filter(t=>t.projectId===pid && t.type==='COST').some(t=>{
+      const rr=_apById[t.id]; const c=(rr&&rr.expenseType)?rr.expenseType:'__NONE__'; return c===code;
+    });
+    if(still) showProjectCostByType(pid, code); else closeModal();
+  }, 60);
+}
 function fillMmrMonthPicker(){
   const sel=document.getElementById('rep-mmr-month');
   if(!sel) return;
@@ -29986,9 +30060,10 @@ function renderCostBreakdown(){
     const color=palette[i%palette.length];
     const row=matrix[cat]||{};
     const pct=grandTotal?catTotal[cat]/grandTotal*100:0;
+    const catEnc=encodeURIComponent(cat);
     html+=`<tr>
       <td style="position:sticky;left:0;background:var(--paper);z-index:1"><span style="display:inline-block;width:9px;height:9px;background:${color};margin-right:6px"></span><b>${esc(cat)}</b></td>
-      ${visibleCols.map(c=>{const v=row[c.key]||0; return `<td class="r num" style="${v>0?'':'color:var(--rule)'}">${v>0?_m(v):'·'}</td>`;}).join('')}
+      ${visibleCols.map(c=>{const v=row[c.key]||0; return `<td class="r num" style="${v>0?'':'color:var(--rule)'}">${v>0?`<a onclick="showCostMatrixDetail('${catEnc}','${c.key}',${yr},'${esc(seg)}')" style="cursor:pointer;color:var(--accent);text-decoration:underline dotted" title="Xem chi tiết phiếu — sửa được">${_m(v)}</a>`:'·'}</td>`;}).join('')}
       <td class="r num" style="border-left:2px solid var(--rule);font-weight:600">${_m(catTotal[cat])}</td>
       <td class="r num" style="color:var(--muted)">${pct.toFixed(1)}%</td>
     </tr>`;
@@ -30004,6 +30079,79 @@ function renderCostBreakdown(){
   <div style="margin-top:6px;font-size:10px;color:var(--muted);font-style:italic">💡 Cột "Khác / không gắn" = chi phí chưa gắn tàu/dự án (chỉ gắn mảng). Quy đổi về ${displayCcy()}. Gồm cả khoản chưa duyệt (trừ từ chối), bỏ CapEx/PO tồn kho.</div>`;
 
   block.innerHTML=html;
+}
+
+/* v3.02.06: Chi tiết phiếu trong 1 ô của ma trận J. Cost Breakdown (loại CP × cột tàu/dự án × năm).
+   Dùng đúng colKeyOf + bộ lọc của renderCostBreakdown để liệt kê chính xác phiếu cấu thành ô. */
+function showCostMatrixDetail(catEnc, colKey, yr, seg){
+  const cat=decodeURIComponent(catEnc);
+  const fx=+S.fxRate||25000;
+  // Tái dựng cột (giống renderCostBreakdown)
+  const vessels=(isViewer()? S.vessels.filter(v=>viewerCanSeeVessel(v.id)) : S.vessels)||[];
+  const omProjects=(S.projects||[]).filter(p=>(p.isOM||p.segment==='OM')&&(!isViewer()||viewerCanSeeProject(p.id)));
+  const projById={}; (S.projects||[]).forEach(p=>projById[p.id]=p);
+  const vesselIds=new Set(vessels.map(v=>v.id));
+  const omIds=new Set(omProjects.map(p=>p.id));
+  const colKeyOf=(r)=>{
+    if(r.projectId && omIds.has(r.projectId)) return 'P:'+r.projectId;
+    if(r.projectId && projById[r.projectId] && projById[r.projectId].vesselId && vesselIds.has(projById[r.projectId].vesselId)) return 'V:'+projById[r.projectId].vesselId;
+    if(r.vesselId && vesselIds.has(r.vesselId)) return 'V:'+r.vesselId;
+    return 'OTHER';
+  };
+  const items=(S.payables||[]).filter(r=>{
+    if(wfStatus(r)==='rejected') return false;
+    if(!r.issueDate || +r.issueDate.slice(0,4)!==(+yr)) return false;
+    if(seg && r.segment!==seg) return false;
+    if(isViewer() && !viewerCanSeeSegment(r.segment)) return false;
+    if(!apCountsInPL(r)) return false;
+    if((r.costCategory||'(không phân loại)')!==cat) return false;
+    if(colKeyOf(r)!==colKey) return false;
+    return true;
+  }).sort((a,b)=>(b.issueDate||'').localeCompare(a.issueDate||''));
+  // nhãn cột
+  let colLabel='Khác / không gắn';
+  if(colKey.startsWith('V:')) colLabel='🚢 '+(anyVesselName(colKey.slice(2))||'');
+  else if(colKey.startsWith('P:')){ const p=projById[colKey.slice(2)]; colLabel='📁 '+((p&&(p.code||p.name))||''); }
+  const _usd=(r)=>{const amt=+r.amountNet||+r.amount||0; return r.ccy==='VND'?amt/fx:amt;};
+  const total=items.reduce((s,r)=>s+_usd(r),0);
+  const stMap={draft:'Nháp',pending_acc:'Chờ KT',pending_l1:'Trình ký',pending_l2:'Chờ L2',approved:'Đã duyệt',rejected:'Từ chối'};
+  let body;
+  if(!items.length){
+    body=`<div class="help-callout info" style="margin:0">Không có phiếu trong ô này.</div>`;
+  } else {
+    const tr=items.map((r,i)=>{
+      const canDel=(typeof wfCanDelete==='function')?wfCanDelete(r):isAdmin();
+      return `<tr>
+        <td class="c" style="font-size:11px">${i+1}</td>
+        <td style="font-size:11px">${esc((r.issueDate||'').slice(0,10))}</td>
+        <td>${esc(r.partner||'')}<div style="font-size:11px;color:var(--muted)">${esc(r.desc||'')}</div></td>
+        <td style="font-size:11px">${esc(r.invoiceNo||'')}</td>
+        <td style="font-size:10px"><span style="color:${r.status==='rejected'?'var(--bad)':(r.status==='approved'?'var(--good)':'var(--muted)')}">${esc(stMap[r.status||'draft']||r.status)}</span></td>
+        <td class="r" style="font-family:var(--font-mono);white-space:nowrap">${fmt(_usd(r),'USD')}</td>
+        <td class="c" style="white-space:nowrap">
+          <button class="icon-btn" title="Sửa phiếu" onclick="closeModal();openPayableModal('${r.id}')">✎</button>
+          ${canDel?`<button class="icon-btn danger" title="Xóa phiếu" onclick="_costMatrixDelete('${r.id}','${catEnc}','${colKey}',${yr},'${esc(seg)}')">✕</button>`:''}
+        </td>
+      </tr>`;
+    }).join('');
+    body=`<div style="font-size:12.5px">
+      <div style="margin:0 0 10px;color:var(--muted)">Loại <b>${esc(cat)}</b> · Cột <b>${esc(colLabel)}</b> · năm ${yr} · ${items.length} phiếu</div>
+      <div style="max-height:50vh;overflow:auto;border:1px solid var(--rule)">
+        <table class="tbl" style="font-size:12px">
+          <thead><tr><th class="c">#</th><th>Ngày</th><th>NCC / Diễn giải</th><th>Số HĐ</th><th>Trạng thái</th><th class="r">Số tiền</th><th class="c">Thao tác</th></tr></thead>
+          <tbody>${tr}</tbody>
+        </table>
+      </div>
+      <div style="text-align:right;margin-top:10px;font-weight:700">Tổng ô: ${fmt(total,'USD')}</div>
+    </div>`;
+  }
+  openModal('🔎 Chi tiết · '+cat+' × '+colLabel, body, `<button class="btn-sec" onclick="closeModal()">Đóng</button>`);
+}
+function _costMatrixDelete(id, catEnc, colKey, yr, seg){
+  const r=(S.payables||[]).find(x=>x.id===id);
+  if(!r){ toast('Không tìm thấy','bad'); return; }
+  deleteAr('ap', id);
+  setTimeout(()=>showCostMatrixDetail(catEnc, colKey, yr, seg), 60);
 }
 
 // Map event type → fuel state bucket
