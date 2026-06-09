@@ -1937,7 +1937,10 @@ body.readonly-mode::before{
   <div class="section">
     <div class="section-head">
       <div class="section-title"><span class="tag">∑</span>Danh sách bút toán chờ duyệt</div>
-      <div style="display:flex;gap:8px;align-items:center">
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <input type="text" id="appr-partner" placeholder="🔎 Lọc tên NCC…" oninput="renderApprovalList()" style="padding:5px 9px;border:1px solid var(--rule);font-size:11px;width:150px">
+        <input type="number" id="appr-amt-min" placeholder="Tiền từ" oninput="renderApprovalList()" style="padding:5px 9px;border:1px solid var(--rule);font-size:11px;width:100px;font-family:var(--font-mono)">
+        <input type="number" id="appr-amt-max" placeholder="đến" oninput="renderApprovalList()" style="padding:5px 9px;border:1px solid var(--rule);font-size:11px;width:100px;font-family:var(--font-mono)">
         <label style="display:inline-flex;align-items:center;gap:6px;font-size:11px;cursor:pointer">
           <input type="checkbox" id="appr-select-all" checked onchange="toggleSelectAllApproval()">
           <span>Chọn tất cả</span>
@@ -2715,7 +2718,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.02.06';            // bumped on each release
+const APP_VERSION='3.02.08';            // bumped on each release
 
 /* v2.62.0: Token xác thực backend — PHẢI khớp API_TOKEN trong Apps Script (Code.gs).
    Mọi request tới Apps Script tự động được gắn token qua lớp bọc fetch bên dưới.
@@ -16317,6 +16320,21 @@ function approvalGetCandidates(){
   const fromDate=(document.getElementById('appr-from')||{}).value||'';
   const toDate=(document.getElementById('appr-to')||{}).value||'';
   const entityFilter=(document.getElementById('appr-entity')||{}).value||'';
+  // v3.02.08: lọc theo tên NCC + khoảng số tiền (đơn vị hiển thị)
+  const partnerFilter=((document.getElementById('appr-partner')||{}).value||'').trim().toLowerCase();
+  const amtMinRaw=(document.getElementById('appr-amt-min')||{}).value;
+  const amtMaxRaw=(document.getElementById('appr-amt-max')||{}).value;
+  const amtMin=(amtMinRaw!==''&&amtMinRaw!=null)?+amtMinRaw:null;
+  const amtMax=(amtMaxRaw!==''&&amtMaxRaw!=null)?+amtMaxRaw:null;
+  const _apprPassNccAmt=(r)=>{
+    if(partnerFilter && !((r.partner||'').toLowerCase().includes(partnerFilter))) return false;
+    if(amtMin!=null || amtMax!=null){
+      const disp=toDisplay(+r.amountGross||+r.amount||0, r.ccy||'USD');
+      if(amtMin!=null && disp<amtMin) return false;
+      if(amtMax!=null && disp>amtMax) return false;
+    }
+    return true;
+  };
 
   // BOD filter: get pre-filtered arrays (BOD_ONLY hidden from non-BOD users)
   const arSource = filterBODRecords(S.receivables||[]);
@@ -16335,6 +16353,7 @@ function approvalGetCandidates(){
         if(entityFilter.startsWith('VESSEL:') && r.vesselId!==entityFilter.substring(7)) return;
         if(entityFilter.startsWith('PROJECT:') && r.projectId!==entityFilter.substring(8)) return;
       }
+      if(!_apprPassNccAmt(r)) return;
       out.push({id:r.id, kind:'ar', record:r, kindLabel:'Phải thu', kindClass:'good'});
     });
   }
@@ -16353,6 +16372,7 @@ function approvalGetCandidates(){
         if(entityFilter.startsWith('VESSEL:') && r.vesselId!==entityFilter.substring(7)) return;
         if(entityFilter.startsWith('PROJECT:') && r.projectId!==entityFilter.substring(8)) return;
       }
+      if(!_apprPassNccAmt(r)) return;
       // Origin filter
       if(typeFilter && typeFilter.startsWith('ap-')){
         if(typeFilter==='ap-other'){
@@ -16429,6 +16449,9 @@ function resetApprovalFilter(){
   document.getElementById('appr-from').value='';
   document.getElementById('appr-to').value='';
   document.getElementById('appr-entity').value='';
+  const _p=document.getElementById('appr-partner'); if(_p) _p.value='';
+  const _mn=document.getElementById('appr-amt-min'); if(_mn) _mn.value='';
+  const _mx=document.getElementById('appr-amt-max'); if(_mx) _mx.value='';
   APPROVAL_SELECTED.clear();
   renderApprovalList();
 }
@@ -30013,13 +30036,23 @@ function renderCostBreakdown(){
   const catTotal={};     // cat -> usd
   const colTotal={};     // colKey -> usd
   let grandTotal=0;
+  // v3.02.07: khóa loại CP — ưu tiên expenseType (người nhập chọn), fallback costCategory (legacy).
+  // Trước đây chỉ dùng costCategory → phiếu có expenseType mà thiếu costCategory bị dồn vào "(không phân loại)".
+  const _catKeyOf=(r)=>{
+    if(r.expenseType){
+      const et=getExpenseType(r.expenseType)||{};
+      return et.label ? ((et.icon?et.icon+' ':'')+et.label) : r.expenseType;
+    }
+    if(r.costCategory) return r.costCategory;
+    return '(không phân loại)';
+  };
   (S.payables||[]).forEach(r=>{
     if(wfStatus(r)==='rejected') return;
     if(!r.issueDate || +r.issueDate.slice(0,4)!==yr) return;
     if(seg && r.segment!==seg) return;
     if(isViewer() && !viewerCanSeeSegment(r.segment)) return;
     if(!apCountsInPL(r)) return;
-    const cat=r.costCategory||'(không phân loại)';
+    const cat=_catKeyOf(r);
     const amt=+r.amountNet||+r.amount||0;
     const usd=r.ccy==='VND'?amt/fx:amt;
     const ck=colKeyOf(r);
@@ -30098,13 +30131,21 @@ function showCostMatrixDetail(catEnc, colKey, yr, seg){
     if(r.vesselId && vesselIds.has(r.vesselId)) return 'V:'+r.vesselId;
     return 'OTHER';
   };
+  const _catKeyOf=(r)=>{
+    if(r.expenseType){
+      const et=getExpenseType(r.expenseType)||{};
+      return et.label ? ((et.icon?et.icon+' ':'')+et.label) : r.expenseType;
+    }
+    if(r.costCategory) return r.costCategory;
+    return '(không phân loại)';
+  };
   const items=(S.payables||[]).filter(r=>{
     if(wfStatus(r)==='rejected') return false;
     if(!r.issueDate || +r.issueDate.slice(0,4)!==(+yr)) return false;
     if(seg && r.segment!==seg) return false;
     if(isViewer() && !viewerCanSeeSegment(r.segment)) return false;
     if(!apCountsInPL(r)) return false;
-    if((r.costCategory||'(không phân loại)')!==cat) return false;
+    if(_catKeyOf(r)!==cat) return false;
     if(colKeyOf(r)!==colKey) return false;
     return true;
   }).sort((a,b)=>(b.issueDate||'').localeCompare(a.issueDate||''));
