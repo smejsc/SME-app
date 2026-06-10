@@ -2724,7 +2724,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.02.49';            // bumped on each release
+const APP_VERSION='3.02.51';            // bumped on each release
 
 /* v2.62.0: Token xác thực backend — PHẢI khớp API_TOKEN trong Apps Script (Code.gs).
    Mọi request tới Apps Script tự động được gắn token qua lớp bọc fetch bên dưới.
@@ -23135,6 +23135,7 @@ function _arEditorBody(r,isPayable){
       <div style="font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);font-weight:600;margin-bottom:4px">Lịch sử thanh toán</div>
       ${paymentsHtml}
     </div>
+    ${isPayable ? _apOrdersBlock(r) : ''}
     ${creatorBlock}
     <div id="ar-err" style="font-size:12px;color:var(--bad);min-height:14px;font-family:var(--font-mono);margin-top:8px"></div>`;
 }
@@ -23309,6 +23310,43 @@ function _arRecalcRemain(){
   const remain=gross-due;
   out.value = remain.toLocaleString('vi-VN')+' '+(((document.getElementById('ar-ccy')||{}).value)||'VND');
   out.style.color = remain>0.001 ? 'var(--bad)' : (remain<-0.001 ? '#a8362b' : 'var(--good)');
+}
+
+/* v3.02.50: Block "Lệnh chi từng đợt" trong modal AP */
+function _apOrdersBlock(r){
+  const orders=_apOrders(r);
+  const rem=arRemaining(r);
+  const canApprove = isAdmin() || (typeof canApproveL2==='function'&&canApproveL2()) || (CURRENT_USER&&CURRENT_USER.canManageUsers);
+  const stChip=o=>{
+    if(o.status==='paid') return '<span class="chip chip-good" style="font-size:9px">✓ Đã chi</span>';
+    if(o.status==='approved') return '<span class="chip chip-warn" style="font-size:9px">Đã duyệt · chờ chi</span>';
+    return '<span class="chip" style="font-size:9px;background:var(--rule);color:var(--muted)">Chờ duyệt</span>';
+  };
+  const rows=orders.map(o=>{
+    let act='';
+    if(o.status==='pending' && canApprove) act+=`<button class="icon-btn good" title="Duyệt lệnh này" onclick="apApproveOrder('${r.id}','${o.id}')">✓</button>`;
+    if(o.status==='pending') act+=`<button class="icon-btn danger" title="Hủy lệnh" onclick="apCancelOrder('${r.id}','${o.id}')">✕</button>`;
+    if(o.status==='approved') act+=`<button class="icon-btn" title="Ghi nhận đã chi" onclick="apPayOrder('${r.id}','${o.id}')">$</button>`;
+    if(o.status==='approved' && canApprove) act+=`<button class="icon-btn danger" title="Hủy lệnh" onclick="apCancelOrder('${r.id}','${o.id}')">✕</button>`;
+    return `<tr>
+      <td style="font-family:var(--font-mono);font-weight:600">${fmtFull(o.amount,o.ccy)}${(o.proposedAmount!=null && Math.abs(o.proposedAmount-o.amount)>0.01)?`<br><span style="font-size:9px;color:var(--muted);font-weight:400;text-decoration:line-through">ĐX ${fmtFull(o.proposedAmount,o.ccy)}</span>`:''}</td>
+      <td>${stChip(o)}</td>
+      <td style="font-size:10px;color:var(--muted)">ĐX: ${esc(o.proposedBy||'')}${o.approvedBy?'<br>Duyệt: '+esc(o.approvedBy):''}${o.note?'<br>'+esc(o.note):''}</td>
+      <td style="text-align:right">${act}</td>
+    </tr>`;
+  }).join('');
+  return `
+    <div style="margin-top:14px;padding-top:10px;border-top:1px solid var(--rule)">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+        <span style="font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);font-weight:600">Lệnh chi từng đợt</span>
+        <div style="display:flex;gap:6px">
+          <button type="button" class="btn-sec" style="font-size:11px;padding:3px 8px" onclick="apAddOldPayment('${r.id}')" title="Nhập đợt đã trả trước khi dùng app">↩ Nhập đợt TT cũ</button>
+          ${rem>0.01?`<button type="button" class="btn-sec" style="font-size:11px;padding:3px 8px;border-color:var(--accent);color:var(--accent)" onclick="apProposeOrder('${r.id}')" title="Đề xuất lệnh chi đợt mới">+ Đề xuất lệnh chi</button>`:''}
+        </div>
+      </div>
+      ${orders.length?`<table class="table" style="font-size:11px"><thead><tr><th>Số tiền đợt</th><th>Trạng thái</th><th>Người</th><th></th></tr></thead><tbody>${rows}</tbody></table>`
+        :'<div style="font-size:11px;color:var(--muted);font-style:italic;padding:4px 0">Chưa có lệnh chi nào. Bấm "+ Đề xuất lệnh chi" để tạo đợt thanh toán.</div>'}
+    </div>`;
 }
 
 function openReceivableModal(id){
@@ -24698,6 +24736,99 @@ function migrateArToApproved(){
   renderAll();
 }
 
+/* v3.02.50: LỆNH CHI TỪNG ĐỢT cho AP (chờ duyệt → duyệt → chi).
+   - KT đề xuất lệnh chi (số tiền đợt) → status 'pending'
+   - KTT/L2 duyệt đúng lệnh đó → status 'approved'
+   - Ghi chi thực → tạo payment trong r.payments (công nợ tự giảm) → status 'paid'
+   - "Nhập đợt TT cũ": tạo payment lịch sử thẳng (đã trả trước khi dùng app), không cần duyệt.
+   Chi phí KHÔNG chờ duyệt (ghi nhận từ khi NV nhập) — cơ chế này CHỈ quản lý các đợt CHI TIỀN. */
+function _apOrders(r){ if(!Array.isArray(r.paymentOrders)) r.paymentOrders=[]; return r.paymentOrders; }
+function _apPaidTotal(r){ return (r.payments||[]).reduce((s,p)=>s+(+p.amount||0),0); }
+function _apPendingOrders(r){ return _apOrders(r).filter(o=>o.status==='pending'||o.status==='approved').reduce((s,o)=>s+(+o.amount||0),0); }
+
+// KT đề xuất lệnh chi đợt này
+function apProposeOrder(id){
+  const r=(S.payables||[]).find(x=>x.id===id); if(!r){toast('Không tìm thấy phiếu','bad');return;}
+  const rem=arRemaining(r)-_apPendingOrders(r);  // còn lại sau khi trừ lệnh đang chờ
+  const a=prompt(`Đề xuất lệnh chi đợt này cho:\n${r.partner||''} · Tổng ${fmtFull(r.amount,r.ccy)}\nCòn có thể đề xuất: ${fmtFull(rem,r.ccy)}\n\nNhập số tiền đợt này (${r.ccy}):`, rem>0?Math.round(rem):'');
+  if(a===null) return;
+  const amt=+String(a).replace(/[^\d.-]/g,'')||0;
+  if(amt<=0){ toast('Số tiền > 0','bad'); return; }
+  if(amt>rem+0.01){ toast('Vượt số còn lại có thể đề xuất','bad'); return; }
+  const note=prompt('Ghi chú lệnh chi (tùy chọn):','')||'';
+  _apOrders(r).push({id:'PO'+Math.random().toString(36).slice(2,8), amount:amt, ccy:r.ccy, status:'pending',
+    proposedBy:actorName(), proposedAt:new Date().toISOString(), note});
+  touchRecord(r); saveState(); renderAll();
+  try{ logAuditEvent('ap_order_propose',{recordId:r.id,amount:amt,ccy:r.ccy,actor:actorName()}); }catch(e){}
+  toast('Đã tạo lệnh chi — chờ KTT/L2 duyệt','good');
+  openPayableModal(id);
+}
+// KTT/L2 duyệt ĐÚNG lệnh đó
+function apApproveOrder(id, orderId){
+  const r=(S.payables||[]).find(x=>x.id===id); if(!r) return;
+  const o=_apOrders(r).find(x=>x.id===orderId); if(!o) return;
+  const canApprove = isAdmin() || (typeof canApproveL2==='function'&&canApproveL2()) || (CURRENT_USER&&CURRENT_USER.canManageUsers);
+  if(!canApprove){ toast('Cần Admin / KTT / Duyệt L2','bad'); return; }
+  if(!isAdmin() && o.proposedBy===actorName()){ toast('🔒 SOD: không tự duyệt lệnh mình đề xuất','bad'); return; }
+  // v3.02.51: KTT/L2 có thể DUYỆT GIÁ TRỊ KHÁC với đề xuất (quyền quyết định cuối thuộc người duyệt)
+  const remMax = arRemaining(r) - _apPendingOrders(r) + (+o.amount||0);  // trần = còn lại + chính lệnh này
+  const a=prompt(`Duyệt lệnh chi đợt này.\nKT đề xuất: ${fmtFull(o.amount,o.ccy)}\nTối đa có thể duyệt: ${fmtFull(remMax,o.ccy)}\n\nNhập giá trị DUYỆT (${o.ccy}) — sửa nếu muốn khác đề xuất:`, Math.round(+o.amount||0));
+  if(a===null) return;
+  const amt=+String(a).replace(/[^\d.-]/g,'')||0;
+  if(amt<=0){ toast('Giá trị duyệt > 0','bad'); return; }
+  if(amt>remMax+0.01){ toast(`Vượt số còn lại (tối đa ${fmtFull(remMax,o.ccy)})`,'bad'); return; }
+  const changed = Math.abs(amt-(+o.amount||0))>0.01;
+  o.proposedAmount = +o.amount||0;   // lưu lại số đề xuất gốc
+  o.amount = amt;                     // số duyệt (ưu tiên KTT/L2)
+  o.status='approved'; o.approvedBy=actorName(); o.approvedAt=new Date().toISOString();
+  if(changed) o.approveNote=`Duyệt ${fmtFull(amt,o.ccy)} (đề xuất ${fmtFull(o.proposedAmount,o.ccy)})`;
+  touchRecord(r); saveState(); renderAll();
+  try{ logAuditEvent('ap_order_approve',{recordId:r.id,orderId,proposed:o.proposedAmount,approved:amt,changed,ccy:o.ccy,actor:actorName()}); }catch(e){}
+  toast(changed?`Đã duyệt ${fmtFull(amt,o.ccy)} (khác đề xuất)`:'Đã duyệt lệnh chi','good');
+  openPayableModal(id);
+}
+// Hủy lệnh chi (khi chưa chi)
+function apCancelOrder(id, orderId){
+  const r=(S.payables||[]).find(x=>x.id===id); if(!r) return;
+  const o=_apOrders(r).find(x=>x.id===orderId); if(!o) return;
+  if(o.status==='paid'){ toast('Lệnh đã chi — không hủy','bad'); return; }
+  if(!confirm('Hủy lệnh chi này?')) return;
+  r.paymentOrders=_apOrders(r).filter(x=>x.id!==orderId);
+  touchRecord(r); saveState(); renderAll(); openPayableModal(id);
+  toast('Đã hủy lệnh chi','warn');
+}
+// Ghi nhận ĐÃ CHI cho lệnh đã duyệt → tạo payment
+function apPayOrder(id, orderId){
+  const r=(S.payables||[]).find(x=>x.id===id); if(!r) return;
+  const o=_apOrders(r).find(x=>x.id===orderId); if(!o) return;
+  if(o.status!=='approved'){ toast('Lệnh chưa được duyệt','bad'); return; }
+  if(!_canConfirmOpTT && !isAdmin()){}
+  _apPayOrderCtx={id, orderId};
+  // mở form ghi chi với số tiền khóa = số lệnh
+  addArPaymentForOrder(id, o);
+}
+let _apPayOrderCtx=null;
+
+// Nhập ĐỢT TT CŨ (trước khi dùng app) — payment lịch sử, không qua duyệt
+function apAddOldPayment(id){
+  const r=(S.payables||[]).find(x=>x.id===id); if(!r){toast('Không tìm thấy','bad');return;}
+  const rem=arRemaining(r);
+  const d=prompt(`Nhập ĐỢT TT CŨ (đã trả trước khi dùng app) cho:\n${r.partner||''}\nCòn lại hiện tại: ${fmtFull(rem,r.ccy)}\n\nNgày trả (YYYY-MM-DD):`, todayISO());
+  if(d===null) return;
+  const a=prompt(`Số tiền đã trả đợt đó (${r.ccy}):`, '');
+  if(a===null) return;
+  const amt=+String(a).replace(/[^\d.-]/g,'')||0;
+  if(amt<=0){ toast('Số tiền > 0','bad'); return; }
+  const note=prompt('Ghi chú (UNC, số chứng từ...):','(đợt cũ — nhập bù)')||'';
+  r.payments=r.payments||[];
+  r.payments.push({date:(d||'').trim()||todayISO(), amount:amt, ccy:r.ccy, note:note, method:'old',
+    recordedBy:actorName(), recordedAt:new Date().toISOString(), _oldEntry:true});
+  touchRecord(r); saveState(); renderAll();
+  try{ logAuditEvent('ap_old_payment',{recordId:r.id,amount:amt,ccy:r.ccy,actor:actorName()}); }catch(e){}
+  toast('Đã nhập đợt TT cũ — công nợ cập nhật','good');
+  openPayableModal(id);
+}
+
 function addArPayment(kind,id){
   const list=kind==='ap'?'payables':'receivables';
   const r=S[list].find(x=>x.id===id);if(!r)return;
@@ -24734,6 +24865,33 @@ function addArPayment(kind,id){
               <button class="btn-primary" onclick="saveArPayment('${kind}','${id}')">${kind==='ap'?'Ghi nhận đã trả':'Ghi nhận đã thu'}</button>`;
   openModal(kind==='ap'?'Ghi nhận thanh toán phải trả':'Ghi nhận thu từ khách hàng',body,foot);
   // Init VND display
+  setTimeout(()=>{payRecalcVnd();payMethodChanged();},50);
+}
+
+/* v3.02.50: ghi chi cho 1 LỆNH đã duyệt — số tiền khóa theo lệnh */
+function addArPaymentForOrder(id, o){
+  const r=(S.payables||[]).find(x=>x.id===id); if(!r) return;
+  const isUsd=r.ccy==='USD';
+  const body=`
+    <div style="font-size:12px;color:var(--muted);margin-bottom:10px">
+      <b>${esc(r.partner)}</b> · Lệnh chi đã duyệt<br>
+      Giá trị lệnh: <b style="color:var(--bad)">${fmtFull(o.amount,o.ccy)}</b> ${o.note?'· '+esc(o.note):''}
+    </div>
+    <div class="form-grid" style="grid-template-columns:1fr 1fr 1fr">
+      <div class="field"><label>Ngày trả</label><input type="date" id="pay-date" value="${todayISO()}"></div>
+      <div class="field"><label>Giá trị (${r.ccy})</label><input type="number" id="pay-amount" value="${o.amount}" step="any" readonly style="background:var(--paper-2);font-weight:600" oninput="payRecalcVnd()"></div>
+      <div class="field"><label>${isUsd?'Tỷ giá (VND/USD)':'Tỷ giá'}</label><input type="number" id="pay-fx" value="${isUsd?(S.fxRate||25000):0}" step="any" oninput="payRecalcVnd()" ${isUsd?'':'disabled'}></div>
+      <div class="field" style="grid-column:span 3"><label>Quy đổi VND</label><input type="text" id="pay-vnd" readonly style="background:var(--paper-2);font-weight:600"></div>
+      <div class="field" style="grid-column:span 3"><label>Hình thức *</label>
+        <select id="pay-method" onchange="payMethodChanged()"><option value="bank">Chuyển khoản</option><option value="cash">Tiền mặt</option></select></div>
+      <div class="field" id="pay-bank-wrap" style="grid-column:span 3"><label>Tài khoản NH chi tiền *</label>
+        <select id="pay-bank"><option value="">— Chọn tài khoản —</option>${(S.bankAccounts||[]).filter(a=>a.isActive!==false).map(a=>`<option value="${a.id}">${esc(a.name)} (${a.ccy||'USD'})</option>`).join('')}</select></div>
+      <div class="field" style="grid-column:span 3"><label>Ghi chú</label><input type="text" id="pay-note" value="${esc(o.note||'')}" placeholder="UNC..."></div>
+    </div>
+    <div id="pay-err" style="font-size:12px;color:var(--bad);min-height:14px;margin-top:8px"></div>`;
+  const foot=`<button class="btn-sec" onclick="closeModal();openPayableModal('${id}')">Hủy</button>
+              <button class="btn-primary" onclick="saveArPayment('ap','${id}')">Ghi nhận đã chi (đợt này)</button>`;
+  openModal('Ghi nhận chi — lệnh đã duyệt',body,foot);
   setTimeout(()=>{payRecalcVnd();payMethodChanged();},50);
 }
 
@@ -24789,6 +24947,12 @@ function saveArPayment(kind,id){
   if(bankAccountId) pay.bankAccountId=bankAccountId;
   r.payments=r.payments||[];
   r.payments.push(pay);
+  // v3.02.50: nếu đang ghi chi cho 1 LỆNH đã duyệt → đánh dấu lệnh 'paid'
+  if(_apPayOrderCtx && _apPayOrderCtx.id===id){
+    const o=(r.paymentOrders||[]).find(x=>x.id===_apPayOrderCtx.orderId);
+    if(o){ o.status='paid'; o.paidAt=new Date().toISOString(); o.paidBy=actorName(); o.paymentIdx=r.payments.length-1; }
+    _apPayOrderCtx=null;
+  }
   // v2.99.83: bump updatedAt — nếu không, merge khi pull coi bản local "không mới hơn"
   // → có thể MẤT khoản thanh toán vừa ghi sau khi đồng bộ.
   try{ touchRecord(r); }catch(e){ r.updatedAt=new Date().toISOString(); }
