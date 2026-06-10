@@ -2724,7 +2724,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.02.54';            // bumped on each release
+const APP_VERSION='3.02.56';            // bumped on each release
 
 /* v2.62.0: Token xác thực backend — PHẢI khớp API_TOKEN trong Apps Script (Code.gs).
    Mọi request tới Apps Script tự động được gắn token qua lớp bọc fetch bên dưới.
@@ -17122,6 +17122,9 @@ function approvalBulkApprove(){
   const candidates=approvalGetCandidates();
   const records=candidates.filter(c=>APPROVAL_SELECTED.has(c.id));
   const total=records.reduce((s,c)=>s+toDisplay(+c.record.amountGross||+c.record.amount||0, c.record.ccy||'USD'),0);
+  // v3.02.56: nếu phiếu có "Giá trị thanh toán đợt này" (dueAmount) → hiện rõ để duyệt ĐÚNG đợt, tránh nhầm cả phiếu
+  const dueTotal=records.reduce((s,c)=>s+toDisplay(+c.record.dueAmount||0, c.record.ccy||'USD'),0);
+  const hasDue = dueTotal>0.001;
 
   const actionLabel = lvl==='pending_acc' ? 'Trình ký (đẩy lên L1)'
                     : lvl==='pending_l1' ? 'Duyệt L1'
@@ -17129,9 +17132,15 @@ function approvalBulkApprove(){
   const nextStatus = lvl==='pending_acc' ? 'Trình ký (chờ L1)'
                    : lvl==='pending_l1' ? 'Chờ L2'
                    : 'Đã duyệt (LOCK, vào BI)';
+  const dueLine = hasDue
+    ? `<div style="margin:8px 0;padding:8px 12px;background:rgba(184,71,46,.08);border-left:3px solid var(--accent);border-radius:3px">
+         <b style="color:var(--accent)">Giá trị thanh toán đợt này (KTT đề xuất): <span style="font-family:var(--font-mono)">${fmt(dueTotal)}</span></b><br>
+         <span style="font-size:11px;color:var(--muted)">Tổng phiếu (chi phí): ${fmt(total)} — duyệt này áp cho ĐỢT thanh toán, không phải cả phiếu.</span>
+       </div>`
+    : `Tổng giá trị: <b style="font-family:var(--font-mono)">${fmt(total)}</b><br>`;
   confirmDialog(
     `${actionLabel} ${ids.length} bút toán?`,
-    `Tổng giá trị: <b style="font-family:var(--font-mono)">${fmt(total)}</b><br>Sau khi xử lý, các bút toán sẽ chuyển sang trạng thái <b>${nextStatus}</b>.`,
+    `${dueLine}Sau khi xử lý, các bút toán sẽ chuyển sang trạng thái <b>${nextStatus}</b>.`,
     null,
     ()=>{
       let ok=0, fail=0;
@@ -25979,6 +25988,85 @@ function unapproveOpPayment(id){
   toast('Đã bỏ duyệt lệnh','warn');
 }
 
+/* v3.02.55: PHIẾU TỪ AP — duyệt + xác nhận TT + phí NGAY TẠI TAB 06 (thống nhất với phiếu nhập tay).
+   opApproveAp: KTT/Admin duyệt nhanh phiếu AP. opConfirmApPay: KT ghi TT đợt + phí (trả nhiều lần). */
+function opApproveAp(apId){
+  const r=(S.payables||[]).find(x=>x.id===apId);
+  if(!r){ toast('Không tìm thấy phiếu','bad'); return; }
+  if(!_canApproveOpPay()){ toast('Cần KTT/Admin để duyệt','bad'); return; }
+  if(wfStatus(r)==='approved'){ opConfirmApPay(apId); return; }
+  if(!confirm(`Duyệt phiếu: ${esc(r.partner||'')} · ${fmtFull(r.amount,r.ccy)}?\nSau khi duyệt, KT ghi nhận thanh toán đợt + phí.`)) return;
+  const now=new Date().toISOString(), me=actorName();
+  r.status='approved';
+  r.accCheckedBy=r.accCheckedBy||(me+' (tab 06)'); r.accCheckedAt=r.accCheckedAt||now;
+  r.approvedL1By=r.approvedL1By||(me+' (tab 06)'); r.approvedL1At=r.approvedL1At||now;
+  r.approvedL2By=me+' (tab 06)'; r.approvedL2At=now;
+  touchRecord(r); saveState(); renderAll();
+  try{ logAuditEvent('op_ap_approve',{recordId:r.id,amount:r.amount||0,ccy:r.ccy||'',actor:me}); }catch(e){}
+  toast('Đã duyệt — KT ghi nhận thanh toán đợt','good');
+}
+function opConfirmApPay(apId){
+  const r=(S.payables||[]).find(x=>x.id===apId);
+  if(!r){ toast('Không tìm thấy phiếu','bad'); return; }
+  if(!_canConfirmOpTT()){ toast('Cần quyền KT để xác nhận TT','bad'); return; }
+  if(wfStatus(r)!=='approved'){ toast('Phiếu chưa được duyệt','bad'); return; }
+  const rem=arRemaining(r);
+  if(rem<=0.001){ toast('Phiếu đã trả đủ','warn'); return; }
+  const ccy=r.ccy||'VND';
+  const banks=(S.bankAccounts||[]).filter(a=>a.isActive!==false);
+  const body=`
+    <div style="font-size:12px;color:var(--muted);margin-bottom:10px">
+      <b>${esc(r.partner||'')}</b> · ${esc(r.desc)||''}<br>
+      Tổng: <b>${fmtFull(r.amount,ccy)}</b> · Còn lại: <b style="color:var(--bad)">${fmtFull(rem,ccy)}</b>
+    </div>
+    <div class="form-grid" style="grid-template-columns:1fr 1fr">
+      <div class="field"><label>Ngày trả</label><input type="text" id="oap-date" value="${todayISO()}" placeholder="YYYY-MM-DD"></div>
+      <div class="field"><label>Số tiền đợt này (${ccy})</label><input type="number" id="oap-amount" value="${Math.round(rem)}" max="${rem}" step="any"></div>
+      <div class="field"><label>Phí ngân hàng (${ccy})</label><input type="number" id="oap-bankfee" value="0" step="any"></div>
+      <div class="field"><label>Phí khác (${ccy})</label><input type="number" id="oap-otherfee" value="0" step="any"></div>
+      <div class="field" style="grid-column:span 2"><label>Tài khoản NH chi tiền</label>
+        <select id="oap-bank"><option value="">— Tiền mặt / không qua NH —</option>${banks.map(a=>`<option value="${a.id}">${esc(a.name)} (${a.ccy||'USD'})</option>`).join('')}</select></div>
+      <div class="field" style="grid-column:span 2"><label>Ghi chú (UNC, phí...)</label><input type="text" id="oap-note" placeholder="VD: UNC 12345 · phí chuyển tiền"></div>
+    </div>
+    <div id="oap-err" style="font-size:12px;color:var(--bad);min-height:14px;margin-top:6px"></div>`;
+  openModal('✓ Xác nhận thanh toán — '+esc(r.partner||''), body,
+    `<button class="btn-sec" onclick="closeModal()">Hủy</button>
+     <button class="btn-primary" onclick="opSaveApPay('${apId}')">Ghi nhận đã chi (đợt này)</button>`);
+}
+function opSaveApPay(apId){
+  const r=(S.payables||[]).find(x=>x.id===apId); if(!r) return;
+  const err=document.getElementById('oap-err'); if(err) err.textContent='';
+  const date=(document.getElementById('oap-date')||{}).value||todayISO();
+  const amount=+(document.getElementById('oap-amount')||{}).value||0;
+  const bankFee=+(document.getElementById('oap-bankfee')||{}).value||0;
+  const otherFee=+(document.getElementById('oap-otherfee')||{}).value||0;
+  const note=((document.getElementById('oap-note')||{}).value||'').trim();
+  const bankId=(document.getElementById('oap-bank')||{}).value||'';
+  const rem=arRemaining(r);
+  if(amount<=0){ if(err)err.textContent='Số tiền > 0'; return; }
+  if(amount>rem+0.001){ if(err)err.textContent=`Vượt số còn lại (${fmtFull(rem,r.ccy)})`; return; }
+  const pay={date,amount,ccy:r.ccy,note,method:bankId?'bank':'cash',recordedBy:actorName(),recordedAt:new Date().toISOString()};
+  if(bankFee>0) pay.bankFee=bankFee;
+  if(otherFee>0) pay.otherFee=otherFee;
+  if(bankId) pay.bankAccountId=bankId;
+  r.payments=r.payments||[]; r.payments.push(pay);
+  // trừ tài khoản NH (gồm phí) nếu qua NH
+  if(bankId){
+    const acc=(S.bankAccounts||[]).find(a=>a.id===bankId);
+    if(acc){
+      const delta=_arPayAmountInCcy({amount,fxRate:0}, r.ccy, acc.ccy||'USD');
+      const feeAmt=bankFee+otherFee;
+      const feeDelta=feeAmt>0?_arPayAmountInCcy({amount:feeAmt,fxRate:0}, r.ccy, acc.ccy||'USD'):0;
+      acc.balance=(+acc.balance||0)-(delta+feeDelta);
+      try{ touchRecord(acc); }catch(e){}
+    }
+  }
+  try{ touchRecord(r); }catch(e){ r.updatedAt=new Date().toISOString(); }
+  saveState(); closeModal(); renderAll();
+  try{ logAuditEvent('op_ap_pay',{recordId:r.id,amount,bankFee,otherFee,ccy:r.ccy||'',actor:actorName()}); }catch(e){}
+  toast('Đã ghi nhận thanh toán đợt'+(arRemaining(r)<=0.001?' — đã trả đủ':''),'good');
+}
+
 /* v3.02.30: Quyền XÁC NHẬN ĐÃ TT + nhập phí = KT viên (canCheckAcc) hoặc người Xác nhận TT (canConfirmPayment) hoặc admin.
    Tách bạch: KTT/Admin DUYỆT lệnh (_canApproveOpPay), KT viên XÁC NHẬN đã chi + phí. */
 function _canConfirmOpTT(){
@@ -26629,11 +26717,23 @@ function renderOpTxList(){
         </td>`;
         // Cột 6: trạng thái TT — v3.02.45: phiếu _fromAp xử lý qua AP GỐC (không phải op tx thật).
         const ttCell = t._fromAp
-          ? (t.paid
-              ? `<span class="chip chip-good" style="font-size:10px" title="AP đã trả">✓ TT</span>`
-              : (_canConfirmOpTT()
-                  ? `<button class="btn-sec" style="padding:3px 8px;font-size:11px;border-color:var(--accent);color:var(--accent)" title="Mở phiếu Phải trả — dùng Lệnh chi từng đợt (KT đề xuất → KTT duyệt → KT ghi chi + phí)" onclick="openPayableModal('${t._apId}')">⊳ Lệnh chi ↗</button>`
-                  : `<span class="chip" style="background:var(--rule);color:var(--muted);font-size:10px" title="AP chưa trả">Chưa</span>`))
+          ? (()=>{
+              const ap=(S.payables||[]).find(x=>x.id===t._apId);
+              if(!ap) return '<span class="chip" style="font-size:10px;background:var(--rule);color:var(--muted)">?</span>';
+              const rem=arRemaining(ap);
+              if(rem<=0.001) return '<span class="chip chip-good" style="font-size:10px" title="AP đã trả đủ">✓ TT đủ</span>';
+              const isApproved=(wfStatus(ap)==='approved');
+              if(!isApproved){
+                // CHƯA duyệt → KTT/Admin duyệt ngay tại tab 06
+                return _canApproveOpPay()
+                  ? `<button class="btn-sec" style="padding:3px 8px;font-size:11px;border-color:var(--accent);color:var(--accent)" title="KTT/Admin duyệt phiếu (ngay tại đây)" onclick="opApproveAp('${t._apId}')">⊳ Duyệt TT</button>`
+                  : `<span class="chip" style="background:var(--rule);color:var(--muted);font-size:10px" title="Chờ KTT/Admin duyệt">Chờ duyệt</span>`;
+              }
+              // ĐÃ duyệt → KT xác nhận TT đợt + phí ngay tại tab 06
+              return _canConfirmOpTT()
+                ? `<button class="btn-sec" style="padding:3px 8px;font-size:11px;border-color:var(--good);color:var(--good)" title="KT ghi nhận thanh toán đợt + phí (trả nhiều lần)" onclick="opConfirmApPay('${t._apId}')">✓ Xác nhận TT</button>`
+                : `<span class="chip chip-warn" style="font-size:10px" title="Đã duyệt — chờ KT xác nhận TT">✓ Đã duyệt · chờ KT</span>`;
+            })()
           : (t.paid
             ?(_canConfirmOpTT()
               ?`<span class="chip chip-good" title="TT ngày ${t.paidDate||'?'}${t.payApprovedBy?' · Duyệt bởi '+esc(t.payApprovedBy):''}" style="cursor:pointer" onclick="confirmOpPayment('${t.id}')">✓ ${t.paidDate?t.paidDate.slice(5):'TT'}</span>`
