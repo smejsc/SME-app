@@ -1941,6 +1941,13 @@ body.readonly-mode::before{
 
   <div class="kpi-grid" id="appr-kpi"></div>
 
+  <div class="section" id="appr-orders-section" style="display:none">
+    <div class="section-head">
+      <div class="section-title"><span class="tag">$</span>Lệnh chi chờ duyệt (thanh toán từng đợt)</div>
+    </div>
+    <div id="appr-orders-body"></div>
+  </div>
+
   <div class="section">
     <div class="section-head">
       <div class="section-title"><span class="tag">∑</span>Danh sách bút toán chờ duyệt</div>
@@ -2724,7 +2731,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.02.56';            // bumped on each release
+const APP_VERSION='3.02.58';            // bumped on each release
 
 /* v2.62.0: Token xác thực backend — PHẢI khớp API_TOKEN trong Apps Script (Code.gs).
    Mọi request tới Apps Script tự động được gắn token qua lớp bọc fetch bên dưới.
@@ -16944,9 +16951,55 @@ function updateApprovalSummary(){
   }
 }
 
+/* v3.02.58: Tập trung LỆNH CHI chờ duyệt từ mọi AP lên tab Phê duyệt — KTT/Admin duyệt 1 chỗ.
+   Dùng lại apApproveOrder (cho sửa giá trị khi duyệt) / apCancelOrder. */
+function renderApprovalOrders(){
+  const sec=document.getElementById('appr-orders-section');
+  const body=document.getElementById('appr-orders-body');
+  if(!sec||!body) return;
+  const canApprove = isAdmin() || (typeof canApproveL2==='function'&&canApproveL2()) || (CURRENT_USER&&CURRENT_USER.canManageUsers);
+  // gom mọi lệnh pending từ payables
+  const rows=[];
+  (S.payables||[]).forEach(r=>{
+    (r.paymentOrders||[]).filter(o=>o.status==='pending').forEach(o=>{
+      rows.push({r,o});
+    });
+  });
+  if(!rows.length){ sec.style.display='none'; body.innerHTML=''; return; }
+  sec.style.display='';
+  const html=`
+    <table class="table" style="font-size:12px">
+      <thead><tr>
+        <th>NCC / Diễn giải</th><th>Tàu/DA</th><th class="num">Giá trị đề xuất</th><th>Người đề xuất</th><th>Còn nợ phiếu</th><th></th>
+      </tr></thead>
+      <tbody>
+      ${rows.map(({r,o})=>{
+        const rem=arRemaining(r);
+        const v=(S.vessels||[]).find(x=>x.id===r.vesselId);
+        return `<tr>
+          <td><b>${esc(r.partner||'—')}</b><div style="font-size:10px;color:var(--muted)">${esc((r.desc||'').slice(0,50))}</div></td>
+          <td style="font-size:11px">${v?esc(v.name):'—'}</td>
+          <td class="num" style="font-family:var(--font-mono);font-weight:600;color:var(--accent)">${fmtFull(o.amount,o.ccy)}</td>
+          <td style="font-size:11px">${esc(o.proposedBy||'')}${o.note?'<div style="font-size:10px;color:var(--muted)">'+esc(o.note)+'</div>':''}</td>
+          <td class="num" style="font-size:11px;color:var(--bad)">${fmtFull(rem,r.ccy)}</td>
+          <td style="text-align:right;white-space:nowrap">
+            ${canApprove
+              ? `<button class="btn-sec" style="padding:3px 8px;font-size:11px;border-color:var(--good);color:var(--good)" title="Duyệt lệnh (sửa được giá trị)" onclick="apApproveOrder('${r.id}','${o.id}');setTimeout(renderApprovalList,100)">✓ Duyệt</button>
+                 <button class="icon-btn danger" title="Hủy lệnh" onclick="apCancelOrder('${r.id}','${o.id}');setTimeout(renderApprovalList,100)">✕</button>`
+              : '<span style="font-size:10px;color:var(--muted)">Chờ KTT/Admin</span>'}
+          </td>
+        </tr>`;
+      }).join('')}
+      </tbody>
+    </table>
+    <div style="font-size:11px;color:var(--muted);margin-top:6px;font-style:italic">Khi duyệt, KTT/Admin có thể sửa giá trị khác đề xuất (ưu tiên người duyệt). Duyệt xong, KT ghi nhận đã chi trong phiếu / tab 06.</div>`;
+  body.innerHTML=html;
+}
+
 function renderApprovalList(){
   if(!document.getElementById('page-approval')) return;
   fillApprovalFilterDropdowns();
+  try{ renderApprovalOrders(); }catch(e){}
 
   const candidates=approvalGetCandidates();
   // v3.01.07: chỉ auto chọn tất cả LẦN ĐẦU mở tab — sau đó tôn trọng lựa chọn của user
@@ -17122,9 +17175,6 @@ function approvalBulkApprove(){
   const candidates=approvalGetCandidates();
   const records=candidates.filter(c=>APPROVAL_SELECTED.has(c.id));
   const total=records.reduce((s,c)=>s+toDisplay(+c.record.amountGross||+c.record.amount||0, c.record.ccy||'USD'),0);
-  // v3.02.56: nếu phiếu có "Giá trị thanh toán đợt này" (dueAmount) → hiện rõ để duyệt ĐÚNG đợt, tránh nhầm cả phiếu
-  const dueTotal=records.reduce((s,c)=>s+toDisplay(+c.record.dueAmount||0, c.record.ccy||'USD'),0);
-  const hasDue = dueTotal>0.001;
 
   const actionLabel = lvl==='pending_acc' ? 'Trình ký (đẩy lên L1)'
                     : lvl==='pending_l1' ? 'Duyệt L1'
@@ -17132,15 +17182,9 @@ function approvalBulkApprove(){
   const nextStatus = lvl==='pending_acc' ? 'Trình ký (chờ L1)'
                    : lvl==='pending_l1' ? 'Chờ L2'
                    : 'Đã duyệt (LOCK, vào BI)';
-  const dueLine = hasDue
-    ? `<div style="margin:8px 0;padding:8px 12px;background:rgba(184,71,46,.08);border-left:3px solid var(--accent);border-radius:3px">
-         <b style="color:var(--accent)">Giá trị thanh toán đợt này (KTT đề xuất): <span style="font-family:var(--font-mono)">${fmt(dueTotal)}</span></b><br>
-         <span style="font-size:11px;color:var(--muted)">Tổng phiếu (chi phí): ${fmt(total)} — duyệt này áp cho ĐỢT thanh toán, không phải cả phiếu.</span>
-       </div>`
-    : `Tổng giá trị: <b style="font-family:var(--font-mono)">${fmt(total)}</b><br>`;
   confirmDialog(
     `${actionLabel} ${ids.length} bút toán?`,
-    `${dueLine}Sau khi xử lý, các bút toán sẽ chuyển sang trạng thái <b>${nextStatus}</b>.`,
+    `Tổng giá trị: <b style="font-family:var(--font-mono)">${fmt(total)}</b><br>Sau khi xử lý, các bút toán sẽ chuyển sang trạng thái <b>${nextStatus}</b>.`,
     null,
     ()=>{
       let ok=0, fail=0;
