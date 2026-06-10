@@ -1871,6 +1871,7 @@ body.readonly-mode::before{
         <select id="op-filter-creator" onchange="renderOpTxList()" title="Lọc theo nhân viên đã nhập bút toán" style="padding:6px 10px;border:1px solid var(--rule);background:var(--paper);font-family:var(--font-mono);font-size:12px;min-width:140px">
           <option value="">— Mọi người nhập —</option>
         </select>
+        <input type="text" id="op-filter-partner" placeholder="🔎 Lọc NCC / diễn giải…" oninput="renderOpTxList()" title="Lọc theo tên NCC, diễn giải, số HĐ" style="padding:6px 9px;border:1px solid var(--rule);background:var(--paper);font-size:12px;width:180px">
         <button class="btn-primary" onclick="openOpReportModal()" title="Xuất báo cáo PDF cho chủ tàu">📄 Xuất PDF</button>
       </div>
     </div>
@@ -2723,7 +2724,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.02.25';            // bumped on each release
+const APP_VERSION='3.02.30';            // bumped on each release
 
 /* v2.62.0: Token xác thực backend — PHẢI khớp API_TOKEN trong Apps Script (Code.gs).
    Mọi request tới Apps Script tự động được gắn token qua lớp bọc fetch bên dưới.
@@ -5204,6 +5205,7 @@ function openSettings(){
           <button class="btn-sec" onclick="showAuditLog()" style="font-size:11px">📋 Xem nhật ký (máy này)</button>
           ${CURRENT_ROLE==='admin'?`<button class="btn-sec" onclick="showSystemAuditLog()" style="font-size:11px;border-color:var(--accent);color:var(--accent)">🌐 Nhật ký toàn hệ thống (${(S.auditLogShared||[]).length})</button>`:''}
           ${CURRENT_ROLE==='admin'?`<button class="btn-sec" onclick="showUserUsage()" style="font-size:11px;border-color:var(--ink);color:var(--ink)">👥 Người dùng đã sử dụng</button>`:''}
+          ${CURRENT_ROLE==='admin'?`<button class="btn-sec" onclick="showSyncConflicts()" style="font-size:11px;border-color:#8b6f47;color:#8b6f47" title="Các bản ghi bị 2 máy sửa cùng lúc — đã merge theo bản mới nhất">⚠ Xung đột đồng bộ</button>`:''}
           <button class="btn-sec" onclick="exportAuditLog()" style="font-size:11px">⬇ Export CSV</button>
         </div>
         <div style="font-size:11px;color:var(--muted);font-style:italic;margin-top:4px">Nhật ký "máy này" lưu cục bộ (200 sự kiện). "Toàn hệ thống" gộp các sự kiện quan trọng (đăng nhập/duyệt/xóa…) từ mọi máy qua đồng bộ — lọc theo ngày + NV.</div>
@@ -9336,6 +9338,7 @@ async function cloudSync(mode, opts){
           if(conflictFields.length>0){
             const total=conflictFields.reduce((s,f)=>s+conflictReport[f].length,0);
             console.warn('[sync admin merge] conflicts:', conflictReport);
+            try{ _recordSyncConflicts(conflictReport); }catch(e){}  // v3.02.26: lưu bền vững
             toast(`⚠ ${total} bản ghi đã được NV khác cập nhật — đã merge theo bản mới nhất`, 'warn');
           }
         }catch(mergeErr){
@@ -9406,6 +9409,7 @@ async function cloudSync(mode, opts){
           if(conflictFields.length>0){
             const total=conflictFields.reduce((s,f)=>s+conflictReport[f].length,0);
             console.warn('[sync merge] conflicts detected:', conflictReport);
+            try{ _recordSyncConflicts(conflictReport); }catch(e){}  // v3.02.26
             toast(`⚠ ${total} bản ghi có thay đổi đồng thời từ NV khác — đã merge theo bản mới nhất`, 'warn');
           }
         }catch(mergeErr){
@@ -11664,6 +11668,58 @@ function _exportSysAuditLog(){
    danh sách user (authConfig) + số thao tác (auditLogShared) + lần online cuối (presence).
    Hiện cả NV chưa từng dùng. Chỉ admin. */
 let _userUsageRows=[];
+/* v3.02.26: LƯU LỊCH SỬ XUNG ĐỘT ĐỒNG BỘ — để admin truy được phiếu nào bị ghi đè khi 2 máy sửa cùng lúc.
+   Giữ tối đa 50 lần gần nhất. Kèm thông tin nhận dạng bản ghi (lấy từ state hiện tại). */
+function _recordSyncConflicts(conflictReport){
+  if(!conflictReport) return;
+  if(!Array.isArray(S._syncConflicts)) S._syncConflicts=[];
+  const when=new Date().toISOString();
+  const labelMap={payables:'Phải trả (AP)',receivables:'Phải thu (AR)',opTransactions:'Thu/Chi hộ',
+    companies:'Thông tin công ty',vendors:'NCC',projects:'Dự án',vessels:'Tàu',loans:'Khoản vay',transactions:'Giao dịch'};
+  Object.keys(conflictReport).forEach(field=>{
+    const arr=conflictReport[field]||[];
+    const srcArr=Array.isArray(S[field])?S[field]:[];
+    arr.forEach(c=>{
+      const rec=srcArr.find(r=>String(r.id)===String(c.id))||{};
+      S._syncConflicts.push({
+        when, field, fieldLabel:labelMap[field]||field, id:c.id,
+        winner:c.winner||'?', cloudAt:c.cloudUpdatedAt||'', localAt:c.localUpdatedAt||'',
+        partner:rec.partner||rec.name||'', amount:rec.amountNet||rec.amount||'',
+        desc:(rec.desc||rec.note||'').slice(0,60)
+      });
+    });
+  });
+  // giữ 50 mới nhất
+  if(S._syncConflicts.length>50) S._syncConflicts=S._syncConflicts.slice(-50);
+  try{ saveState(); }catch(e){}
+}
+function showSyncConflicts(){
+  if(CURRENT_ROLE!=='admin'){ toast('Chỉ admin xem được','bad'); return; }
+  const list=(S._syncConflicts||[]).slice().reverse();
+  let body;
+  if(!list.length){
+    body='<div class="help-callout tip" style="margin:0">✓ Chưa ghi nhận xung đột đồng bộ nào. Khi 2 máy sửa cùng 1 bản ghi gần thời điểm, hệ thống giữ bản mới nhất và ghi lại tại đây.</div>';
+  } else {
+    const rows=list.map(c=>`<tr>
+      <td class="mono" style="font-size:10px;white-space:nowrap">${esc(new Date(c.when).toLocaleString('vi-VN'))}</td>
+      <td style="font-size:11px">${esc(c.fieldLabel)}</td>
+      <td style="font-size:11px">${esc(c.partner||'')}${c.amount?(' · '+Number(c.amount).toLocaleString('vi-VN')):''}${c.desc?('<br><span style="color:var(--muted);font-size:10px">'+esc(c.desc)+'</span>'):''}</td>
+      <td class="mono" style="font-size:10px;white-space:nowrap">${esc(c.id)}</td>
+      <td style="font-size:10px;text-align:center">${c.winner==='local'?'<span style="color:var(--good)">máy này</span>':'<span style="color:#8b6f47">máy khác</span>'}</td>
+    </tr>`).join('');
+    body=`<div style="font-size:11px;color:var(--muted);margin-bottom:8px">${list.length} lần xung đột gần nhất (tối đa 50). "Bản giữ" = bản được giữ lại (mới hơn). Nên kiểm các phiếu này xem số liệu đúng chưa.</div>
+    <div style="max-height:54vh;overflow:auto"><table class="tbl" style="font-size:11px"><thead><tr>
+      <th>Thời điểm</th><th>Loại</th><th>Bản ghi</th><th>ID</th><th>Bản giữ</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+  }
+  openModal('⚠ Lịch sử xung đột đồng bộ', body,
+    (list.length?`<button class="btn-sec" onclick="_clearSyncConflicts()">Xóa lịch sử</button>`:'')+
+    `<button class="btn-sec" onclick="closeModal()">Đóng</button>`);
+}
+function _clearSyncConflicts(){
+  S._syncConflicts=[]; try{ saveState(); }catch(e){}
+  closeModal(); toast('Đã xóa lịch sử xung đột','good');
+}
+
 function showUserUsage(){
   if(CURRENT_ROLE!=='admin'){ toast('Chỉ admin xem được','bad'); return; }
   const cfg=getAuthConfig()||{};
@@ -17050,7 +17106,8 @@ function approvalBulkApprove(){
       APPROVAL_SELECTED.clear();
       renderAll();
       toast(`Đã xử lý ${ok} bút toán${fail?`, ${fail} thất bại`:''}`);
-    }
+    },
+    false   // v3.02.27: KHÔNG phải hành động xóa → nút "Đồng ý" xanh, không phải "Xác nhận xóa" đỏ
   );
 }
 
@@ -25312,12 +25369,55 @@ function editOpTx(id){
     saveState();
   });
 }
+/* v3.02.29: DUYỆT LỆNH THANH TOÁN (bước trước khi KT xác nhận đã TT).
+   KTT/Admin duyệt lệnh → t.payApproved=true → KT mới được bấm "Xác nhận đã TT" (+ phí NH). */
+function _canApproveOpPay(){
+  // KTT/Admin duyệt lệnh. Dùng canApproveL1 (KTT) hoặc admin; canConfirmPayment cũng được (bao trùm).
+  if(CURRENT_ROLE==='admin') return true;
+  if(typeof canApproveL1==='function' && canApproveL1()) return true;
+  if(typeof canConfirmPayment==='function' && canConfirmPayment()) return true;
+  return false;
+}
+function approveOpPayment(id){
+  if(!_canApproveOpPay()){ toast('Chỉ KTT/Admin được duyệt lệnh thanh toán','bad'); return; }
+  const t=S.opTransactions.find(x=>x.id===id); if(!t) return;
+  if(t.paid){ toast('Bút toán đã thanh toán rồi','warn'); return; }
+  t.payApproved=true;
+  t.payApprovedBy=actorName();
+  t.payApprovedAt=new Date().toISOString();
+  touchRecord(t); saveState(); renderAll();
+  try{ logAuditEvent('op_pay_approve',{id:t.id,vesselId:t.vesselId,amount:t.amount||0,ccy:t.ccy||'',actor:actorName()}); }catch(e){}
+  toast('Đã DUYỆT lệnh thanh toán — KT có thể xác nhận đã TT','good');
+}
+function unapproveOpPayment(id){
+  if(!_canApproveOpPay()){ toast('Chỉ KTT/Admin được bỏ duyệt','bad'); return; }
+  const t=S.opTransactions.find(x=>x.id===id); if(!t) return;
+  if(t.paid){ toast('Đã TT — bỏ xác nhận TT trước đã','bad'); return; }
+  if(!confirm('Bỏ duyệt lệnh thanh toán cho bút toán này?')) return;
+  t.payApproved=false; t.payApprovedBy=''; t.payApprovedAt='';
+  touchRecord(t); saveState(); renderAll();
+  toast('Đã bỏ duyệt lệnh','warn');
+}
+
+/* v3.02.30: Quyền XÁC NHẬN ĐÃ TT + nhập phí = KT viên (canCheckAcc) hoặc người Xác nhận TT (canConfirmPayment) hoặc admin.
+   Tách bạch: KTT/Admin DUYỆT lệnh (_canApproveOpPay), KT viên XÁC NHẬN đã chi + phí. */
+function _canConfirmOpTT(){
+  if(CURRENT_ROLE==='admin') return true;
+  if(typeof canCheckAcc==='function' && canCheckAcc()) return true;
+  if(typeof canConfirmPayment==='function' && canConfirmPayment()) return true;
+  return false;
+}
 function confirmOpPayment(id){
-  if(!canConfirmPayment()){
-    toast('Bạn không có quyền xác nhận thanh toán — liên hệ admin','bad');
+  if(!_canConfirmOpTT()){
+    toast('Bạn không có quyền xác nhận thanh toán (cần quyền KT viên) — liên hệ admin','bad');
     return;
   }
   const t=S.opTransactions.find(x=>x.id===id);if(!t)return;
+  // v3.02.29: phải DUYỆT lệnh trước khi xác nhận đã TT (trừ khi đang bỏ xác nhận)
+  if(!t.paid && !t.payApproved){
+    toast('Lệnh chưa được KTT/Admin duyệt — chưa thể xác nhận thanh toán','bad');
+    return;
+  }
   const v=S.opVessels.find(v=>v.id===t.vesselId);
   const ccy=v?v.ccy:'VND';
   const isUnconfirm = t.paid;
@@ -25424,8 +25524,8 @@ function saveOpConfirm(id){
 }
 
 function editOpFees(id){
-  if(!canConfirmPayment()){
-    toast('Bạn không có quyền sửa bút toán đã xác nhận — liên hệ admin','bad');
+  if(!_canConfirmOpTT()){
+    toast('Bạn không có quyền sửa bút toán đã xác nhận (cần quyền KT) — liên hệ admin','bad');
     return;
   }
   // After confirmation: only this editor can change the record (full content + fees).
@@ -25656,9 +25756,9 @@ function renderOpInputRecent(){
       : '<span class="chip" style="background:var(--warn);color:#fff;font-size:10px">⏳ Chưa</span>';
     // v3.01.73: NV sửa/xóa NGAY tại nơi nhập. Chưa TT → sửa nội dung + xóa; đã TT → sửa toàn bộ (cần quyền xác nhận TT).
     const actCell = t.paid
-      ? (canConfirmPayment()
+      ? (_canConfirmOpTT()
           ? `<button class="icon-btn" title="Sửa (đã TT)" onclick="editOpFees('${t.id}')">✎</button>`
-          : `<span class="mono" style="font-size:9px;color:var(--muted)" title="Đã TT — cần người có quyền xác nhận TT để sửa">🔒</span>`)
+          : `<span class="mono" style="font-size:9px;color:var(--muted)" title="Đã TT — cần quyền KT xác nhận TT để sửa">🔒</span>`)
       : `<button class="icon-btn" title="Sửa" onclick="editOpTx('${t.id}')">✎</button>
          <button class="icon-btn danger" title="Xóa" onclick="delOpTx('${t.id}')">✕</button>`;
     h += `<tr>
@@ -25749,8 +25849,10 @@ function _opClearFilters(){
   // v3.01.58: bỏ lọc Người nhập + Tháng (giữ lọc Tàu), rồi render lại
   const cSel=document.getElementById('op-filter-creator');
   const mSel=document.getElementById('op-filter-month');
+  const pInp=document.getElementById('op-filter-partner');  // v3.02.28
   if(cSel) cSel.value='';
   if(mSel) mSel.value='';
+  if(pInp) pInp.value='';
   renderOpTxList();
 }
 function renderOpTxList(){
@@ -25790,6 +25892,11 @@ function renderOpTxList(){
   }
 
   const fV=vSel.value, fM=mSel.value, fC=cSel?cSel.value:'';
+  const fN=((document.getElementById('op-filter-partner')||{}).value||'').trim().toLowerCase();  // v3.02.28: lọc NCC/diễn giải
+  // v3.02.29: backfill — bút toán đã TT (paid) coi như đã duyệt lệnh (tương thích dữ liệu cũ)
+  let _bf=0;
+  (S.opTransactions||[]).forEach(t=>{ if(t.paid && !t.payApproved){ t.payApproved=true; _bf++; } });
+  if(_bf>0){ try{ saveState(); }catch(e){} }
   const block=document.getElementById('op-ledgers-block');
   if(!allTxScoped.length){
     block.innerHTML='<div class="empty">Chưa có bút toán thu/chi hộ' + (canSeeAllRecords()?'':' (trong phạm vi của bạn)') + '</div>';
@@ -25801,6 +25908,10 @@ function renderOpTxList(){
     if(fV && t.vesselId!==fV) return false;
     if(fM && !t.date.startsWith(fM)) return false;
     if(fC && t.createdBy!==fC) return false;  // v2.99.57: lọc theo người nhập
+    if(fN){  // v3.02.28: lọc theo NCC / diễn giải / số HĐ
+      const hay=((t.vendor||'')+' '+(t.desc||'')+' '+(t.contractNo||'')+' '+(t.invoiceNo||'')).toLowerCase();
+      if(!hay.includes(fN)) return false;
+    }
     return true;
   });
 
@@ -25881,16 +25992,22 @@ function renderOpTxList(){
           ${!isUsd?`<div style="font-size:10px;color:var(--accent)">≈ ${fmtCcy(usd,'USD')}</div>`:''}
           ${vatLine}${feeLine}
         </td>`;
-        // Cột 6: trạng thái TT
+        // Cột 6: trạng thái TT — v3.02.29: 2 bước (Duyệt lệnh → Xác nhận đã TT)
         const ttCell = t._fromAp
           ? (t.paid?`<span class="chip chip-good" style="font-size:10px" title="AP đã trả">✓ TT</span>`:`<span class="chip" style="background:var(--rule);color:var(--muted);font-size:10px" title="AP chưa trả đủ">Chưa</span>`)
           : (t.paid
-            ?(canConfirmPayment()
-              ?`<span class="chip chip-good" title="TT ngày ${t.paidDate||'?'}" style="cursor:pointer" onclick="confirmOpPayment('${t.id}')">✓ ${t.paidDate?t.paidDate.slice(5):'TT'}</span>`
+            ?(_canConfirmOpTT()
+              ?`<span class="chip chip-good" title="TT ngày ${t.paidDate||'?'}${t.payApprovedBy?' · Duyệt bởi '+esc(t.payApprovedBy):''}" style="cursor:pointer" onclick="confirmOpPayment('${t.id}')">✓ ${t.paidDate?t.paidDate.slice(5):'TT'}</span>`
               :`<span class="chip chip-good" title="TT ngày ${t.paidDate||'?'}">✓ ${t.paidDate?t.paidDate.slice(5):'TT'}</span>`)
-            :(canConfirmPayment()
-              ?`<button class="btn-sec" style="padding:3px 8px;font-size:11px" onclick="confirmOpPayment('${t.id}')">Xác nhận</button>`
-              :`<span class="chip" title="Chờ NV có quyền xác nhận TT" style="background:var(--rule);color:var(--muted);font-size:10px">Chờ xác nhận</span>`));
+            : (t.payApproved
+                // ĐÃ DUYỆT lệnh → chờ KT xác nhận đã TT (+ phí)
+                ? (_canConfirmOpTT()
+                    ? `<button class="btn-sec" style="padding:3px 8px;font-size:11px;border-color:var(--good);color:var(--good)" title="Lệnh đã duyệt${t.payApprovedBy?' bởi '+esc(t.payApprovedBy):''} — KT xác nhận đã chi tiền + nhập phí NH" onclick="confirmOpPayment('${t.id}')">✓ Xác nhận TT</button>${_canApproveOpPay()?` <button class="icon-btn" title="Bỏ duyệt lệnh" onclick="unapproveOpPayment('${t.id}')" style="font-size:10px">↶</button>`:''}`
+                    : `<span class="chip chip-warn" style="font-size:10px" title="Lệnh đã duyệt${t.payApprovedBy?' bởi '+esc(t.payApprovedBy):''} — chờ KT xác nhận đã TT">✓ Đã duyệt · chờ KT</span>`)
+                // CHƯA duyệt lệnh → KTT/Ad duyệt
+                : (_canApproveOpPay()
+                    ? `<button class="btn-sec" style="padding:3px 8px;font-size:11px;border-color:var(--accent);color:var(--accent)" title="KTT/Admin duyệt lệnh thanh toán" onclick="approveOpPayment('${t.id}')">⊳ Duyệt TT</button>`
+                    : `<span class="chip" title="Chờ KTT/Admin duyệt lệnh thanh toán" style="background:var(--rule);color:var(--muted);font-size:10px">Chờ duyệt</span>`)));
         // Cột 7: thao tác — v3.01.73: TAB 06 CHỈ XEM. Sửa/xóa làm ở nơi nhập gốc.
         const actCell = t._fromAp
           ? `<button class="icon-btn" title="Mở khoản Phải trả gốc (sửa ở giao diện Phải trả)" onclick="openPayableModal('${t._apId}')">👁</button>`
