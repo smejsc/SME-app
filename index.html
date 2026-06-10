@@ -2723,7 +2723,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.02.23';            // bumped on each release
+const APP_VERSION='3.02.25';            // bumped on each release
 
 /* v2.62.0: Token xác thực backend — PHẢI khớp API_TOKEN trong Apps Script (Code.gs).
    Mọi request tới Apps Script tự động được gắn token qua lớp bọc fetch bên dưới.
@@ -3087,6 +3087,48 @@ async function decryptJSON(payload){
   const iv=b64ToBytes(payload.iv);
   const ct=b64ToBytes(payload.ct);
   const data=await crypto.subtle.decrypt({name:'AES-GCM',iv},CRYPTO_KEY,ct);
+  return JSON.parse(new TextDecoder().decode(data));
+}
+
+/* v3.02.24: SYNC DATA — NÉN TRƯỚC, MÃ HÓA SAU.
+   Dữ liệu mã hóa là ngẫu nhiên → gzip sau mã hóa vô dụng (0%). Đảo thứ tự:
+   JSON text → gzip (bytes) → AES-GCM(bytes) → {iv, ct, gz:1}.
+   Giảm payload ~85% (1,1MB → ~150KB). Chỉ dùng cho luồng sync DATA;
+   backup/cfg/snapshot vẫn dùng encryptJSON/decryptJSON cũ (không đụng → an toàn).
+   decryptJSONgz NHẬN BIẾT cả 2: có gz:1 → giải nén; không → đọc kiểu cũ (tương thích ngược). */
+async function _gzipBytes(str){
+  const stream=new Blob([new TextEncoder().encode(str)]).stream().pipeThrough(new CompressionStream('gzip'));
+  const buf=await new Response(stream).arrayBuffer();
+  return new Uint8Array(buf);
+}
+async function _gunzipToStr(bytes){
+  const stream=new Blob([bytes]).stream().pipeThrough(new DecompressionStream('gzip'));
+  return await new Response(stream).text();
+}
+async function encryptJSONgz(obj){
+  // nếu trình duyệt không hỗ trợ nén → rơi về encrypt thường (vẫn chạy, chỉ không nhỏ)
+  if(!_compressionSupported()) return await encryptJSON(obj);
+  try{
+    const iv=rand(12);
+    const gz=await _gzipBytes(JSON.stringify(obj));            // text → gzip bytes
+    const ct=await crypto.subtle.encrypt({name:'AES-GCM',iv},CRYPTO_KEY,gz);  // mã hóa bytes đã nén
+    return {iv:bytesToB64(iv), ct:bytesToB64(new Uint8Array(ct)), v:1, gz:1};
+  }catch(e){
+    console.warn('[encryptJSONgz] nén-mã hóa lỗi, dùng encrypt thường:', e&&e.message);
+    return await encryptJSON(obj);
+  }
+}
+async function decryptJSONgz(payload){
+  if(!payload||!payload.iv||!payload.ct) throw new Error('Payload không hợp lệ');
+  const iv=b64ToBytes(payload.iv);
+  const ct=b64ToBytes(payload.ct);
+  const data=await crypto.subtle.decrypt({name:'AES-GCM',iv},CRYPTO_KEY,ct);
+  if(payload.gz===1 || payload.gz===true){
+    // data là gzip bytes → giải nén ra text
+    const str=await _gunzipToStr(new Uint8Array(data));
+    return JSON.parse(str);
+  }
+  // định dạng cũ: data là JSON text thẳng
   return JSON.parse(new TextDecoder().decode(data));
 }
 
@@ -9017,7 +9059,7 @@ async function loadEncryptedLocal(){
     const payload=JSON.parse(raw);
     let data;
     if(payload.iv && payload.ct){
-      data=await decryptJSON(payload);
+      data=await decryptJSONgz(payload);  // v3.02.24: tự nhận biết gz
     } else {
       data=payload;
     }
@@ -9106,7 +9148,7 @@ async function cloudSync(mode, opts){
         toast('Cloud chưa có dữ liệu. Bấm Sync để đẩy lên.');
         return;
       }
-      const decoded=await decryptJSON(payloadObj);
+      const decoded=await decryptJSONgz(payloadObj);  // v3.02.24
       // Filter for current user (admin gets everything)
       const filteredCloud=filterStateForUser(Object.assign(defaultState(),decoded));
       // v1.57.0: Preserve local audit log when pulling (not synced anymore)
@@ -9250,7 +9292,7 @@ async function cloudSync(mode, opts){
           if(data0.ok){
             const decodedPayload = await decodeCloudPayload(data0);
             if(decodedPayload){
-              cloudFull=await decryptJSON(decodedPayload);
+              cloudFull=await decryptJSONgz(decodedPayload);  // v3.02.24
             }
           }
           // v2.76.0: CẢNH BÁO SỤT GIẢM — nếu local ít hơn cloud >50% (mà cloud có nhiều dữ liệu),
@@ -9340,7 +9382,7 @@ async function cloudSync(mode, opts){
           if(data0.ok){
             const decodedPayload = await decodeCloudPayload(data0);
             if(decodedPayload){
-              cloudFull=await decryptJSON(decodedPayload);
+              cloudFull=await decryptJSONgz(decodedPayload);  // v3.02.24
             }
           }
           // Build merged state: start from cloud (full state)
@@ -9391,31 +9433,15 @@ async function cloudSync(mode, opts){
           }
         }
       }
-      const payload=await encryptJSON(toEncrypt);
-      // v1.57.0: Compress payload to fit Apps Script POST size limit
+      // v3.02.24: NÉN TRƯỚC MÃ HÓA — payload tự nhỏ ~85%. Bỏ lớp gzip-sau-mã-hóa cũ (vô dụng vì ct ngẫu nhiên).
+      const payload=await encryptJSONgz(toEncrypt);
       const payloadJson = JSON.stringify(payload);
       const origSize = payloadJson.length;
 
-      let finalBody;
-      let finalSize;
-      let compressionInfo = '';
-
-      if(_compressionSupported()){
-        const compressed = await gzipCompress(payloadJson);
-        if(compressed.compressed){
-          finalBody = JSON.stringify({action:'save', key:'data', payload_gz:compressed.data, gz:true});
-          finalSize = finalBody.length;
-          const ratio = Math.round((1 - compressed.compSize / origSize) * 100);
-          compressionInfo = ` (nén ${ratio}%: ${_fmtBytes(origSize)} → ${_fmtBytes(compressed.compSize)})`;
-          console.log('[sync push] gzip:', _fmtBytes(origSize), '→', _fmtBytes(compressed.compSize), `(${ratio}% smaller)`);
-        } else {
-          finalBody = JSON.stringify({action:'save', key:'data', payload});
-          finalSize = finalBody.length;
-        }
-      } else {
-        finalBody = JSON.stringify({action:'save', key:'data', payload});
-        finalSize = finalBody.length;
-      }
+      let finalBody = JSON.stringify({action:'save', key:'data', payload});
+      let finalSize = finalBody.length;
+      let compressionInfo = ` (payload ${_fmtBytes(finalSize)}${payload.gz?' • nén trước mã hóa':''})`;
+      console.log('[sync push] payload:', _fmtBytes(finalSize), payload.gz?'(gz trước mã hóa)':'(không nén)');
 
       // v2.62.0: backend (Apps Script v1.64.0+) hỗ trợ chia nhỏ dữ liệu (chunking,
       // CHUNK_SIZE=45000 ký tự/ô, không giới hạn số ô) → trần thật là giới hạn POST
@@ -9489,8 +9515,27 @@ async function cloudSync(mode, opts){
         headers:{'Content-Type':'text/plain'},
         body:finalBody
       });
-      const data=await safeJson(res);
-      if(!data.ok){updateSyncStatus('error',data.error||'Lỗi');if(_interactive){toast('Sync thất bại','bad');}return;}
+      let data=await safeJson(res);
+      // v3.02.25: backend báo BẬN/LOCK (LockService) → lỗi TẠM THỜI, tự thử lại tối đa 2 lần
+      //   thay vì báo đỏ ngay. Tránh làm user hoảng vì lỗi vô hại khi 2 thao tác sync trùng giờ.
+      if(!data.ok && /đang bận|busy|lock|thử lại sau|try again/i.test(String(data.error||''))){
+        for(let attempt=1; attempt<=2 && !data.ok; attempt++){
+          updateSyncStatus('syncing','Cloud đang bận — thử lại ('+attempt+')…');
+          await new Promise(r=>setTimeout(r, 1200*attempt));  // 1.2s, 2.4s
+          try{
+            const res2=await fetchWithTimeout(cfg.scriptUrl,{method:'POST',headers:{'Content-Type':'text/plain'},body:finalBody});
+            data=await safeJson(res2);
+          }catch(re){ console.warn('[sync push] retry',attempt,'lỗi:',re&&re.message); }
+        }
+      }
+      if(!data.ok){
+        // nếu vẫn bận sau khi thử lại → báo nhẹ nhàng (warn), không phải lỗi nặng
+        const isBusy=/đang bận|busy|lock|thử lại sau|try again/i.test(String(data.error||''));
+        updateSyncStatus('error',data.error||'Lỗi');
+        if(_interactive){ toast(isBusy?'Cloud đang bận, vài giây nữa thử lại nhé':'Sync thất bại','warn'); }
+        if(isBusy){ try{ window._syncBackoffUntil=Date.now()+8000; }catch(_){}}  // lùi autosync 8s
+        return;
+      }
       cfg.lastSync=new Date().toISOString();
       setAuthConfig(cfg);
       updateSyncStatus('synced','Đã sync '+timeAgo(cfg.lastSync));
