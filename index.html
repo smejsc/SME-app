@@ -2724,7 +2724,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.02.52';            // bumped on each release
+const APP_VERSION='3.02.54';            // bumped on each release
 
 /* v2.62.0: Token xác thực backend — PHẢI khớp API_TOKEN trong Apps Script (Code.gs).
    Mọi request tới Apps Script tự động được gắn token qua lớp bọc fetch bên dưới.
@@ -10826,7 +10826,9 @@ function auditOpVessel(nameSub){
     console.log(`-- AP gắn tàu (${aps.length} khoản) --`);
     aps.forEach(p=>{
       const net=+p.amountNet||((+p.amountGross||+p.amount||0)-(+p.vatAmount||0))||(+p.amount||0);
-      const u=toUsd(net,p.ccy); apUsd+=u;
+      let u=toUsd(net,p.ccy);
+      (p.payments||[]).forEach(pay=>{ const fee=(+pay.bankFee||0)+(+pay.otherFee||0); if(fee>0) u+=toUsd(fee,p.ccy); });
+      apUsd+=u;
       const flag = (p.ccy==='USD' && u>5000) ? '  ⚠ NGỜ (USD lớn — kiểm tra import)' : '';
       console.log(`   ${p.ccy||'?'} ${net.toLocaleString()} → ${u.toLocaleString()} USD · ${(p.desc||p.partner||'').slice(0,40)}${flag}`);
     });
@@ -23126,7 +23128,7 @@ function _arEditorBody(r,isPayable){
         <div class="field"><label>Ngày hóa đơn</label><input type="date" id="ar-issue" value="${r.issueDate||todayISO()}" ${lockedAttr}></div>
         <div class="field"><label>Hạn thanh toán</label><input type="date" id="ar-due" value="${r.dueDate||''}" ${lockedAttr}></div>
         ${isPayable?`<div class="field"><label>Giá trị thanh toán đợt này</label><input type="number" id="ar-due-amount" step="any" value="${r.dueAmount||0}" placeholder="Số tiền chi đợt này" oninput="_arRecalcRemain()" ${lockedAttr}></div>
-        <div class="field"><label>Giá trị còn lại (sau đợt này)</label><input type="text" id="ar-remain-display" readonly style="background:var(--paper-2);font-weight:600"></div>
+        <div class="field"><label>Giá trị còn lại (sau khi trừ đã trả & đợt này)</label><input type="text" id="ar-remain-display" readonly style="background:var(--paper-2);font-weight:600"></div>
         <input type="hidden" id="ar-due-month" value="${r.dueMonth||''}">`:''}
       </div>
     </div>
@@ -23299,7 +23301,7 @@ function arRecalcGross(){
   try{ _arRecalcRemain(); }catch(e){}
 }
 
-/* v3.02.48: Giá trị còn lại (sau đợt này) = Tổng (sau VAT) − Giá trị thanh toán đợt này. Cập nhật live. */
+/* v3.02.54: Giá trị còn lại (sau đợt này) = Tổng (sau VAT) − Σ đã trả (các đợt cũ) − thanh toán đợt này. */
 function _arRecalcRemain(){
   const gEl=document.getElementById('ar-amount-gross');
   const dEl=document.getElementById('ar-due-amount');
@@ -23307,7 +23309,14 @@ function _arRecalcRemain(){
   if(!out) return;
   const gross=_unformatNumber((gEl||{}).value||'0');
   const due=_unformatNumber((dEl||{}).value||'0');
-  const remain=gross-due;
+  // Σ các đợt đã trả (payments hiện có của phiếu đang mở)
+  let paid=0;
+  try{
+    const id=(window._curApId||'');
+    const r=id?(S.payables||[]).find(x=>x.id===id):null;
+    if(r) paid=(r.payments||[]).reduce((s,p)=>s+(+p.amount||0),0);
+  }catch(e){}
+  const remain=gross-paid-due;
   out.value = remain.toLocaleString('vi-VN')+' '+(((document.getElementById('ar-ccy')||{}).value)||'VND');
   out.style.color = remain>0.001 ? 'var(--bad)' : (remain<-0.001 ? '#a8362b' : 'var(--good)');
 }
@@ -23425,6 +23434,7 @@ function openPayableModal(id){
   const isEdit=!!id;
   const r=isEdit?S.payables.find(x=>x.id===id):{ccy:'USD',issueDate:todayISO(),payments:[]};
   if(isEdit && !r){toast('Không tìm thấy','bad');return;}
+  try{ window._curApId = isEdit ? id : ''; }catch(e){}
   const body=_arEditorBody(r,true);
   const foot=`<button class="btn-sec" onclick="closeModal()">Hủy</button>
               <button class="btn-primary" onclick="saveAr('ap','${id||''}')">${isEdit?'Cập nhật':'Lưu phải trả'}</button>`;
@@ -25452,7 +25462,9 @@ function opBalance(vid){
   return bal;
 }
 /* v3.01.02: tổng AP gắn tàu QL (chi hộ) quy USD — trả về số ÂM (giảm số dư). Mọi trạng thái.
-   v3.01.04: dùng NET (chưa VAT) — đồng nhất với "chi hộ ảo" hiện ở tab 06 (VAT là khấu trừ của Seahorse, không đòi chủ tàu). */
+   v3.01.04: dùng NET (chưa VAT) — đồng nhất với "chi hộ ảo" hiện ở tab 06 (VAT là khấu trừ của Seahorse, không đòi chủ tàu).
+   v3.02.53: CỘNG THÊM mọi PHÍ (bankFee+otherFee) trong các đợt thanh toán AP — nguyên tắc: mọi chi phí
+             phát sinh liên quan tàu QL hộ đều đối chiếu với chủ tàu. */
 function opApChiHo(vid){
   const toUsd=(raw, ccy)=>{
     raw=+raw||0; if(raw===0) return 0;
@@ -25461,7 +25473,13 @@ function opApChiHo(vid){
   };
   return -(S.payables||[]).filter(p=>p.vesselId===vid).reduce((s,p)=>{
     const net=+p.amountNet||((+p.amountGross||+p.amount||0)-(+p.vatAmount||0))||(+p.amount||0);
-    return s + toUsd(net, p.ccy);
+    let sum = toUsd(net, p.ccy);
+    // v3.02.53: phí của từng đợt thanh toán (phí NH, phí khác) — cũng là chi hộ chủ tàu
+    (p.payments||[]).forEach(pay=>{
+      const fee=(+pay.bankFee||0)+(+pay.otherFee||0);
+      if(fee>0) sum += toUsd(fee, p.ccy);
+    });
+    return s + sum;
   },0);
 }
 function renderOpVessels(){
