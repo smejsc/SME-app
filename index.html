@@ -2724,7 +2724,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.02.39';            // bumped on each release
+const APP_VERSION='3.02.42';            // bumped on each release
 
 /* v2.62.0: Token xác thực backend — PHẢI khớp API_TOKEN trong Apps Script (Code.gs).
    Mọi request tới Apps Script tự động được gắn token qua lớp bọc fetch bên dưới.
@@ -10628,7 +10628,9 @@ function mergeByID(cloudArr, localArr, idField, skipTombstone, fieldName){
       const cloudT=_recordTimestamp(existing.rec);
       const localT=_recordTimestamp(r);
       // If both have timestamps and they differ, record as conflict for warning
-      if(cloudT && localT && Math.abs(cloudT-localT)>1000){
+      // v3.02.40: BỎ QUA companies — mảng này hiếm khi sửa, đã được admin-push đè qua SHARED_FIELDS;
+      //   chênh lệch chỉ là nhiễu timestamp (CO-PARENT) gây spam "conflicts: companies" vô nghĩa.
+      if(cloudT && localT && Math.abs(cloudT-localT)>1000 && fieldName!=='companies'){
         conflicts.push({
           id:k,
           cloudUpdatedAt:existing.rec.updatedAt||existing.rec.createdAt,
@@ -11730,6 +11732,12 @@ function _recordSyncConflicts(conflictReport){
 }
 function showSyncConflicts(){
   if(CURRENT_ROLE!=='admin'){ toast('Chỉ admin xem được','bad'); return; }
+  // v3.02.40: dọn các conflict 'companies' cũ (nhiễu timestamp, không phải xung đột thật)
+  if(Array.isArray(S._syncConflicts)){
+    const before=S._syncConflicts.length;
+    S._syncConflicts=S._syncConflicts.filter(c=>c.field!=='companies');
+    if(S._syncConflicts.length!==before){ try{ saveState(); }catch(e){} }
+  }
   const list=(S._syncConflicts||[]).slice().reverse();
   let body;
   if(!list.length){
@@ -19370,39 +19378,61 @@ function viewCashLedger(fundId){
   const txns=(S.cashTxns||[]).filter(t=>t.fundId===fundId)
     .slice().sort((a,b)=>(a.date||'').localeCompare(b.date||'')||(a.recordedAt||'').localeCompare(b.recordedAt||''));
   let running=0;
+  let totIn=0, totOut=0;
   let rows='';
   if(!txns.length){
-    rows='<tr><td colspan="6" class="empty" style="text-align:center;color:var(--muted)">Chưa có giao dịch</td></tr>';
+    rows='<tr><td colspan="6" style="text-align:center;color:var(--muted);padding:24px">Chưa có giao dịch — bấm <b>▲ Ứng quỹ</b> hoặc <b>▼ Hoàn ứng</b> bên dưới</td></tr>';
   } else {
     txns.forEach(t=>{
       const amt=+t.amount||0;
-      running += (t.direction==='IN'? amt : -amt);
+      const isIn = t.direction==='IN';
+      running += (isIn? amt : -amt);
+      if(isIn) totIn+=amt; else totOut+=amt;
       const isManual = (t.sourceType==='manual' || !t.sourceType);
       const act = isManual
         ? `<button class="icon-btn" title="Sửa" onclick="editCashTxn('${fundId}','${t.id}')">✎</button>
            <button class="icon-btn danger" title="Xóa" onclick="deleteCashTxn('${fundId}','${t.id}')">✕</button>`
-        : `<span class="mono" style="font-size:9px;color:var(--muted)" title="Dòng tự sinh từ ${t.sourceType==='ap'?'phiếu Ứng quỹ (AP)':'hệ thống'} — sửa ở nguồn gốc">🔒</span>`;
-      rows+=`<tr>
-        <td style="font-family:var(--font-mono);font-size:11px">${esc(t.date||'')}</td>
-        <td>${t.direction==='IN'?'<span style="color:var(--good)">Thu ▲</span>':'<span style="color:var(--bad)">Chi ▼</span>'}</td>
-        <td>${esc(t.category||'')}${t.desc?`<br><span style="font-size:10px;color:var(--muted)">${esc(t.desc)}</span>`:''}</td>
-        <td class="num">${t.direction==='IN'?'+':'−'}${fmtCcy(amt,t.ccy||f.ccy||'VND')}</td>
-        <td class="num" style="font-weight:600">${fmtCcy(running,f.ccy||'VND')}</td>
-        <td><div class="row-actions">${act}</div></td>
+        : `<span title="Dòng tự sinh từ ${t.sourceType==='ap'?'phiếu Ứng quỹ (AP)':(t.sourceType==='cash_clear'?'phiếu Hoàn ứng':'hệ thống')} — sửa ở nguồn gốc" style="color:var(--muted);font-size:12px">🔒</span>`;
+      const badge = isIn
+        ? '<span class="chip" style="background:rgba(45,106,106,.12);color:#2d6a6a;font-size:10px;font-weight:600;padding:2px 8px;border-radius:10px">▲ Ứng</span>'
+        : '<span class="chip" style="background:rgba(184,71,46,.12);color:#b8472e;font-size:10px;font-weight:600;padding:2px 8px;border-radius:10px">▼ Hoàn/Chi</span>';
+      rows+=`<tr style="border-bottom:1px solid var(--rule)">
+        <td style="font-family:var(--font-mono);font-size:11px;color:var(--muted);padding:8px 10px;white-space:nowrap">${esc(t.date||'')}</td>
+        <td style="padding:8px 10px">${badge}</td>
+        <td style="padding:8px 10px"><div style="font-weight:500">${esc(t.category||'—')}</div>${t.desc?`<div style="font-size:10.5px;color:var(--muted);margin-top:1px">${esc(t.desc)}</div>`:''}</td>
+        <td class="num" style="padding:8px 10px;font-family:var(--font-mono);font-weight:600;color:${isIn?'#2d6a6a':'#b8472e'};white-space:nowrap">${isIn?'+':'−'}${fmtCcy(amt,t.ccy||f.ccy||'VND')}</td>
+        <td class="num" style="padding:8px 10px;font-family:var(--font-mono);font-weight:700;white-space:nowrap">${fmtCcy(running,f.ccy||'VND')}</td>
+        <td style="padding:8px 10px;text-align:center;white-space:nowrap">${act}</td>
       </tr>`;
     });
   }
+  const bal=+f.balance||0;
+  const card=(label,val,color)=>`<div style="flex:1;background:var(--paper-2,rgba(0,0,0,.02));border:1px solid var(--rule);border-radius:8px;padding:10px 14px">
+    <div style="font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);font-weight:600;margin-bottom:3px">${label}</div>
+    <div style="font-size:16px;font-weight:700;font-family:var(--font-mono);color:${color}">${val}</div></div>`;
   const body=`
-    <div style="font-size:12px;color:var(--muted);margin-bottom:8px">
-      <b>${esc(f.name)}</b> · Số dư hiện tại: <b style="color:${(+f.balance||0)>=0?'var(--good)':'var(--bad)'}">${fmtCcy(+f.balance||0,f.ccy||'VND')}</b>
+    <div style="display:flex;gap:10px;margin-bottom:14px;flex-wrap:wrap">
+      ${card('Tổng ứng quỹ', fmtCcy(totIn,f.ccy||'VND'), '#2d6a6a')}
+      ${card('Tổng hoàn/chi', fmtCcy(totOut,f.ccy||'VND'), '#b8472e')}
+      ${card('Số dư hiện tại', fmtCcy(bal,f.ccy||'VND'), bal>=0?'var(--ink)':'#b8472e')}
     </div>
-    <div style="max-height:50vh;overflow:auto">
-      <table class="table" style="font-size:12px"><thead><tr><th>Ngày</th><th>Loại</th><th>Diễn giải</th><th class="num">Số tiền</th><th class="num">Số dư lũy kế</th><th></th></tr></thead>
-      <tbody>${rows}</tbody></table>
+    <div style="font-size:11px;color:var(--muted);margin-bottom:6px">Số dư = tiền tạm ứng <b>chưa hoàn</b>. Hoàn ứng = ghi chi phí vào P&L + giảm quỹ.</div>
+    <div style="max-height:46vh;overflow:auto;border:1px solid var(--rule);border-radius:8px">
+      <table style="width:100%;border-collapse:collapse;font-size:12px">
+        <thead><tr style="background:var(--paper-2,rgba(0,0,0,.03));position:sticky;top:0">
+          <th style="padding:8px 10px;text-align:left;font-size:10px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted)">Ngày</th>
+          <th style="padding:8px 10px;text-align:left;font-size:10px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted)">Loại</th>
+          <th style="padding:8px 10px;text-align:left;font-size:10px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted)">Diễn giải</th>
+          <th style="padding:8px 10px;text-align:right;font-size:10px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted)">Số tiền</th>
+          <th style="padding:8px 10px;text-align:right;font-size:10px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted)">Số dư lũy kế</th>
+          <th style="padding:8px 10px;width:60px"></th>
+        </tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
     </div>`;
   openModal('📒 Sổ quỹ — '+esc(f.name),body,
-    `<button class="btn-sec" onclick="addCashTxn('${fundId}','IN')" style="border-color:var(--good);color:var(--good)">▲ Ứng quỹ</button>
-     <button class="btn-sec" onclick="openCashClearModal('${fundId}')" style="border-color:var(--bad);color:var(--bad)">▼ Hoàn ứng (ghi chi phí)</button>
+    `<button class="btn-sec" onclick="addCashTxn('${fundId}','IN')" style="border-color:#2d6a6a;color:#2d6a6a;font-weight:600">▲ Ứng quỹ</button>
+     <button class="btn-sec" onclick="openCashClearModal('${fundId}')" style="border-color:#b8472e;color:#b8472e;font-weight:600">▼ Hoàn ứng (ghi chi phí)</button>
      <button class="btn-sec" onclick="closeModal()">Đóng</button>`);
 }
 
@@ -21013,7 +21043,7 @@ function viewLoanSchedule(id){
               return `
               <tr style="${rowStyle}">
                 <td>${p.period}</td>
-                <td>${esc(p.dueDate)}</td>
+                <td>${esc(p.dueDate)}${(!p.paid && !p.isPrepayPayoff && canEditTreasury())?` <button class="icon-btn" style="font-size:10px;padding:1px 4px" onclick="editScheduleDate('${esc(l.id)}',${p.period})" title="Sửa ngày thu lãi — app tính lại lãi theo số ngày thực tế">✎</button>`:''}${p.dayBased?' <span title="Lãi tính theo số ngày thực tế" style="color:var(--accent);font-size:9px">⊙</span>':''}</td>
                 <td class="num" style="padding-right:14px">${(+p.principal||0).toLocaleString()}</td>
                 <td class="num">${(+p.interest||0).toLocaleString()}</td>
                 <td class="num"><b>${(+p.total||0).toLocaleString()}</b></td>
@@ -21046,6 +21076,39 @@ function viewLoanSchedule(id){
 }
 
 /* v2.89.0: Ghi nhận phát sinh khác (phí gia hạn, lãi phạt, phí cam kết, tất toán trước hạn...) */
+/* v3.02.42: KT sửa NGÀY THU LÃI từng kỳ → app tính lại lãi theo SỐ NGÀY THỰC TẾ.
+   Lãi kỳ = dư nợ đầu kỳ × (lãi suất năm/100) × (số ngày kể từ mốc kỳ trước) / 365.
+   Mốc kỳ trước = dueDate kỳ liền trước (hoặc ngày giải ngân nếu là kỳ đầu). */
+function editScheduleDate(loanId, period){
+  if(!canEditTreasury()){ toast('Chỉ Admin / Kế toán trưởng','bad'); return; }
+  const l=(S.loans||[]).find(x=>x.id===loanId); if(!l) return;
+  const sched=l.paymentSchedule||[];
+  const idx=sched.findIndex(p=>p.period===period); if(idx<0) return;
+  const p=sched[idx];
+  if(p.paid){ toast('Kỳ đã trả — không sửa ngày','bad'); return; }
+  const cur=p.dueDate||'';
+  const nd=prompt(`Ngày thu lãi kỳ ${period} (YYYY-MM-DD):\n\nApp sẽ tính lại lãi kỳ này theo SỐ NGÀY thực tế kể từ kỳ trước.`, cur);
+  if(nd===null) return;
+  const nv=nd.trim();
+  if(!/^\d{4}-\d{2}-\d{2}$/.test(nv)){ toast('Ngày không hợp lệ (YYYY-MM-DD)','bad'); return; }
+  p.dueDate=nv;
+  // tính lại lãi kỳ này theo số ngày kể từ mốc trước
+  const annualRate=(+l.interestRate||0)/100;
+  // dư nợ đầu kỳ = principal gốc trừ các principal đã trả ở kỳ trước đó
+  let bal=+l.principal||0;
+  for(let i=0;i<idx;i++){ bal -= (+sched[i].principal||0); }
+  const prevDate = idx>0 ? (sched[idx-1].dueDate || l.startDate) : (l.startDate);
+  const days = Math.max(1, Math.round((new Date(nv) - new Date(prevDate)) / 86400000));
+  const interest = Math.round(bal * annualRate * days / 365);
+  p.interest = interest;
+  p.total = Math.round((+p.principal||0) + interest);
+  p.dayBased = true;            // đánh dấu lãi tính theo ngày
+  p._interestDays = days;
+  touchRecord(l); saveState(); renderAll();
+  toast(`Kỳ ${period}: ${days} ngày → lãi ${interest.toLocaleString('vi-VN')} ${l.ccy}`,'good');
+  viewLoanSchedule(loanId);
+}
+
 function loanAddCustomExpense(loanId){
   if(!canEditTreasury()){toast('Chỉ Admin / Kế toán trưởng','bad');return;}
   const l=(S.loans||[]).find(x=>x.id===loanId);
