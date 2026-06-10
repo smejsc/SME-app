@@ -2724,7 +2724,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.02.42';            // bumped on each release
+const APP_VERSION='3.02.44';            // bumped on each release
 
 /* v2.62.0: Token xác thực backend — PHẢI khớp API_TOKEN trong Apps Script (Code.gs).
    Mọi request tới Apps Script tự động được gắn token qua lớp bọc fetch bên dưới.
@@ -19517,56 +19517,93 @@ function openCashClearModal(fundId){
   if(!(CURRENT_ROLE==='admin' || (typeof canCheckAcc==='function'&&canCheckAcc()) || (typeof canApproveL1==='function'&&canApproveL1()) || (typeof canConfirmPayment==='function'&&canConfirmPayment()))){
     toast('Bạn không có quyền nhập phiếu hoàn ứng — liên hệ admin','bad'); return;
   }
-  _cashClearState={fundId, date:todayISO(), noteHeader:'', lines:[_ccNewLine()]};
+  _cashClearState={fundId, date:todayISO(), noteHeader:'', mode:'expense', refundAmount:0, refundNote:'', lines:[_ccNewLine()]};
   _renderCashClearModal();
 }
 function _renderCashClearModal(){
   const st=_cashClearState; if(!st) return;
   const f=(S.cashFunds||[]).find(x=>x.id===st.fundId); if(!f) return;
   const ccy=f.ccy||'VND';
+  const bal=+f.balance||0;
   const ets=(typeof activeExpenseTypes==='function'?activeExpenseTypes():[]).filter(t=>!t.isBODOnly);
-  const etOpts=t=>ets.map(e=>`<option value="${e.code}" ${e.code===t.expenseType?'selected':''}>${esc(e.label)}</option>`).join('');
+  const etOpts=t=>'<option value="">— Chọn loại chi phí —</option>'+ets.map(e=>`<option value="${e.code}" ${e.code===t.expenseType?'selected':''}>${esc(e.label)}</option>`).join('');
   const vessels=(S.vessels||[]); const projects=(S.projects||[]);
   function objOpts(t){
-    let o='<option value="">— Không gắn (CP chung quỹ) —</option>';
+    let o='<option value="">— Không gắn —</option>';
     o+='<optgroup label="Tàu">'+vessels.map(v=>`<option value="V:${v.id}" ${t.objType==='V'&&t.objId===v.id?'selected':''}>⛵ ${esc(v.name)}</option>`).join('')+'</optgroup>';
     o+='<optgroup label="Dự án">'+projects.map(p=>`<option value="P:${p.id}" ${t.objType==='P'&&t.objId===p.id?'selected':''}>⚙ ${esc((p.code?p.code+' ':'')+(p.name||''))}</option>`).join('')+'</optgroup>';
     return o;
   }
-  let total=0;
-  const rows=st.lines.map((t,i)=>{
-    const net=+t.amount||0; const vat=net*(+t.vatPercent||0)/100; total+=net+vat;
-    return `<tr>
-      <td style="padding:3px"><select onchange="_ccSet(${i},'expenseType',this.value)" style="font-size:11px;width:150px">${etOpts(t)}</select></td>
-      <td style="padding:3px"><select onchange="_ccSetObj(${i},this.value)" style="font-size:11px;width:160px">${objOpts(t)}</select></td>
-      <td style="padding:3px"><input type="number" value="${net||''}" oninput="_ccSet(${i},'amount',this.value)" class="num" style="font-size:11px;width:110px" step="any"></td>
-      <td style="padding:3px"><input type="number" value="${+t.vatPercent||0}" oninput="_ccSet(${i},'vatPercent',this.value)" class="num" style="font-size:11px;width:50px" step="any"></td>
-      <td style="padding:3px"><input type="text" value="${esc(t.desc||'')}" oninput="_ccSet(${i},'desc',this.value)" placeholder="Diễn giải" style="font-size:11px;width:170px"></td>
-      <td style="padding:3px">${st.lines.length>1?`<button class="icon-btn danger" onclick="_ccDelLine(${i})" title="Xóa dòng">✕</button>`:''}</td>
-    </tr>`;
-  }).join('');
+  const tabBtn=(m,label)=>`<button onclick="_ccSetMode('${m}')" style="flex:1;padding:9px;border:none;cursor:pointer;font-size:12.5px;font-weight:600;background:${st.mode===m?'var(--ink)':'transparent'};color:${st.mode===m?'#fff':'var(--muted)'};border-radius:6px;transition:.15s">${label}</button>`;
+
+  // ===== CHẾ ĐỘ HOÀN TIỀN (chỉ giảm quỹ, không P&L) =====
+  let inner;
+  if(st.mode==='refund'){
+    const amt=+st.refundAmount||0;
+    inner=`
+      <div style="background:rgba(45,106,106,.06);border:1px solid var(--rule);border-radius:8px;padding:16px;margin-bottom:6px">
+        <div style="font-size:11px;color:var(--muted);margin-bottom:12px">Hoàn lại tiền mặt thừa về công ty/quỹ khác. <b>Chỉ giảm số dư quỹ, KHÔNG ghi chi phí.</b></div>
+        <div class="form-grid" style="grid-template-columns:1fr 1.5fr;gap:14px">
+          <div class="field"><label>Số tiền hoàn (${ccy})</label>
+            <input type="number" value="${amt||''}" oninput="_cashClearState.refundAmount=+this.value||0;_renderCashClearModal()" class="num" style="font-size:15px;font-weight:600" step="any" placeholder="0"></div>
+          <div class="field"><label>Diễn giải</label>
+            <input type="text" value="${esc(st.refundNote||'')}" oninput="_cashClearState.refundNote=this.value" placeholder="VD: Nộp lại tiền thừa về quỹ công ty"></div>
+        </div>
+        ${amt>bal?`<div style="color:#b8472e;font-size:11px;margin-top:8px">⚠ Số tiền hoàn (${fmtCcy(amt,ccy)}) lớn hơn số dư quỹ (${fmtCcy(bal,ccy)})</div>`:''}
+      </div>`;
+  } else {
+    // ===== CHẾ ĐỘ GHI CHI PHÍ (nhiều dòng) =====
+    let total=0;
+    const cards=st.lines.map((t,i)=>{
+      const net=+t.amount||0; const vat=net*(+t.vatPercent||0)/100; total+=net+vat;
+      return `<div style="background:var(--paper);border:1px solid var(--rule);border-radius:8px;padding:12px;margin-bottom:8px;position:relative">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+          <span style="font-size:11px;font-weight:600;color:var(--muted)">Khoản #${i+1}</span>
+          ${st.lines.length>1?`<button class="icon-btn danger" onclick="_ccDelLine(${i})" title="Xóa khoản này" style="font-size:12px">✕ Xóa</button>`:''}
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:8px">
+          <div><label style="font-size:10px;color:var(--muted);display:block;margin-bottom:3px">LOẠI CHI PHÍ *</label>
+            <select onchange="_ccSet(${i},'expenseType',this.value)" style="width:100%;padding:7px;font-size:12px">${etOpts(t)}</select></div>
+          <div><label style="font-size:10px;color:var(--muted);display:block;margin-bottom:3px">TÀU / DỰ ÁN</label>
+            <select onchange="_ccSetObj(${i},this.value)" style="width:100%;padding:7px;font-size:12px">${objOpts(t)}</select></div>
+        </div>
+        <div style="display:grid;grid-template-columns:1.2fr .6fr 2fr;gap:10px">
+          <div><label style="font-size:10px;color:var(--muted);display:block;margin-bottom:3px">SỐ TIỀN (${ccy}) *</label>
+            <input type="number" value="${net||''}" oninput="_ccSet(${i},'amount',this.value)" class="num" style="width:100%;padding:7px;font-size:13px;font-weight:600" step="any" placeholder="0"></div>
+          <div><label style="font-size:10px;color:var(--muted);display:block;margin-bottom:3px">%VAT</label>
+            <input type="number" value="${+t.vatPercent||0}" oninput="_ccSet(${i},'vatPercent',this.value)" class="num" style="width:100%;padding:7px;font-size:12px" step="any"></div>
+          <div><label style="font-size:10px;color:var(--muted);display:block;margin-bottom:3px">DIỄN GIẢI</label>
+            <input type="text" value="${esc(t.desc||'')}" oninput="_ccSet(${i},'desc',this.value)" placeholder="Nội dung khoản chi" style="width:100%;padding:7px;font-size:12px"></div>
+        </div>
+      </div>`;
+    }).join('');
+    inner=`
+      <div style="max-height:42vh;overflow:auto;padding-right:4px">${cards}</div>
+      <div style="margin-top:8px;display:flex;justify-content:space-between;align-items:center">
+        <button class="btn-sec" onclick="_ccAddLine()" style="font-size:12px">+ Thêm khoản chi phí</button>
+        <div style="font-size:14px">Tổng: <b style="color:#b8472e;font-family:var(--font-mono)">${fmtCcy(total,ccy)}</b></div>
+      </div>`;
+  }
+
   const body=`
-    <div style="font-size:12px;color:var(--muted);margin-bottom:10px">
-      Quỹ: <b>${esc(f.name)}</b> · Số dư: <b style="color:${(+f.balance||0)>=0?'var(--good)':'var(--bad)'}">${fmtCcy(+f.balance||0,ccy)}</b> · Tiền tệ: ${ccy}<br>
-      <span style="font-size:11px">Mỗi dòng = 1 khoản chi phí (ghi thẳng P&L). Tổng các dòng sẽ TRỪ vào quỹ. Không qua duyệt.</span>
+    <div style="display:flex;gap:18px;align-items:center;padding:10px 14px;background:var(--paper-2,rgba(0,0,0,.03));border-radius:8px;margin-bottom:12px">
+      <div><span style="font-size:10px;color:var(--muted);text-transform:uppercase">Quỹ</span><br><b>${esc(f.name)}</b></div>
+      <div><span style="font-size:10px;color:var(--muted);text-transform:uppercase">Số dư</span><br><b style="color:${bal>=0?'var(--ink)':'#b8472e'};font-family:var(--font-mono)">${fmtCcy(bal,ccy)}</b></div>
+      <div style="margin-left:auto;width:200px">
+        <span style="font-size:10px;color:var(--muted);text-transform:uppercase">Ngày hoàn ứng</span>
+        <input type="text" value="${esc(st.date)}" oninput="_cashClearState.date=this.value" placeholder="YYYY-MM-DD" style="width:100%;padding:5px;font-size:12px;margin-top:2px">
+      </div>
     </div>
-    <div class="form-grid" style="grid-template-columns:1fr 2fr;margin-bottom:10px">
-      <div class="field"><label>Ngày hoàn ứng</label><input type="text" id="cc-date" value="${esc(st.date)}" oninput="_cashClearState.date=this.value" placeholder="YYYY-MM-DD"></div>
-      <div class="field"><label>Diễn giải chung (tùy chọn)</label><input type="text" id="cc-note" value="${esc(st.noteHeader)}" oninput="_cashClearState.noteHeader=this.value" placeholder="VD: Hoàn ứng đợt tháng 5"></div>
+    <div style="display:flex;gap:4px;background:var(--rule);padding:4px;border-radius:8px;margin-bottom:14px">
+      ${tabBtn('expense','▼ Ghi chi phí (vào P&L)')}
+      ${tabBtn('refund','↩ Hoàn tiền (chỉ giảm quỹ)')}
     </div>
-    <div style="max-height:40vh;overflow:auto;border:1px solid var(--rule)">
-      <table class="table" style="font-size:11px"><thead><tr style="background:var(--paper-2)">
-        <th style="padding:5px">Loại chi phí</th><th style="padding:5px">Tàu / Dự án</th><th style="padding:5px">Số tiền (${ccy})</th><th style="padding:5px">%VAT</th><th style="padding:5px">Diễn giải</th><th></th>
-      </tr></thead><tbody>${rows}</tbody></table>
-    </div>
-    <div style="margin-top:8px;display:flex;justify-content:space-between;align-items:center">
-      <button class="btn-sec" onclick="_ccAddLine()" style="font-size:12px">+ Thêm dòng</button>
-      <div style="font-size:13px">Tổng hoàn ứng: <b style="color:var(--bad)">${fmtCcy(total,ccy)}</b></div>
-    </div>`;
-  openModal('▼ Phiếu hoàn ứng — '+esc(f.name), body,
+    ${inner}`;
+  openModal('Phiếu hoàn ứng — '+esc(f.name), body,
     `<button class="btn-sec" onclick="closeModal();viewCashLedger('${st.fundId}')">Hủy</button>
-     <button class="btn-primary" onclick="saveCashClear()">Ghi chi phí + Trừ quỹ</button>`);
+     <button class="btn-primary" onclick="saveCashClear()">${st.mode==='refund'?'Hoàn tiền + Trừ quỹ':'Ghi chi phí + Trừ quỹ'}</button>`);
 }
+function _ccSetMode(m){ _cashClearState.mode=m; _renderCashClearModal(); }
 function _ccSet(i,k,v){ const t=_cashClearState.lines[i]; if(!t)return; t[k]=(k==='amount'||k==='vatPercent')?(+v||0):v; if(k==='amount'||k==='vatPercent')_renderCashClearModal(); }
 function _ccSetObj(i,v){ const t=_cashClearState.lines[i]; if(!t)return; if(!v){t.objType='';t.objId='';} else {const[a,b]=v.split(':');t.objType=a;t.objId=b;} }
 function _ccAddLine(){ _cashClearState.lines.push(_ccNewLine()); _renderCashClearModal(); }
@@ -19575,9 +19612,25 @@ function saveCashClear(){
   const st=_cashClearState; if(!st) return;
   const f=(S.cashFunds||[]).find(x=>x.id===st.fundId); if(!f){toast('Không tìm thấy quỹ','bad');return;}
   const ccy=f.ccy||'VND';
-  const valid=st.lines.filter(l=>l.expenseType && (+l.amount||0)>0);
-  if(!valid.length){ toast('Cần ít nhất 1 dòng có loại CP + số tiền','bad'); return; }
   const me=actorName(); const nowIso=new Date().toISOString();
+
+  // ===== CHẾ ĐỘ HOÀN TIỀN: chỉ giảm quỹ, KHÔNG ghi chi phí =====
+  if(st.mode==='refund'){
+    const amt=Math.round((+st.refundAmount||0)*100)/100;
+    if(amt<=0){ toast('Nhập số tiền hoàn > 0','bad'); return; }
+    f.balance=(+f.balance||0)-amt;
+    S.cashTxns=S.cashTxns||[];
+    S.cashTxns.push({id:uid(),fundId:f.id,date:st.date,direction:'OUT',amount:amt,ccy,
+      category:'Hoàn tiền',desc:st.refundNote||'Hoàn lại tiền mặt thừa',
+      sourceType:'manual',recordedBy:me,recordedAt:nowIso});
+    touchRecord(f); saveState(); renderAll();
+    toast(`Đã hoàn tiền ${fmtCcy(amt,ccy)} — trừ quỹ`,'good');
+    _cashClearState=null; viewCashLedger(f.id); return;
+  }
+
+  // ===== CHẾ ĐỘ GHI CHI PHÍ =====
+  const valid=st.lines.filter(l=>l.expenseType && (+l.amount||0)>0);
+  if(!valid.length){ toast('Cần ít nhất 1 khoản có loại CP + số tiền','bad'); return; }
   let total=0; let n=0;
   S.payables=S.payables||[];
   const batchId='CASHCLEAR-'+Math.random().toString(36).slice(2,8);
@@ -26326,20 +26379,19 @@ function renderOpTxList(){
         // Cột 2: Tàu + số HĐ (chi hộ)
         const hd = type==='OUT' ? `<div class="mono" style="font-size:10px;color:var(--muted)">${t.contractNo?'HĐ:'+esc(t.contractNo):''}${t.contractNo&&t.invoiceNo?' · ':''}${t.invoiceNo?'HD:'+esc(t.invoiceNo):''}${!t.contractNo&&!t.invoiceNo?'—':''}</div>` : '';
         const col2=`<td>${v?esc(v.name):'—'}${hd}</td>`;
-        // Cột 4: Số tiền — gốc (lớn) + quy USD + VAT + phí (nhỏ)
+        // Cột 4: Số tiền — v3.02.44: SỐ ĐẬM = net + VAT (giá trị thanh toán thực). Dòng nhỏ tách net · vat.
+        const grossAmt = (+t.amount||0) + ((type==='OUT')?(+t.vatAmount||0):0);
         const vatLine = (type==='OUT' && +t.vatAmount>0) ? `<div style="font-size:10px;color:var(--muted)">net ${fmtCcy(t.amount,ccy)} · vat ${fmtCcy(+t.vatAmount,ccy)}</div>` : '';
         const feeLine = feesUsd ? `<div style="font-size:10px;color:var(--muted)" title="${feeTip}">phí ${fmtCcy(feesUsd,'USD')}</div>` : '';
         const col4=`<td class="r num"${fxHint}>
-          <b>${fmtCcy(t.amount,ccy)}</b>
+          <b>${fmtCcy(grossAmt,ccy)}</b>
           ${!isUsd?`<div style="font-size:10px;color:var(--accent)">≈ ${fmtCcy(usd,'USD')}</div>`:''}
           ${vatLine}${feeLine}
         </td>`;
-        // Cột 6: trạng thái TT — v3.02.29: 2 bước (Duyệt lệnh → Xác nhận đã TT)
-        const ttCell = t._fromAp
-          ? (t.paid?`<span class="chip chip-good" style="font-size:10px" title="AP đã trả">✓ TT</span>`:`<span class="chip" style="background:var(--rule);color:var(--muted);font-size:10px" title="AP chưa trả đủ">Chưa</span>`)
-          : (t.paid
+        // Cột 6: trạng thái TT — v3.02.29: 2 bước. v3.02.44: phiếu _fromAp cũng duyệt/xác nhận TT tại đây.
+        const ttCell = (t.paid
             ?(_canConfirmOpTT()
-              ?`<span class="chip chip-good" title="TT ngày ${t.paidDate||'?'}${t.payApprovedBy?' · Duyệt bởi '+esc(t.payApprovedBy):''}" style="cursor:pointer" onclick="confirmOpPayment('${t.id}')">✓ ${t.paidDate?t.paidDate.slice(5):'TT'}</span>`
+              ?`<span class="chip chip-good" title="TT ngày ${t.paidDate||'?'}${t.payApprovedBy?' · Duyệt bởi '+esc(t.payApprovedBy):''}${t._fromAp?' · từ AP':''}" style="cursor:pointer" onclick="confirmOpPayment('${t.id}')">✓ ${t.paidDate?t.paidDate.slice(5):'TT'}</span>`
               :`<span class="chip chip-good" title="TT ngày ${t.paidDate||'?'}">✓ ${t.paidDate?t.paidDate.slice(5):'TT'}</span>`)
             : (t.payApproved
                 // ĐÃ DUYỆT lệnh → chờ KT xác nhận đã TT (+ phí)
