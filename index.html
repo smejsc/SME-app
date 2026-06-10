@@ -2724,7 +2724,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.02.34';            // bumped on each release
+const APP_VERSION='3.02.39';            // bumped on each release
 
 /* v2.62.0: Token xác thực backend — PHẢI khớp API_TOKEN trong Apps Script (Code.gs).
    Mọi request tới Apps Script tự động được gắn token qua lớp bọc fetch bên dưới.
@@ -9649,6 +9649,8 @@ const DEFAULT_EXPENSE_TYPES = [
   // TÀI CHÍNH (auto từ Banking)
   {id:'ET-INTEREST',      code:'INTEREST',      group:'FINANCE',  label:'Lãi vay ngân hàng',       icon:'💸', isPO:false, hint:'Auto tạo khi NV tích "đã trả" kỳ vay (Tab Ngân hàng)'},
   {id:'ET-BANK_FEE',      code:'BANK_FEE',      group:'FINANCE',  label:'Phí ngân hàng',           icon:'🏦', isPO:false, hint:'Phí prepay, phí chuyển tiền, phí khác từ NH'},
+  {id:'ET-FIN_OTHER',     code:'FIN_OTHER',     group:'FINANCE',  label:'Chi phí tài chính khác',  icon:'💱', isPO:false, hint:'Chênh lệch tỷ giá, phí bảo lãnh, phí L/C, lãi phạt... ngoài lãi vay & phí NH.'},
+  {id:'ET-FIN_OTHER',     code:'FIN_OTHER',     group:'FINANCE',  label:'Chi phí tài chính khác',  icon:'💱', isPO:false, hint:'Chênh lệch tỷ giá, phí bảo lãnh, chiết khấu thanh toán, lãi/phí tài chính khác...'},
   {id:'ET-TAX_NSNN',      code:'TAX_NSNN',      group:'FINANCE',  label:'Thuế & phải nộp NSNN (chung)', icon:'🏛', isPO:false, hint:'Mục chung (tương thích dữ liệu cũ). Nên chọn loại NSNN cụ thể bên dưới để link đúng tab 12 NSNN.'},
   // v2.99.38: Danh mục NSNN cụ thể — map 1-1 với NSNN_TAX_TYPES (tab 12) để NV chọn đúng, link chính xác.
   {id:'ET-TAX_IMPORT_DUTY', code:'TAX_IMPORT_DUTY', group:'FINANCE', label:'Thuế Nhập khẩu',          icon:'📦', isPO:false, nsnnType:'IMPORT_DUTY', hint:'Thuế nhập khẩu hàng hóa — phải nộp NSNN. Link tab 12 NSNN.'},
@@ -9799,6 +9801,13 @@ function apCountsInPL(r){
   //   KHÔNG áp quy tắc loại PO/tồn kho (BUNKER_PO trong YTD là nhiên liệu đã tiêu thụ).
   if(r._isYtdHistorical){
     if(_isOpManagedAp(r)) return false;  // chi hộ tàu QL hộ vẫn loại
+    return true;
+  }
+  // v3.02.38: phiếu hoàn ứng quỹ = chi phí ĐÃ THỰC CHI từ quỹ tiền mặt → vào P&L
+  //   (đã loại CapEx ở trên; PO/tồn kho hiếm khi hoàn ứng nhưng vẫn theo quy tắc chung bên dưới).
+  if(r._cashClear){
+    if(_isOpManagedAp(r)) return false;
+    if(isExpensePO(r.expenseType)) return false;
     return true;
   }
   if(isExpensePO(r.expenseType)) return false;
@@ -19363,17 +19372,23 @@ function viewCashLedger(fundId){
   let running=0;
   let rows='';
   if(!txns.length){
-    rows='<tr><td colspan="5" class="empty" style="text-align:center;color:var(--muted)">Chưa có giao dịch</td></tr>';
+    rows='<tr><td colspan="6" class="empty" style="text-align:center;color:var(--muted)">Chưa có giao dịch</td></tr>';
   } else {
     txns.forEach(t=>{
       const amt=+t.amount||0;
       running += (t.direction==='IN'? amt : -amt);
+      const isManual = (t.sourceType==='manual' || !t.sourceType);
+      const act = isManual
+        ? `<button class="icon-btn" title="Sửa" onclick="editCashTxn('${fundId}','${t.id}')">✎</button>
+           <button class="icon-btn danger" title="Xóa" onclick="deleteCashTxn('${fundId}','${t.id}')">✕</button>`
+        : `<span class="mono" style="font-size:9px;color:var(--muted)" title="Dòng tự sinh từ ${t.sourceType==='ap'?'phiếu Ứng quỹ (AP)':'hệ thống'} — sửa ở nguồn gốc">🔒</span>`;
       rows+=`<tr>
         <td style="font-family:var(--font-mono);font-size:11px">${esc(t.date||'')}</td>
         <td>${t.direction==='IN'?'<span style="color:var(--good)">Thu ▲</span>':'<span style="color:var(--bad)">Chi ▼</span>'}</td>
         <td>${esc(t.category||'')}${t.desc?`<br><span style="font-size:10px;color:var(--muted)">${esc(t.desc)}</span>`:''}</td>
         <td class="num">${t.direction==='IN'?'+':'−'}${fmtCcy(amt,t.ccy||f.ccy||'VND')}</td>
         <td class="num" style="font-weight:600">${fmtCcy(running,f.ccy||'VND')}</td>
+        <td><div class="row-actions">${act}</div></td>
       </tr>`;
     });
   }
@@ -19382,10 +19397,193 @@ function viewCashLedger(fundId){
       <b>${esc(f.name)}</b> · Số dư hiện tại: <b style="color:${(+f.balance||0)>=0?'var(--good)':'var(--bad)'}">${fmtCcy(+f.balance||0,f.ccy||'VND')}</b>
     </div>
     <div style="max-height:50vh;overflow:auto">
-      <table class="table" style="font-size:12px"><thead><tr><th>Ngày</th><th>Loại</th><th>Diễn giải</th><th class="num">Số tiền</th><th class="num">Số dư lũy kế</th></tr></thead>
+      <table class="table" style="font-size:12px"><thead><tr><th>Ngày</th><th>Loại</th><th>Diễn giải</th><th class="num">Số tiền</th><th class="num">Số dư lũy kế</th><th></th></tr></thead>
       <tbody>${rows}</tbody></table>
     </div>`;
-  openModal('📒 Sổ quỹ — '+esc(f.name),body,'<button class="btn-sec" onclick="closeModal()">Đóng</button>');
+  openModal('📒 Sổ quỹ — '+esc(f.name),body,
+    `<button class="btn-sec" onclick="addCashTxn('${fundId}','IN')" style="border-color:var(--good);color:var(--good)">▲ Ứng quỹ</button>
+     <button class="btn-sec" onclick="openCashClearModal('${fundId}')" style="border-color:var(--bad);color:var(--bad)">▼ Hoàn ứng (ghi chi phí)</button>
+     <button class="btn-sec" onclick="closeModal()">Đóng</button>`);
+}
+
+/* v3.02.37: Thêm/sửa/xóa giao dịch quỹ tiền mặt THỦ CÔNG (điều chỉnh số dư quỹ). */
+function _cashTxnModal(fundId, dir, t){
+  const f=(S.cashFunds||[]).find(x=>x.id===fundId); if(!f) return;
+  const isEdit=!!t;
+  const ccy=f.ccy||'VND';
+  const body=`
+    <div style="font-size:12px;color:var(--muted);margin-bottom:10px">Quỹ: <b>${esc(f.name)}</b> · Tiền tệ: ${ccy}</div>
+    <div class="form-grid" style="grid-template-columns:1fr 1fr">
+      <div class="field"><label>Loại</label>
+        <select id="ctx-dir">
+          <option value="IN" ${dir==='IN'?'selected':''}>▲ Ứng quỹ (tiền vào quỹ)</option>
+          <option value="OUT" ${dir==='OUT'?'selected':''}>▼ Chi (tiền ra khỏi quỹ)</option>
+        </select>
+      </div>
+      <div class="field"><label>Ngày</label><input type="text" id="ctx-date" value="${esc(t?t.date:todayISO())}" placeholder="YYYY-MM-DD"></div>
+      <div class="field"><label>Số tiền (${ccy})</label><input type="number" id="ctx-amt" class="num" value="${t?(+t.amount||0):''}" step="any"></div>
+      <div class="field"><label>Hạng mục</label><input type="text" id="ctx-cat" value="${esc(t?(t.category||''):'')}" placeholder="VD: Tạm ứng, Hoàn ứng, Chi lặt vặt"></div>
+      <div class="field span-2"><label>Diễn giải</label><input type="text" id="ctx-desc" value="${esc(t?(t.desc||''):'')}" placeholder="Ghi chú chi tiết"></div>
+    </div>`;
+  openModal((isEdit?'✎ Sửa':'+ Thêm')+' giao dịch quỹ', body,
+    `<button class="btn-sec" onclick="closeModal();viewCashLedger('${fundId}')">Hủy</button>
+     <button class="btn-primary" onclick="saveCashTxn('${fundId}','${isEdit?t.id:''}')">${isEdit?'Lưu':'Thêm'}</button>`);
+}
+function addCashTxn(fundId, dir){ _cashTxnModal(fundId, dir||'IN', null); }
+function editCashTxn(fundId, txnId){
+  const t=(S.cashTxns||[]).find(x=>x.id===txnId); if(!t){toast('Không tìm thấy giao dịch','bad');return;}
+  if(t.sourceType && t.sourceType!=='manual'){ toast('Dòng tự sinh từ nguồn khác — sửa ở nguồn gốc','bad'); return; }
+  _cashTxnModal(fundId, t.direction, t);
+}
+function saveCashTxn(fundId, txnId){
+  const f=(S.cashFunds||[]).find(x=>x.id===fundId); if(!f) return;
+  const dir=document.getElementById('ctx-dir').value;
+  const date=document.getElementById('ctx-date').value.trim()||todayISO();
+  const amt=Math.round((+document.getElementById('ctx-amt').value||0)*100)/100;
+  const cat=document.getElementById('ctx-cat').value.trim();
+  const desc=document.getElementById('ctx-desc').value.trim();
+  if(amt<=0){ toast('Số tiền phải > 0','bad'); return; }
+  S.cashTxns=S.cashTxns||[];
+  const signOf=(d,a)=> d==='IN'? a : -a;
+  if(txnId){
+    const t=S.cashTxns.find(x=>x.id===txnId); if(!t){toast('Không tìm thấy giao dịch','bad');return;}
+    // hoàn tác ảnh hưởng số dư cũ rồi áp số mới
+    f.balance=(+f.balance||0) - signOf(t.direction, +t.amount||0) + signOf(dir, amt);
+    Object.assign(t,{direction:dir,date,amount:amt,category:cat,desc,
+      updatedBy:actorName(),updatedAt:new Date().toISOString()});
+    touchRecord(t);
+  } else {
+    const t={id:uid(),fundId,date,direction:dir,amount:amt,ccy:f.ccy||'VND',
+      category:cat||(dir==='IN'?'Ứng quỹ':'Chi quỹ'),desc,
+      sourceType:'manual',sourceId:null,recordedBy:actorName(),recordedAt:new Date().toISOString()};
+    S.cashTxns.push(t);
+    f.balance=(+f.balance||0)+signOf(dir,amt);
+  }
+  touchRecord(f); saveState(); renderAll();
+  toast(txnId?'Đã lưu giao dịch':'Đã thêm giao dịch');
+  viewCashLedger(fundId);
+}
+function deleteCashTxn(fundId, txnId){
+  const f=(S.cashFunds||[]).find(x=>x.id===fundId); if(!f) return;
+  const t=(S.cashTxns||[]).find(x=>x.id===txnId); if(!t){toast('Không tìm thấy','bad');return;}
+  if(t.sourceType && t.sourceType!=='manual'){ toast('Dòng tự sinh từ nguồn khác — không xóa trực tiếp','bad'); return; }
+  if(!confirm(`Xóa giao dịch ${t.direction==='IN'?'Thu':'Chi'} ${(+t.amount||0).toLocaleString('vi-VN')} ${t.ccy||f.ccy||'VND'} ngày ${t.date}?\nSố dư quỹ sẽ được điều chỉnh lại.`)) return;
+  // hoàn tác ảnh hưởng số dư
+  f.balance=(+f.balance||0) - (t.direction==='IN'? (+t.amount||0) : -(+t.amount||0));
+  S.cashTxns=S.cashTxns.filter(x=>x.id!==txnId);
+  touchRecord(f); saveState(); renderAll();
+  toast('Đã xóa giao dịch');
+  viewCashLedger(fundId);
+}
+
+/* v3.02.38: PHIẾU HOÀN ỨNG (giảm quỹ = ghi chi phí vào P&L).
+   Nhiều dòng, mỗi dòng = 1 loại CP + tàu/dự án + số tiền. Mỗi dòng tạo 1 AP _cashClear
+   (approved + đã TT 100% từ quỹ → vào P&L, ẨN khỏi Sổ Phải trả). Tổng các dòng → giảm số dư quỹ. */
+let _cashClearState=null;
+function _ccNewLine(){ return {tmpId:'C'+Math.random().toString(36).slice(2,8), expenseType:'', objType:'', objId:'', segment:'', amount:0, vatPercent:0, desc:''}; }
+function openCashClearModal(fundId){
+  const f=(S.cashFunds||[]).find(x=>x.id===fundId); if(!f){toast('Không tìm thấy quỹ','bad');return;}
+  // quyền: chỉ người được phân quyền nhập chi quỹ — dùng canCheckAcc (KT) / canApproveL1 (KTT) / admin
+  if(!(CURRENT_ROLE==='admin' || (typeof canCheckAcc==='function'&&canCheckAcc()) || (typeof canApproveL1==='function'&&canApproveL1()) || (typeof canConfirmPayment==='function'&&canConfirmPayment()))){
+    toast('Bạn không có quyền nhập phiếu hoàn ứng — liên hệ admin','bad'); return;
+  }
+  _cashClearState={fundId, date:todayISO(), noteHeader:'', lines:[_ccNewLine()]};
+  _renderCashClearModal();
+}
+function _renderCashClearModal(){
+  const st=_cashClearState; if(!st) return;
+  const f=(S.cashFunds||[]).find(x=>x.id===st.fundId); if(!f) return;
+  const ccy=f.ccy||'VND';
+  const ets=(typeof activeExpenseTypes==='function'?activeExpenseTypes():[]).filter(t=>!t.isBODOnly);
+  const etOpts=t=>ets.map(e=>`<option value="${e.code}" ${e.code===t.expenseType?'selected':''}>${esc(e.label)}</option>`).join('');
+  const vessels=(S.vessels||[]); const projects=(S.projects||[]);
+  function objOpts(t){
+    let o='<option value="">— Không gắn (CP chung quỹ) —</option>';
+    o+='<optgroup label="Tàu">'+vessels.map(v=>`<option value="V:${v.id}" ${t.objType==='V'&&t.objId===v.id?'selected':''}>⛵ ${esc(v.name)}</option>`).join('')+'</optgroup>';
+    o+='<optgroup label="Dự án">'+projects.map(p=>`<option value="P:${p.id}" ${t.objType==='P'&&t.objId===p.id?'selected':''}>⚙ ${esc((p.code?p.code+' ':'')+(p.name||''))}</option>`).join('')+'</optgroup>';
+    return o;
+  }
+  let total=0;
+  const rows=st.lines.map((t,i)=>{
+    const net=+t.amount||0; const vat=net*(+t.vatPercent||0)/100; total+=net+vat;
+    return `<tr>
+      <td style="padding:3px"><select onchange="_ccSet(${i},'expenseType',this.value)" style="font-size:11px;width:150px">${etOpts(t)}</select></td>
+      <td style="padding:3px"><select onchange="_ccSetObj(${i},this.value)" style="font-size:11px;width:160px">${objOpts(t)}</select></td>
+      <td style="padding:3px"><input type="number" value="${net||''}" oninput="_ccSet(${i},'amount',this.value)" class="num" style="font-size:11px;width:110px" step="any"></td>
+      <td style="padding:3px"><input type="number" value="${+t.vatPercent||0}" oninput="_ccSet(${i},'vatPercent',this.value)" class="num" style="font-size:11px;width:50px" step="any"></td>
+      <td style="padding:3px"><input type="text" value="${esc(t.desc||'')}" oninput="_ccSet(${i},'desc',this.value)" placeholder="Diễn giải" style="font-size:11px;width:170px"></td>
+      <td style="padding:3px">${st.lines.length>1?`<button class="icon-btn danger" onclick="_ccDelLine(${i})" title="Xóa dòng">✕</button>`:''}</td>
+    </tr>`;
+  }).join('');
+  const body=`
+    <div style="font-size:12px;color:var(--muted);margin-bottom:10px">
+      Quỹ: <b>${esc(f.name)}</b> · Số dư: <b style="color:${(+f.balance||0)>=0?'var(--good)':'var(--bad)'}">${fmtCcy(+f.balance||0,ccy)}</b> · Tiền tệ: ${ccy}<br>
+      <span style="font-size:11px">Mỗi dòng = 1 khoản chi phí (ghi thẳng P&L). Tổng các dòng sẽ TRỪ vào quỹ. Không qua duyệt.</span>
+    </div>
+    <div class="form-grid" style="grid-template-columns:1fr 2fr;margin-bottom:10px">
+      <div class="field"><label>Ngày hoàn ứng</label><input type="text" id="cc-date" value="${esc(st.date)}" oninput="_cashClearState.date=this.value" placeholder="YYYY-MM-DD"></div>
+      <div class="field"><label>Diễn giải chung (tùy chọn)</label><input type="text" id="cc-note" value="${esc(st.noteHeader)}" oninput="_cashClearState.noteHeader=this.value" placeholder="VD: Hoàn ứng đợt tháng 5"></div>
+    </div>
+    <div style="max-height:40vh;overflow:auto;border:1px solid var(--rule)">
+      <table class="table" style="font-size:11px"><thead><tr style="background:var(--paper-2)">
+        <th style="padding:5px">Loại chi phí</th><th style="padding:5px">Tàu / Dự án</th><th style="padding:5px">Số tiền (${ccy})</th><th style="padding:5px">%VAT</th><th style="padding:5px">Diễn giải</th><th></th>
+      </tr></thead><tbody>${rows}</tbody></table>
+    </div>
+    <div style="margin-top:8px;display:flex;justify-content:space-between;align-items:center">
+      <button class="btn-sec" onclick="_ccAddLine()" style="font-size:12px">+ Thêm dòng</button>
+      <div style="font-size:13px">Tổng hoàn ứng: <b style="color:var(--bad)">${fmtCcy(total,ccy)}</b></div>
+    </div>`;
+  openModal('▼ Phiếu hoàn ứng — '+esc(f.name), body,
+    `<button class="btn-sec" onclick="closeModal();viewCashLedger('${st.fundId}')">Hủy</button>
+     <button class="btn-primary" onclick="saveCashClear()">Ghi chi phí + Trừ quỹ</button>`);
+}
+function _ccSet(i,k,v){ const t=_cashClearState.lines[i]; if(!t)return; t[k]=(k==='amount'||k==='vatPercent')?(+v||0):v; if(k==='amount'||k==='vatPercent')_renderCashClearModal(); }
+function _ccSetObj(i,v){ const t=_cashClearState.lines[i]; if(!t)return; if(!v){t.objType='';t.objId='';} else {const[a,b]=v.split(':');t.objType=a;t.objId=b;} }
+function _ccAddLine(){ _cashClearState.lines.push(_ccNewLine()); _renderCashClearModal(); }
+function _ccDelLine(i){ _cashClearState.lines.splice(i,1); _renderCashClearModal(); }
+function saveCashClear(){
+  const st=_cashClearState; if(!st) return;
+  const f=(S.cashFunds||[]).find(x=>x.id===st.fundId); if(!f){toast('Không tìm thấy quỹ','bad');return;}
+  const ccy=f.ccy||'VND';
+  const valid=st.lines.filter(l=>l.expenseType && (+l.amount||0)>0);
+  if(!valid.length){ toast('Cần ít nhất 1 dòng có loại CP + số tiền','bad'); return; }
+  const me=actorName(); const nowIso=new Date().toISOString();
+  let total=0; let n=0;
+  S.payables=S.payables||[];
+  const batchId='CASHCLEAR-'+Math.random().toString(36).slice(2,8);
+  valid.forEach(l=>{
+    const net=+l.amount||0; const vatPct=+l.vatPercent||0; const vat=Math.round(net*vatPct)/100; const gross=net+vat;
+    total+=gross;
+    const v = l.objType==='V' ? (S.vessels||[]).find(x=>x.id===l.objId) : null;
+    const p = l.objType==='P' ? (S.projects||[]).find(x=>x.id===l.objId) : null;
+    let seg = (v&&v.segment) || (p&&p.segment) || '';
+    if(!seg && (v||p)) seg='VESSEL_SERVICE';
+    const rec={
+      id:uid(), partner:'[Hoàn ứng quỹ '+(f.name||'')+']',
+      invoiceNo:'CASH-'+batchId.slice(-6)+'-'+(l.expenseType||''),
+      desc:l.desc || ('Hoàn ứng quỹ · '+((getExpenseType&&getExpenseType(l.expenseType)||{}).label||l.expenseType)+(v?' · '+v.name:'')+(p?' · '+(p.code||p.name):'')),
+      expenseType:l.expenseType, amount:gross, amountNet:net, vatAmount:vat, vatPercent:vatPct, ccy,
+      vesselId:v?v.id:'', projectId:p?p.id:'', segment:seg||'OTHER',
+      issueDate:st.date, dueDate:st.date, dueMonth:(st.date||'').slice(0,7),
+      status:'approved', submittedBy:me, submittedAt:nowIso,
+      approvedL1By:'(Hoàn ứng — '+me+')', approvedL1At:nowIso,
+      approvedL2By:'(Hoàn ứng — '+me+')', approvedL2At:nowIso,
+      payments:[{date:st.date, amount:gross, ccy, note:'Chi từ quỹ '+(f.name||'')}],
+      _cashClear:true, _cashFundId:f.id, _batchId:batchId,
+      createdBy:me, createdAt:nowIso
+    };
+    touchRecord(rec); S.payables.push(rec); n++;
+  });
+  // giảm quỹ + ghi 1 dòng sổ quỹ tổng
+  f.balance=(+f.balance||0)-total;
+  S.cashTxns=S.cashTxns||[];
+  S.cashTxns.push({id:uid(),fundId:f.id,date:st.date,direction:'OUT',amount:total,ccy,
+    category:'Hoàn ứng ('+n+' khoản)',desc:st.noteHeader||('Hoàn ứng — ghi '+n+' khoản chi phí'),
+    sourceType:'cash_clear',sourceId:batchId,recordedBy:me,recordedAt:nowIso});
+  touchRecord(f); saveState(); renderAll();
+  toast(`Đã ghi ${n} khoản chi phí (${fmtCcy(total,ccy)}) + trừ quỹ`,'good');
+  _cashClearState=null;
+  viewCashLedger(f.id);
 }
 
 /* v3.01.33: Phân loại kỳ hạn vay — ưu tiên l.loanType nếu có, không thì auto theo số kỳ trả.
@@ -21795,6 +21993,7 @@ function renderArAp(kind){
   const hideYtdHistorical = isAp && !stFilter && !creatorFilter && !vendorFilter && !vpFilter && !etypeFilter;
   let rows=all.filter(r=>{
     if(hideYtdHistorical && r && r._isYtdHistorical) return false;
+    if(isAp && r && r._cashClear) return false;  // v3.02.38: phiếu hoàn ứng quỹ — ẩn khỏi Sổ Phải trả (đã chi qua quỹ)
     if(stFilter){
       if(isPaymentFilter){
         // Chỉ áp filter thanh toán cho các bản ghi ĐÃ DUYỆT (đã vào sổ)
@@ -36013,7 +36212,12 @@ function excelConfirmImport(){
       if(!d.segment){
         const v = d._vesselId ? (S.vessels||[]).find(x=>x.id===d._vesselId) : null;
         const p = d._projectId ? (S.projects||[]).find(x=>x.id===d._projectId) : null;
-        record.segment = (v && v.segment) || (p && p.segment) || 'OTHER';
+        // v3.02.35: nếu ĐÃ gắn tàu/dự án → KHÔNG bao giờ là OTHER/overhead.
+        // Ưu tiên segment của tàu, rồi dự án; nếu cả hai thiếu segment mà có tàu → mặc định VESSEL_SERVICE
+        // (tàu dịch vụ); chỉ khi THẬT SỰ không có tàu lẫn dự án mới để 'OTHER' (CP chung).
+        let seg = (v && v.segment) || (p && p.segment) || '';
+        if(!seg && (v || p)) seg = 'VESSEL_SERVICE';   // có đối tượng nhưng thiếu segment → tàu dịch vụ
+        record.segment = seg || 'OTHER';
       }
     }
     // v3.01.94: Import Dock/SCL có Loại CP=Dock + tàu → tự gán dockAssetId từ TSCĐ của tàu
