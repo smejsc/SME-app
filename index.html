@@ -1843,7 +1843,10 @@ body.readonly-mode::before{
   </div>
 
   <div class="section">
-    <div class="section-head"><div class="section-title"><span class="tag">∑</span>Trạng thái số dư</div></div>
+    <div class="section-head" style="display:flex;justify-content:space-between;align-items:center">
+      <div class="section-title"><span class="tag">∑</span>Trạng thái số dư</div>
+      <button class="btn-sec" onclick="internalSummaryReport()" title="Báo cáo PDF tóm tắt nội bộ — tổng hợp các tàu QL hộ" style="font-size:12px">📑 Báo cáo tóm tắt (PDF)</button>
+    </div>
     <div class="section-body"><table class="tbl" id="op-vessel-table"></table></div>
   </div>
 
@@ -2738,7 +2741,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.02.72';            // bumped on each release
+const APP_VERSION='3.02.73';            // bumped on each release
 
 /* v2.62.0: Token xác thực backend — PHẢI khớp API_TOKEN trong Apps Script (Code.gs).
    Mọi request tới Apps Script tự động được gắn token qua lớp bọc fetch bên dưới.
@@ -25727,6 +25730,100 @@ function renderOpVessels(){
   });
   html+='</tbody>';
   tbl.innerHTML=html;
+}
+
+/* v3.02.73: BÁO CÁO TÓM TẮT NỘI BỘ (PDF) — tổng hợp các tàu QL hộ (tab 06).
+   Cấu trúc: Tổng thu · Đã chi (CP hoạt động) · Phí QL lũy kế · Số dư thực tế ·
+   Dự kiến chi (chi tiết lương) · Số dư cần lưu ý (= thực tế − dự kiến). */
+function internalSummaryReport(){
+  const allowedIds=(typeof userAssignedOpVesselIds==='function')?userAssignedOpVesselIds():[];
+  const vs=(S.opVessels||[]).filter(v=>allowedIds.includes(v.id));
+  if(!vs.length){ toast('Không có tàu QL hộ trong phạm vi','warn'); return; }
+  const co=S.companyInfo||{};
+  const fxr=+S.fxRate||0;
+  const f=(n)=>fmtCcy(n,'USD');
+  const fv=(n)=>fxr>0?(n*fxr).toLocaleString('vi-VN',{maximumFractionDigits:0})+'₫':'';
+
+  // gom số liệu từng tàu
+  let gThu=0,gChiReal=0,gMgmtIssued=0,gMgmtPending=0,gBudget=0,gBalReal=0,gBalAfter=0;
+  const rowsHtml = vs.map(v=>{
+    const bd=opBalanceBreakdown(v.id);
+    const bal=opBalance(v.id);                 // sau dự kiến (đã trừ phí QL pending)
+    const balReal=bal+(bd.chiBudget||0);       // số dư thực (chưa trừ dự kiến)
+    const issued=opMgmtFeeIssued(v.id);
+    const issuedUsd = (v.ccy==='USD')?issued:(fxr>0?issued/fxr:issued);
+    // chi tiết lương thuyền viên trong dự kiến
+    let crewBudget=0;
+    (S.opTransactions||[]).filter(t=>t.vesselId===v.id&&t.type==='OUT'&&t._isBudget&&t.opCat==='CREW_SALARY').forEach(t=>{ crewBudget+=opTxUsd(t); });
+    gThu+=bd.thu; gChiReal+=bd.chiReal; gMgmtIssued+=issuedUsd; gMgmtPending+=bd.mgmtPending;
+    gBudget+=(bd.chiBudget||0); gBalReal+=balReal; gBalAfter+=bal;
+    const warn = bal<opMinUsd(v);
+    return `<tr>
+      <td style="padding:7pt 10pt"><b>${esc(v.name)}</b><div style="font-size:8.5pt;color:#666">${esc(v.owner||'')}</div></td>
+      <td style="padding:7pt 10pt;text-align:right;color:#2d6a6a">${f(bd.thu)}</td>
+      <td style="padding:7pt 10pt;text-align:right;color:#a8362b">${f(bd.chiReal)}</td>
+      <td style="padding:7pt 10pt;text-align:right;color:#8a5a1e">${f(bd.mgmtPending+issuedUsd)}${bd.mgmtPending>0?`<div style="font-size:8pt;color:#999">tự tính ${f(bd.mgmtPending)}</div>`:''}</td>
+      <td style="padding:7pt 10pt;text-align:right;font-weight:700;color:${balReal<0?'#a8362b':'#1c3a5c'}">${f(balReal)}</td>
+      <td style="padding:7pt 10pt;text-align:right;color:#8a5a1e">${bd.chiBudget>0?f(bd.chiBudget):'—'}${crewBudget>0?`<div style="font-size:8pt;color:#999">lương ${f(crewBudget)}</div>`:''}</td>
+      <td style="padding:7pt 10pt;text-align:right;font-weight:700;color:${bal<0?'#a8362b':'#2d6a6a'}">${f(bal)}${warn?'<div style="font-size:8pt;color:#a8362b">⚠ dưới ngưỡng</div>':''}</td>
+    </tr>`;
+  }).join('');
+
+  const html=`
+  <div style="font-family:Arial,sans-serif;max-width:900px;margin:0 auto;padding:24pt;color:#222">
+    <div style="display:flex;justify-content:space-between;align-items:flex-start;border-bottom:2pt solid #1c3a5c;padding-bottom:10pt;margin-bottom:14pt">
+      <div>
+        <div style="font-size:16pt;font-weight:700;color:#1c3a5c">${esc(co.name||'CTCP HÀNG HẢI VÀ NĂNG LƯỢNG HẢI MÃ')}</div>
+        <div style="font-size:9pt;color:#666">${esc(co.addr||'')}</div>
+      </div>
+      <div style="text-align:right;font-size:8.5pt;color:#666">
+        <div><b>BÁO CÁO NỘI BỘ</b></div>
+        <div>Ngày lập: ${todayISO()}</div>
+        <div>Người lập: ${esc(actorName())}</div>
+      </div>
+    </div>
+    <div style="text-align:center;font-size:14pt;font-weight:700;color:#1c3a5c;margin-bottom:4pt">TÓM TẮT QUẢN LÝ VẬN HÀNH TÀU QL HỘ</div>
+    <div style="text-align:center;font-size:9pt;color:#888;margin-bottom:16pt">Đơn vị: USD${fxr>0?` · tỷ giá tham chiếu ${fxr.toLocaleString('vi-VN')}₫/USD`:''} · ${vs.length} tàu</div>
+
+    <table style="width:100%;border-collapse:collapse;font-size:9.5pt">
+      <thead>
+        <tr style="background:#1c3a5c;color:#fff">
+          <th style="padding:8pt 10pt;text-align:left">Tàu / Chủ tàu</th>
+          <th style="padding:8pt 10pt;text-align:right">Tổng thu</th>
+          <th style="padding:8pt 10pt;text-align:right">Đã chi (CP HĐ)</th>
+          <th style="padding:8pt 10pt;text-align:right">Phí QL lũy kế</th>
+          <th style="padding:8pt 10pt;text-align:right">Số dư thực tế</th>
+          <th style="padding:8pt 10pt;text-align:right">Dự kiến chi</th>
+          <th style="padding:8pt 10pt;text-align:right">Số dư cần lưu ý</th>
+        </tr>
+      </thead>
+      <tbody>${rowsHtml}</tbody>
+      <tfoot>
+        <tr style="background:rgba(28,58,92,.08);border-top:2pt solid #1c3a5c;font-weight:700">
+          <td style="padding:9pt 10pt">TỔNG CỘNG (${vs.length} tàu)</td>
+          <td style="padding:9pt 10pt;text-align:right;color:#2d6a6a">${f(gThu)}</td>
+          <td style="padding:9pt 10pt;text-align:right;color:#a8362b">${f(gChiReal)}</td>
+          <td style="padding:9pt 10pt;text-align:right;color:#8a5a1e">${f(gMgmtPending+gMgmtIssued)}</td>
+          <td style="padding:9pt 10pt;text-align:right;color:${gBalReal<0?'#a8362b':'#1c3a5c'}">${f(gBalReal)}</td>
+          <td style="padding:9pt 10pt;text-align:right;color:#8a5a1e">${f(gBudget)}</td>
+          <td style="padding:9pt 10pt;text-align:right;color:${gBalAfter<0?'#a8362b':'#2d6a6a'}">${f(gBalAfter)}</td>
+        </tr>
+      </tfoot>
+    </table>
+
+    <div style="margin-top:14pt;padding:10pt 12pt;background:#f7f4ee;border-left:3pt solid #1c3a5c;font-size:9pt;color:#444;line-height:1.6">
+      <b>Diễn giải:</b><br>
+      • <b>Số dư thực tế</b> = Tổng thu − Đã chi (chi phí hoạt động đã phát sinh) − Phí QL lũy kế. Là tiền chủ tàu thực còn ở ${esc(co.short||'Seahorse')}.<br>
+      • <b>Dự kiến chi</b> = các khoản sắp chi chưa phát sinh (gồm lương thuyền viên kỳ tới nếu có).<br>
+      • <b>Số dư cần lưu ý</b> = Số dư thực tế − Dự kiến chi. Nếu âm → cần nhắc chủ tàu nạp thêm tiền ứng trước trước khi chi.
+    </div>
+    <div style="margin-top:18pt;font-size:8pt;color:#999;font-style:italic;text-align:center">Báo cáo nội bộ — tạo tự động bởi hệ thống Seahorse Manager · ${todayISO()}</div>
+  </div>`;
+
+  const pa=document.getElementById('print-area');
+  if(!pa){ toast('Không tìm thấy vùng in','bad'); return; }
+  pa.innerHTML=html;
+  setTimeout(()=>{ window.print(); }, 120);
 }
 
 /* v2.71.5: Modal phát hành hóa đơn phí QL cho 1 tàu QL hộ.
