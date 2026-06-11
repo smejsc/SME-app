@@ -1305,6 +1305,12 @@ body.readonly-mode::before{
               <option value="BUDGET">📋 Dự kiến chi trong tháng</option>
             </select>
           </div>
+          <div class="field"><label>Loại khoản chi <span style="font-size:9px;color:var(--accent);font-weight:600">v3.02.61</span></label>
+            <select id="opt-cat" title="Lương thuyền viên sẽ tách dòng/section riêng trong báo cáo đối chiếu chủ tàu.">
+              <option value="" selected>Chi hộ thường</option>
+              <option value="CREW_SALARY">💵 Lương thuyền viên</option>
+            </select>
+          </div>
           <div class="field" style="grid-column:span 2"><label>Tên NCC / Nhà cung cấp</label><input type="text" id="opt-vendor" placeholder="VD: Cty CP Cảng Vũng Tàu, Cty TNHH Cung ứng Sài Gòn..."></div>
           <div class="field"><label>Số hợp đồng</label><input type="text" id="opt-contract" placeholder="VD: HD-2026-001"></div>
           <div class="field"><label>Số hóa đơn</label><input type="text" id="opt-invoice" placeholder="VD: HD-VAT-12345"></div>
@@ -2731,7 +2737,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.02.58';            // bumped on each release
+const APP_VERSION='3.02.64';            // bumped on each release
 
 /* v2.62.0: Token xác thực backend — PHẢI khớp API_TOKEN trong Apps Script (Code.gs).
    Mọi request tới Apps Script tự động được gắn token qua lớp bọc fetch bên dưới.
@@ -7598,6 +7604,41 @@ const WF_STATES={
 };
 function wfState(r){return r&&r.status?(WF_STATES[r.status]||WF_STATES.draft):WF_STATES.draft;}
 function wfStatus(r){return (r&&r.status)||'draft';}
+/* v3.02.64: TRẠNG THÁI HỒ SƠ THỐNG NHẤT (cho NV nhìn 1 kiểu trên mọi tab chi).
+   Chỉ đổi NHÃN hiển thị — KHÔNG động cơ chế duyệt (AP 4 cấp / Chi hộ 2 bước vẫn chạy như cũ).
+   Mốc: Nháp → KT đang kiểm → Chờ KTT duyệt → Chờ chi tiền → Đã TT.
+   Trả {label, who, cls, icon}. who = tên người ĐANG GIỮ hồ sơ (đang chờ ai xử lý). */
+function docStatusInfo(r){
+  if(!r) return {label:'—', who:'', cls:'', icon:''};
+  const st=wfStatus(r);
+  const paidEnough = (typeof arRemaining==='function') ? (arRemaining(r)<=0.001) : false;
+  // ĐÃ thanh toán đủ
+  if(st==='approved' && paidEnough){
+    const d=(r.payments&&r.payments.length)?(r.payments[r.payments.length-1].date||''):'';
+    return {label:'Đã TT', who:d?d:'', cls:'chip-good', icon:'✅'};
+  }
+  switch(st){
+    case 'draft':
+      return {label:'Nháp', who:esc(r.submittedBy||r.createdBy||''), cls:'', icon:'📝'};
+    case 'pending_acc':
+      return {label:'KT đang kiểm', who:esc(r.submittedBy||''), cls:'chip-warn', icon:'🔍'};
+    case 'pending_l1':
+    case 'pending_l2':
+      return {label:'Chờ KTT duyệt', who:esc(r.accCheckedBy||r.submittedBy||''), cls:'chip-warn', icon:'⊳'};
+    case 'approved':  // đã duyệt nhưng còn nợ → chờ KT chi tiền
+      return {label:'Chờ chi tiền', who:esc(r.approvedL2By||r.approvedL1By||''), cls:'chip-warn', icon:'💰'};
+    case 'rejected':
+      return {label:'Bị từ chối', who:'', cls:'chip-bad', icon:'✕'};
+    default:
+      return {label:(wfState(r).label||st), who:'', cls:'', icon:''};
+  }
+}
+function docStatusBadge(r){
+  const i=docStatusInfo(r);
+  const who = i.who ? ` · <span style="font-weight:400;opacity:.85">${i.who}</span>` : '';
+  const tip = `Trạng thái hồ sơ: ${i.label}${i.who?' (đang ở: '+i.who.replace(/<[^>]+>/g,'')+')':''}`;
+  return `<span class="chip ${i.cls}" style="font-size:10px" title="${tip}">${i.icon} ${i.label}${who}</span>`;
+}
 function wfBadge(r){
   const s=wfState(r);
   let title=s.label;
@@ -16706,7 +16747,7 @@ function renderDeptExpense(prefix, origin, pageId){
       <td class="r num" style="color:var(--muted);font-size:11px">${vat>0?fmt(vat,r.ccy):'—'}</td>
       <td class="r num" style="font-weight:600">${fmt(tot,r.ccy)}</td>
       <td class="r num" style="font-weight:600;color:${rem>0?'var(--bad)':'var(--muted)'}">${fmt(rem,r.ccy)}</td>
-      <td class="c">${wfBadge(r)}</td>
+      <td class="c">${docStatusBadge(r)}<div style="margin-top:2px">${wfBadge(r)}</div></td>
       <td><div class="row-actions">${actionBtns.join('')}</div></td>
     </tr>`;
   });
@@ -17174,7 +17215,17 @@ function approvalBulkApprove(){
 
   const candidates=approvalGetCandidates();
   const records=candidates.filter(c=>APPROVAL_SELECTED.has(c.id));
-  const total=records.reduce((s,c)=>s+toDisplay(+c.record.amountGross||+c.record.amount||0, c.record.ccy||'USD'),0);
+  // v3.02.59: Duyệt L1/L2 = duyệt CÔNG NỢ thanh toán. Hộp thoại hiện:
+  //   (1) Giá trị thanh toán ĐỢT NÀY (dueAmount KTT đề xuất)  (2) Công nợ CÒN LẠI (tổng − đã trả).
+  const dueThis=records.reduce((s,c)=>s+toDisplay(+c.record.dueAmount||0, c.record.ccy||'USD'),0);
+  // Công nợ còn lại SAU khi duyệt đợt này = (tổng − đã trả) − đợt này
+  const remainTotal=records.reduce((s,c)=>{
+    const r=c.record;
+    const remNow=(typeof arRemaining==='function') ? arRemaining(r) : (+r.amountGross||+r.amount||0);
+    const after = remNow - (+r.dueAmount||0);
+    return s+toDisplay(after, r.ccy||'USD');
+  },0);
+  const total=remainTotal;  // fallback cho các chỗ khác dùng biến total
 
   const actionLabel = lvl==='pending_acc' ? 'Trình ký (đẩy lên L1)'
                     : lvl==='pending_l1' ? 'Duyệt L1'
@@ -17182,9 +17233,15 @@ function approvalBulkApprove(){
   const nextStatus = lvl==='pending_acc' ? 'Trình ký (chờ L1)'
                    : lvl==='pending_l1' ? 'Chờ L2'
                    : 'Đã duyệt (LOCK, vào BI)';
+  const dueBlock = dueThis>0.001
+    ? `<div style="padding:8px 12px;background:rgba(184,71,46,.08);border-left:3px solid var(--accent);border-radius:3px;margin-bottom:8px">
+         <div style="font-size:13px"><b style="color:var(--accent)">Giá trị thanh toán đợt này: <span style="font-family:var(--font-mono)">${fmt(dueThis)}</span></b></div>
+         <div style="font-size:12px;color:var(--muted);margin-top:2px">Công nợ còn lại (sau đợt này): <b style="font-family:var(--font-mono)">${fmt(remainTotal)}</b></div>
+       </div>`
+    : `<div style="margin-bottom:8px">Công nợ còn lại (cần thanh toán): <b style="font-family:var(--font-mono)">${fmt(remainTotal)}</b></div>`;
   confirmDialog(
     `${actionLabel} ${ids.length} bút toán?`,
-    `Tổng giá trị: <b style="font-family:var(--font-mono)">${fmt(total)}</b><br>Sau khi xử lý, các bút toán sẽ chuyển sang trạng thái <b>${nextStatus}</b>.`,
+    `${dueBlock}Sau khi xử lý, các bút toán sẽ chuyển sang trạng thái <b>${nextStatus}</b>.`,
     null,
     ()=>{
       let ok=0, fail=0;
@@ -18261,7 +18318,7 @@ function renderVesselExpense(){
       <td class="r num" style="color:var(--muted);font-size:11px">${vat>0?fmt(vat,r.ccy):'—'}</td>
       <td class="r num" style="font-weight:600">${fmt(tot,r.ccy)}</td>
       <td class="r num" style="font-weight:600;color:${rem>0?'var(--bad)':'var(--muted)'}">${fmt(rem,r.ccy)}</td>
-      <td class="c">${wfBadge(r)}</td>
+      <td class="c">${docStatusBadge(r)}<div style="margin-top:2px">${wfBadge(r)}</div></td>
       <td><div class="row-actions">${actionBtns.join('')}</div></td>
     </tr>`;
   });
@@ -22346,8 +22403,8 @@ function renderArAp(kind){
         <div style="font-size:9px;color:var(--muted)" title="Net ${fmt(net,r.ccy)} · VAT ${vat>0?fmt(vat,r.ccy):'—'}">net ${fmt(net,r.ccy)}${vat>0?' · vat '+fmt(vat,r.ccy):''}</div>
       </td>
       <td class="c">
-        <div><span class="chip ${st.cls}" style="font-size:10px">${st.label}</span></div>
-        <div style="margin-top:3px">${wfBadge(r)}</div>
+        <div>${docStatusBadge(r)}</div>
+        <div style="margin-top:3px"><span class="chip ${st.cls}" style="font-size:9px;opacity:.75">${st.label}</span> ${wfBadge(r)}</div>
       </td>
       <td><div class="row-actions">${actionBtns.join('')}</div></td>
     </tr>`;
@@ -25877,6 +25934,7 @@ function addOpTx(){
   // v2.99.31: Tính chất khoản chi hộ — Chi thực (ACTUAL) vs Dự kiến chi (BUDGET).
   // BUDGET vẫn tính vào opBalance (khoá tiền chủ tàu), nhưng hiện riêng cột "Dự kiến chi".
   const _isBudget = isChi && ((document.getElementById('opt-budget')||{}).value === 'BUDGET');
+  const opCat = isChi ? ((document.getElementById('opt-cat')||{}).value||'') : '';  // v3.02.61: CREW_SALARY = lương thuyền viên
   S.opTransactions.push({
     id:uid(),
     date:document.getElementById('opt-date').value||todayISO(),
@@ -25894,6 +25952,7 @@ function addOpTx(){
     contractNo,    // v1.40.1
     invoiceNo,     // v1.40.1
     _isBudget,     // v2.99.31: true = dự kiến chi trong tháng (chưa phát sinh thực)
+    opCat,         // v3.02.61: '' = chi hộ thường, 'CREW_SALARY' = lương thuyền viên (tách riêng báo cáo)
     paid:false,
     paidDate:'',
     bankFee:0,
@@ -25914,6 +25973,7 @@ function addOpTx(){
     document.getElementById('opt-invoice').value='';
     const vp=document.getElementById('opt-vat-percent'); if(vp) vp.value='0';  // v2.70.0
     const bg=document.getElementById('opt-budget'); if(bg) bg.value='ACTUAL';  // v2.99.31
+    const oc=document.getElementById('opt-cat'); if(oc) oc.value='';  // v3.02.61
     opVatRecalc();
   }
   toast('Đã ghi nhận'); renderAll();
@@ -26290,6 +26350,12 @@ function editOpFees(id){
       <div style="font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--accent);font-weight:600;margin-bottom:8px">Chứng từ chi hộ</div>
       <div class="form-grid" style="grid-template-columns:1fr 1fr">
         <div class="field" style="grid-column:span 2"><label>Tên NCC</label><input type="text" id="op-edit-vendor" value="${(t.vendor||'').replace(/"/g,'&quot;')}" placeholder="VD: Cty CP Cảng Vũng Tàu"></div>
+        <div class="field"><label>Loại khoản chi</label>
+          <select id="op-edit-cat">
+            <option value="" ${!t.opCat?'selected':''}>Chi hộ thường</option>
+            <option value="CREW_SALARY" ${t.opCat==='CREW_SALARY'?'selected':''}>💵 Lương thuyền viên</option>
+          </select>
+        </div>
         <div class="field"><label>Số hợp đồng</label><input type="text" id="op-edit-contract" value="${(t.contractNo||'').replace(/"/g,'&quot;')}" placeholder="HD-2026-001"></div>
         <div class="field"><label>Số hóa đơn</label><input type="text" id="op-edit-invoice" value="${(t.invoiceNo||'').replace(/"/g,'&quot;')}" placeholder="HD-VAT-12345"></div>
         <div class="field"><label>Thuế suất VAT %</label>
@@ -26374,6 +26440,7 @@ function saveOpEditFull(id){
   // v1.40.1: 3 trường chứng từ (chỉ lưu nếu Chi hộ)
   const isChi = type==='OUT';
   const vendor = isChi ? (document.getElementById('op-edit-vendor')?.value||'').trim() : '';
+  const opCat = isChi ? ((document.getElementById('op-edit-cat')||{}).value||'') : '';  // v3.02.61
   const contractNo = isChi ? (document.getElementById('op-edit-contract')?.value||'').trim() : '';
   const invoiceNo = isChi ? (document.getElementById('op-edit-invoice')?.value||'').trim() : '';
   if(!date){err.textContent='Nhập ngày phát sinh';return;}
@@ -26400,7 +26467,7 @@ function saveOpEditFull(id){
     amountUsd = amount/txFx;
   }
   else { if(txFx<=0) txFx=(+S.fxRate||25000); amountUsd = amount/txFx; }
-  Object.assign(t,{date,vesselId,type,amount,ccy:ccyT,fxToUsd:txFx,amountUsd,desc,paidDate,bankFee,otherFee,feeCcy,feeFxToUsd,feeNote,vendor,contractNo,invoiceNo,vatPercent,vatAmount,amountGross});
+  Object.assign(t,{date,vesselId,type,amount,ccy:ccyT,fxToUsd:txFx,amountUsd,desc,paidDate,bankFee,otherFee,feeCcy,feeFxToUsd,feeNote,vendor,contractNo,invoiceNo,vatPercent,vatAmount,amountGross,opCat});
   touchRecord(t);  // v1.38.4
   saveState();closeModal();renderAll();toast('Đã cập nhật');
 }
@@ -27023,15 +27090,19 @@ function generateOpReport(){
     const inRows=period.filter(x=>x.type==='IN');
     // v2.99.31: tách Chi hộ THỰC (đã/đang chi) vs DỰ KIẾN CHI (_isBudget — chưa phát sinh).
     // Dự kiến VẪN trừ vào tồn cuối kỳ (chủ tàu thấy ngân sách còn lại sau khi trừ cả khoản sắp chi).
-    const outRows=period.filter(x=>x.type==='OUT' && !x._isBudget);
+    // v3.02.61: tách thêm LƯƠNG THUYỀN VIÊN (opCat==='CREW_SALARY') thành section riêng.
+    const outAll=period.filter(x=>x.type==='OUT' && !x._isBudget);
+    const outRows=outAll.filter(x=>x.opCat!=='CREW_SALARY');
+    const crewRows=outAll.filter(x=>x.opCat==='CREW_SALARY');
     const budgetRows=period.filter(x=>x.type==='OUT' && x._isBudget);
-    let sumIn=0, sumOut=0, sumBudget=0, sumFee=0;
+    let sumIn=0, sumOut=0, sumBudget=0, sumFee=0, sumCrew=0;
     period.forEach(x=>{
       if(x.type==='IN') sumIn+=opTxUsd(x);
       else if(x._isBudget) sumBudget+=opTxUsd(x);
-      else sumOut+=opTxUsd(x);
+      else { const u=opTxUsd(x); sumOut+=u; if(x.opCat==='CREW_SALARY') sumCrew+=u; }
       if(!x._isBudget) sumFee+=opTxFeesUsd(x);   // v3.01.82: phí của dòng dự kiến KHÔNG tính (chưa phát sinh)
     });
+    const sumOutNormal=sumOut-sumCrew;
     const closeBal=openBal+sumIn-sumOut-sumBudget-sumFee;
 
     // v2.71.5: Dòng PHÍ QUẢN LÝ trong báo cáo tháng.
@@ -27206,11 +27277,33 @@ function generateOpReport(){
           ${tableRowsOUT(outRows)}
           ${outRows.length?`<tr class="total">
             <td colspan="7">${t.total} ${t.expense.split('·')[0].trim()} <span style="font-weight:400;color:#888;font-size:8pt">(USD)</span></td>
-            <td class="r">${fmtMoney(sumOut,'USD')}</td>
+            <td class="r">${fmtMoney(sumOutNormal,'USD')}</td>
           </tr>`:''}
         </tbody>
       </table>
 
+      ${crewRows.length?`
+      <div class="pr-section-title">${en?'Crew Wages':bi?'Chi lương thuyền viên · Crew Wages':'Chi lương thuyền viên'}</div>
+      <table>
+        <thead><tr>
+          <th style="width:9%">${t.date}</th>
+          <th style="width:26%">${esc(t.desc)}</th>
+          <th style="width:18%">${en?'Vendor':bi?'NCC · Vendor':'Tên NCC'}</th>
+          <th style="width:11%">${en?'Contract':bi?'HĐ · Contract':'Số HĐ'}</th>
+          <th style="width:11%">${en?'Invoice':bi?'HD · Invoice':'Số HD'}</th>
+          <th class="c" style="width:8%">${enOrBi?'CCY':'Tiền tệ'}</th>
+          <th class="r" style="width:14%">${enOrBi?'Original':'Số tiền gốc'}</th>
+          <th class="r" style="width:13%">USD</th>
+        </tr></thead>
+        <tbody>
+          ${tableRowsOUT(crewRows)}
+          <tr class="total">
+            <td colspan="7">${t.total} ${en?'Crew Wages':'Chi lương thuyền viên'} <span style="font-weight:400;color:#888;font-size:8pt">(USD)</span></td>
+            <td class="r">${fmtMoney(sumCrew,'USD')}</td>
+          </tr>
+        </tbody>
+      </table>
+      `:''}
       ${budgetRows.length?`
       <div class="pr-section-title" style="color:#8a5a1e">${t.expenseBudget}</div>
       <table>
@@ -34570,6 +34663,9 @@ const EXCEL_TEMPLATES={
       // v2.70.0: VAT đầu vào — chỉ Chi hộ. Số tiền cột trên là NET (chưa VAT).
       {key:'vatPercent',   label:'Thuế suất VAT % (chỉ Chi hộ: 0/5/8/10)', required:false, type:'number',
         aliases:['VAT','VAT %','Thuế suất','Thue suat','VAT percent']},
+      // v3.02.62: Loại khoản chi — tách Lương thuyền viên trong báo cáo chủ tàu
+      {key:'opCat',        label:'Loại khoản (Chi hộ thường / Lương thuyền viên)', required:false, type:'text',
+        aliases:['Loại khoản','Loại khoản chi','Loai khoan','Crew','Lương TV','Luong TV']},
       // Phí ngân hàng + khác
       {key:'bankFee',      label:'Phí NH',                              required:false, type:'number',
         aliases:['Bank fee','Phí ngân hàng']},
@@ -34587,6 +34683,34 @@ const EXCEL_TEMPLATES={
       {key:'staff',        label:'Nhân viên nhập (tên NV)',              required:false, type:'text',
         aliases:['NV','Nhân viên','Người nhập','Staff','Employee','Nhân viên nhập','Người lập']},
 
+    ]
+  },
+  cash_clear:{
+    // v3.02.63: HOÀN ỨNG QUỸ TIỀN MẶT — import bảng kê chi từ quỹ của NV.
+    // Mỗi dòng = 1 khoản chi → tạo AP _cashClear (đã duyệt + đã trả 100%, ẩn khỏi Sổ Phải trả,
+    // vào P&L), cuối lô trừ quỹ + ghi 1 dòng sổ quỹ tổng — giống hệt phiếu Hoàn ứng trong app.
+    name:'Hoàn ứng quỹ tiền mặt',
+    target:'payables',
+    origin:'cash_clear',
+    columns:[
+      {key:'fundName',    label:'Quỹ tiền mặt *', required:true, type:'fundLookup',
+        aliases:['Quỹ','Tên quỹ','Fund','Quỹ tiền mặt']},
+      {key:'issueDate',   label:'Ngày chi *', required:true, type:'date',
+        aliases:['Ngày','Date','Ngày chứng từ']},
+      {key:'costCategory',label:'Danh mục *', required:true, type:'text',
+        aliases:['Loại chi phí','Loại CP','Danh mục']},
+      {key:'vesselName',  label:'Tàu phân bổ (tùy chọn)', required:false, type:'vesselLookup'},
+      {key:'projectCode', label:'Mã dự án phân bổ (tùy chọn)', required:false, type:'projectLookup'},
+      {key:'desc',        label:'Diễn giải', required:false, type:'text',
+        aliases:['Nội dung','Mô tả','Description']},
+      {key:'partnerNote', label:'NCC / Người nhận tiền', required:false, type:'text',
+        aliases:['NCC','Người nhận','Vendor','Nhà cung cấp']},
+      {key:'invoiceNo',   label:'Số hóa đơn (nếu có)', required:false, type:'text',
+        aliases:['Số hóa đơn','Hóa đơn','Invoice']},
+      {key:'amountNet',   label:'Net *', required:true, type:'number',
+        aliases:['Số tiền','Net','Amount','Số tiền chưa VAT']},
+      {key:'vatPercent',  label:'% VAT', required:false, type:'number',
+        aliases:['VAT','Thuế suất']},
     ]
   }
 };
@@ -35594,7 +35718,20 @@ function excelParseAndPreview(aoa, tpl, type){
   // Skip rows that match template "* BẮT BUỘC" pattern or example rows.
   if(aoa.length<2){toast('File trống','bad');return;}
 
-  const headers=aoa[0];
+  // v3.02.62: DÒ DÒNG HEADER trong 10 dòng đầu — hỗ trợ file có khối thông tin
+  // (người lập/bộ phận/tháng) phía trên bảng. Dòng nào khớp NHIỀU nhãn template
+  // nhất (>=2 cột) được chọn; không thấy → dòng 1 như cũ (tương thích ngược).
+  const _nh0=(s)=>String(s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[đĐ]/g,'d').toLowerCase().replace(/\s*\*\s*$/,'').replace(/[^a-z0-9\s]/g,' ').replace(/\s+/g,' ').trim();
+  const _allCand=new Set();
+  tpl.columns.forEach(c=>[c.label].concat(c.aliases||[]).forEach(x=>{const n=_nh0(x); if(n)_allCand.add(n);}));
+  let hdrIdx=0, bestHits=0;
+  for(let i=0;i<Math.min(10,aoa.length);i++){
+    const hits=(aoa[i]||[]).reduce((n,cell)=>{const cn=_nh0(cell); return n+((cn&&_allCand.has(cn))?1:0);},0);
+    if(hits>bestHits){bestHits=hits;hdrIdx=i;}
+  }
+  if(bestHits<2) hdrIdx=0;
+
+  const headers=aoa[hdrIdx];
   // v1.46.0: Normalize for flexible matching
   // - Remove Vietnamese diacritics
   // - Lowercase
@@ -35645,7 +35782,7 @@ function excelParseAndPreview(aoa, tpl, type){
 
   // Parse data rows: skip rows that are clearly instructions (starts with "* BẮT BUỘC")
   const parsed=[];
-  for(let i=1;i<aoa.length;i++){
+  for(let i=hdrIdx+1;i<aoa.length;i++){
     const row=aoa[i];
     if(!row || row.every(c=>String(c||'').trim()==='')) continue; // empty row
     // Skip note rows starting with "*"
@@ -35653,6 +35790,9 @@ function excelParseAndPreview(aoa, tpl, type){
     if(firstCell.startsWith('*') && firstCell.toUpperCase().includes('BẮT BUỘC')) continue;
     // v3.02.20: bỏ qua DÒNG TIÊU ĐỀ TRANG TRÍ của file khung (■ tiêu đề khối, ▸ tiêu đề nhóm)
     if(firstCell.startsWith('■') || firstCell.startsWith('▸') || firstCell.startsWith('Điền ')) continue;
+    // v3.02.62: bỏ qua dòng TỔNG CỘNG / Lưu ý của file kê khai NV (chữ này có thể ở vài cột đầu)
+    const _rowHead=(row.slice(0,8).map(c=>String(c||'').toUpperCase()).join(' '));
+    if(_rowHead.includes('TỔNG CỘNG')||_rowHead.includes('TONG CONG')||String(row[1]||'').trim().startsWith('Lưu ý')||firstCell.startsWith('⚠')) continue;
     // v3.02.20: với template YTD — bỏ qua dòng KHUNG CHƯA ĐIỀN (số tiền trống/0) để KTT
     //   để trống thoải mái các loại CP không phát sinh, không bị báo lỗi hàng loạt.
     if(tpl && tpl.origin==='ytd_summary'){
@@ -35900,6 +36040,15 @@ function _excelRowToRecord(row, colMap, tpl){
         if(!v) rec.errors.push(`Tàu QL hộ "${val}" không tìm thấy — tạo tàu trước ở tab 06`);
         rec.data._opVesselId = v ? v.id : null;
       } else { rec.errors.push('Tàu QL hộ bắt buộc'); rec.data._opVesselId = null; }
+    } else if(c.type==='fundLookup'){
+      // v3.02.63: match quỹ tiền mặt theo TÊN (bỏ dấu, không phân hoa thường)
+      if(val){
+        const _nrm=s=>String(s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase().trim();
+        const fn=_nrm(val);
+        const f=(S.cashFunds||[]).find(x=>_nrm(x.name)===fn) || (S.cashFunds||[]).find(x=>fn && _nrm(x.name).includes(fn));
+        if(!f) rec.errors.push(`Quỹ "${val}" không tìm thấy — kiểm tra tên quỹ trong app (Ngân hàng & Quỹ)`);
+        rec.data._fundId = f ? f.id : null;
+      } else { rec.errors.push('Tên quỹ tiền mặt bắt buộc'); rec.data._fundId = null; }
     } else if(c.type==='expenseGroup'){
       // v1.48.0: PO/VESSEL/HR/TRAVEL/OVERHEAD/FINANCE/OTHER/BOD
       const valid=['PO','VESSEL','HR','TRAVEL','OVERHEAD','FINANCE','OTHER','BOD'];
@@ -36088,6 +36237,7 @@ function excelConfirmImport(){
   // theo ngày nữa — để "Xóa lô gần nhất" không xóa nhầm lô khác cùng ngày.
   const IMPORT_BATCH_ID = 'IMP-' + new Date().toISOString().replace(/[:.]/g,'-') + '-' + Math.random().toString(36).slice(2,6);
   const _apImportSeen = new Set();  // v2.72.1: theo dõi HĐ AP đã tạo trong lượt này (chặn trùng nội bộ file)
+  const _ccImportAgg = {};          // v3.02.63: gom tổng hoàn ứng theo quỹ → cuối lô trừ quỹ + ghi sổ quỹ
 
   let created=0;
   let warnings=[];
@@ -36535,6 +36685,9 @@ function excelConfirmImport(){
       const opVatPct = isChi ? _parseVatPercent(d.vatPercent) : 0;  // v2.99.87
       const opVatAmt = Math.round(opAmt*opVatPct/100*100)/100;
       const opGross = opAmt + opVatAmt;
+      // v3.02.62: Loại khoản — "Lương thuyền viên"/"crew" → CREW_SALARY (tách riêng báo cáo chủ tàu)
+      const _ocRaw = String(d.opCat||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase();
+      const opCatVal = isChi && (_ocRaw.includes('luong')||_ocRaw.includes('crew')) ? 'CREW_SALARY' : '';
       const opRec = {
         id: uid(),
         date: d.date || todayISO(),
@@ -36542,6 +36695,7 @@ function excelConfirmImport(){
         type: opType,
         desc: d.desc || '',
         amount: opAmt,
+        opCat: opCatVal,                                         // v3.02.62
         ccy: opCcy,                                              // v1.89.0
         fxToUsd: opFx,                                           // v1.89.0
         amountUsd: opCcy==='USD' ? opAmt : (opFx>0?opAmt/opFx:0), // v1.89.0 (net)
@@ -36572,6 +36726,62 @@ function excelConfirmImport(){
     }
 
     const net=+d.amountNet||0;
+    // v3.02.62: Danh mục chấp nhận CODE hoặc TÊN tiếng Việt (NV không cần biết mã).
+    //  "Mua nhiên liệu" → FUEL. Không khớp gì → giữ nguyên text (cảnh báo).
+    if(d.costCategory){
+      const _norm=s=>String(s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[đĐ]/g,'d').toLowerCase().trim();
+      const txt=String(d.costCategory).trim();
+      const byCode=(S.expenseTypes||[]).find(t=>String(t.code||'').toUpperCase()===txt.toUpperCase());
+      if(!byCode){
+        const tn=_norm(txt);
+        const byLabel=(S.expenseTypes||[]).find(t=>_norm(t.label)===tn)
+          || (S.expenseTypes||[]).find(t=>tn && _norm(t.label).startsWith(tn));
+        if(byLabel){ d.costCategory=byLabel.code; }
+        else warnings.push(`Danh mục "${txt}" không khớp loại CP nào — giữ nguyên, KT kiểm lại`);
+      } else { d.costCategory=byCode.code; }
+    }
+
+    // v3.02.63: HOÀN ỨNG QUỸ TIỀN MẶT (import) — tái tạo đúng saveCashClear():
+    //  AP _cashClear đã duyệt + đã trả, cuối lô trừ quỹ + 1 dòng sổ quỹ tổng/quỹ/ngày.
+    if(tpl.origin==='cash_clear'){
+      if(!d._fundId){ warnings.push('Bỏ qua dòng không có quỹ'); return; }
+      const f=(S.cashFunds||[]).find(x=>x.id===d._fundId); if(!f){ warnings.push('Quỹ không tồn tại'); return; }
+      const ccyF=f.ccy||'VND';
+      const netC=+d.amountNet||0; if(netC<=0){ warnings.push('Bỏ qua dòng số tiền 0'); return; }
+      const vatPctC=_parseVatPercent(d.vatPercent);
+      const vatC=Math.round(netC*vatPctC/100*100)/100;
+      const grossC=netC+vatC;
+      const vC=d._vesselId?(S.vessels||[]).find(x=>x.id===d._vesselId):null;
+      const pC=d._projectId?(S.projects||[]).find(x=>x.id===d._projectId):null;
+      let segC=(vC&&vC.segment)||(pC&&pC.segment)||'';
+      if(!segC&&(vC||pC)) segC='VESSEL_SERVICE';
+      const meC=(EXCEL_IMPORT_ASSIGNEE&&EXCEL_IMPORT_ASSIGNEE.trim())||actorName();
+      const nowC=new Date().toISOString();
+      const descC=(d.desc||('Hoàn ứng quỹ · '+(((typeof getExpenseType==='function'&&getExpenseType(d.costCategory))||{}).label||d.costCategory)))
+        + (d.partnerNote?(' · '+d.partnerNote):'');
+      const recC={
+        id:uid(), partner:'[Hoàn ứng quỹ '+(f.name||'')+']',
+        invoiceNo:d.invoiceNo||('CASH-IMP-'+IMPORT_BATCH_ID.slice(-6)),
+        desc:descC,
+        expenseType:d.costCategory, costCategory:d.costCategory,
+        amount:grossC, amountNet:netC, vatAmount:vatC, vatPercent:vatPctC, ccy:ccyF,
+        vesselId:vC?vC.id:'', projectId:pC?pC.id:'', segment:segC||'OTHER',
+        issueDate:d.issueDate, dueDate:d.issueDate, dueMonth:(d.issueDate||'').slice(0,7),
+        status:'approved', submittedBy:meC, submittedAt:nowC,
+        approvedL1By:'(Hoàn ứng — import)', approvedL1At:nowC,
+        approvedL2By:'(Hoàn ứng — import)', approvedL2At:nowC,
+        payments:[{date:d.issueDate, amount:grossC, ccy:ccyF, note:'Chi từ quỹ '+(f.name||'')+' (import)'}],
+        _cashClear:true, _cashFundId:f.id, _batchId:'CASHCLEAR-'+IMPORT_BATCH_ID.slice(-6),
+        _importedFromExcel:true, _importBatch:IMPORT_BATCH_ID,
+        createdBy:meC, createdAt:nowC
+      };
+      touchRecord(recC); S.payables.push(recC); created++;
+      // gom tổng theo quỹ + ngày để cuối lô trừ quỹ + ghi sổ
+      _ccImportAgg[f.id]=_ccImportAgg[f.id]||{fund:f,total:0,n:0,date:d.issueDate};
+      _ccImportAgg[f.id].total+=grossC; _ccImportAgg[f.id].n++;
+      if(d.issueDate && d.issueDate>_ccImportAgg[f.id].date) _ccImportAgg[f.id].date=d.issueDate;
+      return;
+    }
     const vatPercent=_parseVatPercent(d.vatPercent);  // v2.99.87: chấp nhận 0.08→8, "10%"→10, "0% (không VAT)"→0
     const vatAmount=Math.round(net*vatPercent/100*100)/100;
     const gross=net+vatAmount;
@@ -36780,6 +36990,18 @@ function excelConfirmImport(){
   if(tpl.target==='events' && typeof syncEventsToOnhires==='function'){
     try{ syncEventsToOnhires(); }catch(e){console.warn('syncEventsToOnhires failed',e);}
   }
+  // v3.02.63: HOÀN ỨNG import — trừ quỹ + ghi 1 dòng sổ quỹ tổng cho mỗi quỹ
+  Object.values(_ccImportAgg).forEach(agg=>{
+    const f=agg.fund;
+    f.balance=(+f.balance||0)-agg.total;
+    S.cashTxns=S.cashTxns||[];
+    S.cashTxns.push({id:uid(),fundId:f.id,date:agg.date||todayISO(),direction:'OUT',
+      amount:agg.total,ccy:f.ccy||'VND',
+      category:'Hoàn ứng ('+agg.n+' khoản — import)',
+      desc:'Hoàn ứng — import Excel '+agg.n+' khoản chi phí',
+      sourceType:'cash_clear',sourceId:'IMP-'+IMPORT_BATCH_ID,recordedBy:actorName(),recordedAt:new Date().toISOString()});
+    try{ touchRecord(f); }catch(e){}
+  });
   saveState();
   // v2.71.3: ghi nhớ LÔ IMPORT GẦN NHẤT để có thể "Xóa lô gần nhất" nếu lỡ import nhầm.
   try{
