@@ -2741,7 +2741,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.02.75';            // bumped on each release
+const APP_VERSION='3.02.80';            // bumped on each release
 
 /* v2.62.0: Token xác thực backend — PHẢI khớp API_TOKEN trong Apps Script (Code.gs).
    Mọi request tới Apps Script tự động được gắn token qua lớp bọc fetch bên dưới.
@@ -9871,6 +9871,10 @@ function isExpenseCapEx(typeCode){
 function apCountsInPL(r){
   if(!r) return false;
   if(isExpenseCapEx(r.expenseType)) return false;  // CapEx/Dock → cộng nguyên giá TSCĐ, không vào P&L (kể cả YTD)
+  // v3.02.78: NGUYÊN TẮC — mảng QUẢN LÝ HỘ (VESSEL_MGMT) KHÔNG phát sinh chi phí của công ty.
+  //   Toàn bộ là chi hộ chủ tàu (đã phản ánh ở Tab 06, trừ vào số dư chủ tàu). Chặn cứng theo
+  //   segment, kể cả khi phiếu KHÔNG gắn tàu QL hộ (vesselId trống) — tránh lỗ ảo ở báo cáo theo mảng.
+  if(r.segment==='VESSEL_MGMT') return false;
   // v3.02.21: bản ghi YTD lịch sử = chi phí ĐÃ THỰC CHI trong kỳ → vào P&L,
   //   KHÔNG áp quy tắc loại PO/tồn kho (BUNKER_PO trong YTD là nhiên liệu đã tiêu thụ).
   if(r._isYtdHistorical){
@@ -22706,6 +22710,9 @@ function vatGatherRows(opt){
     if(from && d < from) return false;
     if(to && d > to) return false;
     if(onlyWithVat && !(+r.vatAmount>0 || +r.vatPercent>0)) return false;
+    // v3.02.79: NGUYÊN TẮC — chi mảng QUẢN LÝ HỘ (VESSEL_MGMT) là chi hộ chủ tàu;
+    //   thuế GTGT cũng là chi hộ → KHÔNG kê khai trên báo cáo thuế GTGT (không khấu trừ đầu vào).
+    if(r.segment==='VESSEL_MGMT') return false;
     const wfS = wfStatus(r);
     if(stFilter==='approved' && wfS!=='approved') return false;
     if(stFilter==='not_draft' && (wfS==='draft'||wfS==='rejected')) return false;
@@ -22717,12 +22724,9 @@ function vatGatherRows(opt){
     return true;
   });
   rows.sort((a,b)=>(a.issueDate||'').localeCompare(b.issueDate||''));
-  // v2.70.0: gộp thêm hóa đơn CHI HỘ (op_transactions OUT) có VAT — Seahorse khấu trừ đầu vào.
-  // Net đòi lại chủ tàu; phần VAT là GTGT đầu vào, đối chiếu thuế đầy đủ như AP khác.
-  const opRows = opVatGatherRows({month,from,to,status:stFilter,vtype:vtypeFilter,onlyWithVat});
-  const merged = rows.concat(opRows);
-  merged.sort((a,b)=>((a.issueDate||a.date||'')).localeCompare(b.issueDate||b.date||''));
-  return merged;
+  // v3.02.80: NGUYÊN TẮC — chi hộ tàu QL hộ (opTransactions, tab 06) là chi hộ chủ tàu;
+  //   thuế GTGT cũng là chi hộ → KHÔNG kê khai trên báo cáo thuế GTGT (không gộp opVatGatherRows nữa).
+  return rows;
 }
 
 /* v2.70.0: Lấy các giao dịch Chi hộ (OUT) có VAT từ op_transactions, ở dạng đã chuẩn hóa
@@ -25642,7 +25646,11 @@ function opApChiHo(vid){
   };
   return -(S.payables||[]).filter(p=>p.vesselId===vid).reduce((s,p)=>{
     const net=+p.amountNet||((+p.amountGross||+p.amount||0)-(+p.vatAmount||0))||(+p.amount||0);
-    let sum = toUsd(net, p.ccy);
+    const gross=+p.amountGross||(+p.amount||0)||(net+(+p.vatAmount||0));
+    // v3.02.79: mảng QUẢN LÝ HỘ — VAT là chi hộ (không khấu trừ) → đòi chủ tàu theo GROSS (net+VAT).
+    //   Các khoản khác (chi hộ thường) vẫn theo NET, phần VAT Seahorse khấu trừ đầu vào.
+    const base = (p.segment==='VESSEL_MGMT') ? gross : net;
+    let sum = toUsd(base, p.ccy);
     // v3.02.53: phí của từng đợt thanh toán (phí NH, phí khác) — cũng là chi hộ chủ tàu
     (p.payments||[]).forEach(pay=>{
       const fee=(+pay.bankFee||0)+(+pay.otherFee||0);
@@ -25759,13 +25767,13 @@ function internalSummaryReport(){
     gBudget+=(bd.chiBudget||0); gBalReal+=balReal; gBalAfter+=bal;
     const warn = bal<opMinUsd(v);
     return `<tr>
-      <td style="padding:7pt 10pt"><b>${esc(v.name)}</b><div style="font-size:8.5pt;color:#666">${esc(v.owner||'')}</div></td>
-      <td style="padding:7pt 10pt;text-align:right;color:#2d6a6a">${f(bd.thu)}</td>
-      <td style="padding:7pt 10pt;text-align:right;color:#a8362b">${f(bd.chiReal)}</td>
-      <td style="padding:7pt 10pt;text-align:right;color:#8a5a1e">${f(bd.mgmtPending+issuedUsd)}</td>
-      <td style="padding:7pt 10pt;text-align:right;font-weight:700;color:${balReal<0?'#a8362b':'#1c3a5c'}">${f(balReal)}</td>
-      <td style="padding:7pt 10pt;text-align:right;color:#8a5a1e">${bd.chiBudget>0?f(bd.chiBudget):'—'}</td>
-      <td style="padding:7pt 10pt;text-align:right;font-weight:700;color:${bal<0?'#a8362b':'#2d6a6a'}">${f(bal)}</td>
+      <td style="padding:6pt 8pt"><b>${esc(v.name)}</b><div style="font-size:8.5pt;color:#666">${esc(v.owner||'')}</div></td>
+      <td style="padding:6pt 8pt;text-align:right;white-space:nowrap;color:#2d6a6a">${f(bd.thu)}</td>
+      <td style="padding:6pt 8pt;text-align:right;white-space:nowrap;color:#a8362b">${f(bd.chiReal)}</td>
+      <td style="padding:6pt 8pt;text-align:right;white-space:nowrap;color:#8a5a1e">${f(bd.mgmtPending+issuedUsd)}</td>
+      <td style="padding:6pt 8pt;text-align:right;white-space:nowrap;font-weight:700;color:${balReal<0?'#a8362b':'#1c3a5c'}">${f(balReal)}</td>
+      <td style="padding:6pt 8pt;text-align:right;white-space:nowrap;color:#8a5a1e">${bd.chiBudget>0?f(bd.chiBudget):'—'}</td>
+      <td style="padding:6pt 8pt;text-align:right;white-space:nowrap;font-weight:700;color:${bal<0?'#a8362b':'#2d6a6a'}">${f(bal)}</td>
     </tr>`;
   }).join('');
 
@@ -25782,19 +25790,19 @@ function internalSummaryReport(){
         <div>Người lập: ${esc(actorName())}</div>
       </div>
     </div>
-    <div style="text-align:center;font-size:14pt;font-weight:700;color:#1c3a5c;margin-bottom:4pt">TÓM TẮT QUẢN LÝ VẬN HÀNH TÀU QL HỘ</div>
+    <div style="text-align:center;font-size:14pt;font-weight:700;color:#1c3a5c;margin-bottom:4pt">TÓM TẮT VẬN HÀNH TÀU QUẢN LÝ HỘ</div>
     <div style="text-align:center;font-size:9pt;color:#888;margin-bottom:16pt">Đơn vị: USD${fxr>0?` · tỷ giá tham chiếu ${fxr.toLocaleString('vi-VN')}₫/USD`:''} · ${vs.length} tàu</div>
 
     <table style="width:100%;border-collapse:collapse;font-size:9.5pt">
       <thead>
-        <tr style="background:#1c3a5c;color:#fff">
-          <th style="padding:8pt 10pt;text-align:left">Tàu / Chủ tàu</th>
-          <th style="padding:8pt 10pt;text-align:right">Tổng thu</th>
-          <th style="padding:8pt 10pt;text-align:right">Đã chi</th>
-          <th style="padding:8pt 10pt;text-align:right">Phí quản lý<br><span style="font-size:8pt;font-weight:400;opacity:.8">lũy kế</span></th>
-          <th style="padding:8pt 10pt;text-align:right">Số dư</th>
-          <th style="padding:8pt 10pt;text-align:right">Dự kiến chi</th>
-          <th style="padding:8pt 10pt;text-align:right">Số dư cần lưu ý</th>
+        <tr style="background:#1c3a5c;color:#fff;font-size:8.5pt">
+          <th style="padding:7pt 8pt;text-align:left;white-space:nowrap">Tàu / Chủ tàu</th>
+          <th style="padding:7pt 8pt;text-align:right;white-space:nowrap">Tổng thu</th>
+          <th style="padding:7pt 8pt;text-align:right;white-space:nowrap">Đã chi</th>
+          <th style="padding:7pt 8pt;text-align:right;white-space:nowrap">Phí quản lý<br><span style="font-size:7.5pt;font-weight:400;opacity:.8">lũy kế</span></th>
+          <th style="padding:7pt 8pt;text-align:right;white-space:nowrap">Số dư</th>
+          <th style="padding:7pt 8pt;text-align:right;white-space:nowrap">Dự kiến chi</th>
+          <th style="padding:7pt 8pt;text-align:right;white-space:nowrap">Số dư cần lưu ý</th>
         </tr>
       </thead>
       <tbody>${rowsHtml}</tbody>
@@ -32306,8 +32314,10 @@ function _nsnnComputeAuto(period){
     // v2.74.3: tính ngay khi CÓ SỐ HÓA ĐƠN — bất kể trạng thái duyệt (từ chối = trả về bổ sung hồ sơ).
     const d = r.issueDate || r.invoiceDate || '';
     if(!matchPeriod(d)) return;
+    // v3.02.79: chi mảng QUẢN LÝ HỘ — VAT là chi hộ chủ tàu, KHÔNG khấu trừ đầu vào.
+    const skipVatIn = (r.segment==='VESSEL_MGMT');
     // VAT đầu vào: chỉ tính khi có số hóa đơn (hóa đơn GTGT hợp lệ)
-    if((r.invoiceNo||'').trim()){
+    if(!skipVatIn && (r.invoiceNo||'').trim()){
       const vat = +r.vatAmount || 0;
       vatIn += toDisplay(vat, r.ccy||'VND');
     }
@@ -32326,17 +32336,8 @@ function _nsnnComputeAuto(period){
     }
   });
 
-  // v2.70.0: VAT đầu vào từ hóa đơn CHI HỘ (op_transactions OUT) đã thanh toán (xác nhận).
-  // Phần net đòi lại chủ tàu; phần VAT là GTGT đầu vào của Seahorse → cộng vào vatIn.
-  (S.opTransactions||[]).forEach(t=>{
-    if(t.type!=='OUT') return;
-    if(!t.paid) return;                       // mirror AP "approved" = đã xác nhận TT
-    const d = t.date || '';
-    if(!matchPeriod(d)) return;
-    const vat = +t.vatAmount || 0;
-    if(vat<=0) return;
-    vatIn += toDisplay(vat, t.ccy||'VND');
-  });
+  // v3.02.80: chi hộ tàu QL hộ (opTransactions) — VAT là chi hộ chủ tàu, KHÔNG khấu trừ đầu vào.
+  //   (đã bỏ vòng cộng vatIn từ opTransactions theo nguyên tắc thuế mảng Quản lý hộ.)
 
   // VAT_PAYABLE: auto = output − input, but admin can override
   let vatPayable = vatOut - vatIn;
