@@ -2738,7 +2738,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.02.70';            // bumped on each release
+const APP_VERSION='3.02.71';            // bumped on each release
 
 /* v2.62.0: Token xác thực backend — PHẢI khớp API_TOKEN trong Apps Script (Code.gs).
    Mọi request tới Apps Script tự động được gắn token qua lớp bọc fetch bên dưới.
@@ -25671,20 +25671,23 @@ function renderOpVessels(){
   const canIssue = isAdmin() || canApproveL1() || canApproveL2();
   const _rowFor=(v)=>{
     const bal=opBalance(v.id);
+    const bd0=opBalanceBreakdown(v.id);
+    const balReal = bal + (bd0.chiBudget||0);   // v3.02.71: số dư THỰC = số dư + cộng lại phần dự kiến đã trừ
     let status,statusCls;
     const minUsd=opMinUsd(v);
-    if(bal<minUsd){status='⚠ DƯỚI NGƯỠNG';statusCls='chip-bad';}
-    else if(bal<minUsd*1.2){status='⚡ GẦN NGƯỠNG';statusCls='chip-warn';}
+    // trạng thái xét theo SỐ DƯ THỰC
+    if(balReal<minUsd){status='⚠ DƯỚI NGƯỠNG';statusCls='chip-bad';}
+    else if(balReal<minUsd*1.2){status='⚡ GẦN NGƯỠNG';statusCls='chip-warn';}
     else{status='✓ AN TOÀN';statusCls='chip-good';}
     const months=opManagedMonths(v);
     const issued=opMgmtFeeIssued(v.id);
-    const bd = opBalanceBreakdown(v.id);
+    const bd = bd0;
     return `<tr>
       <td><b>${esc(v.name)}</b>${v.owner?` <span style="color:var(--muted);font-weight:400">· ${esc(v.owner)}</span>`:''}${v.managedSince?`<div style="font-size:10px;color:var(--muted)">QL từ ${esc(v.managedSince)} · ${months} tháng · phí ${fmt(v.fee,v.ccy)}/tháng</div>`:'<div style="font-size:10px;color:var(--warn)">chưa đặt ngày QL</div>'}</td>
       <td class="r num" style="color:var(--good);font-weight:600">${fmtCcy(bd.thu,'USD')}</td>
-      <td class="r num" style="color:var(--bad);font-weight:600">−${fmtCcy(bd.chiTotal,'USD')}<div style="font-size:9px;color:var(--muted);font-weight:400;line-height:1.4">${bd.chiBudget>0?`Chi thực: ${fmtCcy(bd.chiReal,'USD')}<br>Dự kiến: ${fmtCcy(bd.chiBudget,'USD')}`:'(đã chi thực)'}</div></td>
+      <td class="r num" style="color:var(--bad);font-weight:600">−${fmtCcy(bd.chiReal,'USD')}<div style="font-size:9px;color:var(--muted);font-weight:400;line-height:1.4">${bd.chiBudget>0?`Dự kiến thêm: ${fmtCcy(bd.chiBudget,'USD')}`:'(đã chi thực)'}</div></td>
       <td class="r num">${(issued>0||bd.mgmtPending>0)?`${issued>0?`<div style="color:var(--good);font-weight:600" title="Đã phát hành hóa đơn">${fmt(issued,v.ccy)}<span style="font-size:9px;font-weight:400"> đã PH</span></div>`:''}${bd.mgmtPending>0?`<div style="color:var(--warn);font-size:11px" title="Tự tính — chưa xuất hóa đơn (${months} tháng × ${fmt(v.fee,v.ccy)} − đã PH)">${fmtCcy(bd.mgmtPending,'USD')}<span style="font-size:9px"> tự tính</span></div>`:''}`:'—'}</td>
-      <td class="r num" style="font-weight:600;color:${bal<minUsd?'var(--bad)':bal<minUsd*1.2?'var(--warn)':'var(--ink)'}" title="Thu/ứng − Chi hộ − Phí QL. Đồng chuẩn USD.">${fmtCcy(bal,'USD')}<div style="font-size:10px;color:var(--muted);font-weight:400" title="Quy đổi VND theo tỷ giá ${(+S.fxRate||0).toLocaleString('vi-VN')}">≈ ${(bal*(+S.fxRate||0)).toLocaleString('vi-VN',{maximumFractionDigits:0})}₫</div></td>
+      <td class="r num" style="font-weight:600;color:${balReal<minUsd?'var(--bad)':balReal<minUsd*1.2?'var(--warn)':'var(--ink)'}" title="Số dư THỰC (chưa gồm dự kiến chi). = Thu/ứng − Chi thực − Phí QL.">${fmtCcy(balReal,'USD')}<div style="font-size:10px;color:var(--muted);font-weight:400" title="Quy đổi VND theo tỷ giá ${(+S.fxRate||0).toLocaleString('vi-VN')}">≈ ${(balReal*(+S.fxRate||0)).toLocaleString('vi-VN',{maximumFractionDigits:0})}₫</div>${bd.chiBudget>0?`<div style="font-size:9px;color:var(--warn);font-weight:400;margin-top:2px" title="Nếu chi hết khoản dự kiến, số dư còn lại">sau dự kiến: ${fmtCcy(bal,'USD')}</div>`:''}</td>
       <td class="r num">${fmtCcy(minUsd,'USD')}</td>
       <td class="c"><span class="chip ${statusCls}">${status}</span></td>
       <td><div class="row-actions">
@@ -25703,18 +25706,19 @@ function renderOpVessels(){
     vs.forEach(v=>{ html+=_rowFor(v); });
     // dòng tổng theo chủ tàu — chỉ hiện khi chủ có >1 tàu (1 tàu thì dòng tàu đã đủ)
     if(vs.length>1){
-      let gThu=0,gChi=0,gBal=0,gMin=0,gMgmt=0;
-      vs.forEach(v=>{ const bd=opBalanceBreakdown(v.id); gThu+=bd.thu; gChi+=bd.chiTotal; gMgmt+=bd.mgmtPending; gBal+=opBalance(v.id); gMin+=opMinUsd(v); });
+      let gThu=0,gChiReal=0,gBudget=0,gBal=0,gMin=0,gMgmt=0;
+      vs.forEach(v=>{ const bd=opBalanceBreakdown(v.id); gThu+=bd.thu; gChiReal+=bd.chiReal; gBudget+=(bd.chiBudget||0); gMgmt+=bd.mgmtPending; gBal+=opBalance(v.id); gMin+=opMinUsd(v); });
+      const gBalReal = gBal + gBudget;   // số dư thực nhóm
       let gStatus,gCls;
-      if(gBal<gMin){gStatus='⚠ DƯỚI NGƯỠNG';gCls='chip-bad';}
-      else if(gBal<gMin*1.2){gStatus='⚡ GẦN NGƯỠNG';gCls='chip-warn';}
+      if(gBalReal<gMin){gStatus='⚠ DƯỚI NGƯỠNG';gCls='chip-bad';}
+      else if(gBalReal<gMin*1.2){gStatus='⚡ GẦN NGƯỠNG';gCls='chip-warn';}
       else{gStatus='✓ AN TOÀN';gCls='chip-good';}
       html+=`<tr style="background:rgba(28,58,92,.06);border-top:2px solid var(--rule)">
         <td><b>TỔNG · ${esc(owner)}</b> <span style="font-size:10px;color:var(--muted);font-weight:400">(${vs.length} tàu)</span></td>
         <td class="r num" style="color:var(--good);font-weight:700">${fmtCcy(gThu,'USD')}</td>
-        <td class="r num" style="color:var(--bad);font-weight:700">−${fmtCcy(gChi,'USD')}</td>
+        <td class="r num" style="color:var(--bad);font-weight:700">−${fmtCcy(gChiReal,'USD')}${gBudget>0?`<div style="font-size:9px;color:var(--muted);font-weight:400">Dự kiến thêm: ${fmtCcy(gBudget,'USD')}</div>`:''}</td>
         <td class="r num" style="color:var(--warn);font-weight:600">${gMgmt>0?fmtCcy(gMgmt,'USD'):'—'}</td>
-        <td class="r num" style="font-weight:700;color:${gBal<gMin?'var(--bad)':gBal<gMin*1.2?'var(--warn)':'var(--ink)'}">${fmtCcy(gBal,'USD')}</td>
+        <td class="r num" style="font-weight:700;color:${gBalReal<gMin?'var(--bad)':gBalReal<gMin*1.2?'var(--warn)':'var(--ink)'}">${fmtCcy(gBalReal,'USD')}${gBudget>0?`<div style="font-size:9px;color:var(--warn);font-weight:400">sau dự kiến: ${fmtCcy(gBal,'USD')}</div>`:''}</td>
         <td class="r num" style="font-weight:600">${fmtCcy(gMin,'USD')}</td>
         <td class="c"><span class="chip ${gCls}">${gStatus}</span></td>
         <td></td>
