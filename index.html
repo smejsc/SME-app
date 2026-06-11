@@ -1879,6 +1879,7 @@ body.readonly-mode::before{
         </select>
         <input type="text" id="op-filter-partner" placeholder="🔎 Lọc NCC / diễn giải…" oninput="renderOpTxList()" title="Lọc theo tên NCC, diễn giải, số HĐ" style="padding:6px 9px;border:1px solid var(--rule);background:var(--paper);font-size:12px;width:180px">
         <button class="btn-primary" onclick="openOpReportModal()" title="Xuất báo cáo PDF cho chủ tàu">📄 Xuất PDF</button>
+        <button class="btn-sec" onclick="opExportExcel()" title="Xuất Excel theo bộ lọc đang xem — kèm cột NV phụ trách" style="font-size:12px">📊 Xuất Excel</button>
       </div>
     </div>
     <div class="section-body">
@@ -2737,7 +2738,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.02.65';            // bumped on each release
+const APP_VERSION='3.02.66';            // bumped on each release
 
 /* v2.62.0: Token xác thực backend — PHẢI khớp API_TOKEN trong Apps Script (Code.gs).
    Mọi request tới Apps Script tự động được gắn token qua lớp bọc fetch bên dưới.
@@ -26708,6 +26709,80 @@ function _opClearFilters(){
   if(mSel) mSel.value='';
   if(pInp) pInp.value='';
   renderOpTxList();
+}
+/* v3.02.66: XUẤT EXCEL Sổ Thu/Chi hộ theo BỘ LỌC đang xem (tàu/tháng/người nhập/tìm kiếm).
+   Có cột "NV phụ trách" (createdBy). Quy USD để đối chiếu + giữ số tiền gốc. */
+function opExportExcel(){
+  if(typeof XLSX==='undefined'){ toast('Thiếu thư viện Excel','bad'); return; }
+  const allowedIds=userAssignedOpVesselIds();
+  const _apVirtual=_opApVirtualTx().filter(t=>allowedIds.includes(t.vesselId));
+  const allTxScoped=S.opTransactions.filter(t=>allowedIds.includes(t.vesselId)).concat(_apVirtual);
+  // đọc bộ lọc hiện tại
+  const fV=(document.getElementById('op-filter-vessel')||{}).value||'';
+  const fM=(document.getElementById('op-filter-month')||{}).value||'';
+  const fC=(document.getElementById('op-filter-creator')||{}).value||'';
+  const fN=((document.getElementById('op-filter-partner')||{}).value||'').trim().toLowerCase();
+  const filtered=allTxScoped.filter(t=>{
+    if(fV && t.vesselId!==fV) return false;
+    if(fM && !t.date.startsWith(fM)) return false;
+    if(fC && t.createdBy!==fC) return false;
+    if(fN){ const hay=((t.vendor||'')+' '+(t.desc||'')+' '+(t.contractNo||'')+' '+(t.invoiceNo||'')).toLowerCase(); if(!hay.includes(fN)) return false; }
+    return true;
+  }).sort((a,b)=>(a.date||'').localeCompare(b.date||'') || (a.type==='IN'?-1:1));
+  if(!filtered.length){ toast('Không có bút toán nào khớp bộ lọc','warn'); return; }
+  const vName=id=>{ const v=(S.opVessels||[]).find(x=>x.id===id); return v?v.name:''; };
+  const stLabel=t=>{
+    if(t._fromAp){ const ap=(S.payables||[]).find(x=>x.id===t._apId); if(ap){ if(arRemaining(ap)<=0.001) return 'Đã TT đủ'; return wfStatus(ap)==='approved'?'Đã duyệt · chờ chi':'Chờ duyệt'; } return '?'; }
+    if(t.paid) return 'Đã TT';
+    if(t.payApproved) return 'Đã duyệt · chờ KT';
+    return 'Chờ duyệt';
+  };
+  const header=['Ngày','Loại','Tàu QL hộ','NCC','Diễn giải','Số HĐ','Số hóa đơn',
+    'Loại khoản','Số tiền gốc','Tiền tệ','%VAT','Tiền VAT','Phí NH','Phí khác','Quy USD',
+    'Trạng thái','NV phụ trách','Bộ phận','Ngày nhập'];
+  const aoa=[header];
+  let totUsdIn=0, totUsdOut=0;
+  filtered.forEach(t=>{
+    const isIn=t.type==='IN';
+    const usd=opTxUsd(t); const feeUsd=opTxFeesUsd(t);
+    if(isIn) totUsdIn+=usd; else totUsdOut+=(usd+feeUsd);
+    aoa.push([
+      t.date||'',
+      isIn?'Thu hộ':'Chi hộ',
+      vName(t.vesselId),
+      t.vendor||'',
+      t.desc||'',
+      t.contractNo||'',
+      t.invoiceNo||'',
+      t.opCat==='CREW_SALARY'?'Lương thuyền viên':(isIn?'Thu hộ':'Chi hộ thường'),
+      +t.amount||0,
+      t.ccy||'',
+      (+t.vatPercent||0),
+      (+t.vatAmount||0),
+      (+t.bankFee||0),
+      (+t.otherFee||0),
+      Math.round((usd+(isIn?0:feeUsd))*100)/100,
+      stLabel(t),
+      t.createdBy||'',           // NV phụ trách
+      t.createdByDept||'',
+      t.createdAt?String(t.createdAt).slice(0,10):''
+    ]);
+  });
+  // dòng tổng
+  aoa.push([]);
+  aoa.push(['','','','','','','','TỔNG THU HỘ (USD)','','','','','','','',Math.round(totUsdIn*100)/100]);
+  aoa.push(['','','','','','','','TỔNG CHI HỘ + phí (USD)','','','','','','','',Math.round(totUsdOut*100)/100]);
+
+  const ws=XLSX.utils.aoa_to_sheet(aoa);
+  ws['!cols']=[{wch:11},{wch:8},{wch:16},{wch:22},{wch:40},{wch:12},{wch:12},{wch:16},
+    {wch:14},{wch:6},{wch:6},{wch:12},{wch:10},{wch:10},{wch:13},{wch:16},{wch:16},{wch:14},{wch:11}];
+  const wb=XLSX.utils.book_new();
+  const vTag=fV?vName(fV):'TatCa';
+  const mTag=fM||'TatCa';
+  XLSX.utils.book_append_sheet(wb,ws,'ThuChiHo');
+  const fname=`ThuChiHo_${vTag}_${mTag}`.replace(/[^\w\-]/g,'_')+'.xlsx';
+  XLSX.writeFile(wb,fname);
+  toast(`Đã xuất ${filtered.length} bút toán ra Excel`,'good');
 }
 function renderOpTxList(){
   // Scope: NV chỉ thấy giao dịch của tàu QL hộ được gán
