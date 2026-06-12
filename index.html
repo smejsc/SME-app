@@ -2779,7 +2779,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.03.08';            // bumped on each release
+const APP_VERSION='3.03.11';            // bumped on each release
 
 /* v2.62.0: Token xác thực backend — PHẢI khớp API_TOKEN trong Apps Script (Code.gs).
    Mọi request tới Apps Script tự động được gắn token qua lớp bọc fetch bên dưới.
@@ -4347,6 +4347,15 @@ function getAuthConfig(){
   return cfg;
 }
 function setAuthConfig(cfg){localStorage.setItem(AUTH_KEY,JSON.stringify(cfg));}
+/* v3.03.09: patch NGUYÊN TỬ — đọc cfg MỚI NHẤT ngay trước khi ghi, chỉ đè các khóa trong patch.
+   Sửa lỗi race: sync/export chụp cfg đầu hàm, làm việc mạng vài giây rồi setAuthConfig(snapshot cũ)
+   → đè mất lastBackup/lastSync mà thao tác khác vừa ghi (banner "X ngày không backup" sống lại mãi). */
+function patchAuthConfig(patch){
+  const c=getAuthConfig()||{};
+  Object.assign(c,patch);
+  setAuthConfig(c);
+  return c;
+}
 
 /* ============================================================
    RATE LIMIT LOGIN — chống brute force
@@ -9401,9 +9410,9 @@ async function cloudSync(mode, opts){
       await saveStateEncrypted();
       try{ _updateLastKnownRecordCount(); }catch(e){}  // v2.99.30: cập nhật mốc cao nhất
       renderAll({fromSync:true});
-      cfg.lastSync=new Date().toISOString();
-      setAuthConfig(cfg);
-      updateSyncStatus('synced','Đã pull '+timeAgo(cfg.lastSync));
+      const _lsP=new Date().toISOString();
+      patchAuthConfig({lastSync:_lsP});  // v3.03.09: không đè snapshot cũ (giữ lastBackup vừa ghi)
+      updateSyncStatus('synced','Đã pull '+timeAgo(_lsP));
       toast('Đã tải dữ liệu từ cloud');
       // v1.55.0: Refresh banner
       try{ updateBackupBanner(); }catch(e){} try{ updateEmptyStateBanner(); }catch(e){}
@@ -9697,9 +9706,9 @@ async function cloudSync(mode, opts){
         if(isBusy){ try{ window._syncBackoffUntil=Date.now()+8000; }catch(_){}}  // lùi autosync 8s
         return;
       }
-      cfg.lastSync=new Date().toISOString();
-      setAuthConfig(cfg);
-      updateSyncStatus('synced','Đã sync '+timeAgo(cfg.lastSync));
+      const _lsQ=new Date().toISOString();
+      patchAuthConfig({lastSync:_lsQ});  // v3.03.09: không đè snapshot cũ (giữ lastBackup vừa ghi)
+      updateSyncStatus('synced','Đã sync '+timeAgo(_lsQ));
       if(_interactive){ toast('Đã đồng bộ lên cloud' + compressionInfo); }
       try{ _updateLastKnownRecordCount(); }catch(e){}  // v2.99.30
       try{ _lastPushHash=_quickStateHash(); }catch(e){}  // v2.99.42: ghi mốc hash chống push trùng
@@ -9818,7 +9827,8 @@ const DEFAULT_EXPENSE_TYPES = [
   {id:'ET-TAX_LICENSE',     code:'TAX_LICENSE',     group:'FINANCE', label:'Thuế Môn bài',           icon:'📋', isPO:false, nsnnType:'BUSINESS_LICENSE', hint:'Thuế môn bài hàng năm. Link tab 12 NSNN.'},
   {id:'ET-TAX_PENALTY',     code:'TAX_PENALTY',     group:'FINANCE', label:'Phạt thuế',              icon:'⚠',  isPO:false, nsnnType:'PENALTY', hint:'Phạt chậm nộp / vi phạm thuế. Link tab 12 NSNN.'},
   {id:'ET-ADVANCE',       code:'ADVANCE',       group:'FINANCE',  label:'Ứng quỹ tiền mặt',        icon:'💰', isPO:false, isAdvance:true, hint:'Phiếu đề xuất ứng tiền mặt. AP duyệt xong → cộng vào số dư Quỹ tiền mặt đã chọn.'},
-  {id:'ET-EMP-ADVANCE',   code:'EMP_ADVANCE',   group:'FINANCE',  label:'Tạm ứng nhân viên',       icon:'💸', isPO:false, isEmpAdvance:true, hint:'v3.03.07: Chi tạm ứng cho NV (công tác/cá nhân) — BẮT BUỘC ghi tên NV. L2 duyệt xong → tự ghi vào tab Tạm ứng NV để theo dõi hoàn ứng.'},
+  {id:'ET-EMP-ADVANCE',   code:'EMP_ADVANCE',   group:'OVERHEAD', label:'Tạm ứng nhân viên',       icon:'💸', isPO:false, isEmpAdvance:true, hint:'v3.03.07: Chi tạm ứng cho NV (công tác/cá nhân) — BẮT BUỘC ghi tên NV. NV ghi → KT kiểm → L2 duyệt → tự ghi vào tab Tạm ứng NV để theo dõi hoàn ứng. Nằm nhóm Quản lý chung (v3.03.10).'},
+  {id:'ET-EMP-ADV-SETTLE',code:'EMP_ADV_SETTLE',group:'OVERHEAD', label:'Hoàn ứng tạm ứng',        icon:'↩', isPO:false, isEmpAdvSettle:true, hint:'v3.03.11: Chi phí thanh toán bằng TẠM ỨNG đã nhận — BẮT BUỘC chọn tạm ứng của NV (khối 💸 Hoàn ứng). L2 duyệt xong → tự TRỪ số dư tạm ứng ở tab 04.'},
   // KHÁC
   {id:'ET-OTHER',         code:'OTHER',         group:'OTHER',    label:'Chi phí khác',            icon:'📝', isPO:false},
   // BOD-ONLY (nội bộ — chỉ BOD/Admin xem)
@@ -9878,6 +9888,26 @@ function migrateExpenseTypes(){
       added++;
     }
   });
+  // v3.03.11: EMP_ADV_SETTLE — đưa về vị trí NGAY SAU EMP_ADVANCE (installs cũ append cuối danh sách)
+  {
+    const _si=S.expenseTypes.findIndex(t=>t.code==='EMP_ADV_SETTLE');
+    const _ai=S.expenseTypes.findIndex(t=>t.code==='EMP_ADVANCE');
+    if(_si>=0 && _ai>=0 && _si!==_ai+1){
+      const [_st]=S.expenseTypes.splice(_si,1);
+      const _ai2=S.expenseTypes.findIndex(t=>t.code==='EMP_ADVANCE');
+      S.expenseTypes.splice(_ai2+1,0,_st);
+      added++;
+    }
+    const _t=S.expenseTypes.find(t=>t.code==='EMP_ADV_SETTLE');
+    if(_t && _t.isEmpAdvSettle===undefined){ _t.isEmpAdvSettle=true; added++; }
+  }
+  // v3.03.10: Backfill EMP_ADVANCE → nhóm Quản lý chung + cờ isEmpAdvance (installs đã chạy 3.03.07)
+  S.expenseTypes.forEach(t=>{
+    if(t.code==='EMP_ADVANCE'){
+      if(t.group!=='OVERHEAD'){ t.group='OVERHEAD'; added++; }
+      if(t.isEmpAdvance===undefined){ t.isEmpAdvance=true; added++; }
+    }
+  });
   // v1.43.0: Backfill isFuel flag for BUNKER_PO (existing installs)
   let fuelBackfilled=0;
   S.expenseTypes.forEach(t=>{
@@ -9933,6 +9963,13 @@ function isExpenseEmpAdvance(typeCode){
   if(!typeCode) return false;
   const t=getExpenseType(typeCode);
   return t ? !!t.isEmpAdvance : false;
+}
+
+/* v3.03.11: Loại chi 'Hoàn ứng tạm ứng' — BẮT BUỘC gắn tạm ứng; L2 duyệt xong tự TRỪ số dư tab 04. */
+function isExpenseEmpAdvSettle(typeCode){
+  if(!typeCode) return false;
+  const t=getExpenseType(typeCode);
+  return t ? !!t.isEmpAdvSettle : false;
 }
 
 /* v2.22.0: Loại chi phí CCDC/MMTB — AP duyệt xong tự ghi 1 món vào Sổ CCDC & MMTB.
@@ -23411,6 +23448,18 @@ function _arEditorBody(r,isPayable){
     `;
   }
 
+  // v3.03.11: Hoàn ứng block — nhắc bắt buộc chọn tạm ứng ở khối 💸 bên dưới
+  let empAdvSettleBlock = '';
+  if(isPayable){
+    const isSettleNow = r.expenseType && isExpenseEmpAdvSettle(r.expenseType);
+    empAdvSettleBlock = `
+      <div id="ar-empadvsettle-block" style="margin-top:14px;padding:10px 14px;background:rgba(74,140,90,.08);border-left:3px solid var(--good);${isSettleNow?'':'display:none'}">
+        <div style="font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--good);font-weight:700;margin-bottom:4px">↩ Hoàn ứng tạm ứng <span style="color:var(--bad);font-weight:400">(bắt buộc chọn tạm ứng)</span></div>
+        <div style="font-size:11px;color:var(--muted);font-style:italic">Chi phí này thanh toán bằng <b>tạm ứng NV đã nhận</b>. Kéo xuống khối <b>💸 Hoàn ứng tạm ứng</b> bên dưới để chọn tạm ứng + số tiền trừ. Khi <b>L2 duyệt xong</b> → tự TRỪ số dư ở tab <b>04 Tạm ứng NV</b>.</div>
+      </div>
+    `;
+  }
+
   // v2.22.0: Asset block (conditional — shown when expenseType is CCDC/MMTB)
   let assetBlock = '';
   if(isPayable){
@@ -23520,7 +23569,7 @@ function _arEditorBody(r,isPayable){
     </div>
 
     ${fuelBlock}
-    ${advanceBlock}${empAdvBlock}
+    ${advanceBlock}${empAdvBlock}${empAdvSettleBlock}
     ${assetBlock}
     ${dockBlock}
 
@@ -23622,6 +23671,11 @@ function arExpenseTypeChanged(){
   const empAdvBlk = document.getElementById('ar-empadv-block');
   if(empAdvBlk){
     empAdvBlk.style.display = (code && isExpenseEmpAdvance(code)) ? 'block' : 'none';
+  }
+  // v3.03.11: Hoàn ứng block
+  const settleBlk = document.getElementById('ar-empadvsettle-block');
+  if(settleBlk){
+    settleBlk.style.display = (code && isExpenseEmpAdvSettle(code)) ? 'block' : 'none';
   }
   // v2.22.0: Asset (CCDC/MMTB) block
   const assetBlk = document.getElementById('ar-asset-block');
@@ -24926,6 +24980,15 @@ async function _mrSave(targetStatus){
     }
   }
 
+  // v3.03.11: dòng loại 'Hoàn ứng tạm ứng' → bắt buộc header phiếu đã chọn tạm ứng (khối 💸 Hoàn ứng)
+  if(s.mode==='ap' && !s.payroll){
+    const _settleLines=validLines.filter(l=>l.expenseType && isExpenseEmpAdvSettle(l.expenseType)).length;
+    if(_settleLines>0 && !s.advLinkId){
+      err.textContent='↩ Có '+_settleLines+' dòng loại "Hoàn ứng tạm ứng" — chọn tạm ứng của NV ở khối 💸 Hoàn ứng tạm ứng (header phiếu)';
+      return;
+    }
+  }
+
   // v3.03.06: HOÀN ỨNG — validate header + chuẩn bị phân bổ vào các dòng (greedy theo thứ tự)
   let _advRemain=0, _advId='';
   if(s.mode==='ap' && !s.payroll && s.advLinkId){
@@ -25213,6 +25276,10 @@ function saveAr(kind,id){
         const _avail=advBalance(_a)-_advPendingDocAmount(_a)+((id && (S.payables.find(x=>x.id===id)||{})._fromAdvance===_advLinkId)?(+(S.payables.find(x=>x.id===id)||{})._advAmount||0):0);
         if(_advLinkAmt>_avail+0.01){err.textContent='💸 Vượt khả dụng tạm ứng ('+fmtFull(_avail,_a.ccy)+')';return;}
       }
+    }
+    // v3.03.11: loại 'Hoàn ứng tạm ứng' BẮT BUỘC chọn tạm ứng
+    if(expenseType && isExpenseEmpAdvSettle(expenseType) && !_advLinkId){
+      err.textContent='↩ Loại "Hoàn ứng tạm ứng" — chọn tạm ứng của NV ở khối 💸 Hoàn ứng tạm ứng (bên dưới Thời hạn)';return;
     }
   }
   // v3.01.03: cảnh báo hóa đơn TRÙNG — theo SỐ HĐ + NCC (tên chuẩn hóa HOẶC MST).
@@ -35045,9 +35112,9 @@ async function exportJSON(){
   a.download=`seahorse_backup_${todayISO()}.json`;
   a.click();
   URL.revokeObjectURL(url);
-  // Track last backup
-  cfg.lastBackup=new Date().toISOString();
-  setAuthConfig(cfg);
+  // Track last backup — v3.03.09: patch nguyên tử (await encryptJSON ở trên mất vài giây,
+  //   ghi nguyên cfg snapshot sẽ đè mất lastSync mà autosync vừa cập nhật)
+  patchAuthConfig({lastBackup:new Date().toISOString()});
   try{ logAuditEvent('export_backup',{filename:`seahorse_backup_${todayISO()}.json`}); }catch(e){}
   toast('Đã xuất JSON · Backup ghi nhận');
   // v1.55.0: Hide warning banner after successful backup
