@@ -2766,7 +2766,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.02.91';            // bumped on each release
+const APP_VERSION='3.02.93';            // bumped on each release
 
 /* v2.62.0: Token xác thực backend — PHẢI khớp API_TOKEN trong Apps Script (Code.gs).
    Mọi request tới Apps Script tự động được gắn token qua lớp bọc fetch bên dưới.
@@ -17152,6 +17152,9 @@ function renderApprPitSection(){
   const body=document.getElementById('appr-pit-body');
   if(!sec||!body) return;
   const canDo = isAdmin() || (typeof canApproveL1==='function'&&canApproveL1());
+  // v3.02.92: ghi nhận TNCN KHÔNG thuộc quyền NV — ẩn toàn bộ khối với người không phải KTT/Admin
+  //   (trước đây NV vẫn thấy khối + dòng "Chờ KTT/Admin" → gây hiểu nhầm việc của mình).
+  if(!canDo){ sec.style.display='none'; body.innerHTML=''; return; }
   const list=_apprPitPending();
   if(!list.length){ sec.style.display='none'; body.innerHTML=''; return; }
   sec.style.display='';
@@ -24192,12 +24195,16 @@ function _payrollReviewDetail(batchId){
   const period = first.payrollPeriod || (first.issueDate||'').slice(0,7);
 
   const lineRows = recs.map((r,i)=>{
+    // v3.02.92: dùng nhãn hồ sơ thống nhất (v3.02.64) — approved chưa chi → "Chờ chi tiền", đã chi đủ → "Đã TT"
+    const ds = (typeof docStatusInfo==='function') ? docStatusInfo(r) : null;
     const st = (WF_STATES[r.status]||WF_STATES.draft);
+    const stHtml = ds ? `<span class="chip ${ds.cls}" style="font-size:9px">${ds.icon} ${ds.label}</span>`
+                      : `<span class="chip ${st.chip}" style="font-size:9px">${st.short}</span>`;
     return `<tr>
       <td class="row-idx">${i+1}</td>
       <td>${esc(r.recipientName||r.desc||'—')}</td>
       <td class="num" style="font-family:var(--font-mono)">${fmtCcy(+r.amountNet||+r.amount||0, ccy)}</td>
-      <td><span class="chip ${st.chip}" style="font-size:9px">${st.short}</span></td>
+      <td>${stHtml}</td>
     </tr>`;
   }).join('');
 
@@ -24232,7 +24239,39 @@ function _payrollReviewDetail(batchId){
       ${usdNote}
     </div>`;
   openModal('Chi tiết phiếu · '+batchId.slice(-6), body,
-    `<button class="btn-sec" onclick="_renderPayrollReview()">← Quay lại</button><button class="btn-sec" onclick="closeModal()">Đóng</button>`);
+    `<button class="btn-sec" onclick="_renderPayrollReview()">← Quay lại</button>`
+    // v3.02.93: phiếu lương NHÁP — người tạo/admin xóa được cả phiếu (trước đây modal lương chỉ xem, không có đường xóa)
+    + (recs.every(r=>['draft','rejected'].includes(wfStatus(r)) && wfCanDelete(r))
+        ? `<button class="btn-sec" style="color:var(--bad);border-color:var(--bad)" onclick="_payrollDeleteBatch('${esc(batchId)}')">🗑 Xóa cả phiếu (nháp)</button>` : '')
+    + `<button class="btn-sec" onclick="closeModal()">Đóng</button>`);
+}
+
+/* v3.02.93: Xóa CẢ phiếu lương nháp (1 confirm) — đúng đường an toàn: audit + tombstone + saveState.
+   Quyền theo wfCanDelete từng dòng (draft/rejected + chính người tạo, hoặc admin). */
+function _payrollDeleteBatch(batchId){
+  const recs=(S.payables||[]).filter(r=>r.batchId===batchId);
+  if(!recs.length){ toast('Không tìm thấy phiếu','bad'); return; }
+  if(!recs.every(r=>['draft','rejected'].includes(wfStatus(r)) && wfCanDelete(r))){
+    toast('Chỉ xóa được phiếu NHÁP của chính mình (hoặc admin)','bad'); return;
+  }
+  const total=recs.reduce((s,r)=>s+(+r.amountNet||+r.amount||0),0);
+  const ccy=recs[0].ccy||'VND';
+  confirmDialog('Xóa CẢ phiếu lương nháp?',
+    `<b>${recs.length} dòng</b> · kỳ ${esc(recs[0].payrollPeriod||'—')} · tổng <b>${fmtFull(total,ccy)}</b><br>Toàn bộ dòng sẽ bị xóa (có ghi audit, đồng bộ xóa trên máy khác).`,
+    null, ()=>{
+      const ids=recs.map(r=>r.id);
+      recs.forEach(r=>{
+        try{ logAuditEvent('delete_ap',{recordId:r.id, partner:r.partner||'', amount:r.amount||0,
+          ccy:r.ccy||'', desc:r.desc||r.recipientName||'', issueDate:r.issueDate||'',
+          actor:actorName(), note:'Xóa cả phiếu lương nháp · batch '+batchId.slice(-6)}); }catch(e){}
+      });
+      S.payables=S.payables.filter(r=>!ids.includes(r.id));
+      ids.forEach(id=>markDeleted(id));
+      saveState();
+      closeModal();
+      toast('✓ Đã xóa '+ids.length+' dòng phiếu lương nháp');
+      renderAll();
+    });
 }
 
 function _renderMultiRowModal(){
@@ -24679,8 +24718,9 @@ async function _mrSave(targetStatus){
   validLines.forEach(l=>{
     l._effSegment = (l.costCenterType==='opVessel') ? 'VESSEL_MGMT' : ((l.segment||'').trim() || s.segment);
   });
-  // RÀO CHẮN nghiệp vụ đã khóa: QL hộ (VESSEL_MGMT) KHÔNG vào P&L / KHÔNG kê khai GTGT,
-  //   các cờ này (apCountsInPL, vatGatherRows) chặn theo CẢ PHIẾU → cấm trộn dòng QL hộ với dòng P&L.
+  // RÀO CHẮN nghiệp vụ đã khóa: QL hộ (VESSEL_MGMT) KHÔNG vào P&L / KHÔNG kê khai GTGT.
+  //   (apCountsInPL/vatGatherRows lọc theo TỪNG record nên kỹ thuật vẫn đúng nếu trộn,
+  //    nhưng nghiệp vụ đã chốt: chi hộ không phát sinh chung hóa đơn với chi công ty → cấm trộn cho sạch sổ.)
   const _hasMgmt = validLines.some(l=>l._effSegment==='VESSEL_MGMT');
   const _hasNonMgmt = validLines.some(l=>l._effSegment!=='VESSEL_MGMT');
   if(_hasMgmt && _hasNonMgmt){
