@@ -694,6 +694,7 @@ body.readonly-mode::before{
 <!-- ========= NAV ========= -->
 <nav class="nav" id="nav">
   <button class="nav-item active" data-page="dashboard"><span class="num">00</span>Dashboard</button>
+  <button class="nav-item" data-page="periodic" id="nav-periodic"><span class="num">02</span>Báo cáo định kỳ</button>
   <button class="nav-item" data-page="catalog"><span class="num">M</span>Danh mục</button>
   <button class="nav-item" data-page="projects"><span class="num">02</span>Dự án</button>
   <button class="nav-item" data-page="vessels"><span class="num">03</span>ON-OFFHIRE</button>
@@ -1841,6 +1842,57 @@ body.readonly-mode::before{
 </section>
 
 <!-- ============ OPERATIONS (Thu/Chi hộ) ============ -->
+<!-- ============ 02 · BÁO CÁO ĐỊNH KỲ (v3.03.14) ============ -->
+<section class="page" id="page-periodic">
+  <div class="page-head">
+    <div>
+      <div class="page-title">Báo cáo <span class="it">định kỳ</span></div>
+      <div class="page-sub">Periodic Report · Công nợ Phải thu / Phải trả · Tuổi nợ · Thu-Chi hộ chủ tàu — xuất PDF gửi email</div>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-head">
+      <div class="section-title"><span class="tag">A</span>Công nợ PHẢI THU (khách hàng còn nợ)</div>
+      <button class="btn-primary" style="font-size:12px" onclick="periodicDebtPdf('ar')">📄 Xuất PDF</button>
+    </div>
+    <div class="section-body"><div class="tbl-scroll" style="max-height:380px"><table class="tbl" id="periodic-ar-table"></table></div></div>
+  </div>
+
+  <div class="section">
+    <div class="section-head">
+      <div class="section-title"><span class="tag">B</span>Công nợ PHẢI TRẢ (còn nợ nhà cung cấp)</div>
+      <button class="btn-primary" style="font-size:12px" onclick="periodicDebtPdf('ap')">📄 Xuất PDF</button>
+    </div>
+    <div class="section-body"><div class="tbl-scroll" style="max-height:380px"><table class="tbl" id="periodic-ap-table"></table></div></div>
+  </div>
+
+  <div class="section">
+    <div class="section-head">
+      <div class="section-title"><span class="tag">C</span>TUỔI NỢ (Aging) — theo hạn thanh toán</div>
+      <div style="display:flex;gap:8px;align-items:center">
+        <select id="periodic-aging-kind" onchange="renderPeriodic()" style="font-size:12px;padding:4px 8px">
+          <option value="ar">Phải thu (KH)</option>
+          <option value="ap">Phải trả (NCC)</option>
+        </select>
+        <button class="btn-primary" style="font-size:12px" onclick="periodicAgingPdf()">📄 Xuất PDF</button>
+      </div>
+    </div>
+    <div class="section-body">
+      <div style="font-size:11px;color:var(--muted);font-style:italic;margin-bottom:6px">Phân nhóm theo số ngày quá hạn (hạn TT, thiếu hạn thì lấy ngày HĐ). Phải thu quy VND · Phải trả quy theo đơn vị hiển thị.</div>
+      <div class="tbl-scroll" style="max-height:380px"><table class="tbl" id="periodic-aging-table"></table></div>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-head">
+      <div class="section-title"><span class="tag">D</span>THU-CHI HỘ CHỦ TÀU (số dư tàu QL — như tab 06)</div>
+      <button class="btn-primary" style="font-size:12px" onclick="openOpReportModal()">📄 Báo cáo chủ tàu (PDF / song ngữ)</button>
+    </div>
+    <div class="section-body"><div class="tbl-scroll"><table class="tbl" id="periodic-op-table"></table></div></div>
+  </div>
+</section>
+
 <section class="page" id="page-operations">
   <div class="page-head">
     <div>
@@ -2779,7 +2831,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.03.13';            // bumped on each release
+const APP_VERSION='3.03.14';            // bumped on each release
 
 /* v2.62.0: Token xác thực backend — PHẢI khớp API_TOKEN trong Apps Script (Code.gs).
    Mọi request tới Apps Script tự động được gắn token qua lớp bọc fetch bên dưới.
@@ -5005,6 +5057,7 @@ function authResetPrompt(){
 // v3.02.96: tab 'advances' (Tạm ứng NV) mở cho MỌI NV — không cần cấp, không có checkbox (như approval).
 const ALL_TABS=[
   {id:'plan',label:'Kế hoạch'},
+  {id:'periodic',label:'Báo cáo định kỳ (PDF)'},
   {id:'projects',label:'Dự án'},
   {id:'vessels',label:'ON-OFFHIRE (khai thác tàu)'},
   {id:'catalog',label:'Danh mục (master data)'},
@@ -36324,6 +36377,193 @@ function arExportExcel(kind){
 }
 
 /* v1.86.0: Xuất sổ Phải thu / Phải trả ra PDF — cửa sổ in trình duyệt */
+/* ============================================================
+   v3.03.14 — TAB 02 · BÁO CÁO ĐỊNH KỲ (PDF gửi email)
+   A/B: công nợ còn nợ (approved & rem>0) gom theo đối tác.
+   C: tuổi nợ theo hạn TT. D: số dư tàu QL (PDF dùng tab 06).
+   ============================================================ */
+function _periodicDebtRows(kind){
+  const list=kind==='ap'?'payables':'receivables';
+  return scopedRecords(S[list]||[]).filter(r=>!r._isBudget && !r._cashClear && wfStatus(r)==='approved' && arRemaining(r)>0.0001);
+}
+function _periodicConv(kind, amt, ccy){
+  // AR quy VND cố định (như sổ AR); AP quy theo đơn vị hiển thị (như sổ AP)
+  if(kind==='ar') return (typeof _toVndFixed==='function')?_toVndFixed(amt,ccy||'VND'):amt;
+  return toDisplay(amt, ccy||'USD');
+}
+function _periodicConvLabel(kind){ return kind==='ar'?'VND':(S.displayCcy||'USD'); }
+function _periodicFmtConv(kind,v){
+  return kind==='ar' ? Math.round(v).toLocaleString('vi-VN')+'₫' : fmt(v);
+}
+function _periodicByPartner(kind){
+  const map={};
+  _periodicDebtRows(kind).forEach(r=>{
+    const k=r.partner||'(không tên)';
+    if(!map[k]) map[k]={partner:k,count:0,tot:0,paid:0,rem:0,oldest:''};
+    const m=map[k];
+    m.count++;
+    m.tot+=_periodicConv(kind,+r.amountGross||+r.amount||0,r.ccy);
+    m.paid+=_periodicConv(kind,arPaidTotal(r),r.ccy);
+    m.rem+=_periodicConv(kind,arRemaining(r),r.ccy);
+    const d=r.dueDate||r.issueDate||'';
+    if(d && (!m.oldest||d<m.oldest)) m.oldest=d;
+  });
+  return Object.values(map).sort((a,b)=>b.rem-a.rem);
+}
+function _periodicAgingBucket(r){
+  const d=r.dueDate||r.issueDate||'';
+  if(!d) return 0;                       // không rõ hạn → chưa đến hạn
+  const days=Math.floor((Date.now()-new Date(d+'T00:00:00').getTime())/86400000);
+  if(days<=0) return 0;
+  if(days<=30) return 1;
+  if(days<=60) return 2;
+  if(days<=90) return 3;
+  return 4;
+}
+const _PERIODIC_BUCKETS=['Chưa đến hạn','1–30 ngày','31–60 ngày','61–90 ngày','>90 ngày'];
+function _periodicAgingByPartner(kind){
+  const map={};
+  _periodicDebtRows(kind).forEach(r=>{
+    const k=r.partner||'(không tên)';
+    if(!map[k]) map[k]={partner:k,b:[0,0,0,0,0],rem:0};
+    const v=_periodicConv(kind,arRemaining(r),r.ccy);
+    map[k].b[_periodicAgingBucket(r)]+=v;
+    map[k].rem+=v;
+  });
+  return Object.values(map).sort((a,b)=>b.rem-a.rem);
+}
+function renderPeriodic(){
+  if(!document.getElementById('page-periodic')) return;
+  // A + B: công nợ theo đối tác
+  ['ar','ap'].forEach(kind=>{
+    const el=document.getElementById('periodic-'+kind+'-table');
+    if(!el) return;
+    const rows=_periodicByPartner(kind);
+    const cl=_periodicConvLabel(kind);
+    if(!rows.length){ el.innerHTML='<tr><td class="empty">Không còn khoản '+(kind==='ap'?'phải trả':'phải thu')+' nào đang nợ 🎉</td></tr>'; return; }
+    let tot=0,paid=0,rem=0;
+    let h=`<thead><tr><th>${kind==='ap'?'Nhà cung cấp':'Khách hàng'}</th><th class="c">Số HĐ</th><th class="r">Tổng (${cl})</th><th class="r">Đã ${kind==='ap'?'trả':'thu'}</th><th class="r">CÒN LẠI</th><th class="c">HĐ cũ nhất</th></tr></thead><tbody>`;
+    rows.forEach(m=>{
+      tot+=m.tot;paid+=m.paid;rem+=m.rem;
+      h+=`<tr><td style="font-weight:600">${esc(m.partner)}</td><td class="c">${m.count}</td>
+        <td class="r num">${_periodicFmtConv(kind,m.tot)}</td>
+        <td class="r num" style="color:var(--good)">${_periodicFmtConv(kind,m.paid)}</td>
+        <td class="r num" style="font-weight:700;color:${kind==='ap'?'var(--bad)':'var(--accent)'}">${_periodicFmtConv(kind,m.rem)}</td>
+        <td class="c mono" style="font-size:11px">${esc(m.oldest||'—')}</td></tr>`;
+    });
+    h+=`<tr class="total"><td><b>TỔNG (${rows.length} đối tác)</b></td><td></td>
+      <td class="r"><b>${_periodicFmtConv(kind,tot)}</b></td>
+      <td class="r" style="color:var(--good)"><b>${_periodicFmtConv(kind,paid)}</b></td>
+      <td class="r" style="color:${kind==='ap'?'var(--bad)':'var(--accent)'}"><b>${_periodicFmtConv(kind,rem)}</b></td><td></td></tr></tbody>`;
+    el.innerHTML=h;
+  });
+  // C: aging
+  const agEl=document.getElementById('periodic-aging-table');
+  if(agEl){
+    const kind=(document.getElementById('periodic-aging-kind')||{}).value||'ar';
+    const rows=_periodicAgingByPartner(kind);
+    if(!rows.length){ agEl.innerHTML='<tr><td class="empty">Không có khoản nào đang nợ</td></tr>'; }
+    else{
+      const sums=[0,0,0,0,0]; let rem=0;
+      let h=`<thead><tr><th>${kind==='ap'?'Nhà cung cấp':'Khách hàng'}</th>${_PERIODIC_BUCKETS.map((b,i)=>`<th class="r" style="${i>=3?'color:var(--bad)':''}">${b}</th>`).join('')}<th class="r">CÒN LẠI</th></tr></thead><tbody>`;
+      rows.forEach(m=>{
+        m.b.forEach((v,i)=>sums[i]+=v); rem+=m.rem;
+        h+=`<tr><td style="font-weight:600">${esc(m.partner)}</td>${m.b.map((v,i)=>`<td class="r num" style="${i>=3&&v>0?'color:var(--bad);font-weight:600':''}">${v>0?_periodicFmtConv(kind,v):'—'}</td>`).join('')}<td class="r num" style="font-weight:700">${_periodicFmtConv(kind,m.rem)}</td></tr>`;
+      });
+      h+=`<tr class="total"><td><b>TỔNG</b></td>${sums.map((v,i)=>`<td class="r" style="${i>=3?'color:var(--bad)':''}"><b>${v>0?_periodicFmtConv(kind,v):'—'}</b></td>`).join('')}<td class="r"><b>${_periodicFmtConv(kind,rem)}</b></td></tr></tbody>`;
+      agEl.innerHTML=h;
+    }
+  }
+  // D: số dư tàu QL
+  const opEl=document.getElementById('periodic-op-table');
+  if(opEl){
+    const vs=(S.opVessels||[]);
+    if(!vs.length){ opEl.innerHTML='<tr><td class="empty">Chưa có tàu quản lý hộ</td></tr>'; }
+    else{
+      let h=`<thead><tr><th>Tàu</th><th>Chủ tàu</th><th class="r">Thu hộ (USD)</th><th class="r">Đã chi + phí GD</th><th class="r">Phí QL chưa phát hành</th><th class="r">SỐ DƯ</th></tr></thead><tbody>`;
+      let tThu=0,tChi=0,tFee=0,tBal=0;
+      vs.forEach(v=>{
+        const b=opBalanceBreakdown(v.id);
+        tThu+=b.thu; tChi+=b.chiTotal; tFee+=b.mgmtPending; tBal+=b.bal;
+        h+=`<tr><td style="font-weight:600">🚢 ${esc(v.name)}</td><td style="font-size:12px;color:var(--muted)">${esc(v.owner||'—')}</td>
+          <td class="r num">${fmt(b.thu)}</td><td class="r num">${fmt(b.chiTotal)}</td>
+          <td class="r num" style="color:var(--warn)">${b.mgmtPending>0?fmt(b.mgmtPending):'—'}</td>
+          <td class="r num" style="font-weight:700;color:${b.bal>=0?'var(--good)':'var(--bad)'}">${fmt(b.bal)}</td></tr>`;
+      });
+      h+=`<tr class="total"><td colspan="2"><b>TỔNG</b></td><td class="r"><b>${fmt(tThu)}</b></td><td class="r"><b>${fmt(tChi)}</b></td><td class="r"><b>${tFee>0?fmt(tFee):'—'}</b></td><td class="r"><b>${fmt(tBal)}</b></td></tr></tbody>`;
+      opEl.innerHTML=h;
+    }
+  }
+}
+function _periodicPdfWin(title, sub, tableHtml, foot){
+  const win=window.open('','_blank');
+  if(!win){ toast('Trình duyệt chặn cửa sổ in — cho phép popup','bad'); return; }
+  const co=(S.companyInfo&&S.companyInfo.name)||'SEAHORSE MARINE & ENERGY JSC';
+  win.document.write(`<!doctype html><html><head><meta charset="utf-8"><title>${title}</title>
+    <style>
+      body{font-family:Arial,sans-serif;font-size:12px;color:#1c3a5c;padding:24px}
+      h1{font-size:16px;color:#b8472e;margin:0 0 2px}
+      .sub{font-size:11px;color:#888;margin-bottom:14px}
+      table{width:100%;border-collapse:collapse}
+      th,td{border:1px solid #ccc;padding:4px 6px;text-align:left;font-size:10px}
+      th{background:#1c3a5c;color:#fff}
+      tr:nth-child(even) td{background:#f5f4ef}
+      .num{text-align:right} .tot td{background:#ece8dd;font-weight:700}
+      .foot{margin-top:10px;font-size:11px;color:#555}
+      @page{size:A4 landscape;margin:12mm}
+    </style></head><body>
+    <h1>${co}</h1>
+    <div class="sub">${title} · ${sub} · Xuất ngày ${new Date().toLocaleDateString('vi-VN')} bởi ${actorName()}</div>
+    ${tableHtml}
+    <div class="foot">${foot||''}</div>
+    <script>window.onload=function(){window.print();}<\\/script>
+    </body></html>`);
+  win.document.close();
+  toast('✓ Đang mở cửa sổ in — chọn "Save as PDF" để gửi email');
+}
+function periodicDebtPdf(kind){
+  const rows=_periodicDebtRows(kind).slice().sort((a,b)=>(a.partner||'').localeCompare(b.partner||'','vi')||((a.issueDate||'').localeCompare(b.issueDate||'')));
+  if(!rows.length){ toast('Không còn khoản nào đang nợ','warn'); return; }
+  const fmtN=n=>(+n||0).toLocaleString('vi-VN');
+  const e2=s2=>String(s2==null?'':s2).replace(/[<>&]/g,c=>({'<':'&lt;','>':'&gt;','&':'&amp;'}[c]));
+  const isAp=kind==='ap';
+  const byCcy={};
+  let body='';
+  rows.forEach((r,i)=>{
+    const tot=+r.amountGross||+r.amount||0, paid=arPaidTotal(r), rem=arRemaining(r);
+    const c=r.ccy||'USD';
+    if(!byCcy[c]) byCcy[c]={tot:0,paid:0,rem:0};
+    byCcy[c].tot+=tot; byCcy[c].paid+=paid; byCcy[c].rem+=rem;
+    const overdue=_periodicAgingBucket(r);
+    body+=`<tr><td>${i+1}</td><td>${e2(r.partner)}</td><td>${e2(r.invoiceNo||'—')}</td><td>${e2(r.desc||'')}</td>
+      <td>${e2(r.issueDate||'')}</td><td>${e2(r.dueDate||'—')}</td><td>${c}</td>
+      <td class="num">${fmtN(tot)}</td><td class="num">${fmtN(paid)}</td><td class="num"><b>${fmtN(rem)}</b></td>
+      <td style="${overdue>=3?'color:#b8472e;font-weight:700':''}">${_PERIODIC_BUCKETS[overdue]}</td></tr>`;
+  });
+  const totalLines=Object.entries(byCcy).map(([c,v])=>`${c}: Tổng <b>${fmtN(v.tot)}</b> · Đã ${isAp?'trả':'thu'} <b>${fmtN(v.paid)}</b> · CÒN LẠI <b>${fmtN(v.rem)}</b>`).join(' &nbsp;|&nbsp; ');
+  const table=`<table><thead><tr><th>STT</th><th>${isAp?'Nhà cung cấp':'Khách hàng'}</th><th>Số HĐ</th><th>Diễn giải</th><th>Ngày HĐ</th><th>Hạn TT</th><th>CCY</th><th>Tổng</th><th>Đã ${isAp?'trả':'thu'}</th><th>Còn lại</th><th>Tuổi nợ</th></tr></thead><tbody>${body}</tbody></table>`;
+  _periodicPdfWin(isAp?'BÁO CÁO CÔNG NỢ PHẢI TRẢ':'BÁO CÁO CÔNG NỢ PHẢI THU',
+    rows.length+' khoản đang nợ (đã duyệt)', table,
+    totalLines+'<br><span style="font-size:10px;color:#888">Tổng gom riêng theo từng loại tiền tệ. Chỉ gồm khoản đã duyệt còn số dư.</span>');
+}
+function periodicAgingPdf(){
+  const kind=(document.getElementById('periodic-aging-kind')||{}).value||'ar';
+  const rows=_periodicAgingByPartner(kind);
+  if(!rows.length){ toast('Không có khoản nào đang nợ','warn'); return; }
+  const e2=s2=>String(s2==null?'':s2).replace(/[<>&]/g,c=>({'<':'&lt;','>':'&gt;','&':'&amp;'}[c]));
+  const f=v=>_periodicFmtConv(kind,v);
+  const sums=[0,0,0,0,0]; let rem=0; let body='';
+  rows.forEach((m,i)=>{
+    m.b.forEach((v,j)=>sums[j]+=v); rem+=m.rem;
+    body+=`<tr><td>${i+1}</td><td>${e2(m.partner)}</td>${m.b.map((v,j)=>`<td class="num" style="${j>=3&&v>0?'color:#b8472e;font-weight:700':''}">${v>0?f(v):'—'}</td>`).join('')}<td class="num"><b>${f(m.rem)}</b></td></tr>`;
+  });
+  body+=`<tr class="tot"><td colspan="2">TỔNG</td>${sums.map(v=>`<td class="num">${v>0?f(v):'—'}</td>`).join('')}<td class="num">${f(rem)}</td></tr>`;
+  const table=`<table><thead><tr><th>STT</th><th>${kind==='ap'?'Nhà cung cấp':'Khách hàng'}</th>${_PERIODIC_BUCKETS.map(b=>`<th>${b}</th>`).join('')}<th>CÒN LẠI</th></tr></thead><tbody>${body}</tbody></table>`;
+  _periodicPdfWin('BÁO CÁO TUỔI NỢ — '+(kind==='ap'?'PHẢI TRẢ (NCC)':'PHẢI THU (KH)'),
+    rows.length+' đối tác · quy đổi '+_periodicConvLabel(kind), table,
+    'Tuổi nợ tính theo hạn thanh toán (thiếu hạn thì lấy ngày hóa đơn) so với hôm nay.');
+}
+
 function arExportPdf(kind){
   const isAp = kind==='ap';
   const rows = _arExportRows(kind);
@@ -39383,6 +39623,7 @@ function _stateFingerprint(){
 }
 
 function renderAll(opts){
+  try{ if(document.getElementById('page-periodic') && document.getElementById('page-periodic').classList.contains('active')) renderPeriodic(); }catch(e){}
   opts = opts || {};
 
   // GUARD 1: If user is actively interacting AND this is background sync → SKIP entirely
