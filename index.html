@@ -2778,7 +2778,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.03.00';            // bumped on each release
+const APP_VERSION='3.03.02';            // bumped on each release
 
 /* v2.62.0: Token xác thực backend — PHẢI khớp API_TOKEN trong Apps Script (Code.gs).
    Mọi request tới Apps Script tự động được gắn token qua lớp bọc fetch bên dưới.
@@ -26561,6 +26561,9 @@ function advBalance(a){
   return Math.max(0,(+a.amount||0)-spent);
 }
 function _advCanApprove(){ return isAdmin() || (typeof canApproveL1==='function'&&canApproveL1()) || (typeof canApproveL2==='function'&&canApproveL2()); }
+/* v3.03.01: hoàn ứng = ghi nhận CHI TIỀN/CHI PHÍ vào sổ → việc của KT trở lên, KHÔNG phải NV
+   (tab mở cho all NV từ v3.02.96 nên phải chốt quyền tại đây). */
+function _advCanSettle(){ return isAdmin() || (typeof canCheckAcc==='function'&&canCheckAcc()) || (typeof canApproveL1==='function'&&canApproveL1()) || (typeof canApproveL2==='function'&&canApproveL2()); }
 function renderAdvances(){
   const block=document.getElementById('adv-list-block'); if(!block) return;
   const stF=(document.getElementById('adv-filter-status')||{}).value||'open';
@@ -26573,10 +26576,12 @@ function renderAdvances(){
     const cur=empSel.value;
     empSel.innerHTML='<option value="">— Mọi nhân viên —</option>'+names.map(n=>`<option value="${esc(n)}" ${n===cur?'selected':''}>${esc(n)}</option>`).join('');
   }
-  // NV thường chỉ thấy tạm ứng của mình; KTT/Admin thấy hết
+  // NV thường chỉ thấy tạm ứng của mình; KTT/Admin thấy hết.
+  // v3.03.02: NHÁP của người khác ẩn với MỌI NGƯỜI trừ admin (nháp = việc riêng của NV, KTT thấy khi gửi duyệt)
   const me=actorName();
   let list=all.filter(a=>{
     if(!_advCanApprove() && a.employee!==me && a.createdBy!==me) return false;
+    if(a.status==='draft' && !isAdmin() && a.createdBy!==me) return false;
     if(empF && a.employee!==empF) return false;
     const bal=advBalance(a);
     const settled = a.status==='approved' && bal<=0.001;
@@ -26590,21 +26595,28 @@ function renderAdvances(){
     const bal=advBalance(a);
     const spent=(+a.amount||0)-bal;
     const settled = a.status==='approved' && bal<=0.001;
-    const stChip = a.status==='pending' ? '<span class="chip chip-warn" style="font-size:9px">⊳ CHỜ DUYỆT</span>'
+    const stChip = a.status==='draft' ? '<span class="chip" style="font-size:9px">📝 NHÁP</span>'
+      : a.status==='pending' ? '<span class="chip chip-warn" style="font-size:9px">⊳ CHỜ DUYỆT</span>'
       : a.status==='rejected' ? '<span class="chip chip-bad" style="font-size:9px">✕ TỪ CHỐI</span>'
       : settled ? '<span class="chip chip-good" style="font-size:9px">✓ ĐÃ HOÀN ỨNG</span>'
       : '<span class="chip" style="font-size:9px;background:var(--accent);color:#fff">● CÒN SỐ DƯ</span>';
     const typeLabel = a.advType==='canhan' ? '👤 Cá nhân' : '✈ Công tác';
     const acts=[];
+    // v3.03.02: NHÁP/BỊ TỪ CHỐI — người tạo/admin: gửi duyệt, sửa, xóa
+    if(['draft','rejected'].includes(a.status) && (isAdmin()||a.createdBy===me)){
+      acts.push(`<button class="btn-sec" style="font-size:11px;padding:3px 10px;border-color:var(--good);color:var(--good)" title="Gửi KTT/Admin duyệt" onclick="advSubmit('${a.id}')">→ Gửi duyệt</button>`);
+      acts.push(`<button class="icon-btn" title="Sửa nháp" onclick="openAdvanceModal('${a.id}')">✎</button>`);
+    }
     if(a.status==='pending' && _advCanApprove()){
       acts.push(`<button class="btn-sec" style="font-size:11px;padding:3px 10px;border-color:var(--good);color:var(--good)" onclick="advApprove('${a.id}')">✓ Duyệt</button>`);
       acts.push(`<button class="icon-btn danger" title="Từ chối" onclick="advReject('${a.id}')">✕</button>`);
     }
-    if(a.status==='approved' && bal>0.001){
+    if(a.status==='approved' && bal>0.001 && _advCanSettle()){
+      // v3.03.01: hoàn ứng chỉ KT trở lên (ghi sổ chi tiền/chi phí) — NV chỉ xem số dư của mình
       acts.push(`<button class="btn-sec" style="font-size:11px;padding:3px 10px" title="Hoàn ứng bằng tiền mặt — giảm số dư" onclick="advSettleCashModal('${a.id}')">💵 Tiền mặt</button>`);
       acts.push(`<button class="btn-sec" style="font-size:11px;padding:3px 10px" title="Hoàn ứng bằng chứng từ — ghi nhận chi phí (như phiếu AP)" onclick="advSettleExpenseModal('${a.id}')">🧾 Thanh toán</button>`);
     }
-    if(a.status==='pending' && (isAdmin()||a.createdBy===me)){
+    if(['draft','pending','rejected'].includes(a.status) && (isAdmin()||a.createdBy===me)){
       acts.push(`<button class="icon-btn danger" title="Xóa (chưa duyệt)" onclick="advDelete('${a.id}')">🗑</button>`);
     }
     acts.push(`<button class="icon-btn" title="Chi tiết / lịch sử hoàn ứng" onclick="advDetailModal('${a.id}')">👁</button>`);
@@ -26622,28 +26634,36 @@ function renderAdvances(){
     <thead><tr><th>Nhân viên</th><th>Diễn giải</th><th class="r">Tạm ứng</th><th class="r">Đã hoàn</th><th class="r">Số dư</th><th class="c">Trạng thái</th><th></th></tr></thead>
     <tbody>${rows}</tbody></table></div>`;
 }
-function openAdvanceModal(){
+function openAdvanceModal(editId){
   const me=actorName();
+  // v3.03.02: sửa NHÁP/BỊ TỪ CHỐI — chỉ người tạo/admin
+  const a0 = editId ? (S.advances||[]).find(x=>x.id===editId) : null;
+  if(editId && !a0){ toast('Không tìm thấy tạm ứng','bad'); return; }
+  if(a0 && !['draft','rejected'].includes(a0.status)){ toast('Chỉ sửa được tạm ứng NHÁP / BỊ TỪ CHỐI','bad'); return; }
+  if(a0 && !isAdmin() && a0.createdBy && a0.createdBy!==me){ toast('Chỉ admin/người tạo mới sửa được','bad'); return; }
   const body=`
     <div class="form-grid" style="grid-template-columns:1fr 1fr">
-      <div class="field"><label>Nhân viên tạm ứng *</label><input type="text" id="adv-emp" value="${esc(me)}" placeholder="Tên NV"></div>
+      <div class="field"><label>Nhân viên tạm ứng *</label><input type="text" id="adv-emp" value="${esc(a0?a0.employee:me)}" placeholder="Tên NV"></div>
       <div class="field"><label>Loại tạm ứng</label><select id="adv-type">
-        <option value="congtac">✈ Tạm ứng công tác</option>
-        <option value="canhan">👤 Tạm ứng cá nhân</option>
+        <option value="congtac" ${a0&&a0.advType==='congtac'?'selected':''}>✈ Tạm ứng công tác</option>
+        <option value="canhan" ${a0&&a0.advType==='canhan'?'selected':''}>👤 Tạm ứng cá nhân</option>
       </select></div>
     </div>
     <div class="form-grid" style="grid-template-columns:1fr 1fr 0.7fr">
-      <div class="field"><label>Ngày</label><input type="date" id="adv-date" value="${todayISO()}"></div>
-      <div class="field"><label>Số tiền *</label><input type="number" id="adv-amt" value="0" step="any" style="font-family:var(--font-mono);font-weight:600"></div>
-      <div class="field"><label>CCY</label><select id="adv-ccy"><option>VND</option><option>USD</option></select></div>
+      <div class="field"><label>Ngày</label><input type="date" id="adv-date" value="${esc(a0?a0.date:todayISO())}"></div>
+      <div class="field"><label>Số tiền *</label><input type="number" id="adv-amt" value="${a0?(+a0.amount||0):0}" step="any" style="font-family:var(--font-mono);font-weight:600"></div>
+      <div class="field"><label>CCY</label><select id="adv-ccy"><option ${a0&&a0.ccy==='VND'?'selected':''}>VND</option><option ${a0&&a0.ccy==='USD'?'selected':''}>USD</option></select></div>
     </div>
-    <div class="field"><label>Diễn giải / mục đích *</label><input type="text" id="adv-desc" placeholder="VD: Tạm ứng công tác Hàn Quốc T6, tạm ứng mua vật tư..."></div>
+    <div class="field"><label>Diễn giải / mục đích *</label><input type="text" id="adv-desc" value="${esc(a0?a0.desc:'')}" placeholder="VD: Tạm ứng công tác Hàn Quốc T6, tạm ứng mua vật tư..."></div>
     <div id="adv-err" style="font-size:11px;color:var(--bad);min-height:14px"></div>`;
-  openModal('💸 Tạm ứng mới', body,
+  openModal(a0?'💸 Sửa tạm ứng (nháp)':'💸 Tạm ứng mới', body,
     `<button class="btn-sec" onclick="closeModal()">Hủy</button>
-     <button class="btn-primary" onclick="saveAdvance()">Lưu (chờ duyệt)</button>`);
+     <button class="btn-sec" onclick="saveAdvance('draft'${a0?`,'${a0.id}'`:''})">💾 Lưu nháp</button>
+     <button class="btn-primary" onclick="saveAdvance('pending'${a0?`,'${a0.id}'`:''})" title="Gửi KTT/Admin duyệt">→ Gửi duyệt</button>`);
 }
-function saveAdvance(){
+function saveAdvance(targetStatus, editId){
+  // v3.03.02: NHÁP — 'draft' (NV soạn, sửa/xóa thoải mái) hoặc 'pending' (gửi duyệt). Sửa nháp qua editId.
+  targetStatus = (targetStatus==='pending') ? 'pending' : 'draft';
   const emp=(document.getElementById('adv-emp')||{}).value.trim();
   const amt=+(document.getElementById('adv-amt')||{}).value||0;
   const desc=(document.getElementById('adv-desc')||{}).value.trim();
@@ -26651,26 +26671,52 @@ function saveAdvance(){
   if(!emp){ if(err)err.textContent='Nhập tên nhân viên'; return; }
   if(amt<=0){ if(err)err.textContent='Số tiền phải > 0'; return; }
   if(!desc){ if(err)err.textContent='Nhập diễn giải/mục đích'; return; }
-  const a={
-    id:'ADV'+Date.now().toString(36)+Math.random().toString(36).slice(2,6),
-    employee:emp,
-    advType:(document.getElementById('adv-type')||{}).value||'congtac',
-    date:(document.getElementById('adv-date')||{}).value||todayISO(),
-    amount:amt,
-    ccy:(document.getElementById('adv-ccy')||{}).value||'VND',
-    desc,
-    status:'pending',
-    settlements:[],
-    createdBy:actorName(), createdAt:new Date().toISOString()
-  };
-  S.advances=S.advances||[]; S.advances.push(a);
+  let a;
+  if(editId){
+    a=(S.advances||[]).find(x=>x.id===editId);
+    if(!a){ closeModal(); return; }
+    if(!['draft','rejected'].includes(a.status)){ toast('Chỉ sửa được NHÁP / BỊ TỪ CHỐI','bad'); return; }
+    if(!isAdmin() && a.createdBy && a.createdBy!==actorName()){ toast('Chỉ admin/người tạo mới sửa được','bad'); return; }
+    a.employee=emp; a.amount=amt; a.desc=desc;
+    a.advType=(document.getElementById('adv-type')||{}).value||'congtac';
+    a.date=(document.getElementById('adv-date')||{}).value||todayISO();
+    a.ccy=(document.getElementById('adv-ccy')||{}).value||'VND';
+    a.status=targetStatus;
+    if(targetStatus==='pending'){ a.submittedBy=actorName(); a.submittedAt=new Date().toISOString(); }
+  } else {
+    a={
+      id:'ADV'+Date.now().toString(36)+Math.random().toString(36).slice(2,6),
+      employee:emp,
+      advType:(document.getElementById('adv-type')||{}).value||'congtac',
+      date:(document.getElementById('adv-date')||{}).value||todayISO(),
+      amount:amt,
+      ccy:(document.getElementById('adv-ccy')||{}).value||'VND',
+      desc,
+      status:targetStatus,
+      settlements:[],
+      createdBy:actorName(), createdAt:new Date().toISOString()
+    };
+    if(targetStatus==='pending'){ a.submittedBy=actorName(); a.submittedAt=new Date().toISOString(); }
+    S.advances=S.advances||[]; S.advances.push(a);
+  }
   touchRecord(a); saveState();
-  try{ logAuditEvent('advance_create',{id:a.id,employee:emp,amount:amt,ccy:a.ccy,type:a.advType,actor:actorName()}); }catch(e){}
-  closeModal(); toast('Đã tạo tạm ứng — chờ duyệt','good'); renderAdvances();
+  try{ logAuditEvent(editId?'advance_edit':'advance_create',{id:a.id,employee:emp,amount:amt,ccy:a.ccy,type:a.advType,status:targetStatus,actor:actorName()}); }catch(e){}
+  closeModal(); toast(targetStatus==='pending'?'Đã gửi tạm ứng — chờ KTT/Admin duyệt':'💾 Đã lưu nháp tạm ứng','good'); renderAdvances();
+}
+/* v3.03.02: NV gửi duyệt nháp của mình */
+function advSubmit(id){
+  const a=(S.advances||[]).find(x=>x.id===id); if(!a) return;
+  if(!['draft','rejected'].includes(a.status)){ toast('Chỉ gửi duyệt được từ NHÁP / BỊ TỪ CHỐI','bad'); return; }
+  if(!isAdmin() && a.createdBy && a.createdBy!==actorName()){ toast('Chỉ admin/người tạo mới gửi duyệt được','bad'); return; }
+  a.status='pending'; a.submittedBy=actorName(); a.submittedAt=new Date().toISOString();
+  touchRecord(a); saveState();
+  try{ logAuditEvent('advance_submit',{id:a.id,employee:a.employee,amount:a.amount,actor:actorName()}); }catch(e){}
+  toast('Đã gửi tạm ứng — chờ KTT/Admin duyệt','good'); renderAdvances();
 }
 function advApprove(id){
   if(!_advCanApprove()){ toast('Cần quyền KTT/Admin','bad'); return; }
   const a=(S.advances||[]).find(x=>x.id===id); if(!a) return;
+  if(a.status!=='pending'){ toast('Chỉ duyệt được tạm ứng đang CHỜ DUYỆT','bad'); return; }  // v3.03.02
   if(!isAdmin() && a.createdBy===actorName() && a.employee===actorName()){ toast('🔒 SOD: không tự duyệt tạm ứng của chính mình','bad'); return; }
   a.status='approved'; a.approvedBy=actorName(); a.approvedAt=new Date().toISOString();
   touchRecord(a); saveState();
@@ -26680,18 +26726,20 @@ function advApprove(id){
 function advReject(id){
   if(!_advCanApprove()){ toast('Cần quyền KTT/Admin','bad'); return; }
   const a=(S.advances||[]).find(x=>x.id===id); if(!a) return;
+  if(a.status!=='pending'){ toast('Chỉ từ chối được tạm ứng đang CHỜ DUYỆT','bad'); return; }  // v3.03.02
   a.status='rejected'; a.rejectedBy=actorName(); a.rejectedAt=new Date().toISOString();
   touchRecord(a); saveState(); toast('Đã từ chối tạm ứng','warn'); renderAdvances();
 }
 function advDelete(id){
   const a=(S.advances||[]).find(x=>x.id===id); if(!a) return;
-  if(a.status!=='pending'){ toast('Chỉ xóa được tạm ứng chưa duyệt','bad'); return; }
+  if(!['draft','pending','rejected'].includes(a.status)){ toast('Chỉ xóa được tạm ứng chưa duyệt','bad'); return; }  // v3.03.02: + nháp/từ chối
   // v3.02.98: enforce trong hàm (không chỉ ẩn nút) — chỉ người tạo/admin xóa
   if(!isAdmin() && a.createdBy && a.createdBy!==actorName()){ toast('Chỉ admin/người tạo mới xóa được tạm ứng','bad'); return; }
   confirmDelete('tạm ứng', `${esc(a.employee)} · ${fmtFull(a.amount,a.ccy)}<br>${esc(a.desc)||''}`,
     ()=>{ S.advances=S.advances.filter(x=>x.id!==id); markDeleted(id); saveState(); toast('Đã xóa'); renderAdvances(); });
 }
 function advSettleCashModal(id){
+  if(!_advCanSettle()){ toast('Hoàn ứng cần quyền KT trở lên','bad'); return; }  // v3.03.01
   const a=(S.advances||[]).find(x=>x.id===id); if(!a) return;
   const bal=advBalance(a);
   const body=`
@@ -26708,6 +26756,7 @@ function advSettleCashModal(id){
      <button class="btn-primary" onclick="advSettleCashConfirm('${id}')">✓ Ghi nhận hoàn ứng</button>`);
 }
 function advSettleCashConfirm(id){
+  if(!_advCanSettle()){ toast('Hoàn ứng cần quyền KT trở lên','bad'); return; }  // v3.03.01
   const a=(S.advances||[]).find(x=>x.id===id); if(!a){ closeModal(); return; }
   const bal=advBalance(a);
   const amt=+(document.getElementById('advc-amt')||{}).value||0;
@@ -26725,6 +26774,7 @@ function advSettleCashConfirm(id){
   closeModal(); toast('✓ Đã hoàn ứng tiền mặt '+fmtFull(amt,a.ccy)+(advBalance(a)<=0.001?' — TẠM ỨNG ĐÃ TẤT TOÁN':''),'good'); renderAdvances();
 }
 function advSettleExpenseModal(id){
+  if(!_advCanSettle()){ toast('Hoàn ứng cần quyền KT trở lên','bad'); return; }  // v3.03.01
   const a=(S.advances||[]).find(x=>x.id===id); if(!a) return;
   const bal=advBalance(a);
   const segOpts=(typeof SEGMENTS==='object'&&SEGMENTS)?Object.entries(SEGMENTS).map(([k,v])=>`<option value="${k}">${esc(v.name||k)}</option>`).join(''):'<option value="OTHER">Khác</option>';
@@ -26749,6 +26799,7 @@ function advSettleExpenseModal(id){
      <button class="btn-primary" onclick="advSettleExpenseConfirm('${id}')">✓ Ghi nhận chi phí & trừ tạm ứng</button>`);
 }
 function advSettleExpenseConfirm(id){
+  if(!_advCanSettle()){ toast('Hoàn ứng cần quyền KT trở lên','bad'); return; }  // v3.03.01
   const a=(S.advances||[]).find(x=>x.id===id); if(!a){ closeModal(); return; }
   const bal=advBalance(a);
   const partner=(document.getElementById('adve-partner')||{}).value.trim();
