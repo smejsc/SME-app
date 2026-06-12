@@ -703,6 +703,8 @@ body.readonly-mode::before{
       <button class="nav-sub-item" data-page="receivables"><span class="sub-dot"></span>Phải thu (Doanh thu + AR)</button>
       <button class="nav-sub-item" data-page="payables"><span class="sub-dot"></span>Phải trả (Tổng AP)</button>
       <button class="nav-sub-item" data-page="op_input" id="nav-op-input"><span class="sub-dot"></span>Thu-Chi hộ tàu QL</button>
+      <!-- v3.02.95: Tạm ứng NV = trang riêng (tách khỏi op_input) -->
+      <button class="nav-sub-item" data-page="advances" id="nav-advances"><span class="sub-dot"></span>💸 Tạm ứng NV</button>
     </div>
   </div>
   <div class="nav-group" id="nav-group-expenses" style="display:none" data-legacy="true">
@@ -1365,8 +1367,18 @@ body.readonly-mode::before{
     </div>
   </div>
 
-  <!-- v3.02.89: TẠM ỨNG NHÂN VIÊN (công tác / cá nhân) -->
-  <div class="section">
+</section>
+
+<!-- ============ v3.02.95: TẠM ỨNG NHÂN VIÊN — trang riêng (tách khỏi Thu-Chi hộ tàu QL, vốn để sai vị trí) ============ -->
+<section class="page" id="page-advances">
+  <div class="page-head">
+    <div>
+      <div class="page-title">Tạm ứng <span class="it">nhân viên</span></div>
+      <div class="page-sub">Tạm ứng công tác / cá nhân — NV tạo, KTT duyệt (SOD), hoàn ứng bằng tiền mặt hoặc chứng từ</div>
+    </div>
+    <div class="page-meta">Hoàn ứng chứng từ → tạo phiếu AP đã duyệt + đã chi<br>Hết số dư phiếu tự ẩn</div>
+  </div>
+  <div class="section" id="sec-advances">
     <div class="section-head" style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">
       <div class="section-title"><span class="tag">💸</span>Tạm ứng nhân viên</div>
       <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
@@ -2766,7 +2778,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.02.93';            // bumped on each release
+const APP_VERSION='3.02.98';            // bumped on each release
 
 /* v2.62.0: Token xác thực backend — PHẢI khớp API_TOKEN trong Apps Script (Code.gs).
    Mọi request tới Apps Script tự động được gắn token qua lớp bọc fetch bên dưới.
@@ -4980,6 +4992,7 @@ function authResetPrompt(){
 }
 
 // Dashboard is admin-only — not in this list. Other tabs can be granted to users.
+// v3.02.96: tab 'advances' (Tạm ứng NV) mở cho MỌI NV — không cần cấp, không có checkbox (như approval).
 const ALL_TABS=[
   {id:'plan',label:'Kế hoạch'},
   {id:'projects',label:'Dự án'},
@@ -5078,6 +5091,7 @@ const TAB_TO_FIELDS={
   salary_fund:    ['salaryFund','receivables','payables'],
   operations:     ['opVessels','opTransactions','advances'],
   op_input:       ['opVessels','opTransactions','advances','payables','vendors','expenseTypes','projects','vessels'],
+  advances:       ['advances','payables','vendors','expenseTypes','projects','vessels','opVessels'],  // v3.02.95
   inventory:      ['warehouses','invMovements','vessels'],
   fixed_assets:   ['fixedAssets','payables','vessels','projects','opVessels'],
   tools:          ['tools','vessels','payables','projects','opVessels'],
@@ -5114,6 +5128,8 @@ function allowedFieldsForUser(){
   tabs.forEach(t=>{
     (TAB_TO_FIELDS[t]||[]).forEach(f=>fields.add(f));
   });
+  // v3.02.96: Tạm ứng NV mở cho MỌI NV → luôn cấp field của tab advances (gồm payables để hoàn ứng chứng từ)
+  (TAB_TO_FIELDS['advances']||[]).forEach(f=>fields.add(f));
   return Array.from(fields);
 }
 
@@ -8009,11 +8025,14 @@ function wfCanEdit(r){
   const st=wfStatus(r);
   if(st==='approved') return false;
   if(st==='draft' || st==='rejected'){
-    // Allow original submitter (or anyone if no submitter recorded for legacy data)
-    if(!r.submittedBy) return true;
-    return r.submittedBy===actorName();
+    // v3.02.97: NHÁP/BỊ TỪ CHỐI — chỉ NGƯỜI TẠO sửa được (đồng bộ wfCanDelete; trước đây
+    //   nháp chưa gửi duyệt có submittedBy rỗng → NV nào cũng sửa được nháp người khác).
+    const me=actorName();
+    if(r.createdBy) return r.createdBy===me;
+    if(r.submittedBy) return r.submittedBy===me;   // legacy: không có createdBy
+    return true;                                    // legacy: không có dấu vết người tạo
   }
-  // pending_l1 / pending_l2: locked for editor; only L1/L2 can sửa qua "Trả về Draft"
+  // pending_acc / pending_l1 / pending_l2: locked for editor; only L1/L2 can sửa qua "Trả về Draft"
   return false;
 }
 
@@ -8978,6 +8997,9 @@ function applyRoleUI(){
       // Also respect main tabs allowance
       const allowedByTabs = !user || !allowedTabs || allowedTabs.includes('op_input') || allowedTabs.includes('operations');
       b.style.display = (hasOpAccess && allowedByTabs) ? '' : 'none';
+    } else if(page==='advances'){
+      // v3.02.96: Tạm ứng NV — hiện cho mọi NV (không cần cấp tab)
+      b.style.display = '';
     } else if(page==='plan' || page==='reports' || page==='rates' || page==='salary_fund'){
       // v1.53.0: BOD group sub-items — admin/BOD only
       b.style.display = canAccessBOD ? '' : 'none';
@@ -16793,9 +16815,17 @@ function renderDeptExpense(prefix, origin, pageId){
     }
     const actionBtns=[];
     if(wfS==='draft' || wfS==='rejected'){
-      actionBtns.push(`<button class="icon-btn good" title="Gửi duyệt L1" onclick="arSubmit('ap','${r.id}')">→</button>`);
-      actionBtns.push(`<button class="icon-btn" title="Sửa" onclick="openPayableModal('${r.id}')">✎</button>`);
-      actionBtns.push(`<button class="icon-btn danger" title="Xóa" onclick="deleteAr('ap','${r.id}')">✕</button>`);
+      // v3.02.98: nút theo QUYỀN (wfCanEdit/wfCanDelete) — nháp của NV khác không hiện nút (chỉ người tạo/admin)
+      if(wfCanEdit(r)){
+        actionBtns.push(`<button class="icon-btn good" title="Gửi duyệt L1" onclick="arSubmit('ap','${r.id}')">→</button>`);
+        actionBtns.push(`<button class="icon-btn" title="Sửa" onclick="openPayableModal('${r.id}')">✎</button>`);
+      }
+      if(wfCanDelete(r)){
+        actionBtns.push(`<button class="icon-btn danger" title="Xóa" onclick="deleteAr('ap','${r.id}')">✕</button>`);
+      }
+      if(!wfCanEdit(r) && !wfCanDelete(r)){
+        actionBtns.push(`<span style="color:var(--muted);font-size:11px;font-style:italic" title="Nháp của ${esc(r.createdBy||'?')} — chỉ người tạo/admin sửa được">Nháp của ${esc(r.createdBy||'?')}</span>`);
+      }
     } else if(wfS==='pending_l1'){
       if(canApproveL1()){
         actionBtns.push(`<button class="icon-btn good" title="Duyệt L1" onclick="arApproveL1('ap','${r.id}')">✓</button>`);
@@ -18463,9 +18493,17 @@ function renderVesselExpense(){
     }
     const actionBtns=[];
     if(wfS==='draft' || wfS==='rejected'){
-      actionBtns.push(`<button class="icon-btn good" title="Gửi duyệt L1" onclick="arSubmit('ap','${r.id}')">→</button>`);
-      actionBtns.push(`<button class="icon-btn" title="Sửa" onclick="openPayableModal('${r.id}')">✎</button>`);
-      actionBtns.push(`<button class="icon-btn danger" title="Xóa" onclick="deleteAr('ap','${r.id}')">✕</button>`);
+      // v3.02.98: nút theo QUYỀN (wfCanEdit/wfCanDelete) — nháp của NV khác không hiện nút (chỉ người tạo/admin)
+      if(wfCanEdit(r)){
+        actionBtns.push(`<button class="icon-btn good" title="Gửi duyệt L1" onclick="arSubmit('ap','${r.id}')">→</button>`);
+        actionBtns.push(`<button class="icon-btn" title="Sửa" onclick="openPayableModal('${r.id}')">✎</button>`);
+      }
+      if(wfCanDelete(r)){
+        actionBtns.push(`<button class="icon-btn danger" title="Xóa" onclick="deleteAr('ap','${r.id}')">✕</button>`);
+      }
+      if(!wfCanEdit(r) && !wfCanDelete(r)){
+        actionBtns.push(`<span style="color:var(--muted);font-size:11px;font-style:italic" title="Nháp của ${esc(r.createdBy||'?')} — chỉ người tạo/admin sửa được">Nháp của ${esc(r.createdBy||'?')}</span>`);
+      }
     } else if(wfS==='pending_l1'){
       if(canApproveL1()){
         actionBtns.push(`<button class="icon-btn good" title="Duyệt L1" onclick="arApproveL1('ap','${r.id}')">✓</button>`);
@@ -22521,14 +22559,17 @@ function renderArAp(kind){
     // Workflow action buttons
     const actionBtns=[];
     if(wfS==='draft' || wfS==='rejected'){
+      // v3.02.98: gửi duyệt / phát HĐ cũng theo quyền wfCanEdit (arSubmit vốn đã chặn, gate nút cho khớp)
       if(isAp){
-        actionBtns.push(`<button class="icon-btn good" title="Gửi duyệt L1" onclick="arSubmit('${kind}','${r.id}')">→</button>`);
+        if(wfCanEdit(r)) actionBtns.push(`<button class="icon-btn good" title="Gửi duyệt L1" onclick="arSubmit('${kind}','${r.id}')">→</button>`);
       } else {
         // v3.01.27: AR — nút "Phát hóa đơn": mở modal cho sửa giá, lưu xong tự duyệt (= đã xuất HĐ)
-        actionBtns.push(`<button class="icon-btn good" title="Phát hóa đơn (sửa giá nếu cần → xuất HĐ)" onclick="arIssueInvoice('${r.id}')" style="font-weight:700">🧾</button>`);
+        if(wfCanEdit(r)) actionBtns.push(`<button class="icon-btn good" title="Phát hóa đơn (sửa giá nếu cần → xuất HĐ)" onclick="arIssueInvoice('${r.id}')" style="font-weight:700">🧾</button>`);
       }
-      actionBtns.push(`<button class="icon-btn" title="Sửa" onclick="${isAp?'openPayableModal':'openReceivableModal'}('${r.id}')">✎</button>`);
-      actionBtns.push(`<button class="icon-btn danger" title="Xóa" onclick="deleteAr('${kind}','${r.id}')">✕</button>`);
+      // v3.02.98: nút theo QUYỀN — nháp của NV khác không hiện nút sửa/xóa
+      if(wfCanEdit(r)) actionBtns.push(`<button class="icon-btn" title="Sửa" onclick="${isAp?'openPayableModal':'openReceivableModal'}('${r.id}')">✎</button>`);
+      if(wfCanDelete(r)) actionBtns.push(`<button class="icon-btn danger" title="Xóa" onclick="deleteAr('${kind}','${r.id}')">✕</button>`);
+      if(!wfCanEdit(r) && !wfCanDelete(r)) actionBtns.push(`<span style="color:var(--muted);font-size:11px;font-style:italic" title="Chỉ người tạo/admin sửa được">Nháp của ${esc(r.createdBy||'?')}</span>`);
     } else if(wfS==='pending_acc'){
       // v1.99.0: KT viên kiểm chứng từ → Trình ký lên L1, hoặc trả lại NV
       if(canCheckAcc()){
@@ -24194,17 +24235,23 @@ function _payrollReviewDetail(batchId){
   const ccLabel = costCenterLabel(first.costCenterType, first.costCenterId) || '—';
   const period = first.payrollPeriod || (first.issueDate||'').slice(0,7);
 
+  // v3.02.95: NV sửa/xóa được TỪNG DÒNG phiếu lương NHÁP của mình (trước đây modal lương chỉ xem)
+  const _anyAction = recs.some(r=>wfCanEdit(r)||wfCanDelete(r));
   const lineRows = recs.map((r,i)=>{
     // v3.02.92: dùng nhãn hồ sơ thống nhất (v3.02.64) — approved chưa chi → "Chờ chi tiền", đã chi đủ → "Đã TT"
     const ds = (typeof docStatusInfo==='function') ? docStatusInfo(r) : null;
     const st = (WF_STATES[r.status]||WF_STATES.draft);
     const stHtml = ds ? `<span class="chip ${ds.cls}" style="font-size:9px">${ds.icon} ${ds.label}</span>`
                       : `<span class="chip ${st.chip}" style="font-size:9px">${st.short}</span>`;
+    const actHtml = _anyAction ? `<td style="white-space:nowrap;text-align:center">
+        ${wfCanEdit(r)?`<button class="icon-btn" title="Sửa dòng này (mở phiếu gốc)" onclick="closeModal();openPayableModal('${r.id}')">✎</button>`:''}
+        ${wfCanDelete(r)?`<button class="icon-btn danger" title="Xóa dòng này" onclick="_batchDeleteLine('ap','${esc(batchId)}','${r.id}')">✕</button>`:''}
+      </td>` : '';
     return `<tr>
       <td class="row-idx">${i+1}</td>
       <td>${esc(r.recipientName||r.desc||'—')}</td>
       <td class="num" style="font-family:var(--font-mono)">${fmtCcy(+r.amountNet||+r.amount||0, ccy)}</td>
-      <td>${stHtml}</td>
+      <td>${stHtml}</td>${actHtml}
     </tr>`;
   }).join('');
 
@@ -24227,7 +24274,7 @@ function _payrollReviewDetail(batchId){
     </div>
     <div style="border:1px solid var(--rule);max-height:40vh;overflow:auto;margin-bottom:10px">
       <table class="pr-dt">
-        <thead><tr><th class="row-idx">#</th><th>Người nhận</th><th class="num">Lương net</th><th>TT</th></tr></thead>
+        <thead><tr><th class="row-idx">#</th><th>Người nhận</th><th class="num">Lương net</th><th>TT</th>${_anyAction?'<th style="text-align:center">Thao tác</th>':''}</tr></thead>
         <tbody>${lineRows}</tbody>
       </table>
     </div>
@@ -26633,6 +26680,8 @@ function advReject(id){
 function advDelete(id){
   const a=(S.advances||[]).find(x=>x.id===id); if(!a) return;
   if(a.status!=='pending'){ toast('Chỉ xóa được tạm ứng chưa duyệt','bad'); return; }
+  // v3.02.98: enforce trong hàm (không chỉ ẩn nút) — chỉ người tạo/admin xóa
+  if(!isAdmin() && a.createdBy && a.createdBy!==actorName()){ toast('Chỉ admin/người tạo mới xóa được tạm ứng','bad'); return; }
   confirmDelete('tạm ứng', `${esc(a.employee)} · ${fmtFull(a.amount,a.ccy)}<br>${esc(a.desc)||''}`,
     ()=>{ S.advances=S.advances.filter(x=>x.id!==id); markDeleted(id); saveState(); toast('Đã xóa'); renderAdvances(); });
 }
@@ -38856,6 +38905,7 @@ function canAccessTab(tabId){
   if(tabId==='dashboard') return false;  // admin-only
   if(tabId==='salary_fund') return false;  // v1.32: admin-only
   if(tabId==='approval') return canCheckAcc()||canApproveL1()||canApproveL2();
+  if(tabId==='advances') return true;  // v3.02.96: Tạm ứng NV — mở cho MỌI NV đăng nhập (tạo tạm ứng của mình; duyệt vẫn cần KTT/Admin + SOD)
   if(tabId==='cashflow') return canCheckAcc()||canApproveL1()||canApproveL2();  // v1.37.1: KT viên + L1 + L2 + admin
   if(tabId==='op_input'){
     // v1.44.0: Sub-tab Thu/Chi hộ — need assignedOpVesselIds OR be BOD/L2
@@ -38883,6 +38933,7 @@ function clearForbiddenPages(){
     hr_expense:['hr-expense-list'],
     qn_expense:['qn-expense-list'],
     operations:['op-vessels-list','op-tx-list'],
+    advances:['adv-list-block'],  // v3.02.95
     approval:['approval-list'],
     inventory:['inv-groups-list','inv-movements-block'],
     fixed_assets:['fa-list'],
@@ -39040,7 +39091,9 @@ function renderAll(opts){
     try{ fillOpVesselPicker(); }catch(e){}
     try{ fillOpInputFilterVessel(); }catch(e){}
     try{ renderOpInputRecent(); }catch(e){}
-    try{ renderAdvances(); }catch(e){}  // v3.02.89: tạm ứng NV
+  }
+  if(canAccessTab('advances') && (renderAllTabs || activePageId==='advances')){
+    try{ renderAdvances(); }catch(e){}  // v3.02.95: tạm ứng NV — trang riêng
   }
   maybe('inventory', renderInventory);
   maybe('catalog', renderCatalog);
