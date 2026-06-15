@@ -516,7 +516,7 @@ body.readonly-mode::before{
       <!-- LOGIN form -->
       <div id="auth-login-form">
         <div class="field">
-          <label>Tên đăng nhập</label>
+          <label>Email công ty hoặc tên đăng nhập <span style="font-weight:400;color:var(--muted)">(admin: nhập “admin”)</span></label>
           <input type="text" id="auth-name" placeholder="Email công ty (vd: lan.kt@seahorse.com.vn)" autocomplete="username" autocapitalize="off" autocorrect="off" spellcheck="false">
         </div>
         <div class="field">
@@ -992,6 +992,23 @@ body.readonly-mode::before{
     <div class="section-body">
       <div style="font-size:11px;color:var(--muted);font-style:italic;margin-bottom:8px">Mỗi đoạn ghi đầy đủ thời gian bắt đầu/kết thúc, loại trạng thái, dự án (nếu Onhire/Transit), cảng đi-đến (nếu Transit) và nhiên liệu tại 2 mốc. App tự tính số ngày + nhiên liệu tiêu thụ.</div>
       <div id="events-block"></div>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-head">
+      <div class="section-title"><span class="tag">☼</span>Báo cáo hàng ngày của tàu (Daily Report)</div>
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <label style="font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);font-weight:600">Chọn tàu:</label>
+        <select id="dr-filter-vessel" onchange="renderDailyReports()" style="padding:6px 10px;border:1px solid var(--rule);background:var(--paper);font-family:var(--font-mono);font-size:12px;min-width:160px">
+          <option value="">— Tất cả tàu —</option>
+        </select>
+        <button class="btn-sec" onclick="openDailyReportModal(null)">+ Thêm báo cáo ngày</button>
+      </div>
+    </div>
+    <div class="section-body">
+      <div style="font-size:11px;color:var(--muted);font-style:italic;margin-bottom:8px">Mỗi ngày tàu báo số dư cuối ngày DO/LO/FW (và lượng bơm nếu có). App tự suy đoạn (event) chứa ngày đó, tính tiêu thụ ngày, và đối chiếu tổng tiêu thụ daily report với số dư đầu/cuối của đoạn — luôn hiện số lệch để kiểm tra.</div>
+      <div id="daily-reports-block"></div>
     </div>
   </div>
 
@@ -1997,6 +2014,8 @@ body.readonly-mode::before{
     <div class="page-meta">Chỉ người có quyền L1/L2 thấy tab này<br>Mặc định tick hết — bấm Duyệt là xong</div>
   </div>
 
+  <div id="postaudit-section"></div>
+
   <div class="section">
     <div class="section-head">
       <div class="section-title"><span class="tag">⚙</span>Bộ lọc lô cần duyệt</div>
@@ -2848,7 +2867,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.03.29';            // bumped on each release
+const APP_VERSION='3.03.36';            // bumped on each release
 
 /* v2.62.0: Token xác thực backend — PHẢI khớp API_TOKEN trong Apps Script (Code.gs).
    Mọi request tới Apps Script tự động được gắn token qua lớp bọc fetch bên dưới.
@@ -2857,6 +2876,12 @@ const API_TOKEN='SME-Mxb0S7xMNU19euOtsBi3k6OrpZ0gwNvFaOulC0JM';
 /* v2.99.48: Tên miền email công ty — chỉ chấp nhận NV có email @domain này.
    Để trống ('') nếu muốn TẮT kiểm tra (cho phép mọi email). */
 const COMPANY_EMAIL_DOMAIN='seahorse.com.vn';
+/* v3.03.30: Chế độ ID đăng nhập cho NV.
+   false = SONG SONG (mặc định): NV đăng nhập bằng email công ty HOẶC tên cũ đều được;
+           dùng tên cũ vẫn vào, chỉ nhắc nhẹ nên chuyển sang email.
+   true  = SIẾT CỨNG: chỉ chấp nhận email @COMPANY_EMAIL_DOMAIN; gõ tên cũ bị chặn + chỉ rõ email.
+   admin luôn đăng nhập bằng tên 'admin' (không bị ảnh hưởng bởi cờ này). */
+const ENFORCE_EMAIL_LOGIN=false;
 /* v2.99.59: App chỉ dùng cho 1 công ty Seahorse → ẩn cột/ô "Công ty" khỏi giao diện + bản in
    cho bảng gọn, dễ in. DỮ LIỆU companyId VẪN GIỮ (chỉ ẩn hiển thị). Đặt false để hiện lại. */
 const HIDE_COMPANY_COL=true;
@@ -4662,8 +4687,41 @@ async function authAction(){
         if(!matched){
           recordFailedLogin(name);
           err.style.color='var(--bad)';
-          err.textContent='Không tìm thấy nhân viên có tên này';
+          // v3.03.30: thông báo phù hợp cả chế độ song song lẫn siết cứng
+          if(ENFORCE_EMAIL_LOGIN && !name.toLowerCase().endsWith('@'+COMPANY_EMAIL_DOMAIN.toLowerCase())){
+            err.innerHTML='Không tìm thấy tài khoản. Vui lòng đăng nhập bằng <b>email công ty @'+esc(COMPANY_EMAIL_DOMAIN)+'</b>.';
+          } else {
+            err.textContent='Không tìm thấy tài khoản với thông tin này';
+          }
           return;
+        }
+      }
+      // v3.03.30: ID đăng nhập NV — hành xử theo cờ ENFORCE_EMAIL_LOGIN.
+      // (admin dùng tên 'admin' — nhánh trên, không vào đây.)
+      let _emailLoginReminder=null; // nếu set, hiện toast nhắc sau khi login xong (chế độ song song)
+      {
+        const _idIsCompanyEmail = name.toLowerCase().endsWith('@'+COMPANY_EMAIL_DOMAIN.toLowerCase());
+        const _hasCompanyEmail = matched.email && matched.email.toLowerCase().endsWith('@'+COMPANY_EMAIL_DOMAIN.toLowerCase());
+        if(!_idIsCompanyEmail){
+          // NV gõ TÊN cũ hoặc email sai đuôi (không phải email công ty)
+          // v3.03.31: siết nếu cờ toàn cục bật HOẶC NV này đã được cấp lại mật khẩu (mustUseEmail)
+          const _enforceThisUser = ENFORCE_EMAIL_LOGIN || (matched.mustUseEmail===true);
+          if(_enforceThisUser){
+            // SIẾT: chặn, chỉ rõ email phải dùng
+            err.style.color='var(--bad)';
+            if(_hasCompanyEmail){
+              err.innerHTML='Tài khoản của bạn nay đăng nhập bằng <b>email công ty</b>:<br><span style="font-family:var(--font-mono);color:var(--ink)">'+esc(matched.email)+'</span><br><span style="color:var(--muted)">Vui lòng nhập email trên (mật khẩu giữ nguyên).</span>';
+            } else {
+              err.innerHTML='Tài khoản này chưa gắn <b>email công ty @'+esc(COMPANY_EMAIL_DOMAIN)+'</b>.<br><span style="color:var(--muted)">Vui lòng liên hệ quản trị (admin) để bổ sung email trước khi đăng nhập.</span>';
+            }
+            document.getElementById('auth-pw').value='';
+            return;
+          } else {
+            // SONG SONG: vẫn cho vào bằng tên cũ; nếu đã có email công ty thì nhắc nhẹ sau khi login
+            if(_hasCompanyEmail){
+              _emailLoginReminder=matched.email;
+            }
+          }
         }
       }
       let h=await sha256Hex(pw+matched.salt);
@@ -4731,6 +4789,13 @@ async function authAction(){
     try{ logAuditEvent('login',{role:CURRENT_ROLE}); }catch(e){}
     resetIdleTimer();
     startMaxSessionTimer();
+    // v3.03.30: chế độ song song — NV vừa đăng nhập bằng tên cũ nhưng đã có email công ty → nhắc nhẹ
+    if(_emailLoginReminder){
+      setTimeout(()=>{
+        try{ toast('💡 Lần sau nên đăng nhập bằng email công ty: '+_emailLoginReminder); }
+        catch(e){ console.warn('[login] reminder toast fail:',e&&e.message); }
+      }, 1200);
+    }
     // Force password change on first login (mustChangePassword flag)
     if(CURRENT_ROLE==='user' && CURRENT_USER && CURRENT_USER.mustChangePassword){
       setTimeout(()=>showChangePasswordModal(true),500);
@@ -5113,7 +5178,7 @@ const PRESET_ROLES={
   },
   captain: {
     label:'Thuyền/Máy trưởng — ON-OFFHIRE & Quỹ tiền mặt',
-    desc:'Nhập liệu khai thác tàu (ON-OFFHIRE) + Quỹ tiền mặt trên tàu. Nên gán kèm tàu phụ trách (⛵ bên dưới).',
+    desc:'Nhập khai thác tàu (ON-OFFHIRE: đoạn + báo cáo ngày) + Quỹ tiền mặt trên tàu. CHỈ thấy tàu được gán đích danh (⛵ bên dưới — bắt buộc chọn). KHÔNG thấy giá/đơn giá nhiên liệu (chỉ nhập số lượng).',
     tabs:['vessels','cashfund'],
     flags:{}
   },
@@ -5165,7 +5230,7 @@ const PRESET_ROLES={
 const TAB_TO_FIELDS={
   plan:           ['plans','dockPlans','projects','vessels','opVessels','receivables','payables','fixedAssets'],
   projects:       ['projects'],
-  vessels:        ['vessels','onhires','events'],
+  vessels:        ['vessels','onhires','events','dailyReports'],
   receivables:    ['receivables','projects','vessels','opVessels'],
   payables:       ['payables','projects','vessels','opVessels'],
   vessel_expense: ['vessels','projects','opVessels','payables','vesselExpenseCats','omProjectExpenseCats'],
@@ -5193,7 +5258,7 @@ const TAB_TO_FIELDS={
 const SHARED_FIELDS=['fxRate','fxRateAt','displayCcy','companyInfo','meta','presence','vesselExpenseCats','omProjectExpenseCats','hrExpenseCats','qnExpenseCats','departments','vendors','expenseTypes','revenueTypes','companies','deletedIds','purgedBatches','auditLogShared','cashflowConfig'];
 /* All possible data fields (used by admin or for save-merge) */
 const ALL_DATA_FIELDS=[
-  'plans','dockPlans','projects','vessels','onhires','events',
+  'plans','dockPlans','projects','vessels','onhires','events','dailyReports',
   'receivables','payables','bankAccounts','bankSnapshots','loans','creditFacilities','bankBalance','bankBalanceCcy',
   'opVessels','opTransactions','opMgmtFees','advances','invGroups','invMovements','warehouses',
   'vesselExpenseCats','omProjectExpenseCats','hrExpenseCats','qnExpenseCats',
@@ -5258,7 +5323,7 @@ function openSettings(){
         const d=(S.departments||[]).find(x=>x.id===u.departmentId);
         if(!d) return '';
         return ` <span class="chip" style="font-size:9px;margin-left:4px;background:#2a5a8c;color:#fff" title="${esc(d.name)}">🏢 ${esc(d.code)}</span>`;
-      })()}${u.isBOD?' <span class="chip" style="font-size:9px;margin-left:4px;background:#8b3a2a;color:#fff" title="Là BOD — xem được bút toán nội bộ">🔒 BOD</span>':''}${u.canManageUsers?' <span class="chip" style="font-size:9px;margin-left:4px;background:#4a6b2c;color:#fff" title="Có quyền quản lý NV (Sub-admin)">🛡 QL NV</span>':''}${u.isViewer?' <span class="chip" style="font-size:9px;margin-left:4px;background:#b8472e;color:#fff" title="Viewer — chỉ đọc báo cáo">👁 VIEWER</span>':''}${u.canConfirmPayment?' <span class="chip chip-warn" style="font-size:9px;margin-left:4px" title="Có quyền xác nhận TT (Vận hành tàu)">XÁC NHẬN TT</span>':''}${u.canCheckAcc?' <span class="chip" style="font-size:9px;margin-left:4px;background:#5a4a8c;color:#fff" title="KT viên kiểm hồ sơ (Gatekeeper)">📝 KT KIỂM</span>':''}${u.canApproveL1?' <span class="chip" style="font-size:9px;margin-left:4px;background:#c5876d;color:#fff" title="Phê duyệt cấp 1">DUYỆT L1</span>':''}${u.canApproveL2?' <span class="chip" style="font-size:9px;margin-left:4px;background:#8b3a2a;color:#fff" title="Phê duyệt cấp 2">DUYỆT L2</span>':''}${u.totp2fa?.enabled?' <span class="chip" style="font-size:9px;margin-left:4px;background:#1c3a5c;color:#fff" title="2FA đã bật">🔐 2FA</span>':''}${(u.assignedVesselIds||[]).length>0?` <span class="chip" style="font-size:9px;margin-left:4px;background:#1c3a5c;color:#fff" title="Tàu: ${esc((u.assignedVesselIds||[]).map(id=>{const v=S.vessels.find(x=>x.id===id);return v?v.name:'?';}).join(', '))}">⛵ ${(u.assignedVesselIds||[]).length}</span>`:''}${(u.assignedProjectIds||[]).length>0?` <span class="chip" style="font-size:9px;margin-left:4px;background:#4a6b2c;color:#fff" title="Dự án O&M: ${esc((u.assignedProjectIds||[]).map(id=>{const p=S.projects.find(x=>x.id===id);return p?p.code:'?';}).join(', '))}">⚙ ${(u.assignedProjectIds||[]).length}</span>`:''}${(u.assignedOpVesselIds||[]).length>0?` <span class="chip" style="font-size:9px;margin-left:4px;background:#5a4a8c;color:#fff" title="Tàu QL hộ: ${esc((u.assignedOpVesselIds||[]).map(id=>{const v=S.opVessels.find(x=>x.id===id);return v?v.name:'?';}).join(', '))}">🚢 ${(u.assignedOpVesselIds||[]).length}</span>`:''}</td>
+      })()}${u.isBOD?' <span class="chip" style="font-size:9px;margin-left:4px;background:#8b3a2a;color:#fff" title="Là BOD — xem được bút toán nội bộ">🔒 BOD</span>':''}${u.canManageUsers?' <span class="chip" style="font-size:9px;margin-left:4px;background:#4a6b2c;color:#fff" title="Có quyền quản lý NV (Sub-admin)">🛡 QL NV</span>':''}${u.isViewer?' <span class="chip" style="font-size:9px;margin-left:4px;background:#b8472e;color:#fff" title="Viewer — chỉ đọc báo cáo">👁 VIEWER</span>':''}${u.canConfirmPayment?' <span class="chip chip-warn" style="font-size:9px;margin-left:4px" title="Có quyền xác nhận TT (Vận hành tàu)">XÁC NHẬN TT</span>':''}${u.canCheckAcc?' <span class="chip" style="font-size:9px;margin-left:4px;background:#5a4a8c;color:#fff" title="KT viên kiểm hồ sơ (Gatekeeper)">📝 KT KIỂM</span>':''}${u.canApproveL1?' <span class="chip" style="font-size:9px;margin-left:4px;background:#c5876d;color:#fff" title="Phê duyệt cấp 1">DUYỆT L1</span>':''}${u.canApproveL2?' <span class="chip" style="font-size:9px;margin-left:4px;background:#8b3a2a;color:#fff" title="Phê duyệt cấp 2">DUYỆT L2</span>':''}${u.totp2fa?.enabled?' <span class="chip" style="font-size:9px;margin-left:4px;background:#1c3a5c;color:#fff" title="2FA đã bật">🔐 2FA</span>':''}${u.mustUseEmail?' <span class="chip" style="font-size:9px;margin-left:4px;background:#2a5a8c;color:#fff" title="Đã chuyển: chỉ đăng nhập bằng email công ty (sau khi cấp lại mật khẩu)">📧 ID=email</span>':''}${(u.assignedVesselIds||[]).length>0?` <span class="chip" style="font-size:9px;margin-left:4px;background:#1c3a5c;color:#fff" title="Tàu: ${esc((u.assignedVesselIds||[]).map(id=>{const v=S.vessels.find(x=>x.id===id);return v?v.name:'?';}).join(', '))}">⛵ ${(u.assignedVesselIds||[]).length}</span>`:''}${(u.assignedProjectIds||[]).length>0?` <span class="chip" style="font-size:9px;margin-left:4px;background:#4a6b2c;color:#fff" title="Dự án O&M: ${esc((u.assignedProjectIds||[]).map(id=>{const p=S.projects.find(x=>x.id===id);return p?p.code:'?';}).join(', '))}">⚙ ${(u.assignedProjectIds||[]).length}</span>`:''}${(u.assignedOpVesselIds||[]).length>0?` <span class="chip" style="font-size:9px;margin-left:4px;background:#5a4a8c;color:#fff" title="Tàu QL hộ: ${esc((u.assignedOpVesselIds||[]).map(id=>{const v=S.opVessels.find(x=>x.id===id);return v?v.name:'?';}).join(', '))}">🚢 ${(u.assignedOpVesselIds||[]).length}</span>`:''}</td>
       <td style="font-family:var(--font-mono);font-size:11px;color:var(--muted)">${(u.tabs||[]).length} tab</td>
       <td>${(u.tabs||[]).map(t=>{const T=ALL_TABS.find(x=>x.id===t);return T?`<span class="chip chip-5" style="margin-right:3px">${T.label}</span>`:'';}).join(' ')}</td>
       <td style="white-space:nowrap"><div class="row-actions">
@@ -7432,6 +7497,12 @@ async function resetUserPw(idx){
     const wrap=await wrapMasterKey(CRYPTO_KEY, await deriveWrappingKey(newPw,salt,PBKDF2_ITER_NEW));
     u.salt=salt; u.hash=hash; u.wrap=wrap; u.iter=PBKDF2_ITER_NEW;
     u.mustChangePassword=true;
+    // v3.03.31: Cách C — nhân dịp cấp lại mật khẩu, siết ID sang email RIÊNG cho NV này
+    // (nếu hồ sơ đã có email công ty). Không đổi u.name → không phá liên kết log/duyệt/sub-admin.
+    // Lần sau NV gõ tên cũ sẽ bị chặn + chỉ rõ email; gõ email thì vào bình thường.
+    if(u.email && u.email.toLowerCase().endsWith('@'+COMPANY_EMAIL_DOMAIN.toLowerCase())){
+      u.mustUseEmail=true;
+    }
     setAuthConfig(cfg);
     try{ logAuditEvent('reset_pw',{target:u.name,by:actorName()}); }catch(e){}
     // v2.07.0: đẩy lên cloud NGAY với chính mật khẩu vừa sinh —
@@ -7687,6 +7758,19 @@ function _smartSetupProceedNew(){
    ROLE-BASED UI ENFORCEMENT
    ============================================================ */
 function isAdmin(){return CURRENT_ROLE==='admin';}
+
+/* v3.03.33: Ai được THẤY giá/đơn giá/giá trị nhiên liệu trong tab ON-OFFHIRE.
+   Crew (thuyền viên nhập daily report / đoạn) KHÔNG được thấy giá — chỉ nhập số lượng.
+   Chỉ admin và BOD (chủ công ty) thấy. (Mức A: ẩn giao diện. Mức B — giá không tải về máy crew — để GĐ5.) */
+function canSeeFuelPrice(){
+  if(CURRENT_ROLE==='admin') return true;
+  if(CURRENT_USER && CURRENT_USER.isBOD) return true;
+  // v3.03.34: KTT (Duyệt L1) + GĐTC (Duyệt L2) thuộc tuyến kế toán/tài chính → được thấy giá nhiên liệu.
+  // Crew (thuyền trưởng/máy trưởng) không có các cờ này → vẫn bị ẩn giá.
+  if(typeof canApproveL1==='function' && canApproveL1()) return true;
+  if(typeof canApproveL2==='function' && canApproveL2()) return true;
+  return false;
+}
 
 /* v1.53.0: Check if current user is BOD (Chủ công ty) */
 function isBOD(){
@@ -8071,6 +8155,22 @@ function userAssignedVesselIds(){
   const a=CURRENT_USER&&CURRENT_USER.assignedVesselIds;
   if(!Array.isArray(a) || a.length===0) return S.vessels.map(v=>v.id);
   return a;
+}
+/* v3.03.35: Quỹ tiền mặt user được phép thấy.
+   Admin + KTT (canManageUsers/canCheckAcc/duyệt) → tất cả.
+   Thuyền trưởng (có gán tàu): NGHIÊM NGẶT — chỉ quỹ loại Tàu gắn đúng tàu mình.
+     (không thấy quỹ Văn phòng, quỹ Khác, hay quỹ Tàu của tàu khác.)
+   User không gán tàu → giữ tất cả (backward compat, tránh khóa nhầm NV cũ). */
+function visibleCashFunds(){
+  const all=S.cashFunds||[];
+  if(CURRENT_ROLE==='admin') return all;
+  if(CURRENT_USER && (CURRENT_USER.canManageUsers || CURRENT_USER.canCheckAcc)) return all;
+  if(typeof canApproveL1==='function' && canApproveL1()) return all;
+  if(typeof canApproveL2==='function' && canApproveL2()) return all;
+  const a=CURRENT_USER&&CURRENT_USER.assignedVesselIds;
+  if(!Array.isArray(a) || a.length===0) return all; // không gán tàu → không siết
+  const set=new Set(a);
+  return all.filter(f=>f.fundType==='VESSEL' && f.vesselId && set.has(f.vesselId));
 }
 function userAssignedProjectIds(){
   if(CURRENT_ROLE==='admin') return S.projects.filter(p=>p.isOM).map(p=>p.id);
@@ -9930,6 +10030,26 @@ function archivedExpenseTypes(){
   return list.filter(t=>t.archived);
 }
 
+/* v3.03.36: Loại chi phí mà user hiện tại được phép CHỌN (lọc theo vai trò).
+   Crew/thuyền trưởng (có gán tàu, KHÔNG thuộc tuyến kế toán/duyệt) → chỉ nhóm hoạt động tàu
+   (group VESSEL + VESSEL_OPS). Admin/KTT/KT/duyệt → tất cả.
+   Dùng cho mọi dropdown chọn loại chi phí để crew không thấy chi phí ngoài phận sự (HR, tài chính, overhead...). */
+const VESSEL_EXPENSE_GROUPS=['VESSEL','VESSEL_OPS'];
+function isVesselOnlyExpenseUser(){
+  if(CURRENT_ROLE==='admin') return false;
+  if(CURRENT_USER && (CURRENT_USER.canManageUsers || CURRENT_USER.canCheckAcc || CURRENT_USER.isBOD)) return false;
+  if(typeof canApproveL1==='function' && canApproveL1()) return false;
+  if(typeof canApproveL2==='function' && canApproveL2()) return false;
+  // còn lại là NV thường — nếu có gán tàu thì coi là crew tàu → chỉ chi phí nhóm tàu
+  const a=CURRENT_USER&&CURRENT_USER.assignedVesselIds;
+  return Array.isArray(a) && a.length>0;
+}
+function expenseTypesForUser(){
+  const all=activeExpenseTypes();
+  if(!isVesselOnlyExpenseUser()) return all;
+  return all.filter(t=>VESSEL_EXPENSE_GROUPS.includes(t.group));
+}
+
 /* Migration: copy DEFAULT_EXPENSE_TYPES to S.expenseTypes if not yet exists.
    Safe to re-run — only adds missing codes. */
 /* v1.36: Migrate plans: ensure profit field (derive from revenue - cost if missing) */
@@ -10722,6 +10842,7 @@ function defaultState(){
   return {
     plans:[], dockPlans:[], projects:[], vessels:[], onhires:[],
     events:[],
+    dailyReports:[],  // v3.03.32: báo cáo hàng ngày của tàu — {id, vesselId, date, eventId(auto), fuelEnd:{do,lo,fw}, fuelPumped:{do,lo,fw}, reporter, notes, createdAt, createdBy}
     transactions:[],
     receivables:[],
     payables:[],
@@ -15934,9 +16055,75 @@ function eventConsumptionValue(e,fuelKey){
   return consumedL*pricePerL;
 }
 
+/* ============================================================
+   DAILY REPORT — báo cáo hàng ngày của tàu (v3.03.32)
+   Nhập tay, tối giản: ngày + số dư cuối ngày DO/LO/FW (+ bơm trong ngày nếu có).
+   Tự suy event chứa ngày đó. Tiêu thụ ngày = tồn cuối hôm trước + bơm − tồn cuối hôm nay.
+   Đối chiếu: tổng tiêu thụ các daily report trong 1 event ↔ tiêu thụ tính từ fuelStart/End của event.
+   Luôn hiện số lệch (không dùng ngưỡng).
+   ============================================================ */
+function defaultDailyReport(){
+  return {
+    id:uid(),
+    vesselId:'',
+    date:'',                 // YYYY-MM-DD
+    fuelEnd:{do:fuelStockDefault(),lo:fuelStockDefault(),fw:fuelStockDefault()},   // số dư CUỐI ngày
+    fuelPumped:{do:fuelPumpDefault(),lo:fuelPumpDefault(),fw:fuelPumpDefault()},   // bơm thêm trong ngày
+    reporter:'',
+    notes:'',
+    createdAt:new Date().toISOString(),
+    createdBy:(typeof actorName==='function'?actorName():'')
+  };
+}
+/* Tìm event của tàu chứa ngày d (so với khoảng startAt..endAt). Trả về event hoặc null. */
+function findEventForDate(vesselId, dateStr){
+  if(!vesselId||!dateStr) return null;
+  const d=new Date(dateStr+'T12:00:00').getTime(); // giữa ngày để tránh lệch múi giờ biên
+  if(isNaN(d)) return null;
+  return (S.events||[]).find(e=>{
+    if(e.vesselId!==vesselId||!e.startAt) return false;
+    const s=new Date(e.startAt).getTime();
+    const en=e.endAt?new Date(e.endAt).getTime():Date.now();
+    return d>=s && d<=en;
+  })||null;
+}
+/* Tiêu thụ trong ngày cho 1 fuelKey (lít): tồn cuối hôm trước + bơm hôm nay − tồn cuối hôm nay.
+   Hôm trước = daily report cùng tàu có ngày gần nhất TRƯỚC ngày này (nếu có). */
+function dailyConsumption(rep, fuelKey){
+  if(!rep) return null;
+  const todayEnd=toLiters((rep.fuelEnd?.[fuelKey]||{}).qty,(rep.fuelEnd?.[fuelKey]||{}).unit,(rep.fuelEnd?.[fuelKey]||{}).phuyLiters);
+  const pumped=toLiters((rep.fuelPumped?.[fuelKey]||{}).qty,(rep.fuelPumped?.[fuelKey]||{}).unit,(rep.fuelPumped?.[fuelKey]||{}).phuyLiters);
+  // tìm báo cáo hôm trước
+  const prev=(S.dailyReports||[])
+    .filter(r=>r.vesselId===rep.vesselId && r.date && r.date<rep.date)
+    .sort((a,b)=>a.date<b.date?1:-1)[0];
+  if(!prev) return null; // chưa có mốc trước → không tính được tiêu thụ ngày
+  const prevEnd=toLiters((prev.fuelEnd?.[fuelKey]||{}).qty,(prev.fuelEnd?.[fuelKey]||{}).unit,(prev.fuelEnd?.[fuelKey]||{}).phuyLiters);
+  return prevEnd + pumped - todayEnd; // lít
+}
+/* Đối chiếu 1 event: so tiêu thụ tính từ daily reports (lít) với tiêu thụ event (lít).
+   Trả về {fuelKey: {eventL, dailyL, diffL}} cho mỗi loại. */
+function reconcileEventWithDaily(e){
+  const out={};
+  const reps=(S.dailyReports||[]).filter(r=>r.vesselId===e.vesselId && r.date && (()=>{
+    const d=new Date(r.date+'T12:00:00').getTime();
+    const s=new Date(e.startAt).getTime();
+    const en=e.endAt?new Date(e.endAt).getTime():Date.now();
+    return d>=s && d<=en;
+  })());
+  FUEL_TYPES.forEach(fk=>{
+    const eventL=eventConsumption(e,fk.key);
+    let dailyL=0, counted=0;
+    reps.forEach(r=>{ const c=dailyConsumption(r,fk.key); if(c!==null){ dailyL+=c; counted++; } });
+    out[fk.key]={eventL, dailyL, diffL:dailyL-eventL, days:counted};
+  });
+  return out;
+}
+
 function openEventModal(eventId){
   const isEdit=!!eventId;
   let e=isEdit?S.events.find(x=>x.id===eventId):defaultEvent();
+  const _canPrice=canSeeFuelPrice(); // v3.03.33: crew không thấy ô đơn giá/giá trị
   if(isEdit && !e){toast('Không tìm thấy','bad');return;}
   if(!isEdit){
     // Default vessel: use the one currently filtered, else last event's vessel, else first vessel
@@ -15950,7 +16137,8 @@ function openEventModal(eventId){
     }
   }
 
-  const vesselOpts=S.vessels.map(v=>`<option value="${v.id}" ${v.id===e.vesselId?'selected':''}>${esc(v.name)} (${v.type==='SERVICE'?'DV':'KT'})</option>`).join('');
+  const _drAllowed=new Set((typeof userAssignedVesselIds==='function')?userAssignedVesselIds():S.vessels.map(v=>v.id));
+  const vesselOpts=S.vessels.filter(v=>_drAllowed.has(v.id)).map(v=>`<option value="${v.id}" ${v.id===e.vesselId?'selected':''}>${esc(v.name)} (${v.type==='SERVICE'?'DV':'KT'})</option>`).join('');
   const typeOpts=EVENT_TYPES.map(t=>`<option value="${t.key}" ${t.key===e.type?'selected':''}>${t.label}</option>`).join('');
   const projectOpts=`<option value="">— Không liên kết —</option>`+S.projects.map(p=>`<option value="${p.id}" ${p.id===e.projectId?'selected':''}>${esc(p.code)} · ${esc(p.name)}</option>`).join('');
 
@@ -15987,7 +16175,9 @@ function openEventModal(eventId){
     const priceCcyVal = f.priceCcy || 'USD';
     const unitPriceVal = (f.unitPrice != null && f.unitPrice !== '') ? f.unitPrice : (f.price || 0);
     // v2.99.0: chuyển sang CSS Grid để header và body align tuyệt đối
-    return `<div class="fuel-grid-row" style="display:grid;grid-template-columns:50px 70px 60px 80px 130px 110px;gap:6px;align-items:center;padding:5px 4px;border-bottom:1px dashed rgba(0,0,0,.05)">
+    // v3.03.33: crew (không thấy giá) → bỏ 2 cột cuối (Đơn giá + Giá trị), grid 4 cột
+    const gridCols = _canPrice ? '50px 70px 60px 80px 130px 110px' : '50px 80px 70px 1fr';
+    return `<div class="fuel-grid-row" style="display:grid;grid-template-columns:${gridCols};gap:6px;align-items:center;padding:5px 4px;border-bottom:1px dashed rgba(0,0,0,.05)">
       <div style="font-weight:600"><span class="chip">${fk.short}</span></div>
       <select id="${group}-${fk.key}-unit" onchange="togglePhuyEv('${group}','${fk.key}');evFuelRowChanged('${group}','${fk.key}')" style="padding:4px;border:1px solid var(--rule);font-family:var(--font-mono);font-size:11px;width:100%">
         <option value="liter" ${f.unit==='liter'?'selected':''}>Lít</option>
@@ -15996,7 +16186,7 @@ function openEventModal(eventId){
       </select>
       <input type="number" id="${group}-${fk.key}-phuy" value="${f.phuyLiters||200}" step="1" onchange="evFuelRowChanged('${group}','${fk.key}')" style="padding:4px;border:1px solid var(--rule);width:100%;font-family:var(--font-mono);font-size:11px;text-align:right;${f.unit==='phuy'?'':'opacity:.3;pointer-events:none'}">
       <input type="number" id="${group}-${fk.key}-qty" value="${f.qty||0}" step="any" oninput="evFuelRowChanged('${group}','${fk.key}')" style="padding:4px;border:1px solid var(--rule);width:100%;font-family:var(--font-mono);font-size:11px;text-align:right">
-      ${showPrice?`<div style="display:flex;gap:3px">
+      ${(_canPrice && showPrice)?`<div style="display:flex;gap:3px">
         <input type="number" id="${group}-${fk.key}-price" value="${unitPriceVal}" step="any" ${priceReadonly} oninput="evFuelRowChanged('${group}','${fk.key}')" style="padding:4px;border:1px solid var(--rule);flex:1;min-width:0;font-family:var(--font-mono);font-size:11px;text-align:right;${priceReadonly?'background:var(--paper-2);color:var(--muted)':''}" title="${isEnd?'Tự tính từ đơn giá bơm mới nhất — có thể sửa tay':'Đơn giá / đơn vị'}">
         <select id="${group}-${fk.key}-priceCcy" onchange="evFuelRowChanged('${group}','${fk.key}')" style="padding:4px;border:1px solid var(--rule);font-family:var(--font-mono);font-size:11px;width:48px;flex-shrink:0">
           <option value="USD" ${priceCcyVal==='USD'?'selected':''}>USD</option>
@@ -16017,19 +16207,19 @@ function openEventModal(eventId){
       <div style="font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);font-weight:600;margin-bottom:4px">${label}</div>
       ${noteHtml}
       <div style="border:1px solid var(--rule);border-radius:3px;overflow:hidden">
-        <div style="display:grid;grid-template-columns:50px 70px 60px 80px 130px 110px;gap:6px;padding:6px 4px;background:var(--paper-2);font-size:10px;letter-spacing:.05em;text-transform:uppercase;color:var(--muted);font-weight:700;border-bottom:1px solid var(--rule)">
+        <div style="display:grid;grid-template-columns:${_canPrice?'50px 70px 60px 80px 130px 110px':'50px 80px 70px 1fr'};gap:6px;padding:6px 4px;background:var(--paper-2);font-size:10px;letter-spacing:.05em;text-transform:uppercase;color:var(--muted);font-weight:700;border-bottom:1px solid var(--rule)">
           <div>Loại</div>
           <div>Đv</div>
           <div>L/phuy</div>
           <div style="text-align:right">Số lượng</div>
-          <div style="text-align:right">Đơn giá${isEnd?' (tự tính)':''}</div>
-          <div style="text-align:right" title="SL × Đơn giá">Giá trị</div>
+          ${_canPrice?`<div style="text-align:right">Đơn giá${isEnd?' (tự tính)':''}</div>
+          <div style="text-align:right" title="SL × Đơn giá">Giá trị</div>`:''}
         </div>
         ${FUEL_TYPES.map(fk=>fuelRow(group,fk)).join('')}
-        <div style="display:grid;grid-template-columns:1fr 110px;gap:6px;padding:6px 8px;background:rgba(184,71,46,.04);border-top:2px solid var(--rule)">
+        ${_canPrice?`<div style="display:grid;grid-template-columns:1fr 110px;gap:6px;padding:6px 8px;background:rgba(184,71,46,.04);border-top:2px solid var(--rule)">
           <div style="text-align:right;font-weight:600;letter-spacing:.05em;text-transform:uppercase;font-size:10px;color:var(--muted)">Tổng giá trị</div>
           <div class="mono" id="${group}-total-value" style="font-size:12px;color:var(--accent);font-weight:700;text-align:right">—</div>
-        </div>
+        </div>`:''}
       </div>
     </div>`;
   };
@@ -16092,6 +16282,7 @@ function evFuelRowChanged(group, fuelKey){
 /* v1.43.0: Recompute all fuel row values + block totals + auto-fill fuelEnd unitPrice */
 function evFuelRecomputeAll(){
   if(typeof FUEL_TYPES === 'undefined') return;
+  if(typeof canSeeFuelPrice==='function' && !canSeeFuelPrice()) return; // v3.03.33: crew không có ô giá → bỏ qua tính giá trị
   const groups = ['fuelStart','fuelPumped','fuelEnd'];
   // Step 1: For each fuel type, find latest pumped unitPrice in event (used for fuelEnd auto-fill)
   const latestPumpPrice = {};  // {fuelKey: {price, priceCcy, unit, phuyLiters}}
@@ -16222,28 +16413,38 @@ function saveEvent(eid,isEdit){
     notes:document.getElementById('ev-notes').value||'',
     fuelStart:{},fuelEnd:{},fuelPumped:{}
   };
+  // v3.03.33: nếu phiên hiện tại KHÔNG được thấy giá (crew), ô price không tồn tại trong form.
+  // Phải GIỮ NGUYÊN giá cũ của event (admin đã nhập), TUYỆT ĐỐI không ghi 0 đè mất.
+  const _canPrice=canSeeFuelPrice();
+  const _oldEv = isEdit ? S.events.find(x=>x.id===eid) : null;
+  const _oldFuel=(g,k)=>((_oldEv&&_oldEv[g]&&_oldEv[g][k])||{});
   FUEL_TYPES.forEach(fk=>{
     // v1.43.0: fuelStart + fuelEnd now also have unitPrice + priceCcy
     ['fuelStart','fuelEnd'].forEach(g=>{
       const unitEl=document.getElementById(`${g}-${fk.key}-unit`);
       if(!unitEl){ev[g][fk.key]=fuelStockDefault();return;}
+      const old=_oldFuel(g,fk.key);
       ev[g][fk.key]={
         unit:unitEl.value,
         phuyLiters:+document.getElementById(`${g}-${fk.key}-phuy`).value||200,
         qty:+document.getElementById(`${g}-${fk.key}-qty`).value||0,
-        unitPrice:+document.getElementById(`${g}-${fk.key}-price`)?.value||0,
-        priceCcy:document.getElementById(`${g}-${fk.key}-priceCcy`)?.value||'USD'
+        // crew (không thấy giá) → giữ giá cũ; admin → đọc từ ô
+        unitPrice: _canPrice ? (+document.getElementById(`${g}-${fk.key}-price`)?.value||0) : (old.unitPrice||0),
+        priceCcy: _canPrice ? (document.getElementById(`${g}-${fk.key}-priceCcy`)?.value||'USD') : (old.priceCcy||'USD')
       };
     });
     const pUnit=document.getElementById(`fuelPumped-${fk.key}-unit`);
     if(pUnit){
+      const oldP=_oldFuel('fuelPumped',fk.key);
+      const pPrice = _canPrice ? (+document.getElementById(`fuelPumped-${fk.key}-price`).value||0) : (oldP.price||oldP.unitPrice||0);
+      const pCcy = _canPrice ? (document.getElementById(`fuelPumped-${fk.key}-priceCcy`).value||'USD') : (oldP.priceCcy||'USD');
       ev.fuelPumped[fk.key]={
         unit:pUnit.value,
         phuyLiters:+document.getElementById(`fuelPumped-${fk.key}-phuy`).value||200,
         qty:+document.getElementById(`fuelPumped-${fk.key}-qty`).value||0,
-        price:+document.getElementById(`fuelPumped-${fk.key}-price`).value||0,
-        unitPrice:+document.getElementById(`fuelPumped-${fk.key}-price`).value||0,  // alias for consistency
-        priceCcy:document.getElementById(`fuelPumped-${fk.key}-priceCcy`).value||'USD'
+        price:pPrice,
+        unitPrice:pPrice,  // alias for consistency
+        priceCcy:pCcy
       };
     } else ev.fuelPumped[fk.key]=fuelPumpDefault();
   });
@@ -16323,10 +16524,14 @@ function renderEvents(){
   const block=document.getElementById('events-block');
   const filterEl=document.getElementById('ev-filter-vessel');
   if(!block||!filterEl) return;
+  const _showVal=canSeeFuelPrice(); // v3.03.33: crew không thấy cột Giá trị
+  // v3.03.34: chỉ hiện tàu user được gán (thuyền trưởng → tàu mình). Admin/KTT thấy hết.
+  const _allowedVids=(typeof userAssignedVesselIds==='function')?userAssignedVesselIds():S.vessels.map(v=>v.id);
+  const _allowedSet=new Set(_allowedVids);
   // Populate vessel filter (preserve current selection)
   const cur=filterEl.value;
   filterEl.innerHTML='<option value="">— Tất cả tàu —</option>'+
-    S.vessels.map(v=>{
+    S.vessels.filter(v=>_allowedSet.has(v.id)).map(v=>{
       const count=S.events.filter(e=>e.vesselId===v.id).length;
       return `<option value="${v.id}" ${v.id===cur?'selected':''}>${esc(v.name)} (${v.type==='SERVICE'?'DV':'KT'}) · ${count} đoạn</option>`;
     }).join('');
@@ -16340,6 +16545,7 @@ function renderEvents(){
   // Group by vessel, sort by startAt
   const groups={};
   S.events.forEach(e=>{
+    if(!_allowedSet.has(e.vesselId)) return; // v3.03.34: bỏ tàu không thuộc quyền
     if(selectedVid && e.vesselId!==selectedVid) return;
     groups[e.vesselId]=groups[e.vesselId]||[];
     groups[e.vesselId].push(e);
@@ -16371,7 +16577,7 @@ function renderEvents(){
     }
     html+=`<div class="tbl-scroll"><table class="tbl" style="font-size:12px"><thead><tr>
       <th>Loại</th><th>Bắt đầu</th><th>Kết thúc</th><th class="r">Thời gian</th><th>Dự án / Cảng / Ghi chú</th>
-      <th class="r">DO tiêu thụ</th><th class="r">LO</th><th class="r">FW</th><th class="r">Giá trị</th><th></th>
+      <th class="r">DO tiêu thụ</th><th class="r">LO</th><th class="r">FW</th>${_showVal?'<th class="r">Giá trị</th>':''}<th></th>
     </tr></thead><tbody>`;
     evs.forEach(e=>{
       const t=evtType(e.type);
@@ -16396,7 +16602,7 @@ function renderEvents(){
         <td class="r num mono" style="font-size:11px;color:var(--muted)">${consumed.do?fmtQty(consumed.do)+'L':'—'}</td>
         <td class="r num mono" style="font-size:11px;color:var(--muted)">${consumed.lo?fmtQty(consumed.lo)+'L':'—'}</td>
         <td class="r num mono" style="font-size:11px;color:var(--muted)">${consumed.fw?fmtQty(consumed.fw)+'L':'—'}</td>
-        <td class="r num">${value?'$'+fmtQty(value):'—'}</td>
+        ${_showVal?`<td class="r num">${value?'$'+fmtQty(value):'—'}</td>`:''}
         <td><div class="row-actions">
           <button class="icon-btn" title="Sửa" onclick="openEventModal('${e.id}')">✎</button>
         </div></td>
@@ -16422,12 +16628,232 @@ function renderEvents(){
       <td class="r"><b>${totConsumedDO?fmtQty(totConsumedDO)+'L':'—'}</b></td>
       <td class="r"><b>${totConsumedLO?fmtQty(totConsumedLO)+'L':'—'}</b></td>
       <td class="r"><b>${totConsumedFW?fmtQty(totConsumedFW)+'L':'—'}</b></td>
-      <td class="r"><b>${totValue?'$'+fmtQty(totValue):'—'}</b></td>
+      ${_showVal?`<td class="r"><b>${totValue?'$'+fmtQty(totValue):'—'}</b></td>`:''}
       <td></td>
     </tr>`;
     html+='</tbody></table></div></div>';
   });
   block.innerHTML=html;
+}
+
+/* ============================================================
+   DAILY REPORT — render + modal + save + delete (v3.03.32)
+   ============================================================ */
+function renderDailyReports(){
+  const block=document.getElementById('daily-reports-block');
+  const filterEl=document.getElementById('dr-filter-vessel');
+  if(!block||!filterEl) return;
+  // v3.03.34: chỉ tàu user được gán
+  const _allowedSet=new Set((typeof userAssignedVesselIds==='function')?userAssignedVesselIds():S.vessels.map(v=>v.id));
+  const cur=filterEl.value;
+  filterEl.innerHTML='<option value="">— Tất cả tàu —</option>'+
+    S.vessels.filter(v=>_allowedSet.has(v.id)).map(v=>{
+      const count=(S.dailyReports||[]).filter(r=>r.vesselId===v.id).length;
+      return `<option value="${v.id}" ${v.id===cur?'selected':''}>${esc(v.name)} (${v.type==='SERVICE'?'DV':'KT'}) · ${count} BC</option>`;
+    }).join('');
+  filterEl.value=cur;
+  const selectedVid=filterEl.value;
+
+  const reps=(S.dailyReports||[]).filter(r=>_allowedSet.has(r.vesselId) && (!selectedVid||r.vesselId===selectedVid));
+  if(!reps.length){
+    block.innerHTML='<div class="empty">Chưa có báo cáo ngày nào — bấm "+ Thêm báo cáo ngày" để bắt đầu</div>';
+    return;
+  }
+  // Group by vessel
+  const groups={};
+  reps.forEach(r=>{ groups[r.vesselId]=groups[r.vesselId]||[]; groups[r.vesselId].push(r); });
+  let html='';
+  Object.entries(groups).forEach(([vid,rs])=>{
+    rs.sort((a,b)=>a.date<b.date?-1:1); // tăng dần theo ngày
+    const v=S.vessels.find(x=>x.id===vid);
+    if(!v) return;
+    html+=`<div style="margin-bottom:24px;border:1px solid var(--rule);border-top:3px solid var(--accent)">
+      <div style="padding:10px 14px;background:var(--paper-2);font-family:var(--font-display);font-weight:600;display:flex;justify-content:space-between;align-items:center">
+        <span>${esc(v.name)} <span class="chip ${v.type==='SERVICE'?'chip-1':'chip-2'}">${v.type==='SERVICE'?'DV':'KT'}</span></span>
+        <span style="font-family:var(--font-mono);font-size:11px;color:var(--muted)">${rs.length} báo cáo</span>
+      </div>`;
+    html+=`<div class="tbl-scroll"><table class="tbl" style="font-size:12px"><thead><tr>
+      <th>Ngày</th><th>Đoạn (event)</th>
+      <th class="r">DO cuối</th><th class="r">DO tiêu thụ</th>
+      <th class="r">LO cuối</th><th class="r">LO t.thụ</th>
+      <th class="r">FW cuối</th><th class="r">FW t.thụ</th>
+      <th>Người báo / Ghi chú</th><th></th>
+    </tr></thead><tbody>`;
+    rs.forEach(r=>{
+      const ev=findEventForDate(r.vesselId, r.date);
+      const evLabel=ev?`<span class="chip ${evtType(ev.type).chip}">${evtType(ev.type).short}</span>`:'<span style="color:var(--warn)" title="Không có đoạn nào chứa ngày này">⚠ ngoài đoạn</span>';
+      const endL=k=>{const f=r.fuelEnd?.[k]||{};return f.qty?fmtQty(f.qty)+(f.unit==='m3'?'m³':f.unit==='phuy'?'phuy':'L'):'—';};
+      const consL=k=>{const c=dailyConsumption(r,k);return c===null?'<span style="color:var(--muted)">—</span>':(c<0?`<span style="color:var(--warn)" title="Âm: tồn cuối > tồn trước + bơm (kiểm lại số liệu)">${fmtQty(c)}L</span>`:fmtQty(c)+'L');};
+      const ctx=[];
+      if(r.reporter) ctx.push(`<b>${esc(r.reporter)}</b>`);
+      if(r.notes) ctx.push(`<span style="color:var(--muted);font-style:italic">${esc(r.notes)}</span>`);
+      html+=`<tr>
+        <td class="mono"><b>${esc(fmtDateOnly(r.date))}</b></td>
+        <td>${evLabel}</td>
+        <td class="r num mono" style="font-size:11px">${endL('do')}</td>
+        <td class="r num mono" style="font-size:11px;color:var(--muted)">${consL('do')}</td>
+        <td class="r num mono" style="font-size:11px">${endL('lo')}</td>
+        <td class="r num mono" style="font-size:11px;color:var(--muted)">${consL('lo')}</td>
+        <td class="r num mono" style="font-size:11px">${endL('fw')}</td>
+        <td class="r num mono" style="font-size:11px;color:var(--muted)">${consL('fw')}</td>
+        <td style="font-size:12px">${ctx.join(' · ')||'<span style="color:var(--muted)">—</span>'}</td>
+        <td><div class="row-actions">
+          <button class="icon-btn" title="Sửa" onclick="openDailyReportModal('${r.id}')">✎</button>
+          <button class="icon-btn danger" title="Xóa" onclick="deleteDailyReport('${r.id}')">✕</button>
+        </div></td>
+      </tr>`;
+    });
+    html+=`</tbody></table></div>`;
+    // ĐỐI CHIẾU với từng event của tàu (luôn hiện số lệch)
+    const evs=(S.events||[]).filter(e=>e.vesselId===vid).sort((a,b)=>new Date(a.startAt||0)-new Date(b.startAt||0));
+    if(evs.length){
+      html+=`<div style="padding:8px 14px;border-top:1px dashed var(--rule);background:var(--paper)">
+        <div style="font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);font-weight:600;margin-bottom:6px">Đối chiếu daily report ↔ đoạn (số lệch = tổng daily − tiêu thụ đoạn)</div>
+        <table class="tbl" style="font-size:11px"><thead><tr><th>Đoạn</th><th class="r">Loại DO</th><th class="r">Đoạn (L)</th><th class="r">Σ Daily (L)</th><th class="r">Lệch (L)</th></tr></thead><tbody>`;
+      evs.forEach(e=>{
+        const rec=reconcileEventWithDaily(e);
+        FUEL_TYPES.forEach((fk,idx)=>{
+          const d=rec[fk.key];
+          if(d.eventL===0 && d.dailyL===0) return; // bỏ dòng rỗng
+          const diffColor=Math.abs(d.diffL)<1?'var(--good)':'var(--warn)';
+          html+=`<tr>
+            ${idx===0?`<td rowspan="${FUEL_TYPES.length}" style="vertical-align:top"><span class="chip ${evtType(e.type).chip}">${evtType(e.type).short}</span> <span class="mono" style="font-size:10px;color:var(--muted)">${fmtDateOnly(e.startAt? e.startAt.slice(0,10):'')}</span></td>`:''}
+            <td class="r">${fk.short}</td>
+            <td class="r num mono">${d.eventL?fmtQty(d.eventL):'—'}</td>
+            <td class="r num mono">${d.dailyL?fmtQty(d.dailyL):'—'} <span style="color:var(--muted);font-size:9px">(${d.days}ng)</span></td>
+            <td class="r num mono" style="color:${diffColor};font-weight:600">${fmtQty(d.diffL)}</td>
+          </tr>`;
+        });
+      });
+      html+=`</tbody></table></div>`;
+    }
+    html+=`</div>`;
+  });
+  block.innerHTML=html;
+}
+function fmtDateOnly(s){
+  if(!s) return '—';
+  const d=new Date(s+(s.length<=10?'T12:00:00':''));
+  if(isNaN(d)) return s;
+  return d.toLocaleDateString('vi-VN',{day:'2-digit',month:'2-digit',year:'2-digit'});
+}
+
+function openDailyReportModal(repId){
+  const isEdit=!!repId;
+  let r=isEdit?(S.dailyReports||[]).find(x=>x.id===repId):defaultDailyReport();
+  if(isEdit&&!r){toast('Không tìm thấy báo cáo','bad');return;}
+  if(!isEdit){
+    // mặc định: tàu đang lọc, ngày hôm nay — chỉ trong tàu được gán
+    const _allowed=(typeof userAssignedVesselIds==='function')?userAssignedVesselIds():S.vessels.map(v=>v.id);
+    const fEl=document.getElementById('dr-filter-vessel');
+    const filterVid=(fEl&&fEl.value)||'';
+    r.vesselId=(filterVid && _allowed.includes(filterVid)) ? filterVid : (_allowed[0]||'');
+    r.date=todayISO();
+  }
+  const _drAllowed2=new Set((typeof userAssignedVesselIds==='function')?userAssignedVesselIds():S.vessels.map(v=>v.id));
+  const vesselOpts=S.vessels.filter(v=>_drAllowed2.has(v.id)).map(v=>`<option value="${v.id}" ${v.id===r.vesselId?'selected':''}>${esc(v.name)} (${v.type==='SERVICE'?'DV':'KT'})</option>`).join('');
+  // ô fuel tối giản: đơn vị + (phuyLiters khi phuy) + qty. Cho 2 nhóm: fuelEnd (số dư cuối ngày), fuelPumped (bơm trong ngày)
+  const fuelRow=(group,fk)=>{
+    const f=(r[group]&&r[group][fk.key])||(group==='fuelPumped'?fuelPumpDefault():fuelStockDefault());
+    return `<div style="display:grid;grid-template-columns:46px 64px 70px 1fr;gap:6px;align-items:center;padding:4px 0;border-bottom:1px dashed rgba(0,0,0,.05)">
+      <div style="font-weight:600"><span class="chip">${fk.short}</span></div>
+      <select id="dr-${group}-${fk.key}-unit" onchange="drTogglePhuy('${group}','${fk.key}')" style="padding:4px;border:1px solid var(--rule);font-family:var(--font-mono);font-size:11px;width:100%">
+        <option value="liter" ${f.unit==='liter'?'selected':''}>Lít</option>
+        <option value="m3" ${f.unit==='m3'?'selected':''}>m³</option>
+        <option value="phuy" ${f.unit==='phuy'?'selected':''}>Phuy</option>
+      </select>
+      <input type="number" id="dr-${group}-${fk.key}-phuy" value="${f.phuyLiters||200}" step="1" title="Lít/phuy" style="padding:4px;border:1px solid var(--rule);width:100%;font-family:var(--font-mono);font-size:11px;text-align:right;${f.unit==='phuy'?'':'opacity:.3;pointer-events:none'}">
+      <input type="number" id="dr-${group}-${fk.key}-qty" value="${f.qty||0}" step="any" style="padding:4px;border:1px solid var(--rule);width:100%;font-family:var(--font-mono);font-size:11px;text-align:right">
+    </div>`;
+  };
+  const body=`
+    <div class="form-grid" style="grid-template-columns:1fr 1fr;gap:12px">
+      <div class="field"><label>Tàu</label>
+        <select id="dr-vessel" style="padding:6px;border:1px solid var(--rule);width:100%;font-family:var(--font-mono)">${vesselOpts}</select></div>
+      <div class="field"><label>Ngày báo cáo</label>
+        <input type="date" id="dr-date" value="${r.date||''}" style="padding:6px;border:1px solid var(--rule);width:100%;font-family:var(--font-mono)"></div>
+    </div>
+    <div style="margin-top:10px;font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);font-weight:600">Số dư CUỐI ngày (DO/LO/FW)</div>
+    <div style="display:grid;grid-template-columns:46px 64px 70px 1fr;gap:6px;font-size:9px;color:var(--muted);text-transform:uppercase;padding:2px 0"><div></div><div>Đơn vị</div><div style="text-align:right">L/phuy</div><div style="text-align:right">Số lượng</div></div>
+    ${FUEL_TYPES.map(fk=>fuelRow('fuelEnd',fk)).join('')}
+    <div style="margin-top:10px;font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);font-weight:600">Bơm thêm trong ngày (nếu có)</div>
+    ${FUEL_TYPES.map(fk=>fuelRow('fuelPumped',fk)).join('')}
+    <div class="form-grid" style="grid-template-columns:1fr 2fr;gap:12px;margin-top:10px">
+      <div class="field"><label>Người báo (Thuyền/Đại phó)</label>
+        <input type="text" id="dr-reporter" value="${esc(r.reporter||'')}" placeholder="VD: Thuyền trưởng" style="padding:6px;border:1px solid var(--rule);width:100%"></div>
+      <div class="field"><label>Ghi chú (vị trí / hoạt động)</label>
+        <input type="text" id="dr-notes" value="${esc(r.notes||'')}" placeholder="VD: neo chờ tại Vũng Tàu" style="padding:6px;border:1px solid var(--rule);width:100%"></div>
+    </div>
+    <div id="dr-event-hint" style="margin-top:8px;font-size:11px;color:var(--muted)"></div>`;
+  const foot=`<button class="btn-sec" onclick="closeModal()">Hủy</button>
+    <button class="btn-pri" onclick="saveDailyReport(${isEdit?`'${repId}'`:'null'})">Lưu báo cáo</button>`;
+  openModal(isEdit?'Sửa báo cáo ngày':'Thêm báo cáo ngày', body, foot);
+  // cập nhật gợi ý đoạn khi đổi tàu/ngày
+  const updateHint=()=>{
+    const vid=document.getElementById('dr-vessel').value;
+    const dt=document.getElementById('dr-date').value;
+    const ev=findEventForDate(vid,dt);
+    const el=document.getElementById('dr-event-hint');
+    if(!el) return;
+    if(ev){ el.innerHTML=`Đoạn chứa ngày này: <span class="chip ${evtType(ev.type).chip}">${evtType(ev.type).short}</span> ${fmtDateTime(ev.startAt)} → ${fmtDateTime(ev.endAt)}`; }
+    else { el.innerHTML='<span style="color:var(--warn)">⚠ Chưa có đoạn (event) nào chứa ngày này — báo cáo vẫn lưu được nhưng sẽ không đối chiếu được với đoạn.</span>'; }
+  };
+  document.getElementById('dr-vessel').addEventListener('change',updateHint);
+  document.getElementById('dr-date').addEventListener('change',updateHint);
+  updateHint();
+}
+function drTogglePhuy(group,fk){
+  const unit=document.getElementById(`dr-${group}-${fk}-unit`).value;
+  const phuyEl=document.getElementById(`dr-${group}-${fk}-phuy`);
+  if(phuyEl){ phuyEl.style.opacity=unit==='phuy'?'1':'.3'; phuyEl.style.pointerEvents=unit==='phuy'?'auto':'none'; }
+}
+function _drReadFuel(group){
+  const out={};
+  FUEL_TYPES.forEach(fk=>{
+    out[fk.key]={
+      qty:+document.getElementById(`dr-${group}-${fk.key}-qty`).value||0,
+      unit:document.getElementById(`dr-${group}-${fk.key}-unit`).value||'liter',
+      phuyLiters:+document.getElementById(`dr-${group}-${fk.key}-phuy`).value||200,
+      unitPrice:0, priceCcy:'USD'
+    };
+  });
+  return out;
+}
+function saveDailyReport(repId){
+  const vesselId=document.getElementById('dr-vessel').value;
+  const date=document.getElementById('dr-date').value;
+  if(!vesselId){toast('Chọn tàu','bad');return;}
+  if(!date){toast('Chọn ngày báo cáo','bad');return;}
+  // chống trùng: 1 tàu + 1 ngày chỉ 1 báo cáo
+  const dup=(S.dailyReports||[]).find(r=>r.id!==repId && r.vesselId===vesselId && r.date===date);
+  if(dup){toast('Đã có báo cáo cho tàu này vào ngày '+fmtDateOnly(date)+' — sửa báo cáo đó','bad');return;}
+  let r;
+  if(repId){ r=(S.dailyReports||[]).find(x=>x.id===repId); if(!r){toast('Không tìm thấy','bad');return;} }
+  else { r=defaultDailyReport(); S.dailyReports=S.dailyReports||[]; S.dailyReports.push(r); }
+  r.vesselId=vesselId;
+  r.date=date;
+  r.fuelEnd=_drReadFuel('fuelEnd');
+  r.fuelPumped=_drReadFuel('fuelPumped');
+  r.reporter=document.getElementById('dr-reporter').value.trim();
+  r.notes=document.getElementById('dr-notes').value.trim();
+  if(typeof touchRecord==='function') touchRecord(r);
+  saveState();
+  try{ logAuditEvent('daily_report_'+(repId?'edit':'add'),{vessel:vesselId,date}); }catch(e){}
+  closeModal();
+  renderDailyReports();
+  toast('Đã lưu báo cáo ngày');
+}
+function deleteDailyReport(repId){
+  const r=(S.dailyReports||[]).find(x=>x.id===repId);
+  if(!r) return;
+  const v=S.vessels.find(x=>x.id===r.vesselId);
+  confirmDelete(`Báo cáo ngày ${fmtDateOnly(r.date)} — ${v?v.name:'tàu'}`, 'Xóa báo cáo hàng ngày này?', ()=>{
+    S.dailyReports=(S.dailyReports||[]).filter(x=>x.id!==repId);
+    if(typeof markDeleted==='function') markDeleted([repId],'dailyReports');
+    saveState();
+    renderDailyReports();
+    toast('Đã xóa báo cáo');
+  });
 }
 
 /* Render legacy onhire summary table from auto-synced data */
@@ -17440,12 +17866,53 @@ function apprPitConfirm(batchId){
   renderAll();
   try{ renderApprovalList(); }catch(e){}
 }
+/* v3.03.36: Section HẬU KIỂM phiếu hoàn ứng quỹ (do thuyền trưởng khai).
+   Hiển thị trên tab Phê duyệt — số liệu ĐÃ ghi sổ, đây chỉ là theo dõi/đánh dấu đã kiểm. */
+function renderPostAudit(){
+  const host=document.getElementById('postaudit-section'); if(!host) return;
+  const list=(typeof postAuditPending==='function')?postAuditPending():[];
+  if(!list.length){ host.innerHTML=''; return; }
+  // gom theo batch để gọn (mỗi phiếu hoàn ứng có thể nhiều dòng cùng _batchId)
+  const rows=list.map(r=>{
+    const pa=postAuditInfo(r);
+    const canAct=postAuditCanAct(r);
+    const v=r.vesselId?(S.vessels||[]).find(x=>x.id===r.vesselId):null;
+    const fund=r._cashFundId?(S.cashFunds||[]).find(x=>x.id===r._cashFundId):null;
+    const amt=fmtCcy(+r.amount||0, r.ccy||'VND');
+    const trail=[];
+    if(r._postAudit.byCrew) trail.push('Khai: '+esc(r._postAudit.byCrew));
+    if(r._postAudit.checkedKTBy) trail.push('KT: '+esc(r._postAudit.checkedKTBy));
+    if(r._postAudit.okL1By) trail.push('L1: '+esc(r._postAudit.okL1By));
+    if(r._postAudit.okL2By) trail.push('L2: '+esc(r._postAudit.okL2By));
+    return `<tr>
+      <td style="font-size:11px">${esc((r.issueDate||'').slice(0,10))}</td>
+      <td><span class="chip" style="font-size:9px">⛵ Quỹ</span> ${v?esc(v.name):'—'}${fund?` <span style="color:var(--muted);font-size:10px">· ${esc(fund.name)}</span>`:''}</td>
+      <td style="font-size:11px">${esc(r.desc||'')}</td>
+      <td class="r num mono">${amt}</td>
+      <td><span class="chip ${pa.cls}" style="font-size:9px">${pa.icon} ${pa.label}</span></td>
+      <td style="font-size:10px;color:var(--muted)">${trail.join(' · ')}</td>
+      <td>${canAct?`<button class="btn-sec" style="font-size:11px;padding:4px 10px" onclick="postAuditAct('${r.id}')">✓ Đánh dấu đã kiểm</button>`:'<span style="font-size:10px;color:var(--muted)">—</span>'}</td>
+    </tr>`;
+  }).join('');
+  host.innerHTML=`
+    <div class="section" style="border-left:3px solid var(--accent)">
+      <div class="section-head">
+        <div class="section-title"><span class="tag">⛵</span>Hậu kiểm phiếu hoàn ứng quỹ tàu (${list.length})</div>
+        <div style="font-size:11px;color:var(--muted);font-style:italic">Số liệu đã ghi sổ ngay khi thuyền trưởng khai — đây là bước theo dõi/đánh dấu đã kiểm (KT → L1 → L2), không đảo sổ.</div>
+      </div>
+      <div class="section-body">
+        <div class="tbl-scroll"><table class="tbl" style="font-size:12px"><thead><tr>
+          <th>Ngày</th><th>Tàu / Quỹ</th><th>Diễn giải</th><th class="r">Số tiền</th><th>Trạng thái</th><th>Dấu vết</th><th></th>
+        </tr></thead><tbody>${rows}</tbody></table></div>
+      </div>
+    </div>`;
+}
 function renderApprovalList(){
   try{ renderApprPitSection(); }catch(e){}
   if(!document.getElementById('page-approval')) return;
+  try{ renderPostAudit(); }catch(e){ console.warn('[postaudit]',e&&e.message); }
   fillApprovalFilterDropdowns();
   try{ renderApprovalOrders(); }catch(e){}
-
   const candidates=approvalGetCandidates();
   // v3.01.07: chỉ auto chọn tất cả LẦN ĐẦU mở tab — sau đó tôn trọng lựa chọn của user
   // (trước đây auto chọn lại mỗi lần render → bỏ tích "Chọn tất cả" bị tự tích lại, không chọn lẻ được).
@@ -19768,9 +20235,17 @@ function _cashFundModal(f){
       </div>
       <div class="field">
         <label>Loại quỹ *</label>
-        <select id="cf-type">
+        <select id="cf-type" onchange="cfToggleVessel()">
           ${Object.entries(CASH_FUND_TYPES).map(([k,v])=>`<option value="${k}" ${f.fundType===k?'selected':''}>${v.icon} ${v.label}</option>`).join('')}
         </select>
+      </div>
+      <div class="field" id="cf-vessel-row" style="${f.fundType==='VESSEL'?'':'display:none'}">
+        <label>Tàu (gắn quỹ này cho tàu nào) *</label>
+        <select id="cf-vessel">
+          <option value="">— Chọn tàu —</option>
+          ${S.vessels.map(v=>`<option value="${v.id}" ${f.vesselId===v.id?'selected':''}>${esc(v.name)} (${v.type==='SERVICE'?'DV':'KT'})</option>`).join('')}
+        </select>
+        <span style="font-size:10px;color:var(--muted)">Thuyền trưởng tàu này sẽ chỉ thấy quỹ gắn đúng tàu mình.</span>
       </div>
       <div class="field">
         <label>Loại tiền *</label>
@@ -19802,6 +20277,11 @@ function _cashFundModal(f){
               <button class="btn-primary" onclick="saveCashFund('${isEdit?f.id:''}')">${isEdit?'Lưu':'Tạo quỹ'}</button>`;
   openModal(isEdit?'Sửa quỹ tiền mặt':'Tạo quỹ tiền mặt mới',body,foot);
 }
+function cfToggleVessel(){
+  const t=document.getElementById('cf-type').value;
+  const row=document.getElementById('cf-vessel-row');
+  if(row) row.style.display = (t==='VESSEL') ? '' : 'none';
+}
 function saveCashFund(id){
   const err=document.getElementById('cf-err');
   err.textContent='';
@@ -19810,15 +20290,19 @@ function saveCashFund(id){
   const ccy=document.getElementById('cf-ccy').value;
   const isActive=document.getElementById('cf-active').checked;
   const note=document.getElementById('cf-note').value.trim();
+  // v3.03.35: quỹ loại Tàu phải gắn 1 tàu đích danh
+  const vesselId = (fundType==='VESSEL') ? (document.getElementById('cf-vessel')?.value||'') : '';
   if(!name){err.textContent='Nhập tên quỹ';return;}
+  if(fundType==='VESSEL' && !vesselId){err.textContent='Quỹ loại Tàu phải chọn tàu đích danh';return;}
   S.cashFunds=S.cashFunds||[];
   if(id){
     const f=S.cashFunds.find(x=>x.id===id);
     if(!f){err.textContent='Không tìm thấy quỹ';return;}
-    f.name=name; f.fundType=fundType; f.ccy=ccy; f.isActive=isActive; f.note=note;
+    f.name=name; f.fundType=fundType; f.ccy=ccy; f.isActive=isActive; f.note=note; f.vesselId=vesselId;
+    if(typeof touchRecord==='function') touchRecord(f);
   } else {
     const initBal=+document.getElementById('cf-balance').value||0;
-    const fund={id:uid(),name,fundType,ccy,balance:initBal,isActive,note,
+    const fund={id:uid(),name,fundType,vesselId,ccy,balance:initBal,isActive,note,
       createdBy:actorName(),createdAt:new Date().toISOString()};
     S.cashFunds.push(fund);
     // Số dư ban đầu > 0 → ghi 1 dòng sổ quỹ làm mốc
@@ -19836,7 +20320,7 @@ function saveCashFund(id){
 function renderCashFunds(){
   const wrap=document.getElementById('cash-funds-list');
   if(!wrap) return;
-  const funds=S.cashFunds||[];
+  const funds=visibleCashFunds(); // v3.03.35: lọc theo tàu được gán
   if(!funds.length){
     wrap.innerHTML='<div class="empty" style="padding:28px 16px;text-align:center;color:var(--muted);background:var(--paper);border:1px dashed var(--rule);border-radius:10px">Chưa có quỹ tiền mặt. Bấm <b>+ Quỹ tiền mặt</b> để tạo quỹ đầu tiên.</div>';
     return;
@@ -19878,7 +20362,7 @@ function renderCashFunds(){
           <div style="width:40px;height:40px;border-radius:50%;background:var(--paper-2);display:flex;align-items:center;justify-content:center;font-size:19px;flex-shrink:0">${t.icon}</div>
           <div style="min-width:0">
             <div style="font-weight:700;font-size:15px;font-family:var(--font-display);line-height:1.25">${esc(f.name)}</div>
-            <div style="font-size:11px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${t.label}${f.note?' · '+esc(f.note):''}</div>
+            <div style="font-size:11px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${t.label}${f.fundType==='VESSEL'&&f.vesselId?(()=>{const vv=S.vessels.find(x=>x.id===f.vesselId);return vv?' · ⛵ '+esc(vv.name):'';})():''}${f.note?' · '+esc(f.note):''}</div>
           </div>
         </div>
         <div style="border-top:1px solid var(--rule);padding-top:10px;margin-bottom:12px">
@@ -20039,11 +20523,21 @@ let _cashClearState=null;
 function _ccNewLine(){ return {tmpId:'C'+Math.random().toString(36).slice(2,8), expenseType:'', objType:'', objId:'', segment:'', amount:0, vatPercent:0, desc:''}; }
 function openCashClearModal(fundId){
   const f=(S.cashFunds||[]).find(x=>x.id===fundId); if(!f){toast('Không tìm thấy quỹ','bad');return;}
-  // quyền: chỉ người được phân quyền nhập chi quỹ — dùng canCheckAcc (KT) / canApproveL1 (KTT) / admin
-  if(!(CURRENT_ROLE==='admin' || (typeof canCheckAcc==='function'&&canCheckAcc()) || (typeof canApproveL1==='function'&&canApproveL1()) || (typeof canConfirmPayment==='function'&&canConfirmPayment()))){
+  // quyền: admin / KT / KTT / xác nhận TT — như cũ.
+  // v3.03.36: HOẶC thuyền trưởng (có gán tàu) trên quỹ loại Tàu thuộc tàu mình → được nhập hoàn ứng (ghi sổ ngay, hậu kiểm KT/L1/L2).
+  const _isCrewOwnFund = (()=>{
+    const a=CURRENT_USER&&CURRENT_USER.assignedVesselIds;
+    return Array.isArray(a)&&a.length>0 && f.fundType==='VESSEL' && f.vesselId && a.includes(f.vesselId);
+  })();
+  const _allowed = (CURRENT_ROLE==='admin'
+      || (typeof canCheckAcc==='function'&&canCheckAcc())
+      || (typeof canApproveL1==='function'&&canApproveL1())
+      || (typeof canConfirmPayment==='function'&&canConfirmPayment())
+      || _isCrewOwnFund);
+  if(!_allowed){
     toast('Bạn không có quyền nhập phiếu hoàn ứng — liên hệ admin','bad'); return;
   }
-  _cashClearState={fundId, date:todayISO(), noteHeader:'', mode:'expense', refundAmount:0, refundNote:'', lines:[_ccNewLine()]};
+  _cashClearState={fundId, date:todayISO(), noteHeader:'', mode:'expense', refundAmount:0, refundNote:'', lines:[_ccNewLine()], _byCrew:_isCrewOwnFund && CURRENT_ROLE!=='admin'};
   _renderCashClearModal();
 }
 function _renderCashClearModal(){
@@ -20051,7 +20545,7 @@ function _renderCashClearModal(){
   const f=(S.cashFunds||[]).find(x=>x.id===st.fundId); if(!f) return;
   const ccy=f.ccy||'VND';
   const bal=+f.balance||0;
-  const ets=(typeof activeExpenseTypes==='function'?activeExpenseTypes():[]).filter(t=>!t.isBODOnly);
+  const ets=(typeof expenseTypesForUser==='function'?expenseTypesForUser():[]).filter(t=>!t.isBODOnly);
   const etOpts=t=>'<option value="">— Chọn loại chi phí —</option>'+ets.map(e=>`<option value="${e.code}" ${e.code===t.expenseType?'selected':''}>${esc(e.label)}</option>`).join('');
   const vessels=(S.vessels||[]); const projects=(S.projects||[]);
   function objOpts(t){
@@ -20167,6 +20661,7 @@ function saveCashClear(){
     const p = l.objType==='P' ? (S.projects||[]).find(x=>x.id===l.objId) : null;
     let seg = (v&&v.segment) || (p&&p.segment) || '';
     if(!seg && (v||p)) seg='VESSEL_SERVICE';
+    const _byCrew = !!st._byCrew;
     const rec={
       id:uid(), partner:'[Hoàn ứng quỹ '+(f.name||'')+']',
       invoiceNo:'CASH-'+batchId.slice(-6)+'-'+(l.expenseType||''),
@@ -20174,6 +20669,7 @@ function saveCashClear(){
       expenseType:l.expenseType, amount:gross, amountNet:net, vatAmount:vat, vatPercent:vatPct, ccy,
       vesselId:v?v.id:'', projectId:p?p.id:'', segment:seg||'OTHER',
       issueDate:st.date, dueDate:st.date, dueMonth:(st.date||'').slice(0,7),
+      // Ghi sổ NGAY (đã chi qua quỹ) — status approved để vào P&L. Số dư quỹ giảm bên dưới.
       status:'approved', submittedBy:me, submittedAt:nowIso,
       approvedL1By:'(Hoàn ứng — '+me+')', approvedL1At:nowIso,
       approvedL2By:'(Hoàn ứng — '+me+')', approvedL2At:nowIso,
@@ -20181,6 +20677,10 @@ function saveCashClear(){
       _cashClear:true, _cashFundId:f.id, _batchId:batchId,
       createdBy:me, createdAt:nowIso
     };
+    // v3.03.36: phiếu do THUYỀN TRƯỞNG khai → thêm nhãn HẬU KIỂM (chỉ để theo dõi, KHÔNG ảnh hưởng số đã ghi sổ).
+    if(_byCrew){
+      rec._postAudit={ stage:'pending_kt', byCrew:me, at:nowIso, checkedKTBy:null, checkedKTAt:null, okL1By:null, okL1At:null, okL2By:null, okL2At:null };
+    }
     touchRecord(rec); S.payables.push(rec); n++;
   });
   // giảm quỹ + ghi 1 dòng sổ quỹ tổng
@@ -20193,6 +20693,47 @@ function saveCashClear(){
   toast(`Đã ghi ${n} khoản chi phí (${fmtCcy(total,ccy)}) + trừ quỹ`,'good');
   _cashClearState=null;
   viewCashLedger(f.id);
+}
+
+/* ============================================================
+   HẬU KIỂM phiếu hoàn ứng quỹ do thuyền trưởng khai (v3.03.36)
+   Số liệu ĐÃ ghi sổ ngay (status='approved'). _postAudit chỉ là lớp theo dõi:
+   pending_kt → KT đánh dấu đã kiểm → pending_l1 → L1 ok → pending_l2 → L2 ok → done.
+   KHÔNG đổi status, KHÔNG đảo bút toán.
+   ============================================================ */
+function postAuditInfo(r){
+  const pa=r&&r._postAudit; if(!pa) return null;
+  switch(pa.stage){
+    case 'pending_kt': return {label:'Chờ KT kiểm', cls:'chip-warn', icon:'🔍', stage:pa.stage};
+    case 'pending_l1': return {label:'Chờ L1 (KTT)', cls:'chip-warn', icon:'⊳', stage:pa.stage};
+    case 'pending_l2': return {label:'Chờ L2 (GĐTC)', cls:'chip-warn', icon:'⊳', stage:pa.stage};
+    case 'done':       return {label:'Hậu kiểm xong', cls:'chip-good', icon:'✅', stage:pa.stage};
+    default:           return {label:'Hậu kiểm', cls:'', icon:'•', stage:pa.stage};
+  }
+}
+/* Ai được đánh dấu ở stage hiện tại? KT kiểm: canCheckAcc; L1: canApproveL1; L2: canApproveL2. Admin: mọi cấp. */
+function postAuditCanAct(r){
+  const pa=r&&r._postAudit; if(!pa) return false;
+  if(CURRENT_ROLE==='admin') return true;
+  if(pa.stage==='pending_kt') return (typeof canCheckAcc==='function'&&canCheckAcc());
+  if(pa.stage==='pending_l1') return (typeof canApproveL1==='function'&&canApproveL1());
+  if(pa.stage==='pending_l2') return (typeof canApproveL2==='function'&&canApproveL2());
+  return false;
+}
+function postAuditAct(recId){
+  const r=(S.payables||[]).find(x=>x.id===recId);
+  if(!r||!r._postAudit){toast('Không tìm thấy phiếu hậu kiểm','bad');return;}
+  if(!postAuditCanAct(r)){toast('Bạn không có quyền đánh dấu ở bước này','bad');return;}
+  const pa=r._postAudit; const me=actorName(); const now=new Date().toISOString();
+  if(pa.stage==='pending_kt'){ pa.checkedKTBy=me; pa.checkedKTAt=now; pa.stage='pending_l1'; }
+  else if(pa.stage==='pending_l1'){ pa.okL1By=me; pa.okL1At=now; pa.stage='pending_l2'; }
+  else if(pa.stage==='pending_l2'){ pa.okL2By=me; pa.okL2At=now; pa.stage='done'; }
+  touchRecord(r); saveState(); renderAll();
+  toast('Đã đánh dấu: '+(postAuditInfo(r).label));
+}
+/* Danh sách phiếu hoàn ứng đang chờ hậu kiểm (chưa done) — cho tab Phê duyệt. */
+function postAuditPending(){
+  return (S.payables||[]).filter(r=>r._postAudit && r._postAudit.stage!=='done');
 }
 
 /* v3.01.33: Phân loại kỳ hạn vay — ưu tiên l.loanType nếu có, không thì auto theo số kỳ trả.
@@ -23449,7 +23990,7 @@ function _arEditorBody(r,isPayable){
   // v1.43.0: Expense type dropdown (only for AP) — grouped, with isFuel marker
   let expenseTypeBlock = '';
   if(isPayable){
-    const etTypes = activeExpenseTypes ? activeExpenseTypes() : [];
+    const etTypes = (typeof expenseTypesForUser==='function') ? expenseTypesForUser() : (activeExpenseTypes ? activeExpenseTypes() : []);
     const etGroups = {};
     etTypes.forEach(t=>{
       if(!etGroups[t.group]) etGroups[t.group]=[];
@@ -23542,7 +24083,7 @@ function _arEditorBody(r,isPayable){
   if(isPayable){
     const isAdvNow = r.expenseType && isExpenseAdvance(r.expenseType);
     const advFundCur = r.advanceFundId || '';
-    const activeFunds = (S.cashFunds||[]).filter(f=>f.isActive!==false);
+    const activeFunds = visibleCashFunds().filter(f=>f.isActive!==false);
     advanceBlock = `
       <div id="ar-advance-block" style="margin-top:14px;padding:12px 14px;background:rgba(28,58,92,.06);border-left:3px solid var(--ink);${isAdvNow?'':'display:none'}">
         <div style="font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--ink);font-weight:700;margin-bottom:8px">💰 Ứng quỹ tiền mặt <span style="color:var(--bad);font-weight:400">(bắt buộc cho loại Ứng quỹ)</span></div>
@@ -29347,7 +29888,7 @@ function _quickViewData(){
     const bal=snap?(+snap.balance||0):0;
     const c=a.ccy||'USD'; bankByCcy[c]=(bankByCcy[c]||0)+bal;
   });
-  (S.cashFunds||[]).filter(f=>f.isActive!==false).forEach(f=>{
+  visibleCashFunds().filter(f=>f.isActive!==false).forEach(f=>{
     const c=f.ccy||'VND'; cashByCcy[c]=(cashByCcy[c]||0)+(+f.balance||0);
   });
   const today=todayISO();
@@ -39900,7 +40441,7 @@ function renderAll(opts){
   maybe('plan', _dockAssetFill);
   maybe('projects', renderProjects);
   if(canAccessTab('vessels') && (renderAllTabs || activePageId==='vessels')){
-    renderVessels(); renderEvents(); renderOnhire();
+    renderVessels(); renderEvents(); renderDailyReports(); renderOnhire();
   }
   if((canAccessTab('receivables')||canAccessTab('payables')) && (renderAllTabs || activePageId==='receivables' || activePageId==='payables')){
     renderAR();
