@@ -1856,7 +1856,13 @@ body.readonly-mode::before{
   <div class="section">
     <div class="section-head">
       <div class="section-title"><span class="tag">A</span>Công nợ PHẢI THU (khách hàng còn nợ)</div>
-      <button class="btn-primary" style="font-size:12px" onclick="periodicDebtPdf('ar')">📄 Xuất PDF</button>
+      <div style="display:flex;gap:8px;align-items:center">
+        <select id="periodic-ar-scope" onchange="renderPeriodic()" style="font-size:12px;padding:4px 8px" title="Phạm vi công nợ">
+          <option value="all">Tất cả khoản đang nợ (gồm chưa duyệt)</option>
+          <option value="approved">Chỉ đã duyệt</option>
+        </select>
+        <button class="btn-primary" style="font-size:12px" onclick="periodicDebtPdf('ar')">📄 Xuất PDF</button>
+      </div>
     </div>
     <div class="section-body"><div class="tbl-scroll" style="max-height:380px"><table class="tbl" id="periodic-ar-table"></table></div></div>
   </div>
@@ -1864,7 +1870,13 @@ body.readonly-mode::before{
   <div class="section">
     <div class="section-head">
       <div class="section-title"><span class="tag">B</span>Công nợ PHẢI TRẢ (còn nợ nhà cung cấp)</div>
-      <button class="btn-primary" style="font-size:12px" onclick="periodicDebtPdf('ap')">📄 Xuất PDF</button>
+      <div style="display:flex;gap:8px;align-items:center">
+        <select id="periodic-ap-scope" onchange="renderPeriodic()" style="font-size:12px;padding:4px 8px" title="Phạm vi công nợ">
+          <option value="all">Tất cả khoản đang nợ (gồm chưa duyệt)</option>
+          <option value="approved">Chỉ đã duyệt</option>
+        </select>
+        <button class="btn-primary" style="font-size:12px" onclick="periodicDebtPdf('ap')">📄 Xuất PDF</button>
+      </div>
     </div>
     <div class="section-body"><div class="tbl-scroll" style="max-height:380px"><table class="tbl" id="periodic-ap-table"></table></div></div>
   </div>
@@ -2836,7 +2848,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.03.26';            // bumped on each release
+const APP_VERSION='3.03.29';            // bumped on each release
 
 /* v2.62.0: Token xác thực backend — PHẢI khớp API_TOKEN trong Apps Script (Code.gs).
    Mọi request tới Apps Script tự động được gắn token qua lớp bọc fetch bên dưới.
@@ -22234,29 +22246,46 @@ function renderAR(){
       </div>`;
   }
 
+  // v3.03.28: TÁCH NĂM HÓA ĐƠN cho AP (năm trước < năm nay dương lịch). Tổng phải trả = giá trị đã duyệt;
+  //   đã trả = payments đã ghi; còn lại = remaining (gồm cả chưa duyệt như cũ).
+  const _yPay=(r)=>{ const y=parseInt(String(r.issueDate||r.date||'').slice(0,4),10); return (y && y<_curYear); };
+  // Tổng phải trả (đã duyệt) theo năm — dùng GIÁ TRỊ gross để khớp "tổng phải trả thực"
+  let payApprovedPrev=0, payApprovedThis=0;
+  payApproved.forEach(r=>{ const v=toDisplay(+r.amountGross||+r.amount||0, r.ccy||'USD'); if(_yPay(r)) payApprovedPrev+=v; else payApprovedThis+=v; });
+  const payApprovedTotal=payApprovedPrev+payApprovedThis;
+  // Đã trả theo năm (payments đã ghi nhận, mọi phiếu)
+  let paidPrev=0, paidThis=0, _paidCount=0;
+  payAll.forEach(r=>{ const paid=(r.payments||[]).reduce((a,p)=>a+(+p.amount||0),0); if(paid<=0.0001) return; _paidCount++; const v=toDisplay(paid,r.ccy||'USD'); if(_yPay(r)) paidPrev+=v; else paidThis+=v; });
+  const paidTotalAp=paidPrev+paidThis;
+  // Còn lại theo năm (gồm chưa duyệt — như thẻ cũ)
+  let remPrev=0, remThis=0;
+  payAllOpen.forEach(r=>{ const v=toDisplay(arRemaining(r),r.ccy||'USD'); if(_yPay(r)) remPrev+=v; else remThis+=v; });
+  // Tuổi nợ (aging) trên các khoản còn nợ
+  const _agBuckets=[0,0,0,0,0]; const _today=todayISO();
+  payAllOpen.forEach(r=>{
+    const d=r.dueDate||r.issueDate||''; const v=toDisplay(arRemaining(r),r.ccy||'USD');
+    let b=0; if(d){ const days=Math.floor((Date.now()-new Date(d+'T00:00:00').getTime())/86400000); b=days<=0?0:days<=30?1:days<=60?2:days<=90?3:4; }
+    _agBuckets[b]+=v;
+  });
+
   // AP KPI block
   const apK=document.getElementById('ap-kpi');
   if(apK){
     apK.innerHTML=`
       <div class="kpi">
-        <div class="kpi-label">Chi phí đã duyệt</div>
-        <div class="kpi-value" style="color:var(--bad)">${fmt(totCost)}</div>
-        <div class="kpi-sub">${payApproved.length} hợp đồng (đã trừ VAT)</div>
+        <div class="kpi-label">Tổng phải trả (đã duyệt)</div>
+        <div class="kpi-value" style="color:var(--bad)">${fmt(payApprovedTotal)}</div>
+        <div class="kpi-sub">1. Năm trước: ${fmt(payApprovedPrev)}<br>2. Năm nay (${_curYear}): ${fmt(payApprovedThis)}</div>
+      </div>
+      <div class="kpi">
+        <div class="kpi-label">Tổng đã trả</div>
+        <div class="kpi-value" style="color:var(--good)">${fmt(paidTotalAp)}</div>
+        <div class="kpi-sub">1. Năm trước: ${fmt(paidPrev)}<br>2. Năm nay (${_curYear}): ${fmt(paidThis)}<br>3. Số phiếu đã chi: ${_paidCount}</div>
       </div>
       <div class="kpi">
         <div class="kpi-label">Phải trả còn lại</div>
         <div class="kpi-value" style="color:var(--bad)">${fmt(totPayRemAll)}</div>
-        <div class="kpi-sub">${payAllOpenCount} khoản (gồm chưa duyệt) · Quá hạn: ${fmt(payOverdueAll)}${totPayRemSalary>0?`<br><span style="color:var(--accent)">trong đó Lương: ${fmt(totPayRemSalary)} (${paySalaryCount}) · Khác: ${fmt(totPayRemOther)}</span>`:''}</div>
-      </div>
-      <div class="kpi">
-        <div class="kpi-label">Chờ duyệt TT (L2)</div>
-        <div class="kpi-value" style="color:var(--warn)">${fmt(payPendingL2Value)}</div>
-        <div class="kpi-sub">${payPendingL2List.length} khoản chờ duyệt cấp cuối · sắp phải chi</div>
-      </div>
-      <div class="kpi">
-        <div class="kpi-label">Chờ xử lý</div>
-        <div class="kpi-value" style="color:var(--warn)">${payUnapprovedTotal}</div>
-        <div class="kpi-sub">Chờ KT kiểm: ${payPendingAcc} · Trình ký: ${payPendingL1} · Chờ TT: ${payPendingL2}${payDraft?` · Nháp: ${payDraft}`:''}</div>
+        <div class="kpi-sub">1. Năm trước: ${fmt(remPrev)}<br>2. Năm nay (${_curYear}): ${fmt(remThis)}<br>3. Tuổi nợ: ≤30d ${fmt(_agBuckets[1])} · 31–60 ${fmt(_agBuckets[2])} · 61–90 ${fmt(_agBuckets[3])} · <span style="color:var(--bad)">&gt;90 ${fmt(_agBuckets[4])}</span></div>
       </div>`;
   }
 
@@ -36510,9 +36539,22 @@ function arExportExcel(kind){
    A/B: công nợ còn nợ (approved & rem>0) gom theo đối tác.
    C: tuổi nợ theo hạn TT. D: số dư tàu QL (PDF dùng tab 06).
    ============================================================ */
-function _periodicDebtRows(kind){
+function _periodicScope(kind){
+  // v3.03.27: phạm vi công nợ — 'all' (mọi khoản đang nợ kể cả chưa duyệt) hoặc 'approved' (chỉ đã duyệt)
+  const el=document.getElementById('periodic-'+kind+'-scope');
+  return (el&&el.value)||'all';
+}
+function _periodicDebtRows(kind, scopeOverride){
   const list=kind==='ap'?'payables':'receivables';
-  return scopedRecords(S[list]||[]).filter(r=>!r._isBudget && !r._cashClear && wfStatus(r)==='approved' && arRemaining(r)>0.0001);
+  const scope=scopeOverride||_periodicScope(kind);
+  return scopedRecords(S[list]||[]).filter(r=>{
+    if(r._isBudget||r._cashClear) return false;
+    if(arRemaining(r)<=0.0001) return false;
+    const st=wfStatus(r);
+    if(st==='rejected') return false;                 // bỏ phiếu đã từ chối
+    if(scope==='approved' && st!=='approved') return false;
+    return true;                                       // 'all': gồm draft/pending_*/approved còn nợ
+  });
 }
 function _periodicConv(kind, amt, ccy){
   // AR quy VND cố định (như sổ AR); AP quy theo đơn vị hiển thị (như sổ AP)
@@ -36579,10 +36621,26 @@ function renderPeriodic(){
         <td class="r num" style="font-weight:700;color:${kind==='ap'?'var(--bad)':'var(--accent)'}">${_periodicFmtConv(kind,m.rem)}</td>
         <td class="c mono" style="font-size:11px">${esc(m.oldest||'—')}</td></tr>`;
     });
-    h+=`<tr class="total"><td><b>TỔNG (${rows.length} đối tác)</b></td><td></td>
+    const _scope=_periodicScope(kind);
+    const _nRec=_periodicDebtRows(kind).length;
+    // tách phần chưa duyệt (chỉ khi đang xem 'all') để ghi chú minh bạch
+    let _approvedRem=0,_pendingRem=0;
+    if(_scope==='all'){
+      _periodicDebtRows(kind).forEach(r=>{
+        const v=_periodicConv(kind,arRemaining(r),r.ccy);
+        if(wfStatus(r)==='approved') _approvedRem+=v; else _pendingRem+=v;
+      });
+    }
+    h+=`<tr class="total"><td><b>TỔNG (${rows.length} đối tác · ${_nRec} khoản)</b></td><td></td>
       <td class="r"><b>${_periodicFmtConv(kind,tot)}</b></td>
       <td class="r" style="color:var(--good)"><b>${_periodicFmtConv(kind,paid)}</b></td>
       <td class="r" style="color:${kind==='ap'?'var(--bad)':'var(--accent)'}"><b>${_periodicFmtConv(kind,rem)}</b></td><td></td></tr></tbody>`;
+    if(_scope==='all' && _pendingRem>0.001){
+      h+=`<tfoot><tr><td colspan="6" style="font-size:11px;color:var(--muted);font-style:italic;padding-top:6px">
+        Gồm: đã duyệt <b style="color:var(--ink)">${_periodicFmtConv(kind,_approvedRem)}</b>
+        · chưa duyệt <b style="color:var(--warn)">${_periodicFmtConv(kind,_pendingRem)}</b>
+        (nháp + chờ KT + trình ký). Chọn "Chỉ đã duyệt" để xem công nợ đã chốt.</td></tr></tfoot>`;
+    }
     el.innerHTML=h;
   });
   // C: aging
@@ -36671,8 +36729,8 @@ function periodicDebtPdf(kind){
   const totalLines=Object.entries(byCcy).map(([c,v])=>`${c}: Tổng <b>${fmtN(v.tot)}</b> · Đã ${isAp?'trả':'thu'} <b>${fmtN(v.paid)}</b> · CÒN LẠI <b>${fmtN(v.rem)}</b>`).join(' &nbsp;|&nbsp; ');
   const table=`<table><thead><tr><th>STT</th><th>${isAp?'Nhà cung cấp':'Khách hàng'}</th><th>Số HĐ</th><th>Diễn giải</th><th>Ngày HĐ</th><th>Hạn TT</th><th>CCY</th><th>Tổng</th><th>Đã ${isAp?'trả':'thu'}</th><th>Còn lại</th><th>Tuổi nợ</th></tr></thead><tbody>${body}</tbody></table>`;
   _periodicPdfWin(isAp?'BÁO CÁO CÔNG NỢ PHẢI TRẢ':'BÁO CÁO CÔNG NỢ PHẢI THU',
-    rows.length+' khoản đang nợ (đã duyệt)', table,
-    totalLines+'<br><span style="font-size:10px;color:#888">Tổng gom riêng theo từng loại tiền tệ. Chỉ gồm khoản đã duyệt còn số dư.</span>');
+    rows.length+' khoản đang nợ ('+(_periodicScope(isAp?'ap':'ar')==='approved'?'chỉ đã duyệt':'tất cả — gồm chưa duyệt')+')', table,
+    totalLines+'<br><span style="font-size:10px;color:#888">Tổng gom riêng theo từng loại tiền tệ. '+(_periodicScope(isAp?'ap':'ar')==='approved'?'Chỉ gồm khoản đã duyệt còn số dư.':'Gồm cả khoản chưa duyệt (nháp/chờ KT/trình ký) còn số dư.')+'</span>');
 }
 function periodicAgingPdf(){
   const kind=(document.getElementById('periodic-aging-kind')||{}).value||'ar';
