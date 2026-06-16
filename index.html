@@ -2954,7 +2954,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.03.72';            // bumped on each release
+const APP_VERSION='3.03.74';            // bumped on each release
 
 /* v2.62.0: Token xác thực backend — PHẢI khớp API_TOKEN trong Apps Script (Code.gs).
    Mọi request tới Apps Script tự động được gắn token qua lớp bọc fetch bên dưới.
@@ -6007,6 +6007,13 @@ function userEditorModal(initial,idx){
               <div style="font-size:11px;color:var(--muted);font-style:italic;margin-top:2px">Có quyền duyệt cấp 2 — quyết định cuối cùng. Chỉ sau khi đã duyệt L2, bản ghi mới vào báo cáo BI cho ban quản trị.</div>
             </div>
           </label>
+          <label style="display:flex;align-items:flex-start;gap:8px;padding:6px 0;cursor:pointer;border-top:1px solid var(--rule)">
+            <input type="checkbox" id="user-can-approve-fund" ${initial.canApproveFund?'checked':''} style="margin-top:3px">
+            <div>
+              <div><b>Duyệt quỹ tiền mặt (Manager quỹ)</b></div>
+              <div style="font-size:11px;color:var(--muted);font-style:italic;margin-top:2px">Duyệt phiếu hoàn ứng của các quỹ có bật "cần Manager duyệt" (vd quỹ O&M). NV nhập hoàn ứng → Manager này duyệt → mới trừ quỹ + ghi chi phí.</div>
+            </div>
+          </label>
           <label style="display:flex;align-items:flex-start;gap:8px;padding:6px 0;cursor:pointer;border-top:1px solid var(--rule);background:rgba(184,71,46,.05)">
             <input type="checkbox" id="user-is-viewer" ${initial.isViewer?'checked':''} style="margin-top:3px" onchange="document.getElementById('viewer-options').style.display=this.checked?'block':'none'">
             <div>
@@ -6193,6 +6200,7 @@ function editUser(idx){
     tabs:u.tabs||[],
     canConfirmPayment:!!u.canConfirmPayment,
     canApproveL1:!!u.canApproveL1,
+    canApproveFund:!!u.canApproveFund,
     canCheckAcc:!!u.canCheckAcc,
     canApproveL2:!!u.canApproveL2,
     assignedVesselIds:u.assignedVesselIds||[],
@@ -7246,6 +7254,7 @@ async function saveUser(idx){
   const canApproveL1=document.getElementById('user-can-approve-l1').checked;
   const canCheckAcc=document.getElementById('user-can-check-acc')?.checked||false;
   const canApproveL2=document.getElementById('user-can-approve-l2').checked;
+  const canApproveFund=(document.getElementById('user-can-approve-fund')||{}).checked||false;
   const isViewer=document.getElementById('user-is-viewer').checked;
   const isBOD=document.getElementById('user-is-bod')?.checked||false;
   // v1.40.0: canManageUsers — only visible+settable when admin is editing
@@ -7330,6 +7339,7 @@ async function saveUser(idx){
       u.tabs=finalTabs;
       u.canConfirmPayment=isViewer?false:canConfirmPayment;
       u.canApproveL1=isViewer?false:canApproveL1;
+      u.canApproveFund=isViewer?false:canApproveFund;
       u.canCheckAcc=isViewer?false:canCheckAcc;
       u.canApproveL2=isViewer?false:canApproveL2;
       u.assignedVesselIds=isViewer?[]:assignedVesselIds;
@@ -7379,6 +7389,7 @@ async function saveUser(idx){
         canApproveL1:isViewer?false:canApproveL1,
         canCheckAcc:isViewer?false:canCheckAcc,
         canApproveL2:isViewer?false:canApproveL2,
+        canApproveFund:isViewer?false:canApproveFund,
         assignedVesselIds:isViewer?[]:assignedVesselIds,
         assignedProjectIds:isViewer?[]:assignedProjectIds,
         assignedOpVesselIds:isViewer?[]:assignedOpVesselIds,
@@ -8126,6 +8137,11 @@ function canApproveL1(){
 function canApproveL2(){
   if(CURRENT_ROLE==='admin') return true;
   return !!(CURRENT_USER && CURRENT_USER.canApproveL2);
+}
+/* v3.03.74: Manager duyệt quỹ tiền mặt (quỹ có needManagerApproval). Admin luôn được. */
+function canApproveFund(){
+  if(CURRENT_ROLE==='admin') return true;
+  return !!(CURRENT_USER && CURRENT_USER.canApproveFund);
 }
 /* v1.35: KT viên (HANG) kiểm tra hồ sơ trước khi đẩy lên L1 */
 function canCheckAcc(){
@@ -10448,6 +10464,8 @@ function apCountsInPL(r){
   }
   // v3.02.38: phiếu hoàn ứng quỹ = chi phí ĐÃ THỰC CHI từ quỹ tiền mặt → vào P&L
   //   (đã loại CapEx ở trên; PO/tồn kho hiếm khi hoàn ứng nhưng vẫn theo quy tắc chung bên dưới).
+  // v3.03.74: phiếu hoàn ứng CHỜ Manager duyệt → CHƯA vào P&L (chỉ vào khi duyệt xong).
+  if(r._fundPending || r.status==='pending_fund') return false;
   if(r._cashClear){
     if(_isOpManagedAp(r)) return false;
     if(isExpensePO(r.expenseType)) return false;
@@ -20481,7 +20499,7 @@ const CASH_FUND_TYPES={
    Lý do: phiếu Ứng quỹ (AP) / Hoàn ứng tạo dòng sổ quỹ nhưng có lúc không cập nhật f.balance
    → số dư hiện 0 dù sổ có giao dịch. Tính từ ledger là nguồn sự thật duy nhất, tự khớp mọi nguồn. */
 function cashLedgerBalance(fundId){
-  return (S.cashTxns||[]).filter(t=>t.fundId===fundId)
+  return (S.cashTxns||[]).filter(t=>t.fundId===fundId && !t._pending)
     .reduce((s,t)=>s + (t.direction==='IN' ? (+t.amount||0) : -(+t.amount||0)), 0);
 }
 function cashFundBalance(fundId){
@@ -20546,6 +20564,13 @@ function _cashFundModal(f){
         </label>
       </div>
       <div class="field" style="grid-column:1/3">
+        <label>Kiểm soát duyệt</label>
+        <label style="display:flex;align-items:flex-start;gap:8px;padding:6px 0;font-size:12px;cursor:pointer">
+          <input type="checkbox" id="cf-need-approval" ${f.needManagerApproval?'checked':''} style="margin-top:3px">
+          <span><b>Hoàn ứng cần Manager duyệt trước</b><br><span style="color:var(--muted);font-style:italic">Bật: NV nhập hoàn ứng → CHỜ Manager duyệt → duyệt xong mới trừ quỹ + ghi chi phí. Tắt: ghi sổ ngay (mặc định).</span></span>
+        </label>
+      </div>
+      <div class="field" style="grid-column:1/3">
         <label>Ghi chú</label>
         <input type="text" id="cf-note" value="${esc(f.note||'')}" placeholder="VD: Thủ quỹ giữ · Két VP tầng 2...">
       </div>
@@ -20568,6 +20593,7 @@ function saveCashFund(id){
   const ccy=document.getElementById('cf-ccy').value;
   const isActive=document.getElementById('cf-active').checked;
   const note=document.getElementById('cf-note').value.trim();
+  const needManagerApproval=!!(document.getElementById('cf-need-approval')||{}).checked;
   // v3.03.35: quỹ loại Tàu phải gắn 1 tàu đích danh
   const vesselId = (fundType==='VESSEL') ? (document.getElementById('cf-vessel')?.value||'') : '';
   if(!name){err.textContent='Nhập tên quỹ';return;}
@@ -20576,11 +20602,11 @@ function saveCashFund(id){
   if(id){
     const f=S.cashFunds.find(x=>x.id===id);
     if(!f){err.textContent='Không tìm thấy quỹ';return;}
-    f.name=name; f.fundType=fundType; f.ccy=ccy; f.isActive=isActive; f.note=note; f.vesselId=vesselId;
+    f.name=name; f.fundType=fundType; f.ccy=ccy; f.isActive=isActive; f.note=note; f.vesselId=vesselId; f.needManagerApproval=needManagerApproval;
     if(typeof touchRecord==='function') touchRecord(f);
   } else {
     const initBal=+document.getElementById('cf-balance').value||0;
-    const fund={id:uid(),name,fundType,vesselId,ccy,balance:initBal,isActive,note,
+    const fund={id:uid(),name,fundType,vesselId,ccy,balance:initBal,isActive,note,needManagerApproval,
       createdBy:actorName(),createdAt:new Date().toISOString()};
     S.cashFunds.push(fund);
     // Số dư ban đầu > 0 → ghi 1 dòng sổ quỹ làm mốc
@@ -20674,22 +20700,36 @@ function viewCashLedger(fundId){
     txns.forEach(t=>{
       const amt=+t.amount||0;
       const isIn = t.direction==='IN';
-      running += (isIn? amt : -amt);
-      if(isIn) totIn+=amt; else totOut+=amt;
+      const isPending = !!t._pending;  // v3.03.74: hoàn ứng chờ Manager duyệt — không tính số dư
+      if(!isPending){
+        running += (isIn? amt : -amt);
+        if(isIn) totIn+=amt; else totOut+=amt;
+      }
       const isManual = (t.sourceType==='manual' || !t.sourceType);
-      const act = isManual
-        ? `<button class="icon-btn" title="Sửa" onclick="editCashTxn('${fundId}','${t.id}')">✎</button>
-           <button class="icon-btn danger" title="Xóa" onclick="deleteCashTxn('${fundId}','${t.id}')">✕</button>`
-        : `<span title="Dòng tự sinh từ ${t.sourceType==='ap'?'phiếu Ứng quỹ (AP)':(t.sourceType==='cash_clear'?'phiếu Hoàn ứng':'hệ thống')} — sửa ở nguồn gốc" style="color:var(--muted);font-size:12px">🔒</span>`;
-      const badge = isIn
+      let act;
+      if(isPending){
+        const canAppr=(typeof canApproveFund==='function' && canApproveFund());
+        act = canAppr
+          ? `<button class="icon-btn" title="Duyệt — trừ quỹ + ghi chi phí" onclick="approveFundClear('${fundId}','${t.sourceId}')" style="color:#2d6a6a;font-weight:700">✓ Duyệt</button>
+             <button class="icon-btn danger" title="Từ chối — hủy phiếu" onclick="rejectFundClear('${fundId}','${t.sourceId}')">✕</button>`
+          : '<span style="color:var(--warn);font-size:10px;font-weight:600" title="Chờ Manager quỹ duyệt">⏳ Chờ duyệt</span>';
+      } else {
+        act = isManual
+          ? `<button class="icon-btn" title="Sửa" onclick="editCashTxn('${fundId}','${t.id}')">✎</button>
+             <button class="icon-btn danger" title="Xóa" onclick="deleteCashTxn('${fundId}','${t.id}')">✕</button>`
+          : `<span title="Dòng tự sinh từ ${t.sourceType==='ap'?'phiếu Ứng quỹ (AP)':(t.sourceType==='cash_clear'?'phiếu Hoàn ứng':'hệ thống')} — sửa ở nguồn gốc" style="color:var(--muted);font-size:12px">🔒</span>`;
+      }
+      const badge = isPending
+        ? '<span class="chip" style="background:rgba(197,166,74,.18);color:#9a7b1a;font-size:10px;font-weight:600;padding:2px 8px;border-radius:10px">⏳ Chờ duyệt</span>'
+        : (isIn
         ? '<span class="chip" style="background:rgba(45,106,106,.12);color:#2d6a6a;font-size:10px;font-weight:600;padding:2px 8px;border-radius:10px">▲ Ứng</span>'
-        : '<span class="chip" style="background:rgba(184,71,46,.12);color:#b8472e;font-size:10px;font-weight:600;padding:2px 8px;border-radius:10px">▼ Hoàn/Chi</span>';
-      rows+=`<tr style="border-bottom:1px solid var(--rule)">
+        : '<span class="chip" style="background:rgba(184,71,46,.12);color:#b8472e;font-size:10px;font-weight:600;padding:2px 8px;border-radius:10px">▼ Hoàn/Chi</span>');
+      rows+=`<tr style="border-bottom:1px solid var(--rule);${isPending?'background:rgba(197,166,74,.05)':''}">
         <td style="font-family:var(--font-mono);font-size:11px;color:var(--muted);padding:8px 10px;white-space:nowrap">${esc(t.date||'')}</td>
         <td style="padding:8px 10px">${badge}</td>
         <td style="padding:8px 10px"><div style="font-weight:500">${esc(t.category||'—')}</div>${t.desc?`<div style="font-size:10.5px;color:var(--muted);margin-top:1px">${esc(t.desc)}</div>`:''}</td>
-        <td class="num" style="padding:8px 10px;font-family:var(--font-mono);font-weight:600;color:${isIn?'#2d6a6a':'#b8472e'};white-space:nowrap">${isIn?'+':'−'}${fmtCcy(amt,t.ccy||f.ccy||'VND')}</td>
-        <td class="num" style="padding:8px 10px;font-family:var(--font-mono);font-weight:700;white-space:nowrap">${fmtCcy(running,f.ccy||'VND')}</td>
+        <td class="num" style="padding:8px 10px;font-family:var(--font-mono);font-weight:600;color:${isPending?'#9a7b1a':(isIn?'#2d6a6a':'#b8472e')};white-space:nowrap">${isPending?'(':(isIn?'+':'−')}${fmtCcy(amt,t.ccy||f.ccy||'VND')}${isPending?')':''}</td>
+        <td class="num" style="padding:8px 10px;font-family:var(--font-mono);font-weight:700;white-space:nowrap">${isPending?'—':fmtCcy(running,f.ccy||'VND')}</td>
         <td style="padding:8px 10px;text-align:center;white-space:nowrap">${act}</td>
       </tr>`;
     });
@@ -20847,10 +20887,13 @@ function _renderCashClearModal(){
   function objOpts(t){
     let o='<option value="">— Không gắn —</option>';
     if(_isOfficeFund){
-      // chỉ dự án O&M (không hiện danh sách tàu)
-      const omProjs=(S.projects||[]).filter(p=>p.isOM);
-      o+='<optgroup label="Dự án O&M">'+omProjs.map(p=>`<option value="P:${p.id}" ${t.objType==='P'&&t.objId===p.id?'selected':''}>⚙ ${esc((p.code?p.code+' ':'')+(p.name||''))}</option>`).join('')+'</optgroup>';
-      return o;
+      // chỉ dự án O&M (không hiện danh sách tàu); "Không gắn" = chi chung mảng O&M
+      let o2='<option value="">— Không gắn (chi chung O&M) —</option>';
+      const omProjs=(S.projects||[]).filter(p=>p.isOM || p.segment==='OM');
+      if(omProjs.length){
+        o2+='<optgroup label="Dự án O&M">'+omProjs.map(p=>`<option value="P:${p.id}" ${t.objType==='P'&&t.objId===p.id?'selected':''}>⚙ ${esc((p.code?p.code+' ':'')+(p.name||''))}</option>`).join('')+'</optgroup>';
+      }
+      return o2;
     }
     o+='<optgroup label="Tàu">'+vessels.map(v=>`<option value="V:${v.id}" ${t.objType==='V'&&t.objId===v.id?'selected':''}>⛵ ${esc(v.name)}</option>`).join('')+'</optgroup>';
     o+='<optgroup label="Dự án">'+projects.map(p=>`<option value="P:${p.id}" ${t.objType==='P'&&t.objId===p.id?'selected':''}>⚙ ${esc((p.code?p.code+' ':'')+(p.name||''))}</option>`).join('')+'</optgroup>';
@@ -20978,6 +21021,7 @@ function saveCashClear(){
 
   // ===== CHẾ ĐỘ GHI CHI PHÍ =====
   const _isOfficeFund = (f.fundType==='OFFICE');   // v3.03.72: quỹ Văn phòng O&M
+  const _needApproval = !!f.needManagerApproval;   // v3.03.74: quỹ cần Manager duyệt trước khi trừ quỹ
   const valid=st.lines.filter(l=>l.expenseType && (+l.amount||0)>0);
   if(!valid.length){ toast('Cần ít nhất 1 khoản có loại CP + số tiền','bad'); return; }
   let total=0; let n=0;
@@ -21000,20 +21044,39 @@ function saveCashClear(){
       expenseType:l.expenseType, amount:gross, amountNet:net, vatAmount:vat, vatPercent:vatPct, ccy,
       vesselId:v?v.id:'', projectId:p?p.id:'', segment:seg||'OTHER',
       issueDate:st.date, dueDate:st.date, dueMonth:(st.date||'').slice(0,7),
-      // Ghi sổ NGAY (đã chi qua quỹ) — status approved để vào P&L. Số dư quỹ giảm bên dưới.
-      status:'approved', submittedBy:me, submittedAt:nowIso,
-      approvedL1By:'(Hoàn ứng — '+me+')', approvedL1At:nowIso,
-      approvedL2By:'(Hoàn ứng — '+me+')', approvedL2At:nowIso,
-      payments:[{date:st.date, amount:gross, ccy, note:'Chi từ quỹ '+(f.name||'')}],
       _cashClear:true, _cashFundId:f.id, _batchId:batchId,
       createdBy:me, createdAt:nowIso
     };
+    if(_needApproval){
+      // v3.03.74: CHỜ Manager duyệt — CHƯA vào P&L, CHƯA trừ quỹ.
+      rec.status='pending_fund';
+      rec.submittedBy=me; rec.submittedAt=nowIso;
+      rec._fundPending=true;
+    } else {
+      // Ghi sổ NGAY (đã chi qua quỹ) — status approved để vào P&L. Số dư quỹ giảm bên dưới.
+      rec.status='approved'; rec.submittedBy=me; rec.submittedAt=nowIso;
+      rec.approvedL1By='(Hoàn ứng — '+me+')'; rec.approvedL1At=nowIso;
+      rec.approvedL2By='(Hoàn ứng — '+me+')'; rec.approvedL2At=nowIso;
+      rec.payments=[{date:st.date, amount:gross, ccy, note:'Chi từ quỹ '+(f.name||'')}];
+    }
     // v3.03.36: phiếu do THUYỀN TRƯỞNG khai → thêm nhãn HẬU KIỂM (chỉ để theo dõi, KHÔNG ảnh hưởng số đã ghi sổ).
     if(_byCrew){
       rec._postAudit={ stage:'pending_kt', byCrew:me, at:nowIso, checkedKTBy:null, checkedKTAt:null, okL1By:null, okL1At:null, okL2By:null, okL2At:null };
     }
     touchRecord(rec); S.payables.push(rec); n++;
   });
+  if(_needApproval){
+    // v3.03.74: CHƯA trừ quỹ — chờ Manager duyệt. Ghi 1 dòng sổ quỹ "chờ duyệt" (PENDING, không tính số dư).
+    S.cashTxns=S.cashTxns||[];
+    S.cashTxns.push({id:uid(),fundId:f.id,date:st.date,direction:'OUT',amount:total,ccy,
+      category:'Hoàn ứng — CHỜ DUYỆT ('+n+' khoản)',desc:st.noteHeader||('Hoàn ứng chờ Manager duyệt — '+n+' khoản'),
+      sourceType:'cash_clear_pending',sourceId:batchId,_pending:true,recordedBy:me,recordedAt:nowIso});
+    touchRecord(f); saveState(); renderAll();
+    toast(`Đã gửi ${n} khoản (${fmtCcy(total,ccy)}) — CHỜ Manager duyệt. Chưa trừ quỹ.`,'good');
+    _cashClearState=null;
+    viewCashLedger(f.id);
+    return;
+  }
   // giảm quỹ + ghi 1 dòng sổ quỹ tổng
   f.balance=(+f.balance||0)-total;
   S.cashTxns=S.cashTxns||[];
@@ -21024,6 +21087,52 @@ function saveCashClear(){
   toast(`Đã ghi ${n} khoản chi phí (${fmtCcy(total,ccy)}) + trừ quỹ`,'good');
   _cashClearState=null;
   viewCashLedger(f.id);
+}
+
+/* v3.03.74: Manager DUYỆT phiếu hoàn ứng quỹ (quỹ cần duyệt) — trừ quỹ + ghi chi phí vào P&L. */
+function approveFundClear(fundId, batchId){
+  if(!canApproveFund()){ toast('Chỉ Manager quỹ (hoặc admin) được duyệt','bad'); return; }
+  const f=(S.cashFunds||[]).find(x=>x.id===fundId); if(!f){ toast('Không tìm thấy quỹ','bad'); return; }
+  const recs=(S.payables||[]).filter(r=>r._batchId===batchId && r._fundPending);
+  if(!recs.length){ toast('Không tìm thấy phiếu chờ duyệt','bad'); return; }
+  const total=recs.reduce((s,r)=>s+(+r.amount||0),0);
+  const ccy=recs[0].ccy||f.ccy||'VND';
+  if(!confirm(`Duyệt phiếu hoàn ứng (${recs.length} khoản · ${fmtCcy(total,ccy)})?\n\nDuyệt xong sẽ TRỪ QUỸ + ghi chi phí vào P&L.`)) return;
+  const me=actorName(); const nowIso=new Date().toISOString();
+  recs.forEach(r=>{
+    r.status='approved'; r._fundPending=false;
+    r.approvedL1By='(Hoàn ứng — duyệt: '+me+')'; r.approvedL1At=nowIso;
+    r.approvedL2By='(Hoàn ứng — duyệt: '+me+')'; r.approvedL2At=nowIso;
+    r.payments=[{date:r.issueDate||todayISO(), amount:+r.amount||0, ccy:r.ccy, note:'Chi từ quỹ '+(f.name||'')+' (Manager duyệt)'}];
+    r.fundApprovedBy=me; r.fundApprovedAt=nowIso;
+    touchRecord(r);
+  });
+  const pend=(S.cashTxns||[]).find(t=>t.sourceId===batchId && t._pending);
+  if(pend){
+    pend._pending=false;
+    pend.sourceType='cash_clear';
+    pend.category='Hoàn ứng ('+recs.length+' khoản)';
+    pend.desc='Hoàn ứng — đã duyệt: '+me;
+    pend.approvedBy=me; pend.approvedAt=nowIso;
+  }
+  f.balance=(+f.balance||0)-total;
+  try{ logAuditEvent('fund_clear_approve',{fundId,batchId,total,ccy,by:me}); }catch(e){}
+  touchRecord(f); saveState(); renderAll();
+  toast(`✓ Đã duyệt — trừ quỹ ${fmtCcy(total,ccy)} + ghi ${recs.length} khoản chi phí`,'good');
+  viewCashLedger(fundId);
+}
+function rejectFundClear(fundId, batchId){
+  if(!canApproveFund()){ toast('Chỉ Manager quỹ (hoặc admin) được từ chối','bad'); return; }
+  const recs=(S.payables||[]).filter(r=>r._batchId===batchId && r._fundPending);
+  if(!recs.length){ toast('Không tìm thấy phiếu chờ duyệt','bad'); return; }
+  if(!confirm(`Từ chối & HỦY phiếu hoàn ứng này (${recs.length} khoản)? Phiếu sẽ bị xóa, quỹ giữ nguyên.`)) return;
+  const ids=new Set(recs.map(r=>r.id));
+  S.payables=S.payables.filter(r=>!ids.has(r.id));
+  S.cashTxns=(S.cashTxns||[]).filter(t=>!(t.sourceId===batchId && t._pending));
+  try{ logAuditEvent('fund_clear_reject',{fundId,batchId,n:recs.length,by:actorName()}); }catch(e){}
+  saveState(); renderAll();
+  toast('Đã từ chối & hủy phiếu hoàn ứng','good');
+  viewCashLedger(fundId);
 }
 
 /* ============================================================
