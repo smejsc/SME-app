@@ -2954,7 +2954,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.03.64';            // bumped on each release
+const APP_VERSION='3.03.66';            // bumped on each release
 
 /* v2.62.0: Token xác thực backend — PHẢI khớp API_TOKEN trong Apps Script (Code.gs).
    Mọi request tới Apps Script tự động được gắn token qua lớp bọc fetch bên dưới.
@@ -5494,6 +5494,7 @@ function openSettings(){
         <label>Công cụ admin <span style="font-size:9px;color:var(--accent);font-weight:600">v2.84.0</span></label>
         <button type="button" class="btn-sec" onclick="migrateArToApproved()" style="margin-top:4px">⚙ Nâng AR Nháp/Chờ duyệt → Đã duyệt</button>
         <button type="button" class="btn-sec" onclick="openFindEntryTool()" style="margin-top:4px;border-color:var(--accent);color:var(--accent)">🔎 Tìm bút toán (xóa/sửa)</button>
+        <button type="button" class="btn-sec" onclick="openFixFxTool()" style="margin-top:4px;border-color:#b8472e;color:#b8472e">⚠ Quét tỷ giá sai</button>
         <div style="font-size:11px;color:var(--muted);font-style:italic;margin-top:6px">
           <b>🔎 Tìm bút toán:</b> gõ từ khóa (số PO, diễn giải, NCC) hoặc số tiền — quét cả Phải thu, Phải trả, Chi hộ tàu QL; mở thẳng để sửa/xóa. Dùng khi không thấy bút toán trong danh sách thường.</div>
         <div style="font-size:11px;color:var(--muted);font-style:italic;margin-top:6px">
@@ -7413,10 +7414,16 @@ function showInviteModalAfterCreate(username, fullName, tempPw){
   const joinLink = COMPANY_SCRIPT_URL
     ? appUrl
     : (scriptUrl ? `${appUrl}?join=${encodeURIComponent(scriptUrl)}` : appUrl);
+  // v3.03.66: ID đăng nhập THỰC TẾ — nếu NV bị siết mustUseEmail thì phải đăng nhập bằng EMAIL,
+  // không phải username. Tránh tin nhắn ghi sai (nhãn "email" nhưng giá trị là username cũ).
+  const _u=(cfg.users||[]).find(x=>x.name===username);
+  const _useEmail = !!(_u && _u.mustUseEmail && _u.email);
+  const loginId = _useEmail ? _u.email : username;
+  const idLabel = _useEmail ? 'Tên đăng nhập (email công ty)' : 'Tên đăng nhập';
   const zaloMsg=`Chào ${fullName||username}, bạn được cấp tài khoản phần mềm Seahorse Manager.
 1. Mở link: ${joinLink}
 2. Đăng nhập:
-   • Tên đăng nhập: ${username}
+   • ${idLabel}: ${loginId}
    • Mật khẩu tạm: ${tempPw}
 3. Hệ thống sẽ yêu cầu đổi mật khẩu mới ngay lần đầu.
 Lưu ý: KHÔNG chia sẻ mật khẩu cho người khác.`;
@@ -7426,7 +7433,7 @@ Lưu ý: KHÔNG chia sẻ mật khẩu cho người khác.`;
 Anh/chị được cấp tài khoản phần mềm kế toán nội bộ Seahorse Manager. Thông tin đăng nhập:
 
 • Link đăng nhập: ${joinLink}
-• Tên đăng nhập (email công ty): ${username}
+• ${idLabel}: ${loginId}
 • Mật khẩu tạm: ${tempPw}
 
 Hệ thống sẽ yêu cầu đổi mật khẩu mới ngay lần đăng nhập đầu tiên. Vui lòng KHÔNG chia sẻ mật khẩu cho người khác.
@@ -7481,7 +7488,7 @@ Trân trọng.`;
     </div>
   `;
   // v3.03.60/62: username NV mới = email công ty → người nhận mailto; nội dung = email đầy đủ (đăng nhập + quy định).
-  const _toEmail = (username && username.indexOf('@')!==-1) ? username : '';
+  const _toEmail = (loginId && loginId.indexOf('@')!==-1) ? loginId : ((_u && _u.email) ? _u.email : '');
   const _mailSubject = 'Tài khoản & quy định nhập liệu — Seahorse Manager';
   const _buildMailto = `(function(){var b=document.getElementById('invite-email');var body=b?b.value:${JSON.stringify(emailBody)};return 'mailto:'+encodeURIComponent(${JSON.stringify(_toEmail)})+'?subject='+encodeURIComponent(${JSON.stringify(_mailSubject)})+'&body='+encodeURIComponent(body);})()`;
   const foot=`
@@ -27315,6 +27322,76 @@ function runFindEntry(){
   out.innerHTML=h;
 }
 
+/* === v3.03.65: QUÉT & SỬA TỶ GIÁ SAI (admin) — bút toán có fxToUsd phi lý ===
+   Tìm opTransactions + payables/receivables ngoại tệ có tỷ giá ngoài khoảng hợp lý
+   (thường là VND nhập nhầm thành ~1.6tr / 4.4tr từ lỗi cũ). Cho sửa nhanh từng dòng. */
+function openFixFxTool(){
+  const body=`
+    <div style="font-size:12px;color:var(--muted);margin-bottom:10px">Liệt kê bút toán ngoại tệ có <b>tỷ giá phi lý</b> (vd VND mà tỷ giá ~1.600.000 hay 4.000.000). Sửa lại tỷ giá đúng theo hóa đơn rồi bấm 💾.</div>
+    <div id="fixfx-result" style="max-height:55vh;overflow:auto"></div>`;
+  openModal('⚠ Quét tỷ giá sai', body, `<button class="btn-sec" onclick="closeModal()">Đóng</button><button class="btn-primary" onclick="runFixFx()">🔄 Quét lại</button>`);
+  setTimeout(runFixFx, 60);
+}
+function runFixFx(){
+  const out=document.getElementById('fixfx-result');
+  if(!out) return;
+  const rows=[];
+  (S.opTransactions||[]).forEach(t=>{
+    const ccy=t.ccy||'USD'; const fx=+t.fxToUsd||0;
+    if(ccy==='USD') return;
+    if(fx>0 && !_fxSane(ccy,fx)) rows.push({src:'optx',id:t.id,date:t.date||'',desc:t.desc||t.khoanCat||'',ccy,fx,amount:+t.amount||0});
+  });
+  [['ap','payables','Phải trả'],['ar','receivables','Phải thu']].forEach(([k,list,lbl])=>{
+    (S[list]||[]).forEach(r=>{
+      const ccy=r.ccy||'USD'; const fx=+r.fxToUsd||0;
+      if(ccy==='USD'||ccy==='VND') return;       // AR/AP: fx là CCY→USD (vd 0.92) — chỉ check ngoại tệ
+      if(fx>0 && !_fxSane(ccy,fx)) rows.push({src:k,srcLbl:lbl,id:r.id,date:r.issueDate||'',desc:r.desc||r.partner||'',ccy,fx,amount:+r.amount||+r.amountGross||0});
+    });
+  });
+  if(!rows.length){ out.innerHTML='<div class="help-callout tip" style="margin:0">✓ Không tìm thấy bút toán nào có tỷ giá phi lý. Dữ liệu tỷ giá sạch.</div>'; return; }
+  let h=`<div style="font-size:11px;color:#b8472e;font-weight:600;margin-bottom:8px">Tìm thấy ${rows.length} bút toán tỷ giá nghi sai:</div>`;
+  h+='<table class="tbl" style="font-size:12px;width:100%"><thead><tr><th>Nguồn</th><th>Ngày</th><th>Diễn giải</th><th class="r">Số tiền</th><th class="c">Tỷ giá hiện (sai)</th><th>Tỷ giá đúng</th><th class="c"></th></tr></thead><tbody>';
+  rows.forEach((r,i)=>{
+    h+=`<tr id="fixfx-row-${i}">
+      <td style="font-size:11px">${esc(r.srcLbl||'Chi hộ')}</td>
+      <td class="mono" style="font-size:11px;white-space:nowrap">${esc(r.date)}</td>
+      <td style="font-size:11px">${esc((r.desc||'').slice(0,40))}</td>
+      <td class="r mono" style="white-space:nowrap">${(Math.round(r.amount)).toLocaleString('vi-VN')} ${esc(r.ccy)}</td>
+      <td class="c mono" style="color:#b8472e">${(Math.round(r.fx)).toLocaleString('vi-VN')}</td>
+      <td><input type="text" inputmode="numeric" id="fixfx-new-${i}" placeholder="VD: 26350" style="width:90px;padding:4px 6px;border:1px solid var(--rule);font-family:var(--font-mono);text-align:right"></td>
+      <td class="c"><button class="btn-sec" style="font-size:11px;padding:3px 8px" onclick="fixFxApply('${r.src}','${r.id}',${i})">💾</button></td>
+    </tr>`;
+  });
+  h+='</tbody></table>';
+  out.innerHTML=h;
+}
+function fixFxApply(src,id,i){
+  const inp=document.getElementById('fixfx-new-'+i);
+  const newFx=_unformatNumber(inp?inp.value:'');
+  if(!(newFx>0)){ toast('Nhập tỷ giá đúng (> 0)','bad'); return; }
+  let rec=null;
+  if(src==='optx') rec=(S.opTransactions||[]).find(x=>x.id===id);
+  else rec=(S[src==='ap'?'payables':'receivables']||[]).find(x=>x.id===id);
+  if(!rec){ toast('Không tìm thấy bút toán','bad'); return; }
+  const ccy=rec.ccy||'USD';
+  if(!_fxSane(ccy,newFx)){ if(!confirm('Tỷ giá '+newFx.toLocaleString('vi-VN')+' vẫn ngoài khoảng thường của '+ccy+'. Vẫn áp dụng?')) return; }
+  rec.fxToUsd=newFx;
+  const amt=+rec.amount||0;
+  if(src==='optx'){
+    rec.amountUsd = ccy==='USD' ? amt : amt/newFx;   // tính lại quy đổi chi hộ
+  } else {
+    const net=+rec.amountNet||amt;                    // AP/AR
+    rec.amountUsd = net/newFx;
+  }
+  try{ touchRecord(rec); }catch(e){ rec.updatedAt=new Date().toISOString(); }
+  try{ logAuditEvent('fix_fx',{src,id,newFx,ccy,actor:actorName()}); }catch(e){}
+  saveState();
+  const row=document.getElementById('fixfx-row-'+i);
+  if(row){ row.style.opacity='.45'; const c=row.querySelector('td:last-child'); if(c) c.innerHTML='<span style="color:var(--good);font-size:11px">✓ Đã sửa</span>'; }
+  toast('✓ Đã sửa tỷ giá → '+newFx.toLocaleString('vi-VN'),'good');
+  try{ renderAll(); }catch(e){}
+}
+
 function deleteAr(kind,id){
   const list=kind==='ap'?'payables':'receivables';
   const r=S[list].find(x=>x.id===id);if(!r)return;
@@ -28126,8 +28203,15 @@ function opTypeChanged(){
   opVatRecalc();  // v2.70.0
 }
 
-/* v1.92.0: Lấy tỷ giá bình quân gia quyền của ngoại tệ trong năm hiện tại (gợi ý điền sẵn).
-   Trả 0 nếu chưa có dữ liệu. ccy ≠ USD → cặp CCY→USD. */
+/* v1.92.0 / v3.03.65: Lấy tỷ giá bình quân gia quyền của ngoại tệ trong năm hiện tại (gợi ý).
+   LỌC tỷ giá phi lý (do bút toán cũ nhập sai) để gợi ý không bị nhiễm. Trả 0 nếu chưa có dữ liệu sạch. */
+function _fxSane(ccy, fx){
+  // khoảng hợp lý của "1 USD = ? ngoại tệ" theo từng đồng (chống dữ liệu bẩn kiểu 1.663.947)
+  const R={ VND:[15000,40000], EUR:[0.7,1.3], GBP:[0.6,1.1], SGD:[1.1,1.8], CNY:[5,9], JPY:[100,200], KRW:[1000,1700] };
+  const r=R[ccy];
+  if(!r) return fx>0;            // đồng lạ: chỉ cần dương
+  return fx>=r[0] && fx<=r[1];
+}
 function fxAvgSuggest(ccy){
   if(!ccy||ccy==='USD') return 0;
   const yr=String(new Date().getFullYear());
@@ -28136,9 +28220,11 @@ function fxAvgSuggest(ccy){
     if((t.ccy||'USD')!==ccy) return;
     const fx=+t.fxToUsd||0, amt=+t.amount||0;
     if(fx<=0||amt<=0||!t.date||t.date.slice(0,4)!==yr) return;
+    if(!_fxSane(ccy, fx)) return;   // v3.03.65: bỏ qua tỷ giá phi lý
     base+=amt; conv+=amt/fx;
   });
-  return conv>0 ? base/conv : 0;  // 1 USD = ? ngoại tệ
+  const avg = conv>0 ? base/conv : 0;  // 1 USD = ? ngoại tệ
+  return _fxSane(ccy, avg) ? avg : 0;  // gợi ý cũng phải hợp lý, nếu không trả 0 (không gợi ý)
 }
 
 /* v1.92.0 / v3.03.63: NV đổi ngoại tệ gốc — CHỈ GỢI Ý (placeholder), KHÔNG tự điền tỷ giá.
