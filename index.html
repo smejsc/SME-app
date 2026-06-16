@@ -2954,7 +2954,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.03.54';            // bumped on each release
+const APP_VERSION='3.03.56';            // bumped on each release
 
 /* v2.62.0: Token xác thực backend — PHẢI khớp API_TOKEN trong Apps Script (Code.gs).
    Mọi request tới Apps Script tự động được gắn token qua lớp bọc fetch bên dưới.
@@ -5493,6 +5493,9 @@ function openSettings(){
       <div class="field" style="border-top:1px dashed var(--rule);padding-top:14px;margin-top:14px">
         <label>Công cụ admin <span style="font-size:9px;color:var(--accent);font-weight:600">v2.84.0</span></label>
         <button type="button" class="btn-sec" onclick="migrateArToApproved()" style="margin-top:4px">⚙ Nâng AR Nháp/Chờ duyệt → Đã duyệt</button>
+        <button type="button" class="btn-sec" onclick="openFindEntryTool()" style="margin-top:4px;border-color:var(--accent);color:var(--accent)">🔎 Tìm bút toán (xóa/sửa)</button>
+        <div style="font-size:11px;color:var(--muted);font-style:italic;margin-top:6px">
+          <b>🔎 Tìm bút toán:</b> gõ từ khóa (số PO, diễn giải, NCC) hoặc số tiền — quét cả Phải thu, Phải trả, Chi hộ tàu QL; mở thẳng để sửa/xóa. Dùng khi không thấy bút toán trong danh sách thường.</div>
         <div style="font-size:11px;color:var(--muted);font-style:italic;margin-top:6px">
           Theo quy trình mới: AR (phải thu) không cần workflow nhiều cấp — KTT phát hành HĐ thực = đã duyệt nội bộ. Bấm nút này để chạy migration một-lần cho các AR cũ còn ở trạng thái Nháp/Chờ duyệt. Có hộp thoại liệt kê chi tiết trước khi áp.
         </div>
@@ -25058,6 +25061,7 @@ function openPayableModal(id){
   try{ window._curApId = isEdit ? id : ''; window._arCurrentKind='ap'; }catch(e){}
   const body=_arEditorBody(r,true);
   const foot=`<button class="btn-sec" onclick="closeModal()">Hủy</button>
+              ${isEdit?`<button class="btn-sec" style="border-color:#b8472e;color:#b8472e;font-weight:600" onclick="closeModal();deleteAr('ap','${id}')" title="Xóa bút toán này (cần quyền admin/người tạo; nếu đã gửi duyệt phải Trả về Nháp trước)">🗑 Xóa</button>`:''}
               <button class="btn-primary" onclick="saveAr('ap','${id||''}')">${isEdit?'Cập nhật':'Lưu phải trả'}</button>`;
   openModal(isEdit?'Sửa khoản phải trả':'Thêm phải trả',body,foot);
   setTimeout(_arSegmentChanged, 60);  // v1.82.0: áp lọc tàu theo mảng
@@ -27150,6 +27154,62 @@ function arSaveQuickReceive(id){
   } else {
     toast(`✓ Đã xác nhận thu đủ — công nợ về 0${methodMsg}`, 'good');
   }
+}
+
+/* === v3.03.55: TÌM BÚT TOÁN TOÀN CỤC (admin) — quét payables/receivables/opTransactions ===
+   Dùng khi bút toán không hiện trong danh sách thường (vd sai trạng thái/tỷ giá). */
+function openFindEntryTool(){
+  const body=`
+    <div style="font-size:12px;color:var(--muted);margin-bottom:8px">Gõ từ khóa (diễn giải, số PO, NCC) hoặc số tiền rồi bấm Tìm. Quét cả Phải thu, Phải trả và Chi hộ tàu QL.</div>
+    <div style="display:flex;gap:8px;margin-bottom:10px;flex-wrap:wrap">
+      <input type="text" id="find-entry-q" placeholder="VD: 128-2026 hoặc Cấp hóa chất hoặc 38232000" style="flex:1;min-width:220px;padding:7px 10px;border:1px solid var(--rule);font-size:13px" onkeydown="if(event.key==='Enter')runFindEntry()">
+      <button class="btn-primary" onclick="runFindEntry()">🔎 Tìm</button>
+    </div>
+    <div id="find-entry-result" style="max-height:50vh;overflow:auto"></div>`;
+  openModal('🔎 Tìm bút toán', body, `<button class="btn-sec" onclick="closeModal()">Đóng</button>`);
+  setTimeout(()=>{ const el=document.getElementById('find-entry-q'); if(el) el.focus(); },80);
+}
+function runFindEntry(){
+  const q=((document.getElementById('find-entry-q')||{}).value||'').trim().toLowerCase();
+  const out=document.getElementById('find-entry-result');
+  if(!out) return;
+  if(!q){ out.innerHTML='<div style="color:var(--muted);font-style:italic;padding:10px">Nhập từ khóa hoặc số tiền.</div>'; return; }
+  const qNum=+q.replace(/[^0-9]/g,'')||0;
+  const matchText=(s)=> (String(s||'').toLowerCase().indexOf(q)!==-1);
+  const matchNum=(n)=> qNum>0 && Math.abs((+n||0)-qNum)<1;
+  const rows=[];
+  [['ap','payables','Phải trả'],['ar','receivables','Phải thu']].forEach(([kind,list,lbl])=>{
+    (S[list]||[]).forEach(r=>{
+      if(matchText(r.desc)||matchText(r.partner)||matchText(r.invoiceNo)||matchText(r.noteHeader)||matchNum(r.amount)||matchNum(r.amountGross)){
+        rows.push({kind, id:r.id, src:lbl, date:r.issueDate||r.date||'', desc:r.desc||r.noteHeader||'', who:r.partner||'', amount:+r.amount||+r.amountGross||0, ccy:r.ccy||'USD', status:(typeof wfStatus==='function'?wfStatus(r):(r.status||'')), creator:r.createdBy||''});
+      }
+    });
+  });
+  (S.opTransactions||[]).forEach(t=>{
+    if(matchText(t.desc)||matchText(t.vendor)||matchText(t.invoiceNo)||matchText(t.khoanCat)||matchNum(t.amount)){
+      rows.push({kind:'optx', id:t.id, src:'Chi hộ tàu QL', date:t.date||'', desc:t.desc||t.khoanCat||'', who:(t.vendor||anyVesselName(t.vesselId)||''), amount:+t.amount||0, ccy:t.ccy||'USD', status:t.type==='IN'?'Thu hộ':'Chi hộ', creator:t.createdBy||''});
+    }
+  });
+  if(!rows.length){ out.innerHTML='<div style="color:var(--muted);font-style:italic;padding:10px">Không tìm thấy bút toán khớp. Thử từ khóa ngắn hơn hoặc số tiền.</div>'; return; }
+  rows.sort((a,b)=>(b.date||'').localeCompare(a.date||''));
+  const fmtM=(n,c)=> (c==='USD'?'$':'')+(Math.round(+n||0)).toLocaleString(c==='USD'?'en-US':'vi-VN')+(c==='USD'?'':' '+c);
+  let h='<table class="tbl" style="font-size:12px;width:100%"><thead><tr><th>Nguồn</th><th>Ngày</th><th>Diễn giải</th><th class="r">Số tiền</th><th class="c">TT</th><th class="c">Mở</th></tr></thead><tbody>';
+  rows.slice(0,50).forEach(r=>{
+    const openCall = r.kind==='ap'?`closeModal();openPayableModal('${r.id}')`
+                   : r.kind==='ar'?`closeModal();openReceivableModal('${r.id}')`
+                   : `closeModal();(typeof editOpTx==='function'?editOpTx('${r.id}'):toast('Mở ở tab 04 → Thu-Chi hộ tàu QL','bad'))`;
+    h+=`<tr>
+      <td style="font-size:11px">${esc(r.src)}</td>
+      <td class="mono" style="font-size:11px;white-space:nowrap">${esc(r.date)}</td>
+      <td style="font-size:11px">${esc((r.desc||'').slice(0,48))}${r.who?'<br><span style="color:var(--muted)">'+esc(r.who)+'</span>':''}</td>
+      <td class="r mono" style="white-space:nowrap">${fmtM(r.amount,r.ccy)}</td>
+      <td class="c" style="font-size:10px">${esc(r.status||'')}</td>
+      <td class="c"><button class="icon-btn" title="Mở để sửa/xóa" onclick="${openCall}">👁</button></td>
+    </tr>`;
+  });
+  h+='</tbody></table>';
+  if(rows.length>50) h+=`<div style="font-size:11px;color:var(--muted);margin-top:6px">…và ${rows.length-50} kết quả nữa — gõ cụ thể hơn.</div>`;
+  out.innerHTML=h;
 }
 
 function deleteAr(kind,id){
