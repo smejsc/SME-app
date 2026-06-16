@@ -1011,13 +1011,6 @@ body.readonly-mode::before{
       <div id="daily-reports-block"></div>
     </div>
   </div>
-
-  <div class="section">
-    <div class="section-head"><div class="section-title"><span class="tag">∑</span>Hiệu suất khai thác</div></div>
-    <div class="section-body">
-      <div class="tbl-scroll"><table class="tbl" id="onhire-table"></table></div>
-    </div>
-  </div>
 </section>
 
 <!-- ============ CATALOG (Danh mục — gộp 6 master) ============ -->
@@ -2867,7 +2860,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.03.36';            // bumped on each release
+const APP_VERSION='3.03.39';            // bumped on each release
 
 /* v2.62.0: Token xác thực backend — PHẢI khớp API_TOKEN trong Apps Script (Code.gs).
    Mọi request tới Apps Script tự động được gắn token qua lớp bọc fetch bên dưới.
@@ -22790,17 +22783,20 @@ function renderAR(){
   // v3.03.28: TÁCH NĂM HÓA ĐƠN cho AP (năm trước < năm nay dương lịch). Tổng phải trả = giá trị đã duyệt;
   //   đã trả = payments đã ghi; còn lại = remaining (gồm cả chưa duyệt như cũ).
   const _yPay=(r)=>{ const y=parseInt(String(r.issueDate||r.date||'').slice(0,4),10); return (y && y<_curYear); };
-  // Tổng phải trả (đã duyệt) theo năm — dùng GIÁ TRỊ gross để khớp "tổng phải trả thực"
+  // v3.03.39: Tổng phải trả = MỌI phiếu (gồm chưa duyệt), CHỈ loại phiếu bị từ chối (rejected).
+  //   3 thẻ (Tổng phải trả / Đã trả / Còn lại) đều tính trên cùng tập này cho nhất quán.
+  const payActive=payAll.filter(r=>wfStatus(r)!=='rejected');
   let payApprovedPrev=0, payApprovedThis=0;
-  payApproved.forEach(r=>{ const v=toDisplay(+r.amountGross||+r.amount||0, r.ccy||'USD'); if(_yPay(r)) payApprovedPrev+=v; else payApprovedThis+=v; });
+  payActive.forEach(r=>{ const v=toDisplay(+r.amountGross||+r.amount||0, r.ccy||'USD'); if(_yPay(r)) payApprovedPrev+=v; else payApprovedThis+=v; });
   const payApprovedTotal=payApprovedPrev+payApprovedThis;
-  // Đã trả theo năm (payments đã ghi nhận, mọi phiếu)
+  // Đã trả theo năm (payments đã ghi nhận) — trên cùng tập payActive
   let paidPrev=0, paidThis=0, _paidCount=0;
-  payAll.forEach(r=>{ const paid=(r.payments||[]).reduce((a,p)=>a+(+p.amount||0),0); if(paid<=0.0001) return; _paidCount++; const v=toDisplay(paid,r.ccy||'USD'); if(_yPay(r)) paidPrev+=v; else paidThis+=v; });
+  payActive.forEach(r=>{ const paid=(r.payments||[]).reduce((a,p)=>a+(+p.amount||0),0); if(paid<=0.0001) return; _paidCount++; const v=toDisplay(paid,r.ccy||'USD'); if(_yPay(r)) paidPrev+=v; else paidThis+=v; });
   const paidTotalAp=paidPrev+paidThis;
-  // Còn lại theo năm (gồm chưa duyệt — như thẻ cũ)
-  let remPrev=0, remThis=0;
-  payAllOpen.forEach(r=>{ const v=toDisplay(arRemaining(r),r.ccy||'USD'); if(_yPay(r)) remPrev+=v; else remThis+=v; });
+  // Còn lại theo năm — v3.03.38: = Tổng phải trả (đã duyệt) − Đã trả, theo từng năm (khớp công thức tổng).
+  const remPrev = payApprovedPrev - paidPrev;
+  const remThis = payApprovedThis - paidThis;
+  const payRemNet = payApprovedTotal - paidTotalAp; // Phải trả còn lại = Tổng phải trả − Tổng đã trả
   // Tuổi nợ (aging) trên các khoản còn nợ
   const _agBuckets=[0,0,0,0,0]; const _today=todayISO();
   payAllOpen.forEach(r=>{
@@ -22814,9 +22810,9 @@ function renderAR(){
   if(apK){
     apK.innerHTML=`
       <div class="kpi">
-        <div class="kpi-label">Tổng phải trả (đã duyệt)</div>
+        <div class="kpi-label">Tổng phải trả</div>
         <div class="kpi-value" style="color:var(--bad)">${fmt(payApprovedTotal)}</div>
-        <div class="kpi-sub">1. Năm trước: ${fmt(payApprovedPrev)}<br>2. Năm nay (${_curYear}): ${fmt(payApprovedThis)}</div>
+        <div class="kpi-sub">Mọi phiếu (gồm chưa duyệt)<br>1. Năm trước: ${fmt(payApprovedPrev)}<br>2. Năm nay (${_curYear}): ${fmt(payApprovedThis)}</div>
       </div>
       <div class="kpi">
         <div class="kpi-label">Tổng đã trả</div>
@@ -22825,7 +22821,7 @@ function renderAR(){
       </div>
       <div class="kpi">
         <div class="kpi-label">Phải trả còn lại</div>
-        <div class="kpi-value" style="color:var(--bad)">${fmt(totPayRemAll)}</div>
+        <div class="kpi-value" style="color:var(--bad)">${fmt(payRemNet)}</div>
         <div class="kpi-sub">1. Năm trước: ${fmt(remPrev)}<br>2. Năm nay (${_curYear}): ${fmt(remThis)}<br>3. Tuổi nợ: ≤30d ${fmt(_agBuckets[1])} · 31–60 ${fmt(_agBuckets[2])} · 61–90 ${fmt(_agBuckets[3])} · <span style="color:var(--bad)">&gt;90 ${fmt(_agBuckets[4])}</span></div>
       </div>`;
   }
@@ -40441,7 +40437,7 @@ function renderAll(opts){
   maybe('plan', _dockAssetFill);
   maybe('projects', renderProjects);
   if(canAccessTab('vessels') && (renderAllTabs || activePageId==='vessels')){
-    renderVessels(); renderEvents(); renderDailyReports(); renderOnhire();
+    renderVessels(); renderEvents(); renderDailyReports();
   }
   if((canAccessTab('receivables')||canAccessTab('payables')) && (renderAllTabs || activePageId==='receivables' || activePageId==='payables')){
     renderAR();
