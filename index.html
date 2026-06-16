@@ -2954,7 +2954,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.03.69';            // bumped on each release
+const APP_VERSION='3.03.72';            // bumped on each release
 
 /* v2.62.0: Token xác thực backend — PHẢI khớp API_TOKEN trong Apps Script (Code.gs).
    Mọi request tới Apps Script tự động được gắn token qua lớp bọc fetch bên dưới.
@@ -10432,6 +10432,10 @@ function isExpenseCapEx(typeCode){
 function apCountsInPL(r){
   if(!r) return false;
   if(isExpenseCapEx(r.expenseType)) return false;  // CapEx/Dock → cộng nguyên giá TSCĐ, không vào P&L (kể cả YTD)
+  // v3.03.71: AP loại "Ứng quỹ tiền mặt" (ADVANCE) chỉ là CHUYỂN TIỀN (ngân hàng → quỹ tiền mặt),
+  //   KHÔNG phải chi phí. Chi phí thực được ghi khi HOÀN ỨNG (phiếu _cashClear). Loại để tránh
+  //   tính chi phí 2 lần (1 lần lúc ứng + 1 lần lúc hoàn ứng).
+  if(isExpenseAdvance(r.expenseType)) return false;
   // v3.02.78: NGUYÊN TẮC — mảng QUẢN LÝ HỘ (VESSEL_MGMT) KHÔNG phát sinh chi phí của công ty.
   //   Toàn bộ là chi hộ chủ tàu (đã phản ánh ở Tab 06, trừ vào số dư chủ tàu). Chặn cứng theo
   //   segment, kể cả khi phiếu KHÔNG gắn tàu QL hộ (vesselId trống) — tránh lỗ ảo ở báo cáo theo mảng.
@@ -20825,12 +20829,26 @@ function _renderCashClearModal(){
   let ets=(typeof expenseTypesForUser==='function'?expenseTypesForUser():[]).filter(t=>!t.isBODOnly);
   if(_isOfficeFund) ets=ets.filter(t=>OFFICE_EXP_GROUPS.includes(t.group));
   const etOpts=t=>'<option value="">— Chọn loại chi phí —</option>'+ets.map(e=>`<option value="${e.code}" ${e.code===t.expenseType?'selected':''}>${esc(e.label)}</option>`).join('');
-  const vessels=(S.vessels||[]); const projects=(S.projects||[]);
+  // v3.03.70: lọc Tàu/Dự án theo phân quyền — NV gán tàu (crew) chỉ thấy tàu mình + dự án thuộc tàu đó.
+  const _crewVesselLimited = (()=>{
+    if(CURRENT_ROLE==='admin') return false;
+    if(CURRENT_USER && (CURRENT_USER.canManageUsers||CURRENT_USER.canCheckAcc)) return false;
+    if(typeof canApproveL1==='function' && canApproveL1()) return false;
+    if(typeof canApproveL2==='function' && canApproveL2()) return false;
+    const a=CURRENT_USER&&CURRENT_USER.assignedVesselIds;
+    return Array.isArray(a)&&a.length>0;
+  })();
+  const _myVesselSet = _crewVesselLimited ? new Set(CURRENT_USER.assignedVesselIds) : null;
+  let vessels=(S.vessels||[]); let projects=(S.projects||[]);
+  if(_crewVesselLimited){
+    vessels = vessels.filter(v=>_myVesselSet.has(v.id));
+    projects = projects.filter(p=>p.vesselId && _myVesselSet.has(p.vesselId));  // dự án thuộc tàu mình
+  }
   function objOpts(t){
     let o='<option value="">— Không gắn —</option>';
     if(_isOfficeFund){
       // chỉ dự án O&M (không hiện danh sách tàu)
-      const omProjs=projects.filter(p=>p.isOM);
+      const omProjs=(S.projects||[]).filter(p=>p.isOM);
       o+='<optgroup label="Dự án O&M">'+omProjs.map(p=>`<option value="P:${p.id}" ${t.objType==='P'&&t.objId===p.id?'selected':''}>⚙ ${esc((p.code?p.code+' ':'')+(p.name||''))}</option>`).join('')+'</optgroup>';
       return o;
     }
@@ -20959,6 +20977,7 @@ function saveCashClear(){
   }
 
   // ===== CHẾ ĐỘ GHI CHI PHÍ =====
+  const _isOfficeFund = (f.fundType==='OFFICE');   // v3.03.72: quỹ Văn phòng O&M
   const valid=st.lines.filter(l=>l.expenseType && (+l.amount||0)>0);
   if(!valid.length){ toast('Cần ít nhất 1 khoản có loại CP + số tiền','bad'); return; }
   let total=0; let n=0;
@@ -20970,7 +20989,9 @@ function saveCashClear(){
     const v = l.objType==='V' ? (S.vessels||[]).find(x=>x.id===l.objId) : null;
     const p = l.objType==='P' ? (S.projects||[]).find(x=>x.id===l.objId) : null;
     let seg = (v&&v.segment) || (p&&p.segment) || '';
+    if(!seg && p && p.isOM) seg='OM';                       // dự án O&M → mảng O&M
     if(!seg && (v||p)) seg='VESSEL_SERVICE';
+    if(!seg && _isOfficeFund) seg='OM';                     // v3.03.72: quỹ Văn phòng O&M, không gắn dự án → mảng O&M (không rơi vào QL chung)
     const _byCrew = !!st._byCrew;
     const rec={
       id:uid(), partner:'[Hoàn ứng quỹ '+(f.name||'')+']',
