@@ -2904,7 +2904,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.03.42';            // bumped on each release
+const APP_VERSION='3.03.43';            // bumped on each release
 
 /* v2.62.0: Token xác thực backend — PHẢI khớp API_TOKEN trong Apps Script (Code.gs).
    Mọi request tới Apps Script tự động được gắn token qua lớp bọc fetch bên dưới.
@@ -5296,7 +5296,7 @@ const SHARED_FIELDS=['fxRate','fxRateAt','displayCcy','companyInfo','meta','pres
 /* All possible data fields (used by admin or for save-merge) */
 const ALL_DATA_FIELDS=[
   'plans','dockPlans','projects','vessels','onhires','events','dailyReports',
-  'receivables','payables','bankAccounts','bankSnapshots','loans','creditFacilities','bankBalance','bankBalanceCcy',
+  'receivables','payables','bankAccounts','bankSnapshots','loans','creditFacilities','loanAutoCollect','bankBalance','bankBalanceCcy',
   'opVessels','opTransactions','opMgmtFees','advances','invGroups','invMovements','warehouses',
   'vesselExpenseCats','omProjectExpenseCats','hrExpenseCats','qnExpenseCats',
   'fixedAssets','tools',
@@ -10895,6 +10895,7 @@ function defaultState(){
     loans:[],            // v1.31: [{id, bankName, loanType, contractNo, principal, ccy, interestRate, startDate, endDate, termMonths, repayMethod, paymentSchedule:[], status, note, createdBy, createdAt}]
     // v2.85.0: Hạn mức tín dụng theo NH/năm. 1 facility = 1 hạn mức tổng. Các loans liên kết qua loan.facilityId.
     creditFacilities:[], // [{id, bankName, year, limit, ccy, contractNo, startDate, expiryDate, collateral, note, isActive, createdAt, createdBy}]
+    loanAutoCollect:{},  // v3.03.42: cờ auto tự thu theo từng NH (lender) — { '<lender>': true }
     // v2.20.0: Quỹ tiền mặt (nhiều quỹ) + sổ quỹ
     cashFunds:[],        // [{id, name, fundType:'OFFICE'|'VESSEL'|'OTHER', ccy, balance, isActive, note, createdBy, createdAt}]
     cashTxns:[],         // [{id, fundId, date, direction:'IN'|'OUT', amount, ccy, category, desc, sourceType:'ar'|'ap'|'manual'|'transfer', sourceId, recordedBy, recordedAt}]
@@ -20851,6 +20852,15 @@ function renderBanking(){
   if(!document.getElementById('page-banking')) return;
   const accounts = S.bankAccounts||[];
   const loans = S.loans||[];
+  // v3.03.42: AUTO TỰ THU — tự ghi kỳ tới hạn cho các NH đang bật auto (idempotent, chặn re-entry).
+  if(!window._loanAutoRunning){
+    try{
+      window._loanAutoRunning=true;
+      const _n=_loanAutoRunDue();
+      if(_n>0){ try{ toast(`🔄 Auto tự thu: đã tự ghi ${_n} kỳ vay tới hạn (giảm gốc + chi phí lãi)`,'good'); }catch(e){} }
+    }catch(e){ console.warn('[loan-auto-run]',e); }
+    finally{ window._loanAutoRunning=false; }
+  }
 
   // KPI
   const totalByCcy = {};
@@ -21136,13 +21146,23 @@ function renderBanking(){
         const lenderRemTxt = Object.entries(lenderRemByCcy).filter(([_,v])=>v>0)
           .map(([c,v])=>`${v.toLocaleString('vi-VN')} ${c}`).join(' + ') || '0';
         const icon = _lenderIcon(lender);
+        // v3.03.42: cờ auto tự thu của NH này + nút bật/tắt trên header
+        const _autoOn=_loanAutoOn(lender);
+        const _lenderB64=(()=>{ try{ return btoa(unescape(encodeURIComponent(lender))); }catch(e){ return lender; } })();
         // v2.99.14: Dùng <details> native — đóng mặc định, click thanh để mở
         html += `<details class="loan-lender-group" style="margin:14px 0 0;border:1px solid var(--rule);border-radius:3px;background:var(--paper)">
           <summary style="font-family:var(--font-display);font-size:14px;font-weight:700;padding:10px 14px;background:rgba(28,58,92,.06);border-left:4px solid var(--ink);color:var(--ink);cursor:pointer;list-style:none;display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;user-select:none">
             <span style="display:flex;align-items:center;gap:8px"><span class="loan-lender-chevron" style="font-size:10px;width:12px;display:inline-block;color:var(--muted)">▶</span> ${icon} ${esc(lender)} <span style="font-weight:400;color:var(--muted);font-size:11px">(${lenderLoans.length} khoản)</span></span>
-            <span style="font-size:12px;color:var(--warn);font-weight:600">Còn nợ: ${lenderRemTxt}</span>
+            <span style="display:flex;align-items:center;gap:14px;flex-wrap:wrap">
+              <label onclick="event.stopPropagation()" title="Bật: app tự ghi giảm gốc + chi phí lãi NGAY khi kỳ tới ngày đáo hạn. Tắt: KT tự tích xác nhận." style="display:inline-flex;align-items:center;gap:5px;font-size:11px;font-weight:600;cursor:pointer;color:${_autoOn?'#2d6a6a':'var(--muted)'}">
+                <input type="checkbox" ${_autoOn?'checked':''} onclick="event.stopPropagation();toggleLoanAuto('${_lenderB64}')" style="cursor:pointer"> 🔄 Auto tự thu
+              </label>
+              <span style="font-size:12px;color:var(--warn);font-weight:600">Còn nợ: ${lenderRemTxt}</span>
+            </span>
           </summary>
           <div style="padding:6px 8px 10px">`;
+        // v3.03.42: DÒNG NHẮC KT — kỳ kế tiếp gần nhất của mỗi khoản (ngày · gốc · lãi) + nút xác nhận/sửa.
+        html += _loanLenderReminders(lenderLoans, lender, _autoOn);
         // Nhóm con: theo loại hạn
         const byType={short:[], medium:[], long:[], unscheduled:[]};
         lenderLoans.forEach(l=>{
@@ -22609,6 +22629,138 @@ function loanDeletePrepay(loanId, ppId){
   setTimeout(()=>viewLoanSchedule(loanId),100);
   renderBanking();
 }
+/* ============================================================
+   v3.03.42: TÍN DỤNG — AUTO TỰ THU theo từng NGÂN HÀNG (lender).
+   - Cờ bật/tắt lưu ở S.loanAutoCollect = { '<lender>': true }.
+   - Khi bật: app tự ghi NGAY các kỳ đã tới ngày đáo hạn (dueDate <= hôm nay) chưa trả
+     → gọi _loanMarkPaid (giảm gốc + auto-tạo AP chi phí lãi). Idempotent.
+   - NV vẫn có thể tích xác nhận tay / sửa số / bỏ qua (auto sẽ ghi khi tới hạn).
+   ============================================================ */
+/* v3.03.42: Dòng nhắc KT trên header NH — kỳ KẾ TIẾP gần nhất của MỖI khoản (ngày · gốc · lãi).
+   Nút: ✓ Xác nhận (ghi ngay) · ✎ Sửa (mở lịch trả). Khi auto bật → ghi chú "tự ghi khi tới hạn". */
+function _loanLenderReminders(lenderLoans, lender, autoOn){
+  const today=todayISO();
+  const rows=[];
+  (lenderLoans||[]).forEach(l=>{
+    if(l.status==='closed') return;
+    const next=(l.paymentSchedule||[]).find(p=>!p.paid);
+    if(!next) return;
+    const ccy=l.ccy||'VND';
+    const overdue = next.dueDate && next.dueDate<=today;
+    const due7 = next.dueDate && !overdue && (new Date(next.dueDate)-new Date(today))/86400000<=7;
+    const stateChip = overdue
+      ? '<span class="chip chip-bad" style="font-size:9px">TỚI HẠN</span>'
+      : (due7 ? '<span class="chip chip-warn" style="font-size:9px">SẮP TỚI</span>' : '');
+    const autoNote = autoOn
+      ? (overdue ? '<span style="color:#2d6a6a;font-size:10px">🔄 auto sẽ tự ghi</span>'
+                 : '<span style="color:var(--muted);font-size:10px">🔄 auto khi tới hạn</span>')
+      : '';
+    const can=canEditTreasury();
+    const btns = can ? `
+      <button class="btn-sec" onclick="_loanConfirmDue('${esc(l.id)}','${esc(next.period)}')" title="Xác nhận đã trả kỳ này — ghi giảm gốc + chi phí lãi" style="font-size:10px;padding:3px 8px">✓ Xác nhận</button>
+      <button class="btn-sec" onclick="viewLoanSchedule('${esc(l.id)}')" title="Sửa / điều chỉnh số gốc-lãi kỳ này" style="font-size:10px;padding:3px 8px">✎ Sửa</button>` : '';
+    rows.push(`<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:6px 10px;margin:4px 0;border-left:3px solid ${overdue?'var(--bad)':'var(--accent)'};background:${overdue?'rgba(184,71,46,.06)':'rgba(184,71,46,.03)'};font-size:11px">
+      <span style="min-width:0;flex:1">
+        ${stateChip} <b>${esc(l.contractNo||l.id.slice(-6))}</b> · Kỳ ${esc(next.period)} ·
+        📅 <b>${esc(next.dueDate||'?')}</b> ·
+        Gốc <b>${(+next.principal||0).toLocaleString('vi-VN')}</b> ·
+        Lãi <b>${(+next.interest||0).toLocaleString('vi-VN')}</b> ·
+        Tổng <b style="color:var(--accent)">${(+next.total||((+next.principal||0)+(+next.interest||0))).toLocaleString('vi-VN')} ${esc(ccy)}</b>
+        ${autoNote?' · '+autoNote:''}
+      </span>
+      <span style="display:flex;gap:5px">${btns}</span>
+    </div>`);
+  });
+  if(rows.length===0) return '';
+  return `<div style="margin:2px 4px 8px">
+    <div style="font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);font-weight:600;margin-bottom:2px">⏰ Nhắc KT — kỳ kế tiếp mỗi khoản</div>
+    ${rows.join('')}
+  </div>`;
+}
+/* Xác nhận tay 1 kỳ tới hạn từ dòng nhắc (giảm gốc + chi phí lãi). */
+function _loanConfirmDue(loanId, period){
+  if(!canEditTreasury()){ toast('Chỉ Admin / Kế toán trưởng','bad'); return; }
+  const l=(S.loans||[]).find(x=>x.id===loanId); if(!l){ toast('Không tìm thấy khoản vay','bad'); return; }
+  const p=(l.paymentSchedule||[]).find(x=>x.period===period); if(!p){ toast('Không tìm thấy kỳ','bad'); return; }
+  if(p.paid){ toast(`Kỳ ${period} đã trả rồi`,'warn'); return; }
+  const interest=+p.interest||0;
+  _loanAutoApplyPeriod(l, p);  // giảm gốc + AP lãi (idempotent)
+  p.paidNote='Xác nhận tay (nhắc KT)';   // ghi đè note auto cho rõ nguồn
+  delete p._autoCollected;
+  try{ touchRecord(l); }catch(e){}
+  saveState();
+  toast(`✓ Đã ghi trả kỳ ${period}${interest>0?` · 💸 AP lãi vay ${interest.toLocaleString('vi-VN')} ${l.ccy}`:''}`,'good');
+  renderBanking();
+}
+
+function _loanLenderKey(l){ return (l.lender||l.bankName||'(Chưa rõ)').trim(); }
+function _loanAutoOn(lender){
+  const m=S.loanAutoCollect||{};
+  return !!m[lender];
+}
+function toggleLoanAuto(lenderB64){
+  if(!canEditTreasury()){ toast('Chỉ Admin / Kế toán trưởng mới bật/tắt auto','bad'); return; }
+  let lender='';
+  try{ lender=decodeURIComponent(escape(atob(lenderB64))); }catch(e){ lender=lenderB64; }
+  S.loanAutoCollect=S.loanAutoCollect||{};
+  const now=!S.loanAutoCollect[lender];
+  S.loanAutoCollect[lender]=now;
+  try{ logAuditEvent('loan_auto_toggle',{lender, on:now, actor:actorName()}); }catch(e){}
+  saveState();
+  if(now){
+    const n=_loanAutoRunDue(lender);  // chạy ngay khi bật
+    toast(n>0 ? `🔄 Bật auto tự thu cho ${lender} — đã tự ghi ${n} kỳ tới hạn` : `🔄 Đã bật auto tự thu cho ${lender}`,'good');
+  } else {
+    toast(`⏸ Đã tắt auto tự thu cho ${lender}`,'warn');
+  }
+  renderBanking();
+}
+/* Chạy auto: tự ghi mọi kỳ tới hạn (dueDate <= hôm nay) chưa trả, cho các NH đang bật auto.
+   lenderFilter (tùy chọn): chỉ chạy cho 1 NH. Trả về số kỳ đã tự ghi. */
+function _loanAutoRunDue(lenderFilter){
+  if(!canEditTreasury()) return 0;          // chỉ Admin/KTT mới có quyền ghi sổ
+  const today=todayISO();
+  let count=0; const touched=[];
+  (S.loans||[]).forEach(l=>{
+    if(l.status==='closed') return;
+    const lender=_loanLenderKey(l);
+    if(lenderFilter && lender!==lenderFilter) return;
+    if(!_loanAutoOn(lender)) return;
+    (l.paymentSchedule||[]).forEach(p=>{
+      if(p.paid) return;
+      if(!p.dueDate || p.dueDate>today) return;   // chỉ kỳ ĐÃ tới hạn
+      // ghi sổ kỳ này (giảm gốc + AP lãi). _loanMarkPaid tự chặn trùng + cập nhật trạng thái.
+      try{
+        _loanAutoApplyPeriod(l, p);
+        count++; touched.push(`${lender}·${l.contractNo||l.id.slice(-6)}·K${p.period}`);
+      }catch(e){ console.warn('[loan-auto]',e); }
+    });
+  });
+  if(count>0){
+    try{ logAuditEvent('loan_auto_collect',{count, items:touched, actor:'(auto)'}); }catch(e){}
+  }
+  return count;
+}
+/* Ghi 1 kỳ theo cơ chế auto — KHÔNG mở lại modal/toast như _loanMarkPaid (tránh spam khi chạy hàng loạt).
+   Dùng đúng logic: paid=true + tạo AP chi phí lãi (idempotent), cập nhật trạng thái khoản vay. */
+function _loanAutoApplyPeriod(l, p){
+  if(p.paid) return;
+  p.paid=true;
+  p.paidDate=p.dueDate || todayISO();
+  p.paidNote='Auto tự thu (tới hạn)';
+  p._autoCollected=true;
+  const interest=+p.interest||0;
+  if(interest>0){
+    try{
+      const apId=_loanCreateInterestAP(l, p);
+      if(apId) p.linkedApId=apId;
+    }catch(e){ console.warn('[loan-auto-ap]',e); }
+  }
+  if((l.paymentSchedule||[]).every(x=>x.paid)) l.status='closed';
+  try{ touchRecord(l); }catch(e){ l.updatedAt=new Date().toISOString(); }
+  saveState();
+}
+
 function _loanMarkPaid(loanId, period){
   if(!canEditTreasury()){toast('Chỉ Admin / Kế toán trưởng','bad');return;}
   const l=(S.loans||[]).find(x=>x.id===loanId);
@@ -22652,6 +22804,8 @@ function _loanUnmarkPaid(loanId, period){
   if(!p)return;
   p.paid=false;
   p.paidDate=null;
+  delete p._autoCollected;        // v3.03.42: gỡ cờ auto khi bỏ đánh dấu
+  if(p.paidNote && /Auto tự thu|Xác nhận tay/.test(p.paidNote)) delete p.paidNote;
   // v1.34: Remove linked AP record (if any)
   let apRemoved='';
   if(p.linkedApId){
