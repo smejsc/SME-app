@@ -2954,7 +2954,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.03.66';            // bumped on each release
+const APP_VERSION='3.03.68';            // bumped on each release
 
 /* v2.62.0: Token xác thực backend — PHẢI khớp API_TOKEN trong Apps Script (Code.gs).
    Mọi request tới Apps Script tự động được gắn token qua lớp bọc fetch bên dưới.
@@ -7487,17 +7487,39 @@ Trân trọng.`;
       <textarea id="invite-zalo" readonly style="width:100%;height:110px;font-size:11px;padding:8px;border:1px solid var(--rule);background:var(--paper-2);font-family:var(--font-body);resize:vertical">${esc(zaloMsg)}</textarea>
     </div>
   `;
-  // v3.03.60/62: username NV mới = email công ty → người nhận mailto; nội dung = email đầy đủ (đăng nhập + quy định).
+  // v3.03.60/62/67: người nhận = email NV; nội dung = email đầy đủ (đăng nhập + quy định).
   const _toEmail = (loginId && loginId.indexOf('@')!==-1) ? loginId : ((_u && _u.email) ? _u.email : '');
   const _mailSubject = 'Tài khoản & quy định nhập liệu — Seahorse Manager';
-  const _buildMailto = `(function(){var b=document.getElementById('invite-email');var body=b?b.value:${JSON.stringify(emailBody)};return 'mailto:'+encodeURIComponent(${JSON.stringify(_toEmail)})+'?subject='+encodeURIComponent(${JSON.stringify(_mailSubject)})+'&body='+encodeURIComponent(body);})()`;
+  window._inviteMailInfo = { to:_toEmail, subject:_mailSubject, fallbackBody:emailBody };
   const foot=`
     <button class="btn-sec" onclick="closeModal();openSettings()">Đóng</button>
     <button class="btn-sec" onclick="closeModal();openCfgSyncDialog()" title="Đẩy wrap NV lên cloud để NV đăng nhập được ở máy khác">☁ Đẩy lên cloud</button>
-    ${_toEmail?`<button class="btn-sec" style="border-color:#2a5a8c;color:#2a5a8c;font-weight:600" onclick="window.open(${_buildMailto.replace(/"/g,'&quot;')},'_blank')" title="Mở ứng dụng email gửi ${esc(_toEmail)} với nội dung soạn sẵn">📧 Mở email soạn sẵn</button>`:''}
+    ${_toEmail?`<button class="btn-sec" style="border-color:#2a5a8c;color:#2a5a8c;font-weight:600" onclick="_openInviteEmail()" title="Mở ứng dụng email gửi ${esc(_toEmail)} với nội dung soạn sẵn">📧 Mở email soạn sẵn</button>`:''}
     <button class="btn-primary" onclick="navigator.clipboard.writeText(document.getElementById('invite-zalo').value);toast('✓ Đã copy tin nhắn — dán vào Zalo','good')">📋 Copy Zalo</button>
   `;
   openModal('📨 Mời nhân viên '+esc(username), body, foot);
+}
+
+/* v3.03.67: Mở app email với nội dung soạn sẵn — dùng location.href (không bị chặn như window.open).
+   Đọc nội dung từ ô soạn (đã sửa được). Có nút copy dự phòng nếu trình duyệt không có ứng dụng mail. */
+function _openInviteEmail(){
+  const info = window._inviteMailInfo || {};
+  const ta = document.getElementById('invite-email');
+  const body = (ta && ta.value) ? ta.value : (info.fallbackBody||'');
+  const to = info.to || '';
+  const subject = info.subject || 'Tài khoản phần mềm Seahorse Manager';
+  const link = 'mailto:'+encodeURIComponent(to)
+    +'?subject='+encodeURIComponent(subject)
+    +'&body='+encodeURIComponent(body);
+  if(link.length > 1900){
+    // mailto quá dài → một số ứng dụng cắt nội dung. Vẫn thử mở, đồng thời copy sẵn nội dung.
+    try{ navigator.clipboard.writeText(body); toast('Nội dung dài — đã COPY sẵn email. Nếu app mail mở thiếu nội dung, dán (Ctrl+V) vào.','good'); }catch(e){}
+  }
+  try{
+    window.location.href = link;   // cách chuẩn mở app email mặc định
+  }catch(e){
+    try{ navigator.clipboard.writeText(to+'\n\n'+subject+'\n\n'+body); toast('Không mở được app email — đã COPY toàn bộ, dán vào email thủ công','bad'); }catch(_){ toast('Không mở được app email','bad'); }
+  }
 }
 
 /* Send email invite via mailto:
@@ -20789,11 +20811,21 @@ function _renderCashClearModal(){
   const f=(S.cashFunds||[]).find(x=>x.id===st.fundId); if(!f) return;
   const ccy=f.ccy||'VND';
   const bal=cashFundBalance(f.id);  // v3.03.43: số dư từ sổ quỹ
-  const ets=(typeof expenseTypesForUser==='function'?expenseTypesForUser():[]).filter(t=>!t.isBODOnly);
+  // v3.03.68: Quỹ Văn phòng (O&M) → chỉ chi phí O&M + Quản lý chung; Tàu/Dự án chỉ hiện dự án O&M.
+  const _isOfficeFund = (f.fundType==='OFFICE');
+  const OFFICE_EXP_GROUPS=['OM','OVERHEAD','MGMT','OTHER','HR','TRAVEL','FINANCE'];
+  let ets=(typeof expenseTypesForUser==='function'?expenseTypesForUser():[]).filter(t=>!t.isBODOnly);
+  if(_isOfficeFund) ets=ets.filter(t=>OFFICE_EXP_GROUPS.includes(t.group));
   const etOpts=t=>'<option value="">— Chọn loại chi phí —</option>'+ets.map(e=>`<option value="${e.code}" ${e.code===t.expenseType?'selected':''}>${esc(e.label)}</option>`).join('');
   const vessels=(S.vessels||[]); const projects=(S.projects||[]);
   function objOpts(t){
     let o='<option value="">— Không gắn —</option>';
+    if(_isOfficeFund){
+      // chỉ dự án O&M (không hiện danh sách tàu)
+      const omProjs=projects.filter(p=>p.isOM);
+      o+='<optgroup label="Dự án O&M">'+omProjs.map(p=>`<option value="P:${p.id}" ${t.objType==='P'&&t.objId===p.id?'selected':''}>⚙ ${esc((p.code?p.code+' ':'')+(p.name||''))}</option>`).join('')+'</optgroup>';
+      return o;
+    }
     o+='<optgroup label="Tàu">'+vessels.map(v=>`<option value="V:${v.id}" ${t.objType==='V'&&t.objId===v.id?'selected':''}>⛵ ${esc(v.name)}</option>`).join('')+'</optgroup>';
     o+='<optgroup label="Dự án">'+projects.map(p=>`<option value="P:${p.id}" ${t.objType==='P'&&t.objId===p.id?'selected':''}>⚙ ${esc((p.code?p.code+' ':'')+(p.name||''))}</option>`).join('')+'</optgroup>';
     return o;
