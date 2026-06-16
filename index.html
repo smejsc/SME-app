@@ -2904,7 +2904,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.03.43';            // bumped on each release
+const APP_VERSION='3.03.45';            // bumped on each release
 
 /* v2.62.0: Token xác thực backend — PHẢI khớp API_TOKEN trong Apps Script (Code.gs).
    Mọi request tới Apps Script tự động được gắn token qua lớp bọc fetch bên dưới.
@@ -20281,9 +20281,19 @@ const CASH_FUND_TYPES={
   OTHER: {label:'Quỹ khác',      icon:'💰'}
 };
 
+/* v3.03.43: Số dư quỹ = TÍNH TỪ SỔ QUỸ (cashTxns), không dựa vào f.balance lưu sẵn.
+   Lý do: phiếu Ứng quỹ (AP) / Hoàn ứng tạo dòng sổ quỹ nhưng có lúc không cập nhật f.balance
+   → số dư hiện 0 dù sổ có giao dịch. Tính từ ledger là nguồn sự thật duy nhất, tự khớp mọi nguồn. */
+function cashLedgerBalance(fundId){
+  return (S.cashTxns||[]).filter(t=>t.fundId===fundId)
+    .reduce((s,t)=>s + (t.direction==='IN' ? (+t.amount||0) : -(+t.amount||0)), 0);
+}
 function cashFundBalance(fundId){
   const f=(S.cashFunds||[]).find(x=>x.id===fundId);
-  return f ? (+f.balance||0) : 0;
+  if(!f) return 0;
+  // Nếu có giao dịch sổ quỹ → lấy theo ledger. Không có → fallback f.balance (số dư đầu nhập tay).
+  const hasTxns=(S.cashTxns||[]).some(t=>t.fundId===fundId);
+  return hasTxns ? cashLedgerBalance(fundId) : (+f.balance||0);
 }
 
 function addCashFund(){
@@ -20401,7 +20411,7 @@ function renderCashFunds(){
   // ---- KPI tổng quan ----
   const active=funds.filter(f=>f.isActive!==false);
   const byCcy={};
-  active.forEach(f=>{ const c=f.ccy||'VND'; byCcy[c]=(byCcy[c]||0)+(+f.balance||0); });
+  active.forEach(f=>{ const c=f.ccy||'VND'; byCcy[c]=(byCcy[c]||0)+cashFundBalance(f.id); });  // v3.03.43: số dư từ sổ quỹ
   const totalStr=Object.entries(byCcy).map(([c,v])=>fmtCcy(v,c)).join(' · ')||'—';
   const cntType={};
   funds.forEach(f=>{ const t=(CASH_FUND_TYPES[f.fundType]||CASH_FUND_TYPES.OTHER).label; cntType[t]=(cntType[t]||0)+1; });
@@ -20426,7 +20436,7 @@ function renderCashFunds(){
 
   funds.forEach(f=>{
     const t=CASH_FUND_TYPES[f.fundType]||CASH_FUND_TYPES.OTHER;
-    const bal=+f.balance||0;
+    const bal=cashFundBalance(f.id);  // v3.03.43: số dư từ sổ quỹ (cashTxns)
     const on=f.isActive!==false;
     html+=`
       <div style="background:var(--paper);border:1px solid var(--rule);border-radius:10px;padding:14px 16px;${on?'':'opacity:.62'}">
@@ -20488,7 +20498,7 @@ function viewCashLedger(fundId){
       </tr>`;
     });
   }
-  const bal=+f.balance||0;
+  const bal=running;  // v3.03.43: số dư = tổng lũy kế sổ quỹ (nguồn sự thật), không dùng f.balance lưu sẵn
   const card=(label,val,color)=>`<div style="flex:1;background:var(--paper-2,rgba(0,0,0,.02));border:1px solid var(--rule);border-radius:8px;padding:10px 14px">
     <div style="font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);font-weight:600;margin-bottom:3px">${label}</div>
     <div style="font-size:16px;font-weight:700;font-family:var(--font-mono);color:${color}">${val}</div></div>`;
@@ -20616,7 +20626,7 @@ function _renderCashClearModal(){
   const st=_cashClearState; if(!st) return;
   const f=(S.cashFunds||[]).find(x=>x.id===st.fundId); if(!f) return;
   const ccy=f.ccy||'VND';
-  const bal=+f.balance||0;
+  const bal=cashFundBalance(f.id);  // v3.03.43: số dư từ sổ quỹ
   const ets=(typeof expenseTypesForUser==='function'?expenseTypesForUser():[]).filter(t=>!t.isBODOnly);
   const etOpts=t=>'<option value="">— Chọn loại chi phí —</option>'+ets.map(e=>`<option value="${e.code}" ${e.code===t.expenseType?'selected':''}>${esc(e.label)}</option>`).join('');
   const vessels=(S.vessels||[]); const projects=(S.projects||[]);
@@ -20717,7 +20727,7 @@ function _ccRefundInput(v){
   const st=_cashClearState; if(!st) return;
   st.refundAmount=+v||0;
   const f=(S.cashFunds||[]).find(x=>x.id===st.fundId); if(!f) return;
-  const ccy=f.ccy||'VND', bal=+f.balance||0, amt=+st.refundAmount||0;
+  const ccy=f.ccy||'VND', bal=cashFundBalance(f.id), amt=+st.refundAmount||0;  // v3.03.43
   const warn=document.getElementById('cc-refund-warn');
   if(warn) warn.innerHTML = amt>bal
     ? `<div style="color:#b8472e;font-size:11px;margin-top:8px">⚠ Số tiền hoàn (${fmtCcy(amt,ccy)}) lớn hơn số dư quỹ (${fmtCcy(bal,ccy)})</div>`
@@ -25048,7 +25058,8 @@ function openMultiRowModal(kind){
     ccType: '',
     ccId: '',
     pitTotal: 0,
-    bhxhTotal: 0
+    bhxhTotal: 0,
+    khoanDoi: 0          // v3.03.44: lương đòi chủ tàu (khoán) — chỉ dùng khi cost center là Tàu QL hộ
   };
   _renderMultiRowModal();
 }
@@ -25252,6 +25263,23 @@ function _renderPayrollModal(){
       </div>
     </div>
 
+    <!-- v3.03.44: LƯƠNG ĐÒI CHỦ TÀU (khoán) — chỉ hiện khi cost center là Tàu QL hộ.
+         Vế thực chi = tổng lương phiếu (AP VESSEL_MGMT). Vế đòi = ô này → app tự sinh dòng khoán tab 06. -->
+    <div id="pr-khoan-box" style="${_mrIsMgmtCC()?'':'display:none'};margin-top:10px;padding:10px 14px;background:rgba(74,107,44,.07);border-left:3px solid #4a6b2c;border-radius:3px">
+      <div style="font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:#3a5520;font-weight:700;margin-bottom:6px">🚢 Khoán lương — tàu quản lý hộ</div>
+      <div class="form-grid" style="grid-template-columns:1fr 1fr;gap:14px;align-items:end">
+        <div class="field">
+          <label style="font-size:10px">💵 Lương ĐÒI chủ tàu (khoán) (${ccy})</label>
+          <input type="text" inputmode="decimal" class="num" id="pr-khoan-doi" value="${_mrFmtNum(+s.khoanDoi||0)}" oninput="_mrPayrollKhoan(this.value)" onfocus="_mrFmtFocus(this)" onblur="_mrFmtBlur(this)" style="text-align:right;font-family:var(--font-mono)" placeholder="Số khoán đòi chủ tàu">
+        </div>
+        <div class="field" style="padding-bottom:6px">
+          <div style="font-size:11px;display:flex;justify-content:space-between"><span style="color:var(--muted)">Thực chi (tổng lương phiếu)</span><b style="font-family:var(--font-mono)"><span id="pr-khoan-chi">${_mrFmtNum(totalSalary)}</span> ${ccy}</b></div>
+          <div style="font-size:11px;display:flex;justify-content:space-between;margin-top:3px"><span style="color:var(--muted)">Chênh (→ doanh thu QL hộ)</span><b id="pr-khoan-chenh" style="font-family:var(--font-mono);color:${((+s.khoanDoi||0)-totalSalary)>=0?'#2d6a6a':'#b8472e'}">${_mrFmtNum((+s.khoanDoi||0)-totalSalary)} ${ccy}</b></div>
+        </div>
+      </div>
+      <div style="font-size:10px;color:#3a5520;font-style:italic;margin-top:4px">→ Khi lưu, app tự sinh dòng <b>Đòi chủ tàu (khoán) · Lương thuyền viên</b> ở tab 06 (cùng tàu/kỳ). Chênh = Đòi − Thực chi vào doanh thu mảng QL hộ. Để 0 nếu chưa chốt số khoán.</div>
+    </div>
+
     <div style="margin-top:10px;padding:10px 12px;background:var(--paper-2);border:1px solid var(--rule);font-size:12px">
       <div style="display:flex;justify-content:space-between"><span>Tổng lương (chi phí → P&amp;L)</span><b style="font-family:var(--font-mono)"><span id="pr-sum-salary">${_mrFmtNum(totalSalary)}</span> ${ccy}</b></div>
       <div style="display:flex;justify-content:space-between;color:var(--muted)"><span>+ BHXH (→ NSNN mục B)</span><span style="font-family:var(--font-mono)"><span id="pr-sum-bhxh">${_mrFmtNum(bhxh)}</span> ${ccy}</span></div>
@@ -25282,6 +25310,20 @@ function _mrPayrollCCType(v){
   _multiRowState.ccId = '';
   const sel = document.getElementById('pr-ccid');
   if(sel) sel.innerHTML = v ? costCenterEntityOpts(v, '') : '<option value="">—</option>';
+  _mrToggleKhoanBox();  // v3.03.44: hiện/ẩn ô lương đòi chủ tàu theo cost center
+}
+/* v3.03.44: cost center hiện tại có phải Tàu QL hộ (VESSEL_MGMT) không? */
+function _mrIsMgmtCC(){
+  return (_multiRowState && _multiRowState.ccType==='opVessel');
+}
+function _mrToggleKhoanBox(){
+  const box=document.getElementById('pr-khoan-box');
+  if(box) box.style.display=_mrIsMgmtCC()?'':'none';
+}
+/* Nhập số lương đòi chủ tàu (khoán) → cập nhật state + chênh tại chỗ. */
+function _mrPayrollKhoan(str){
+  _multiRowState.khoanDoi = _mrParseNum(str);
+  _mrPayrollUpdateSummary();
 }
 function _mrPayrollCcy(v){
   _multiRowState.ccy = v;
@@ -25309,6 +25351,12 @@ function _mrPayrollUpdateSummary(){
   setT('pr-sum-salary', totalSalary);
   setT('pr-sum-bhxh', bhxh);
   setT('pr-sum-pit', pit);
+  // v3.03.44: cập nhật khối khoán lương (thực chi = tổng lương; chênh = đòi − thực chi)
+  setT('pr-khoan-chi', totalSalary);
+  const khoanDoi=+s.khoanDoi||0;
+  const chenh=khoanDoi-totalSalary;
+  const chenhEl=document.getElementById('pr-khoan-chenh');
+  if(chenhEl){ chenhEl.textContent=_mrFmtNum(chenh)+' '+(s.ccy||'VND'); chenhEl.style.color=chenh>=0?'#2d6a6a':'#b8472e'; }
   // footer "n người"
   const tfRow = document.querySelector('.mr-table tfoot td');
   if(tfRow) tfRow.textContent = `TỔNG LƯƠNG (${s.lines.length} người)`;
@@ -26114,6 +26162,10 @@ async function _mrSave(targetStatus){
         bhxhAmount: _bhxhAmount,
         _payroll: !!s.payroll,
         payrollPeriod: s.payroll ? s.period : '',
+        // v3.03.44: KHOÁN LƯƠNG — phiếu lương gắn Tàu QL hộ là vế THỰC CHI của khoán.
+        //   Gắn khoanCat/khoanPeriod để bảng đối chiếu tab 06 nhận diện vế 'chi' (Lương thuyền viên).
+        khoanCat: (s.payroll && l.costCenterType==='opVessel') ? 'Lương thuyền viên' : '',
+        khoanPeriod: (s.payroll && l.costCenterType==='opVessel') ? (s.period||'') : '',
         ccy: s.ccy,
         segment: l._effSegment || s.segment,   // v3.02.91: mảng theo TỪNG DÒNG (đã coerce opVessel→VESSEL_MGMT)
         // v3.03.13: phân bổ hoàn ứng greedy — CHỈ các dòng loại '↩ Hoàn ứng tạm ứng' (theo thứ tự)
@@ -26151,6 +26203,28 @@ async function _mrSave(targetStatus){
       S[list].push(record);
       created++;
     });
+
+    // v3.03.44: PHIẾU LƯƠNG gắn Tàu QL hộ + có nhập "Lương đòi chủ tàu (khoán)" > 0
+    //   → tự sinh 1 dòng opTransaction khoanRole='doi' (Lương thuyền viên) khớp cặp tab 06.
+    //   Vế THỰC CHI = phiếu lương AP (khoanCat đã gắn) → khoanReconcile tự ghép. Không double-count.
+    try{
+      const _khoanDoi=+s.khoanDoi||0;
+      if(s.payroll && s.ccType==='opVessel' && s.ccId && _khoanDoi>0){
+        S.opTransactions=S.opTransactions||[];
+        S.opTransactions.push({
+          id:'optx-'+Date.now().toString(36)+Math.random().toString(36).slice(2,6),
+          vesselId:s.ccId, type:'OUT',
+          date:s.issueDate, amount:_khoanDoi, ccy:s.ccy,
+          fxToUsd: (s.ccy!=='USD'&&s.ccy!=='VND') ? (+s.fxToUsd||0) : 0,
+          category:'Lương thuyền viên (đòi chủ tàu)',
+          desc:'Đòi chủ tàu (khoán) — Lương thuyền viên · kỳ '+(s.period||''),
+          khoanRole:'doi', khoanCat:'Lương thuyền viên', khoanPeriod:s.period||'',
+          _fromPayrollBatch:batchId,
+          createdBy:me, createdAt:nowISO
+        });
+        try{ logAuditEvent('payroll_khoan_doi',{batchId, vesselId:s.ccId, amount:_khoanDoi, ccy:s.ccy, period:s.period}); }catch(e){}
+      }
+    }catch(e){ console.warn('[payroll-khoan]',e); }
 
     saveState();
     try{
@@ -27340,16 +27414,31 @@ function _khoanKey(t){
    Trả về { pairs:[{vesselId,cat,period,doi,chi,chenh,doiCount,chiCount,...}], revenueUsd, byVessel:{vid:revenueUsd} } */
 function khoanReconcile(vid){
   const groups={};
+  const _ensure=(t)=>{
+    const k=_khoanKey(t);
+    if(!groups[k]) groups[k]={vesselId:t.vesselId, cat:(t.khoanCat||'').trim(), period:(t.khoanPeriod||'').trim(),
+                              doi:0, chi:0, doiCount:0, chiCount:0};
+    return groups[k];
+  };
   (S.opTransactions||[]).forEach(t=>{
     if(t.type!=='OUT') return;
     if(t.khoanRole!=='doi' && t.khoanRole!=='chi') return;
     if(vid && t.vesselId!==vid) return;
-    const k=_khoanKey(t);
-    if(!groups[k]) groups[k]={vesselId:t.vesselId, cat:(t.khoanCat||'').trim(), period:(t.khoanPeriod||'').trim(),
-                              doi:0, chi:0, doiCount:0, chiCount:0};
+    const g=_ensure(t);
     const usd=opTxUsd(t);  // đã quy USD (đồng chuẩn QL vận hành)
-    if(t.khoanRole==='doi'){ groups[k].doi+=usd; groups[k].doiCount++; }
-    else { groups[k].chi+=usd; groups[k].chiCount++; }
+    if(t.khoanRole==='doi'){ g.doi+=usd; g.doiCount++; }
+    else { g.chi+=usd; g.chiCount++; }
+  });
+  // v3.03.44: phiếu LƯƠNG gắn Tàu QL hộ (AP, segment VESSEL_MGMT, có khoanCat) = vế THỰC CHI của khoán.
+  //   Quy USD theo loại tiền phiếu (apArToUsd). Không double-count: AP không đồng thời là opTransaction.
+  (S.payables||[]).forEach(r=>{
+    if(r.segment!=='VESSEL_MGMT') return;
+    if(!r.khoanCat || !r.vesselId) return;
+    if(vid && r.vesselId!==vid) return;
+    const net=+r.amountNet||((+r.amountGross||+r.amount||0)-(+r.vatAmount||0))||(+r.amount||0);
+    const usd=(typeof apArToUsd==='function')?apArToUsd(net, r):net;
+    const g=_ensure({vesselId:r.vesselId, khoanCat:r.khoanCat, khoanPeriod:r.khoanPeriod});
+    g.chi+=usd; g.chiCount++;
   });
   const pairs=Object.values(groups).map(g=>{
     g.chenh = g.doi - g.chi;           // dương = lãi (đòi > thực chi); âm = lỗ
@@ -30368,7 +30457,7 @@ function _quickViewData(){
     const c=a.ccy||'USD'; bankByCcy[c]=(bankByCcy[c]||0)+bal;
   });
   visibleCashFunds().filter(f=>f.isActive!==false).forEach(f=>{
-    const c=f.ccy||'VND'; cashByCcy[c]=(cashByCcy[c]||0)+(+f.balance||0);
+    const c=f.ccy||'VND'; cashByCcy[c]=(cashByCcy[c]||0)+cashFundBalance(f.id);  // v3.03.43: từ sổ quỹ
   });
   const today=todayISO();
   const in30=new Date(); in30.setDate(in30.getDate()+30);
