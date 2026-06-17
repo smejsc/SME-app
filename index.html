@@ -2219,6 +2219,7 @@ body.readonly-mode::before{
       <div class="section-title"><span class="tag">▦</span>Danh mục Kho vật tư</div>
       <div style="display:flex;gap:8px">
         <button class="btn-sec" onclick="invAutoSeedWarehouses()" title="Tự sinh Kho tàu từ danh mục tàu + Kho VPCT">↻ Tự sinh kho mặc định</button>
+        <button class="btn-sec" onclick="invMergeDuplicateWarehouses()" title="Gộp các kho trùng mã về 1 kho, dồn dữ liệu tồn">🧹 Dọn kho trùng</button>
         <button class="btn-sec" onclick="openWarehouseModal(null)">+ Thêm kho</button>
       </div>
     </div>
@@ -2959,7 +2960,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.03.90';            // bumped on each release
+const APP_VERSION='3.03.94';            // bumped on each release
 
 /* v2.62.0: Token xác thực backend — PHẢI khớp API_TOKEN trong Apps Script (Code.gs).
    Mọi request tới Apps Script tự động được gắn token qua lớp bọc fetch bên dưới.
@@ -31664,17 +31665,58 @@ const WH_TYPES = {
   OTHER:  {label: 'Kho khác',    icon: '📦', cls: ''}
 };
 
+/* v3.03.94: Gộp các kho TRÙNG MÃ về 1 kho — dồn toàn bộ invMovements, xóa kho dư.
+   Nguyên nhân trùng: kho tự sinh ở nhiều máy/lần với vesselId khác → sync ra nhiều kho cùng code. */
+function invMergeDuplicateWarehouses(){
+  if(!S.warehouses||!S.warehouses.length){toast('Chưa có kho','bad');return;}
+  // Gom theo code chuẩn hóa
+  const byCode=new Map();
+  S.warehouses.forEach(w=>{
+    const code=String(w.code||'').trim().toUpperCase();
+    if(!code) return;
+    if(!byCode.has(code)) byCode.set(code,[]);
+    byCode.get(code).push(w);
+  });
+  let dupGroups=0, removed=0, moved=0;
+  byCode.forEach((list,code)=>{
+    if(list.length<2) return;
+    dupGroups++;
+    // Chọn kho GIỮ LẠI: ưu tiên kho có nhiều dòng tồn nhất; nếu hòa, kho KHÔNG _autoSeeded; nếu hòa nữa, tạo sớm nhất
+    const cnt=w=>(S.invMovements||[]).filter(m=>m.warehouseId===w.id).length;
+    list.sort((a,b)=>{
+      const d=cnt(b)-cnt(a); if(d) return d;
+      const as=a._autoSeeded?1:0, bs=b._autoSeeded?1:0; if(as!==bs) return as-bs;
+      return String(a.createdAt||'').localeCompare(String(b.createdAt||''));
+    });
+    const keep=list[0];
+    const dropIds=list.slice(1).map(w=>w.id);
+    // Dồn invMovements của kho dư về kho giữ lại
+    (S.invMovements||[]).forEach(m=>{
+      if(dropIds.includes(m.warehouseId)){ m.warehouseId=keep.id; moved++; }
+    });
+    // Xóa kho dư
+    S.warehouses=S.warehouses.filter(w=>!dropIds.includes(w.id));
+    removed+=dropIds.length;
+  });
+  if(!dupGroups){toast('Không có kho trùng mã ✓');return;}
+  saveState();
+  renderWarehousesTable(); renderInventory();
+  toast(`✓ Đã gộp ${dupGroups} nhóm kho trùng · xóa ${removed} kho dư · dồn ${moved} dòng tồn`);
+}
+
 /* Auto-seed: tạo Kho tàu cho các tàu chưa có kho + Kho VPCT nếu chưa có */
 function invAutoSeedWarehouses(){
   if(!S.warehouses) S.warehouses=[];
   let added=0;
   // Kho tàu cho mỗi tàu chưa có
   (S.vessels||[]).forEach(v=>{
-    const exists=S.warehouses.find(w=>w.type==='VESSEL' && w.vesselId===v.id);
+    const wantCode=`KHO-${(v.name||'TAU').replace(/[^A-Za-z0-9]/g,'').toUpperCase()}`;
+    // v3.03.94: coi là đã có nếu khớp vesselId HOẶC khớp mã kho → tránh tạo kho trùng
+    const exists=S.warehouses.find(w=>w.type==='VESSEL' && (w.vesselId===v.id || String(w.code||'').toUpperCase()===wantCode));
     if(!exists){
       S.warehouses.push({
         id:uid(),
-        code:`KHO-${(v.name||'TAU').replace(/[^A-Za-z0-9]/g,'').toUpperCase()}`,
+        code:wantCode,
         name:`Kho tàu ${v.name}`,
         type:'VESSEL',
         vesselId:v.id,
@@ -31726,12 +31768,24 @@ function renderWarehousesTable(){
     tbl.innerHTML='<tr><td class="empty">Chưa có kho vật tư — bấm "+ Thêm kho" hoặc "↻ Tự sinh kho mặc định" (sinh kho từ danh mục tàu + Kho VPCT)</td></tr>';
     return;
   }
-  let html='<thead><tr><th>Mã kho</th><th>Tên kho</th><th>Loại</th><th>Tàu/Vị trí</th><th class="c">Trạng thái</th><th class="r">Số dòng tồn</th><th></th></tr></thead><tbody>';
+  let html='<thead><tr><th>Mã kho</th><th>Tên kho</th><th>Loại</th><th>Tàu/Vị trí</th><th class="c">Trạng thái</th><th class="r">Số dòng tồn</th><th class="r">Giá trị tồn hiện tại</th><th></th></tr></thead><tbody>';
+  // v3.03.94: giá trị tồn hiện tại mỗi kho = tổng (tồn cuối) của bản ghi MỚI NHẤT theo từng vật tư trong kho
+  function whCurrentValue(whId){
+    const latest={};
+    (S.invMovements||[]).filter(m=>m.warehouseId===whId).forEach(m=>{
+      const key=String(m.itemName||'').toLowerCase();
+      if(!latest[key] || String(m.month||'')>String(latest[key].month||'')) latest[key]=m;
+    });
+    let v=0;
+    Object.values(latest).forEach(m=>{ v+=toDisplay((+m.openValue||0)+(+m.inValue||0)-(+m.outValue||0), m.ccy||'VND'); });
+    return v;
+  }
   list.forEach(w=>{
     const t=WH_TYPES[w.type]||WH_TYPES.OTHER;
     const v=w.vesselId?(S.vessels||[]).find(x=>x.id===w.vesselId):null;
     const locTxt=v?`⛵ ${esc(v.name)}`:(w.location||'—');
     const movCount=(S.invMovements||[]).filter(m=>m.warehouseId===w.id).length;
+    const curVal=whCurrentValue(w.id);
     html+=`<tr>
       <td class="mono"><b>${esc(w.code||'')}</b></td>
       <td>${esc(w.name)}${w._autoSeeded?' <span class="chip" style="font-size:9px;background:rgba(28,58,92,.08)">tự sinh</span>':''}</td>
@@ -31739,6 +31793,7 @@ function renderWarehousesTable(){
       <td>${locTxt}</td>
       <td class="c">${w.isActive===false?'<span class="chip chip-bad" style="font-size:10px">Đóng</span>':'<span class="chip chip-good" style="font-size:10px">Hoạt động</span>'}</td>
       <td class="r mono">${movCount}</td>
+      <td class="r mono" style="font-weight:600;color:var(--accent)">${curVal>0?fmt(curVal):'—'}</td>
       <td><div class="row-actions">
         <button class="icon-btn" title="Sửa" onclick="openWarehouseModal('${w.id}')">✎</button>
         <button class="icon-btn danger" title="Xóa" onclick="deleteWarehouse('${w.id}')">✕</button>
@@ -31843,6 +31898,48 @@ function deleteWarehouse(id){
   saveState();toast('Đã xóa');renderAll();
 }
 
+/* v3.03.91: Danh mục vật tư GỢI Ý — gom tên vật tư duy nhất đã từng nhập (từ invMovements)
+   để hiện datalist, giúp NV chọn lại đúng tên cũ thay vì gõ tên mới gây trùng. */
+function _invItemDatalistOptions(){
+  const map=new Map();  // normalized → {name, unit, lastMonth}
+  (S.invMovements||[]).forEach(m=>{
+    const nm=String(m.itemName||'').trim();
+    if(!nm) return;
+    const key=nm.toLowerCase();
+    const prev=map.get(key);
+    if(!prev || String(m.month||'')>String(prev.lastMonth||'')){
+      map.set(key,{name:nm, unit:m.unit||'', lastMonth:m.month||''});
+    }
+  });
+  return Array.from(map.values())
+    .sort((a,b)=>a.name.localeCompare(b.name,'vi'))
+    .slice(0,2000)
+    .map(it=>`<option value="${esc(it.name)}">${esc(it.unit?('ĐVT: '+it.unit):'')}</option>`)
+    .join('');
+}
+function _invUnitDatalistOptions(){
+  const units=new Set();
+  (S.invMovements||[]).forEach(m=>{ const u=String(m.unit||'').trim(); if(u) units.add(u); });
+  ['cái','L','kg','m','bộ','chiếc','thùng','hộp','can','lít','m³','tấn'].forEach(u=>units.add(u));
+  return Array.from(units).sort((a,b)=>a.localeCompare(b,'vi'))
+    .map(u=>`<option value="${esc(u)}"></option>`).join('');
+}
+/* Khi chọn 1 vật tư đã có → tự điền đơn vị tính của vật tư đó (nếu ô đơn vị đang trống/mặc định). */
+function _invItemPick(val){
+  const nm=String(val||'').trim().toLowerCase();
+  if(!nm) return;
+  let found=null;
+  (S.invMovements||[]).forEach(m=>{
+    if(String(m.itemName||'').trim().toLowerCase()===nm){
+      if(!found || String(m.month||'')>String(found.month||'')) found=m;
+    }
+  });
+  if(found && found.unit){
+    const uEl=document.getElementById('invm-unit');
+    if(uEl && (!uEl.value || uEl.value==='cái')) uEl.value=found.unit;
+  }
+}
+
 /* Carry over: tồn cuối kỳ tháng trước (tại cùng kho + tên vật tư) → tồn đầu tháng này */
 function invCarryOverByWarehouse(warehouseId, itemName, month){
   // Find previous month record of same warehouse + same itemName
@@ -31883,10 +31980,13 @@ function openInvMovementModal(id){
       <div class="field"><label>Tháng *</label><input type="month" id="invm-month" value="${m.month||todayISO().slice(0,7)}"></div>
 
       <div class="field" style="grid-column:1/3"><label>Tên vật tư *</label>
-        <input type="text" id="invm-item-name" value="${esc(m.itemName||'')}" placeholder="VD: Dầu nhờn SAE 40, Bình chữa cháy, Pin bộ đàm...">
+        <input type="text" id="invm-item-name" list="invm-item-suggestions" value="${esc(m.itemName||'')}" placeholder="Gõ để tìm — chọn tên đã có để không nhập trùng" oninput="_invItemPick(this.value)">
+        <datalist id="invm-item-suggestions">${_invItemDatalistOptions()}</datalist>
+        <div style="font-size:10px;color:var(--muted);margin-top:2px">Chọn từ gợi ý nếu vật tư đã có (tránh tạo trùng tên khác nhau cho cùng 1 vật tư).</div>
       </div>
       <div class="field"><label>Đơn vị tính</label>
-        <input type="text" id="invm-unit" value="${esc(m.unit||'cái')}" placeholder="cái/L/kg/m...">
+        <input type="text" id="invm-unit" list="invm-unit-suggestions" value="${esc(m.unit||'cái')}" placeholder="cái/L/kg/m...">
+        <datalist id="invm-unit-suggestions">${_invUnitDatalistOptions()}</datalist>
       </div>
 
       <div class="field"><label>Tồn đầu (SL)</label><input type="number" id="invm-open-qty" value="${+m.openQty||0}" step="any"></div>
@@ -32083,9 +32183,9 @@ function renderInventory(){
         <div class="kpi-sub">${(S.warehouses||[]).filter(w=>w.isActive!==false).length} hoạt động · ${(S.warehouses||[]).filter(w=>w.isActive===false).length} đóng</div>
       </div>
       <div class="kpi">
-        <div class="kpi-label">Tổng bản ghi sổ kho</div>
-        <div class="kpi-value">${movs.length}</div>
-        <div class="kpi-sub">Toàn bộ kỳ</div>
+        <div class="kpi-label">Kho đang có tồn</div>
+        <div class="kpi-value">${(function(){const s=new Set();Object.values(latest).forEach(m=>{const cv=(+m.openValue||0)+(+m.inValue||0)-(+m.outValue||0);if(cv>0)s.add(m.warehouseId);});return s.size;})()}</div>
+        <div class="kpi-sub">trên tổng ${(S.warehouses||[]).length} kho</div>
       </div>
       <div class="kpi">
         <div class="kpi-label">Theo loại kho</div>
@@ -32125,17 +32225,25 @@ function renderInventory(){
     const t=w?(WH_TYPES[w.type]||WH_TYPES.OTHER):WH_TYPES.OTHER;
     const whTxt=w?`${t.icon} ${esc(w.name)}`:'(kho đã xóa)';
     const closeQty=(+r.openQty||0)+(+r.inQty||0)-(+r.outQty||0);
-    const closeVal=(+r.openValue||0)+(+r.inValue||0)-(+r.outValue||0);
+    const openV=+r.openValue||0, inV=+r.inValue||0, outV=+r.outValue||0;
+    const closeVal=openV+inV-outV;
+    // v3.03.93: kho theo dõi bằng TIỀN (không có số lượng) → hiện GIÁ TRỊ ở cả Tồn đầu/Nhập/Xuất/Tồn cuối.
+    //   Nếu dòng có số lượng thì ưu tiên hiện số lượng; nếu chỉ có giá trị thì hiện giá trị.
+    const hasQty=(+r.openQty||0)||(+r.inQty||0)||(+r.outQty||0);
+    const cellOpen = hasQty ? (+r.openQty||0).toLocaleString('vi-VN') : (openV?fmt(openV,r.ccy):'—');
+    const cellIn   = hasQty ? ((+r.inQty||0)?(+r.inQty).toLocaleString('vi-VN'):'—') : (inV?fmt(inV,r.ccy):'—');
+    const cellOut  = hasQty ? ((+r.outQty||0)?(+r.outQty).toLocaleString('vi-VN'):'—') : (outV?fmt(outV,r.ccy):'—');
+    const cellClose= hasQty ? closeQty.toLocaleString('vi-VN') : (closeVal?fmt(closeVal,r.ccy):'0');
     html+=`<tr>
       <td class="mono" style="font-weight:600">${r.month||'—'}</td>
       <td><span class="chip ${t.cls}" style="font-size:10px">${whTxt}</span></td>
       <td><b>${esc(r.itemName||'')}</b>${r.note?`<br><span style="font-size:10px;color:var(--muted);font-style:italic">${esc(r.note)}</span>`:''}</td>
       <td style="font-size:11px;color:var(--muted)">${esc(r.unit||'')}</td>
-      <td class="r num mono">${(+r.openQty||0).toLocaleString('vi-VN')}</td>
-      <td class="r num mono" style="color:var(--good)">${(+r.inQty||0)?(+r.inQty).toLocaleString('vi-VN'):'—'}</td>
-      <td class="r num mono" style="color:var(--bad)">${(+r.outQty||0)?(+r.outQty).toLocaleString('vi-VN'):'—'}</td>
-      <td class="r num"><b style="color:${closeQty<0?'var(--bad)':'var(--ink)'}">${closeQty.toLocaleString('vi-VN')}</b></td>
-      <td class="r num mono" style="font-size:11px;color:var(--muted)">${closeVal>0?fmt(closeVal,r.ccy):'—'}</td>
+      <td class="r num mono">${cellOpen}</td>
+      <td class="r num mono" style="color:var(--good)">${cellIn}</td>
+      <td class="r num mono" style="color:var(--bad)">${cellOut}</td>
+      <td class="r num"><b style="color:${(hasQty?closeQty:closeVal)<0?'var(--bad)':'var(--ink)'}">${cellClose}</b></td>
+      <td class="r num mono" style="font-size:11px;color:var(--muted)">${closeVal!==0?fmt(closeVal,r.ccy):'—'}</td>
       <td><div class="row-actions">
         <button class="icon-btn" title="Sửa" onclick="openInvMovementModal('${r.id}')">✎</button>
         <button class="icon-btn danger" title="Xóa" onclick="deleteInvMovement('${r.id}')">✕</button>
@@ -37938,18 +38046,30 @@ const EXCEL_TEMPLATES={
     name:'Sổ kho theo tháng (tồn đầu / nhập / xuất)',
     target:'invMovements',
     columns:[
-      {key:'warehouseCode',label:'Mã kho (phải khớp file master) *',          required:true,  type:'warehouseLookup'},
-      {key:'itemName',     label:'Tên vật tư *',                              required:true,  type:'text'},
-      {key:'unit',         label:'Đơn vị tính (cái/L/kg/m...)',               required:false, type:'text'},
-      {key:'month',        label:'Tháng (YYYY-MM) *',                         required:true,  type:'month'},
-      {key:'openQty',      label:'Tồn đầu kỳ (số lượng)',                     required:false, type:'number'},
-      {key:'inQty',        label:'Nhập trong kỳ (SL)',                        required:false, type:'number'},
-      {key:'outQty',       label:'Xuất trong kỳ (SL)',                        required:false, type:'number'},
-      {key:'openValue',    label:'Tồn đầu kỳ (giá trị)',                      required:false, type:'number'},
-      {key:'inValue',      label:'Nhập (giá trị)',                            required:false, type:'number'},
-      {key:'outValue',     label:'Xuất (giá trị)',                            required:false, type:'number'},
-      {key:'ccy',          label:'CCY (VND/USD)',                             required:false, type:'ccy'},
-      {key:'note',         label:'Ghi chú',                                   required:false, type:'text'}
+      {key:'warehouseCode',label:'Mã kho (phải khớp file master) *',          required:true,  type:'warehouseLookup',
+        aliases:['Mã kho','Ma kho','Warehouse','Warehouse code','Kho','Mã Kho']},
+      {key:'itemName',     label:'Tên vật tư *',                              required:true,  type:'text',
+        aliases:['Tên vật tư','Vật tư','Item','Item name','Tên VT','Material']},
+      {key:'unit',         label:'Đơn vị tính (cái/L/kg/m...)',               required:false, type:'text',
+        aliases:['Đơn vị tính','Đơn vị','ĐVT','Unit','DVT']},
+      {key:'month',        label:'Tháng (YYYY-MM) *',                         required:true,  type:'month',
+        aliases:['Tháng','Month','Kỳ','Period']},
+      {key:'openQty',      label:'Tồn đầu kỳ (số lượng)',                     required:false, type:'number',
+        aliases:['Tồn đầu (SL)','Tồn đầu SL','Tồn đầu kỳ SL','Open qty']},
+      {key:'inQty',        label:'Nhập trong kỳ (SL)',                        required:false, type:'number',
+        aliases:['Nhập (SL)','Nhập SL','In qty']},
+      {key:'outQty',       label:'Xuất trong kỳ (SL)',                        required:false, type:'number',
+        aliases:['Xuất (SL)','Xuất SL','Out qty','Sử dụng (SL)']},
+      {key:'openValue',    label:'Tồn đầu kỳ (giá trị)',                      required:false, type:'number',
+        aliases:['Tồn đầu (giá trị)','Tồn đầu GT','Tồn kho đầu tháng','Open value']},
+      {key:'inValue',      label:'Nhập (giá trị)',                            required:false, type:'number',
+        aliases:['Nhập GT','Nhập trong tháng','In value','Nhập trong kỳ (giá trị)']},
+      {key:'outValue',     label:'Xuất (giá trị)',                            required:false, type:'number',
+        aliases:['Xuất GT','Sử dụng trong tháng','Sử dụng (giá trị)','Out value','Xuất trong kỳ (giá trị)']},
+      {key:'ccy',          label:'CCY (VND/USD)',                             required:false, type:'ccy',
+        aliases:['CCY','Tiền tệ','Loại tiền','Currency']},
+      {key:'note',         label:'Ghi chú',                                   required:false, type:'text',
+        aliases:['Ghi chú','Note','Notes']}
     ]
   },
   events:{
