@@ -2217,7 +2217,7 @@ body.readonly-mode::before{
   <div class="section">
     <div class="section-head">
       <div class="section-title"><span class="tag">▦</span>Danh mục Kho vật tư</div>
-      <div style="display:flex;gap:8px">
+      <div style="display:flex;gap:8px" id="wh-admin-actions">
         <button class="btn-sec" onclick="invAutoSeedWarehouses()" title="Tự sinh Kho tàu từ danh mục tàu + Kho VPCT">↻ Tự sinh kho mặc định</button>
         <button class="btn-sec" onclick="invMergeDuplicateWarehouses()" title="Gộp các kho trùng mã về 1 kho, dồn dữ liệu tồn">🧹 Dọn kho trùng</button>
         <button class="btn-sec" onclick="openWarehouseModal(null)">+ Thêm kho</button>
@@ -2367,6 +2367,7 @@ body.readonly-mode::before{
         </select>
         <button class="btn-sec" onclick="assetImport('fixedAssets')" title="Import danh sách TSCĐ từ Excel" style="font-size:12px">📥 Import Excel</button>
         <button class="btn-sec" onclick="openDockLinkTool()" title="v3.01.94: Quét phiếu Dock/SCL đã duyệt chưa gắn TSCĐ → gán & cộng nguyên giá" style="font-size:12px">🛠 Gán phiếu Dock</button>
+        <button class="btn-sec" onclick="openDockReconcileTool()" title="Đối soát: so tổng phiếu Dock đã áp với nguyên giá TSCĐ, bù phần thiếu nếu lệch" style="font-size:12px">⚖ Đối soát Dock</button>
         <button class="btn-sec" onclick="assetExportExcel('fa')" title="Xuất sổ TSCĐ ra Excel" style="font-size:12px">📊 Xuất Excel</button>
         <button class="btn-sec" onclick="assetExportPdf('fa')" title="Xuất sổ TSCĐ ra PDF" style="font-size:12px">📄 Xuất PDF</button>
       </div>
@@ -2976,7 +2977,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.03.95';            // bumped on each release
+const APP_VERSION='3.03.98';            // bumped on each release
 
 /* v2.62.0: Token xác thực backend — PHẢI khớp API_TOKEN trong Apps Script (Code.gs).
    Mọi request tới Apps Script tự động được gắn token qua lớp bọc fetch bên dưới.
@@ -10705,6 +10706,77 @@ function _dockUnlinkedAps(){
   return (S.payables||[]).filter(r=>
     r && r.status!=='rejected' && isExpenseCapEx(r.expenseType) && !r._dockApplied
   );
+}
+/* v3.03.98: Đối soát Dock → TSCĐ. So TỔNG _dockAmount các phiếu Dock đã áp (cờ _dockApplied)
+   với TỔNG lịch sử DOCK thực ghi trong từng TSCĐ. Nếu lệch (phiếu nói đã cộng nhưng nguyên giá
+   thiếu — thường do mất đồng bộ sync/import) → BÙ đúng phần thiếu vào originalCost + bookValue
+   + ghi 1 dòng lịch sử đối soát. Không cộng trùng (chỉ bù chênh lệch). */
+function _dockReconcileScan(){
+  const out=[];
+  (S.fixedAssets||[]).forEach(fa=>{
+    const applied=(S.payables||[]).filter(p=>p && p._dockApplied && p.dockAssetId===fa.id);
+    if(!applied.length) return;
+    const sumApplied=applied.reduce((s,p)=>s+(+p._dockAmount||0),0);
+    const histDock=(fa.history||[]).filter(h=>h.type==='DOCK'||h.type==='DOCK_RECON').reduce((s,h)=>s+(+h.amount||0),0);
+    const diff=Math.round((sumApplied-histDock)*100)/100;
+    if(Math.abs(diff)>=1){
+      out.push({fa, sumApplied, histDock, diff, cnt:applied.length});
+    }
+  });
+  return out;
+}
+function openDockReconcileTool(){
+  if(!isAdmin() && !canApproveL2() && !canEditCatalog()){
+    toast('Cần quyền Admin / KTT / duyệt L2','bad');return;
+  }
+  const list=_dockReconcileScan();
+  if(!list.length){
+    openModal('⚖ Đối soát Dock → TSCĐ', '<div class="help-callout info" style="margin:0">✓ Tất cả TSCĐ đã khớp: tổng phiếu Dock đã áp = nguyên giá ghi nhận. Không có chênh lệch.</div>', '<button class="btn-sec" onclick="closeModal()">Đóng</button>');
+    return;
+  }
+  let rows=list.map(it=>`<tr>
+    <td><b>${esc(it.fa.code||'')}</b> · ${esc(it.fa.name||'')}</td>
+    <td class="r mono">${fmt(it.sumApplied)}</td>
+    <td class="r mono">${fmt(it.histDock)}</td>
+    <td class="r mono" style="color:${it.diff>0?'#b8472e':'#1c7c4a'};font-weight:700">${it.diff>0?'+':''}${fmt(it.diff)}</td>
+    <td class="c">${it.cnt} phiếu</td>
+  </tr>`).join('');
+  const totalDiff=list.reduce((s,it)=>s+it.diff,0);
+  const body=`<div style="font-size:13px;line-height:1.6">
+    <div class="help-callout warn" style="margin:0 0 10px">⚠ Phát hiện <b>${list.length} TSCĐ</b> lệch giữa <b>tổng phiếu Dock đã áp</b> và <b>nguyên giá ghi nhận</b>.
+    Thường do phiếu được áp ở máy khác (cờ đã đánh dấu) nhưng nguyên giá TSCĐ chưa nhận khoản tương ứng (mất đồng bộ).</div>
+    <div class="tbl-scroll"><table class="tbl" style="font-size:12px"><thead><tr>
+      <th>TSCĐ</th><th class="r">Tổng phiếu đã áp</th><th class="r">Đang ghi trong TSCĐ</th><th class="r">Cần bù</th><th class="c">SL phiếu</th>
+    </tr></thead><tbody>${rows}
+    <tr style="border-top:2px solid var(--ink);font-weight:700"><td>TỔNG CẦN BÙ</td><td></td><td></td><td class="r mono">${fmt(totalDiff)}</td><td></td></tr>
+    </tbody></table></div>
+    <div style="font-size:11px;color:var(--muted);margin-top:8px">Bấm "Bù chênh lệch" → cộng đúng phần thiếu vào nguyên giá + giá trị còn lại của từng TSCĐ, ghi 1 dòng lịch sử "Đối soát Dock". Không cộng trùng các phiếu đã khớp.</div>
+  </div>`;
+  const foot=`<button class="btn-sec" onclick="closeModal()">Hủy</button>
+    <button class="btn-primary" onclick="runDockReconcile()">⚖ Bù chênh lệch (${fmt(totalDiff)})</button>`;
+  openModal('⚖ Đối soát Dock → TSCĐ', body, foot);
+}
+function runDockReconcile(){
+  if(!isAdmin() && !canApproveL2() && !canEditCatalog()){toast('Không đủ quyền','bad');return;}
+  const list=_dockReconcileScan();
+  if(!list.length){toast('Không có chênh lệch');closeModal();return;}
+  let fixed=0, totalAdded=0;
+  list.forEach(it=>{
+    const fa=it.fa;
+    fa.originalCost=(+fa.originalCost||0)+it.diff;
+    fa.bookValue=(+fa.bookValue||0)+it.diff;
+    fa.history=fa.history||[];
+    fa.history.push({
+      date:todayISO(), type:'DOCK_RECON', amount:it.diff, ccy:fa.ccy||'VND',
+      desc:`Đối soát Dock — bù chênh lệch nguyên giá (phiếu đã áp nhưng nguyên giá thiếu)`,
+      by:actorName(), at:new Date().toISOString()
+    });
+    fixed++; totalAdded+=it.diff;
+  });
+  saveState();
+  if(typeof renderFixedAssets==='function') renderFixedAssets();
+  closeModal();
+  toast(`✓ Đã bù ${fixed} TSCĐ · tổng ${fmt(totalAdded)} vào nguyên giá`);
 }
 function openDockLinkTool(){
   if(!isAdmin() && !canApproveL2() && !canEditCatalog()){
@@ -21030,7 +21102,7 @@ function _renderCashClearModal(){
         <div style="font-size:11px;color:var(--muted);margin-bottom:12px">Hoàn lại tiền mặt thừa về công ty/quỹ khác. <b>Chỉ giảm số dư quỹ, KHÔNG ghi chi phí.</b></div>
         <div class="form-grid" style="grid-template-columns:1fr 1.5fr;gap:14px">
           <div class="field"><label>Số tiền hoàn (${ccy})</label>
-            <input type="number" id="cc-refund-amt" value="${amt||''}" oninput="_ccRefundInput(this.value)" class="num" style="font-size:15px;font-weight:600" step="any" placeholder="0"></div>
+            <input type="text" inputmode="decimal" id="cc-refund-amt" value="${amt?_formatThousands(String(amt)):''}" oninput="_ccRefundInput(this.value)" class="num" style="font-size:15px;font-weight:600" placeholder="0"></div>
           <div class="field"><label>Diễn giải</label>
             <input type="text" value="${esc(st.refundNote||'')}" oninput="_cashClearState.refundNote=this.value" placeholder="VD: Nộp lại tiền thừa về quỹ công ty"></div>
         </div>
@@ -21105,12 +21177,18 @@ function _ccRecalcTotal(){
   const el=document.getElementById('cc-expense-total');
   if(el) el.textContent=fmtCcy(total,ccy);
 }
-/* Hoàn tiền: cập nhật state + cảnh báo vượt số dư tại chỗ — không re-render. */
+/* Hoàn tiền: cập nhật state + cảnh báo vượt số dư tại chỗ — không re-render.
+   v3.03.96: ô là type=text → parse qua _unformatNumber (xử lý "400.000.000" đúng = 400 triệu),
+   và format nghìn trực tiếp khi gõ. */
 function _ccRefundInput(v){
   const st=_cashClearState; if(!st) return;
-  st.refundAmount=+v||0;
+  const num=_unformatNumber(v)||0;
+  st.refundAmount=num;
+  // format lại ô hiển thị (giữ vị trí con trỏ ở cuối — đủ dùng cho ô số tiền)
+  const el=document.getElementById('cc-refund-amt');
+  if(el){ const f=_formatThousands(String(v)); if(el.value!==f) el.value=f; }
   const f=(S.cashFunds||[]).find(x=>x.id===st.fundId); if(!f) return;
-  const ccy=f.ccy||'VND', bal=cashFundBalance(f.id), amt=+st.refundAmount||0;  // v3.03.43
+  const ccy=f.ccy||'VND', bal=cashFundBalance(f.id), amt=num;
   const warn=document.getElementById('cc-refund-warn');
   if(warn) warn.innerHTML = amt>bal
     ? `<div style="color:#b8472e;font-size:11px;margin-top:8px">⚠ Số tiền hoàn (${fmtCcy(amt,ccy)}) lớn hơn số dư quỹ (${fmtCcy(bal,ccy)})</div>`
@@ -31684,6 +31762,7 @@ const WH_TYPES = {
 /* v3.03.94: Gộp các kho TRÙNG MÃ về 1 kho — dồn toàn bộ invMovements, xóa kho dư.
    Nguyên nhân trùng: kho tự sinh ở nhiều máy/lần với vesselId khác → sync ra nhiều kho cùng code. */
 function invMergeDuplicateWarehouses(){
+  if(typeof canEditCatalog==='function' && !canEditCatalog()){toast('Chỉ Admin / Kế toán trưởng','bad');return;}
   if(!S.warehouses||!S.warehouses.length){toast('Chưa có kho','bad');return;}
   // Gom theo code chuẩn hóa
   const byCode=new Map();
@@ -31722,6 +31801,7 @@ function invMergeDuplicateWarehouses(){
 
 /* Auto-seed: tạo Kho tàu cho các tàu chưa có kho + Kho VPCT nếu chưa có */
 function invAutoSeedWarehouses(){
+  if(typeof canEditCatalog==='function' && !canEditCatalog()){toast('Chỉ Admin / Kế toán trưởng','bad');return;}
   if(!S.warehouses) S.warehouses=[];
   let added=0;
   // Kho tàu cho mỗi tàu chưa có
@@ -31776,6 +31856,9 @@ function invAutoSeedWarehouses(){
 function renderWarehousesTable(){
   const tbl=document.getElementById('warehouses-table');
   if(!tbl) return;
+  // v3.03.97: ẩn nút quản lý kho (Tự sinh/Dọn/Thêm) với người không có quyền master data
+  const _adminActs=document.getElementById('wh-admin-actions');
+  if(_adminActs){ const ok=(typeof canEditCatalog==='function')?canEditCatalog():isAdmin(); _adminActs.style.display=ok?'':'none'; }
   const list=(S.warehouses||[]).slice().sort((a,b)=>{
     if(a.type!==b.type) return ['VESSEL','OFFICE','BRANCH','OTHER'].indexOf(a.type)-['VESSEL','OFFICE','BRANCH','OTHER'].indexOf(b.type);
     return (a.name||'').localeCompare(b.name||'');
@@ -31784,7 +31867,8 @@ function renderWarehousesTable(){
     tbl.innerHTML='<tr><td class="empty">Chưa có kho vật tư — bấm "+ Thêm kho" hoặc "↻ Tự sinh kho mặc định" (sinh kho từ danh mục tàu + Kho VPCT)</td></tr>';
     return;
   }
-  let html='<thead><tr><th>Mã kho</th><th>Tên kho</th><th>Loại</th><th>Tàu/Vị trí</th><th class="c">Trạng thái</th><th class="r">Số dòng tồn</th><th class="r">Giá trị tồn hiện tại</th><th></th></tr></thead><tbody>';
+  const _whCanEdit = (typeof canEditCatalog==='function') ? canEditCatalog() : isAdmin();
+  let html='<thead><tr><th>Mã kho</th><th>Tên kho</th><th>Loại</th><th>Tàu/Vị trí</th><th class="c">Trạng thái</th><th class="r">Số dòng tồn</th><th class="r">Giá trị tồn hiện tại</th>'+(_whCanEdit?'<th></th>':'')+'</tr></thead><tbody>';
   // v3.03.94: giá trị tồn hiện tại mỗi kho = tổng (tồn cuối) của bản ghi MỚI NHẤT theo từng vật tư trong kho
   function whCurrentValue(whId){
     const latest={};
@@ -31810,10 +31894,10 @@ function renderWarehousesTable(){
       <td class="c">${w.isActive===false?'<span class="chip chip-bad" style="font-size:10px">Đóng</span>':'<span class="chip chip-good" style="font-size:10px">Hoạt động</span>'}</td>
       <td class="r mono">${movCount}</td>
       <td class="r mono" style="font-weight:600;color:var(--accent)">${curVal>0?fmt(curVal):'—'}</td>
-      <td><div class="row-actions">
+      ${_whCanEdit?`<td><div class="row-actions">
         <button class="icon-btn" title="Sửa" onclick="openWarehouseModal('${w.id}')">✎</button>
         <button class="icon-btn danger" title="Xóa" onclick="deleteWarehouse('${w.id}')">✕</button>
-      </div></td>
+      </div></td>`:''}
     </tr>`;
   });
   html+='</tbody>';
@@ -31821,6 +31905,7 @@ function renderWarehousesTable(){
 }
 
 function openWarehouseModal(id){
+  if(typeof canEditCatalog==='function' && !canEditCatalog()){toast('Chỉ Admin / Kế toán trưởng được thêm/sửa kho','bad');return;}
   const isEdit=!!id;
   const w=isEdit?S.warehouses.find(x=>x.id===id):{type:'OTHER',isActive:true};
   if(isEdit && !w){toast('Không tìm thấy kho','bad');return;}
@@ -31865,6 +31950,7 @@ function _whTypeChange(){
 }
 
 function saveWarehouse(id){
+  if(typeof canEditCatalog==='function' && !canEditCatalog()){toast('Chỉ Admin / Kế toán trưởng được thêm/sửa kho','bad');return;}
   const err=document.getElementById('wh-err');err.textContent='';
   const code=document.getElementById('wh-code').value.trim();
   const name=document.getElementById('wh-name').value.trim();
