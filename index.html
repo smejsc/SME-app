@@ -2233,8 +2233,24 @@ body.readonly-mode::before{
     <div class="section-head">
       <div class="section-title"><span class="tag">⊕</span>Sổ kho theo tháng</div>
       <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-        <label style="font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);font-weight:600">Tháng:</label>
-        <input type="month" id="inv-filter-month" onchange="renderInventory()" style="padding:6px 10px;border:1px solid var(--rule);background:var(--paper);font-family:var(--font-mono);font-size:12px">
+        <label style="font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);font-weight:600">Xem:</label>
+        <select id="inv-filter-mode" onchange="_invModeChange()" style="padding:6px 10px;border:1px solid var(--rule);background:var(--paper);font-size:12px">
+          <option value="month">1 tháng</option>
+          <option value="range">Khoảng thời gian</option>
+          <option value="year">Cả năm</option>
+          <option value="all">Toàn bộ (mọi kỳ)</option>
+        </select>
+        <span id="inv-filter-month-wrap">
+          <input type="month" id="inv-filter-month" onchange="renderInventory()" style="padding:6px 10px;border:1px solid var(--rule);background:var(--paper);font-family:var(--font-mono);font-size:12px">
+        </span>
+        <span id="inv-filter-range-wrap" style="display:none">
+          <input type="month" id="inv-filter-from" onchange="renderInventory()" style="padding:6px 10px;border:1px solid var(--rule);background:var(--paper);font-family:var(--font-mono);font-size:12px">
+          <span style="color:var(--muted)">→</span>
+          <input type="month" id="inv-filter-to" onchange="renderInventory()" style="padding:6px 10px;border:1px solid var(--rule);background:var(--paper);font-family:var(--font-mono);font-size:12px">
+        </span>
+        <span id="inv-filter-year-wrap" style="display:none">
+          <input type="number" id="inv-filter-year" value="2026" min="2020" max="2099" onchange="renderInventory()" style="padding:6px 10px;border:1px solid var(--rule);background:var(--paper);font-family:var(--font-mono);font-size:12px;width:90px">
+        </span>
         <label style="font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);font-weight:600">Kho:</label>
         <select id="inv-filter-warehouse" onchange="renderInventory()" style="padding:6px 10px;border:1px solid var(--rule);background:var(--paper);font-family:var(--font-mono);font-size:12px">
           <option value="">— Tất cả kho —</option>
@@ -2960,7 +2976,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.03.94';            // bumped on each release
+const APP_VERSION='3.03.95';            // bumped on each release
 
 /* v2.62.0: Token xác thực backend — PHẢI khớp API_TOKEN trong Apps Script (Code.gs).
    Mọi request tới Apps Script tự động được gắn token qua lớp bọc fetch bên dưới.
@@ -32196,16 +32212,98 @@ function renderInventory(){
 
   const block=document.getElementById('inv-movements-block');
   if(!block) return;
+  const mode=(document.getElementById('inv-filter-mode')||{}).value||'month';
   const filterMonth=(document.getElementById('inv-filter-month')||{}).value||'';
+  const filterFrom=(document.getElementById('inv-filter-from')||{}).value||'';
+  const filterTo=(document.getElementById('inv-filter-to')||{}).value||'';
+  const filterYear=(document.getElementById('inv-filter-year')||{}).value||'';
   const filterWh=(document.getElementById('inv-filter-warehouse')||{}).value||'';
   let rows=[...(S.invMovements||[])];
-  if(filterMonth) rows=rows.filter(r=>r.month===filterMonth);
   if(filterWh) rows=rows.filter(r=>r.warehouseId===filterWh);
 
+  // Lọc theo chế độ thời gian
+  let periodLabel='';
+  if(mode==='month'){
+    if(filterMonth){ rows=rows.filter(r=>r.month===filterMonth); periodLabel=filterMonth; }
+  } else if(mode==='range'){
+    if(filterFrom) rows=rows.filter(r=>String(r.month||'')>=filterFrom);
+    if(filterTo)   rows=rows.filter(r=>String(r.month||'')<=filterTo);
+    periodLabel=(filterFrom||'…')+' → '+(filterTo||'…');
+  } else if(mode==='year'){
+    if(filterYear){ rows=rows.filter(r=>String(r.month||'').slice(0,4)===String(filterYear)); periodLabel='Năm '+filterYear; }
+  } else { periodLabel='Toàn bộ kỳ'; }
+
   if(!rows.length){
-    block.innerHTML='<div class="empty">Chưa có dữ liệu tồn kho'+(filterMonth||filterWh?' khớp filter':'')+' — bấm "+ Cập nhật tháng"</div>';
+    block.innerHTML='<div class="empty">Chưa có dữ liệu tồn kho'+((filterMonth||filterWh||filterFrom||filterYear)?' khớp filter':'')+' — bấm "+ Cập nhật tháng"</div>';
     return;
   }
+
+  const aggregate = (mode!=='month');  // khoảng / năm / toàn bộ → gộp mỗi vật tư 1 dòng
+
+  // ---- Chế độ TỔNG HỢP: mỗi (kho + vật tư) 1 dòng ----
+  if(aggregate){
+    const grp=new Map();  // key whId|item → {wh,item,unit,ccy, openV(đầu kỳ sớm nhất), inV(tổng), outV(tổng), firstMonth, lastMonth, openQ,inQ,outQ}
+    rows.forEach(r=>{
+      const key=r.warehouseId+'|'+String(r.itemName||'').toLowerCase();
+      let g=grp.get(key);
+      if(!g){ g={whId:r.warehouseId,item:r.itemName||'',unit:r.unit||'',ccy:r.ccy||'VND',
+                 openV:0,inV:0,outV:0,openQ:0,inQ:0,outQ:0,firstMonth:null,lastMonth:''}; grp.set(key,g); }
+      const mo=String(r.month||'');
+      // tồn đầu kỳ = tồn đầu của tháng SỚM NHẤT trong khoảng
+      if(g.firstMonth===null || mo<g.firstMonth){ g.firstMonth=mo; g.openV=+r.openValue||0; g.openQ=+r.openQty||0; }
+      if(mo>g.lastMonth) g.lastMonth=mo;
+      g.inV+=+r.inValue||0;  g.outV+=+r.outValue||0;
+      g.inQ+=+r.inQty||0;    g.outQ+=+r.outQty||0;
+      if(!g.unit && r.unit) g.unit=r.unit;
+    });
+    const list=Array.from(grp.values()).sort((a,b)=>{
+      const wa=(S.warehouses||[]).find(x=>x.id===a.whId), wb=(S.warehouses||[]).find(x=>x.id===b.whId);
+      return ((wa&&wa.name)||'').localeCompare((wb&&wb.name)||'')||a.item.localeCompare(b.item);
+    });
+    let html=`<div style="font-size:11px;color:var(--muted);font-style:italic;margin-bottom:8px">📊 Tổng hợp theo vật tư · ${periodLabel} · mỗi vật tư 1 dòng (Tồn đầu kỳ đầu + Tổng nhập − Tổng xuất = Tồn cuối)</div>`;
+    html+=`<div class="tbl-scroll"><table class="tbl" style="font-size:12px"><thead><tr>
+      <th>Kho</th><th>Tên vật tư</th><th>ĐVT</th>
+      <th class="r">Tồn đầu kỳ</th>
+      <th class="r" style="color:var(--good)">Tổng nhập</th>
+      <th class="r" style="color:var(--bad)">Tổng xuất</th>
+      <th class="r"><b>Tồn cuối kỳ</b></th>
+    </tr></thead><tbody>`;
+    let tOpen=0,tIn=0,tOut=0,tClose=0;
+    list.forEach(g=>{
+      const w=(S.warehouses||[]).find(x=>x.id===g.whId);
+      const t=w?(WH_TYPES[w.type]||WH_TYPES.OTHER):WH_TYPES.OTHER;
+      const whTxt=w?`${t.icon} ${esc(w.name)}`:'(kho đã xóa)';
+      const hasQty=g.openQ||g.inQ||g.outQ;
+      const closeV=g.openV+g.inV-g.outV;
+      const closeQ=g.openQ+g.inQ-g.outQ;
+      tOpen+=toDisplay(g.openV,g.ccy); tIn+=toDisplay(g.inV,g.ccy); tOut+=toDisplay(g.outV,g.ccy); tClose+=toDisplay(closeV,g.ccy);
+      const cOpen=hasQty?g.openQ.toLocaleString('vi-VN'):(g.openV?fmt(g.openV,g.ccy):'—');
+      const cIn  =hasQty?(g.inQ?g.inQ.toLocaleString('vi-VN'):'—'):(g.inV?fmt(g.inV,g.ccy):'—');
+      const cOut =hasQty?(g.outQ?g.outQ.toLocaleString('vi-VN'):'—'):(g.outV?fmt(g.outV,g.ccy):'—');
+      const cClose=hasQty?closeQ.toLocaleString('vi-VN'):(closeV?fmt(closeV,g.ccy):'0');
+      html+=`<tr>
+        <td><span class="chip ${t.cls}" style="font-size:10px">${whTxt}</span></td>
+        <td><b>${esc(g.item)}</b></td>
+        <td style="font-size:11px;color:var(--muted)">${esc(g.unit||'')}</td>
+        <td class="r num mono">${cOpen}</td>
+        <td class="r num mono" style="color:var(--good)">${cIn}</td>
+        <td class="r num mono" style="color:var(--bad)">${cOut}</td>
+        <td class="r num"><b style="color:${(hasQty?closeQ:closeV)<0?'var(--bad)':'var(--ink)'}">${cClose}</b></td>
+      </tr>`;
+    });
+    html+=`<tr style="border-top:2px solid var(--ink);font-weight:700;background:rgba(28,58,92,.04)">
+      <td colspan="3">TỔNG CỘNG (${list.length} vật tư)</td>
+      <td class="r num mono">${fmt(tOpen)}</td>
+      <td class="r num mono" style="color:var(--good)">${fmt(tIn)}</td>
+      <td class="r num mono" style="color:var(--bad)">${fmt(tOut)}</td>
+      <td class="r num"><b>${fmt(tClose)}</b></td>
+    </tr>`;
+    html+='</tbody></table></div>';
+    block.innerHTML=html;
+    return;
+  }
+
+  // ---- Chế độ CHI TIẾT (1 tháng): giữ như cũ ----
   rows.sort((a,b)=>(b.month||'').localeCompare(a.month||'')||(a.itemName||'').localeCompare(b.itemName||''));
 
   let html=`<div class="tbl-scroll"><table class="tbl" style="font-size:12px"><thead><tr>
@@ -32227,8 +32325,6 @@ function renderInventory(){
     const closeQty=(+r.openQty||0)+(+r.inQty||0)-(+r.outQty||0);
     const openV=+r.openValue||0, inV=+r.inValue||0, outV=+r.outValue||0;
     const closeVal=openV+inV-outV;
-    // v3.03.93: kho theo dõi bằng TIỀN (không có số lượng) → hiện GIÁ TRỊ ở cả Tồn đầu/Nhập/Xuất/Tồn cuối.
-    //   Nếu dòng có số lượng thì ưu tiên hiện số lượng; nếu chỉ có giá trị thì hiện giá trị.
     const hasQty=(+r.openQty||0)||(+r.inQty||0)||(+r.outQty||0);
     const cellOpen = hasQty ? (+r.openQty||0).toLocaleString('vi-VN') : (openV?fmt(openV,r.ccy):'—');
     const cellIn   = hasQty ? ((+r.inQty||0)?(+r.inQty).toLocaleString('vi-VN'):'—') : (inV?fmt(inV,r.ccy):'—');
@@ -32252,6 +32348,16 @@ function renderInventory(){
   });
   html+='</tbody></table></div>';
   block.innerHTML=html;
+}
+
+/* v3.03.95: chuyển chế độ xem sổ kho → ẩn/hiện ô lọc tương ứng */
+function _invModeChange(){
+  const mode=(document.getElementById('inv-filter-mode')||{}).value||'month';
+  const show=(id,on)=>{const el=document.getElementById(id); if(el) el.style.display=on?'':'none';};
+  show('inv-filter-month-wrap', mode==='month');
+  show('inv-filter-range-wrap', mode==='range');
+  show('inv-filter-year-wrap', mode==='year');
+  renderInventory();
 }
 
 
