@@ -598,8 +598,8 @@ body.readonly-mode::before{
     <div style="text-align:center;margin-top:10px">
       <a href="#" onclick="event.preventDefault();refreshConfigFromCloud();" style="font-size:11px;color:var(--muted);text-decoration:underline">🔄 Làm mới cấu hình (khi không đăng nhập được trên máy này)</a>
     </div>
-    <div style="text-align:center;margin-top:12px;font-family:var(--font-mono);font-size:10px;letter-spacing:.08em;color:rgba(246,241,232,0.45)">
-      Seahorse Manager · phiên bản <span id="auth-version-label"></span>
+    <div style="text-align:center;margin-top:12px;font-family:var(--font-mono);font-size:11px;letter-spacing:.08em;color:#8a7a5c">
+      Seahorse Manager · phiên bản <span id="auth-version-label" style="font-weight:700;color:#5a4a2a"></span>
     </div>
   </div>
 </div>
@@ -2959,7 +2959,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.03.86';            // bumped on each release
+const APP_VERSION='3.03.90';            // bumped on each release
 
 /* v2.62.0: Token xác thực backend — PHẢI khớp API_TOKEN trong Apps Script (Code.gs).
    Mọi request tới Apps Script tự động được gắn token qua lớp bọc fetch bên dưới.
@@ -7991,6 +7991,16 @@ function activeOnly(arr){
   if(!Array.isArray(arr)) return [];
   return arr.filter(x => !x || !x.archived);
 }
+/* v3.03.89: option NCC cho datalist — sắp theo tên (dễ tìm) + giới hạn rộng (2000) để NCC
+   mới tạo không bị cắt mất như trước (slice 200 theo thứ tự push). */
+function _vendorDatalistOptions(){
+  return activeOnly(S.vendors||[])
+    .slice()
+    .sort((a,b)=>(a.name||'').localeCompare(b.name||'','vi'))
+    .slice(0,2000)
+    .map(v=>`<option value="${esc(v.name)}">${esc(v.normalized||'')}</option>`)
+    .join('');
+}
 
 /* v1.42.0: Set archive state on a master item.
    Records who/when. NV without canArchiveItem cannot call this. */
@@ -10456,6 +10466,16 @@ function isExpenseCapEx(typeCode){
    - v3.01.101: AP gắn TÀU QUẢN LÝ HỘ (opVessels) = CHI HỘ chủ tàu → KHÔNG vào P&L công ty.
      Nguyên tắc: mảng QL Tàu (VESSEL_MGMT) không phát sinh chi phí của công ty; toàn bộ là chi hộ
      (đã phản ánh ở Tab 06, trừ vào số dư chủ tàu). */
+/* v3.03.90: Số tiền chi phí 1 dòng AP đưa vào P&L.
+   CÔNG TY TRẢ LƯƠNG NET → công ty gánh thêm toàn bộ TNCN + BHXH (NV nhập tay trên phiếu lương).
+   Do đó với AP lương (có pitAmount hoặc bhxhAmount): chi phí P&L = NET + TNCN + BHXH.
+   AP thường: giữ nguyên amountNet (NET chưa VAT). */
+function _apCostAmount(r){
+  const net = (+r.amountNet)||(+r.amount)||0;
+  const pit = +r.pitAmount||0;
+  const bhxh = +r.bhxhAmount||0;
+  return net + pit + bhxh;
+}
 function apCountsInPL(r){
   if(!r) return false;
   if(isExpenseCapEx(r.expenseType)) return false;  // CapEx/Dock → cộng nguyên giá TSCĐ, không vào P&L (kể cả YTD)
@@ -14196,15 +14216,16 @@ function renderPresenceUI(){
 
   const all=presenceList();
   const online=all.filter(u=>u.status==='online');
-  // v3.03.80: LUÔN hiện nút nếu có ai online (kể cả mình). Chỉ ẩn khi hoàn toàn không có dấu online nào.
-  // Khi chưa cấu hình cloud: vẫn hiện (đếm 1 = chính mình) để NV thấy mình đang online, nhưng không thấy người máy khác.
-  if(online.length===0 && all.length===0){
+  // v3.03.88: nút LUÔN hiện khi đã đăng nhập (có CRYPTO_KEY) — tối thiểu đếm 1 (chính bạn).
+  //   Trước đây ẩn khi presenceList chưa kịp ghi → NV không thấy nút. Giờ hiện ngay.
+  const loggedIn = (typeof CRYPTO_KEY!=='undefined' && CRYPTO_KEY);
+  if(!loggedIn && online.length===0 && all.length===0){
     btn.style.display='none';
     return;
   }
   btn.style.display='inline-block';
-  cnt.textContent=online.length;
-  btn.title = hasCloud ? (online.length+' người đang online') : 'Đang online (chưa bật đồng bộ — chỉ thấy chính bạn)';
+  cnt.textContent = Math.max(online.length, loggedIn?1:0);
+  btn.title = hasCloud ? (Math.max(online.length,1)+' người đang online') : 'Đang online (chưa bật đồng bộ — chỉ thấy chính bạn)';
 
   list.innerHTML=`<div style="padding:8px 14px;border-bottom:1px solid var(--rule);font-size:10px;color:var(--muted);letter-spacing:.1em;text-transform:uppercase;font-weight:600">Team đang online · ${online.length}</div>` +
     all.map(u=>{
@@ -15025,7 +15046,7 @@ function approvedTx(includeAll){
       segment:r.segment||'OTHER',
       category:r.desc||'',
       desc:r.desc||r.partner||'',
-      amount:+r.amountNet||+r.amount||0,  // NET (chưa VAT) for BI
+      amount:_apCostAmount(r),  // v3.03.90: lương NET → cộng đủ TNCN + BHXH (chi phí công ty gánh)
       ccy:r.ccy||'USD',
       paid:arRemaining(r)<=0.0001,
       vesselId:r.vesselId||null,
@@ -24950,7 +24971,7 @@ function _arEditorBody(r,isPayable){
           <input type="text" id="ar-partner" list="ar-partner-suggestions" value="${(r.partner||'').replace(/"/g,'&quot;')}" placeholder="${isPayable?'VD: Cảng PTSC Vũng Tàu':'VD: PVEP, JVPC, Pertamina...'}" ${lockedAttr} oninput="arPartnerCheck(this)" style="flex:1">
           <button type="button" class="btn-sec" title="Tìm trong danh mục ${isPayable?'NCC':'khách hàng'} — chọn dùng luôn, khỏi gõ lại" onclick="openVendorPicker('${isPayable?'ap':'ar'}')" style="white-space:nowrap;padding:0 12px" ${lockedAttr?'disabled':''}>🔍 Tìm</button>
         </div>
-        <datalist id="ar-partner-suggestions">${activeOnly(S.vendors||[]).slice(0,200).map(v=>`<option value="${esc(v.name)}">${esc(v.normalized)}</option>`).join('')}</datalist>
+        <datalist id="ar-partner-suggestions">${_vendorDatalistOptions()}</datalist>
         <div id="ar-partner-hint" style="font-size:11px;color:var(--muted);margin-top:4px"></div>
       </div>
       <div class="field" style="grid-column:span 2"><label>Diễn giải</label><input type="text" id="ar-desc" value="${(r.desc||'').replace(/"/g,'&quot;')}" placeholder="Nội dung — VD: Cước thuê tàu T5/2026" ${lockedAttr}></div>
@@ -26044,7 +26065,7 @@ function _renderMultiRowModal(){
         <input type="text" id="mr-partner" list="mr-partner-suggestions" value="${esc(s.partner)}"
           placeholder="${isPayable?'VD: Cảng PTSC Vũng Tàu':'VD: PVEP, JVPC...'}"
           oninput="_mrPartnerInput(this.value)">
-        <datalist id="mr-partner-suggestions">${activeOnly(S.vendors||[]).slice(0,200).map(v=>`<option value="${esc(v.name)}">${esc(v.normalized)}</option>`).join('')}</datalist></datalist>
+        <datalist id="mr-partner-suggestions">${_vendorDatalistOptions()}</datalist>
         <div id="mr-partner-hint" style="font-size:10px;color:var(--muted);margin-top:2px"></div>
       </div>
       <div class="field" style="margin:8px 0 0 0">
@@ -28623,7 +28644,9 @@ function opVendorInput(value){
   const dl=document.getElementById('opt-vendor-suggestions');
   // nạp datalist (1 lần đủ) — danh sách NCC active
   if(dl && !dl.dataset.filled){
-    dl.innerHTML=(activeOnly(S.vendors||[]).slice(0,300)).map(v=>`<option value="${esc(v.name)}">${esc(v.taxCode?('MST '+v.taxCode):v.normalized)}</option>`).join('');
+    dl.innerHTML=activeOnly(S.vendors||[])
+      .slice().sort((a,b)=>(a.name||'').localeCompare(b.name||'','vi')).slice(0,2000)
+      .map(v=>`<option value="${esc(v.name)}">${esc(v.taxCode?('MST '+v.taxCode):(v.normalized||''))}</option>`).join('');
     dl.dataset.filled='1';
   }
   const raw=(value||'').trim();
