@@ -2977,7 +2977,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.03.98';            // bumped on each release
+const APP_VERSION='3.03.100';            // bumped on each release
 
 /* v2.62.0: Token xác thực backend — PHẢI khớp API_TOKEN trong Apps Script (Code.gs).
    Mọi request tới Apps Script tự động được gắn token qua lớp bọc fetch bên dưới.
@@ -4380,10 +4380,16 @@ async function selfWrapInCloudCfg(userName, password){
         try{ masterKey=await unwrapCfgMasterKey(adminWrap, password); }catch(e){}
       }
     } else {
-      // For NV: try unwrap their own existing wrap (if password didn't change, it would have returned above)
-      // Without master key, can't create new wrap → silently fail
-      // Admin will need to manually re-push cfg with NV password
-      return;
+      // For NV: try unwrap their own existing wrap (password didn't change → returned above).
+      // v3.03.99: NẾU NV chưa có wrap NHƯNG phiên hiện tại đã mở khóa (CRYPTO_KEY = master key
+      // trong RAM) → DÙNG NGAY master key đó để tạo wrap cho NV. Trước đây return → NV đăng nhập
+      // + nhập liệu được trên máy này nhưng wrap KHÔNG lên cloud → máy khác không đăng nhập được,
+      // modal đẩy auth báo "chưa có wrap" dù NV đã hoạt động.
+      if(typeof CRYPTO_KEY!=='undefined' && CRYPTO_KEY){
+        masterKey=CRYPTO_KEY;
+      } else {
+        return;  // không có master key → admin phải đẩy cfg kèm mật khẩu NV
+      }
     }
     if(!masterKey) return;
 
@@ -4393,12 +4399,19 @@ async function selfWrapInCloudCfg(userName, password){
     // Update wraps array
     let wraps=payload.wraps.filter(w=>w.name.toLowerCase()!==userName.toLowerCase());
     wraps.push(newWrap);
-    // Push back
-    await fetch(cfg.scriptUrl, {
+    // Push back (v3.03.100: retry 1 lần nếu lỗi mạng để wrap chắc chắn lên cloud)
+    const _pushWrap=async()=>fetch(cfg.scriptUrl, {
       method:'POST',
       headers:{'Content-Type':'text/plain'},
       body:JSON.stringify({action:'save', key:'auth', payload:{...payload, wraps}})
     });
+    try{
+      await _pushWrap();
+    }catch(e1){
+      console.warn('[cfg-sync] self-wrap push lỗi, thử lại...', e1&&e1.message);
+      await new Promise(r=>setTimeout(r,1500));
+      await _pushWrap();  // nếu vẫn lỗi → throw ra catch ngoài (sẽ thử lại ở lần đăng nhập sau)
+    }
     console.log('[cfg-sync] Self-wrap updated for', userName);
   }catch(e){
     console.warn('[cfg-sync] Self-wrap failed:', e.message);
