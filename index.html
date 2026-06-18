@@ -967,6 +967,7 @@ body.readonly-mode::before{
       <div style="margin-left:auto;display:flex;align-items:center;gap:8px">
         <label style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.05em">Lọc theo tàu</label>
         <select id="prj-filter-vessel" onchange="_prjFilterVessel=this.value;renderProjects()" style="padding:6px 10px;font-size:12px;border:1px solid var(--rule);border-radius:6px;min-width:180px"></select>
+        <button class="btn-sec" onclick="exportProjectsPdf()" title="Xuất báo cáo dự án (theo bộ lọc đang xem) ra PDF / in" style="font-size:12px;white-space:nowrap">📄 Xuất PDF</button>
       </div>
     </div>
     <div class="section-body">
@@ -2982,7 +2983,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.04.17';            // bumped on each release
+const APP_VERSION='3.04.20';            // bumped on each release
 
 /* v2.62.0: Token xác thực backend — PHẢI khớp API_TOKEN trong Apps Script (Code.gs).
    Mọi request tới Apps Script tự động được gắn token qua lớp bọc fetch bên dưới.
@@ -16306,8 +16307,84 @@ function renderProjects(){
   tbl.innerHTML=html;
 }
 
-/* v3.03.78: Chi tiết doanh thu / chi phí 1 dự án — liệt kê từng bút toán REV/COST */
-function projectDetailModal(pid){
+/* v3.04.19: Xuất báo cáo Dự án ra PDF (mở cửa sổ in — lưu PDF qua trình duyệt).
+   Tôn trọng bộ lọc tàu đang xem (_prjFilterVessel). */
+function exportProjectsPdf(){
+  let list=S.projects.slice();
+  if(_prjFilterVessel==='__none__') list=list.filter(p=>!p.vesselId);
+  else if(_prjFilterVessel) list=list.filter(p=>p.vesselId===_prjFilterVessel);
+  if(!list.length){ toast('Không có dự án để xuất','warn'); return; }
+
+  const SEGNAME={VESSEL_SERVICE:'Tàu dịch vụ',VESSEL_TECH:'Tàu kỹ thuật',OM:'O&M',VESSEL_MGMT:'QL vận hành tàu',PORT:'Cảng biển',OTHER:'QL chung'};
+  const fmtMoney=(n,ccy)=>{ if(n==null||isNaN(n)) return '—'; const a=Math.abs(Math.round(n)); const s=a.toLocaleString(ccy==='USD'?'en-US':'vi-VN'); return (n<0?'-':'')+(ccy==='USD'?'$'+s:s+'₫'); };
+  const company=(S.companyInfo&&S.companyInfo.nameEn)||'SEAHORSE MARINE & ENERGY JSC';
+  const companyVi=(S.companyInfo&&S.companyInfo.name)||'CTCP HÀNG HẢI VÀ NĂNG LƯỢNG HẢI MÃ';
+  const filterLabel = _prjFilterVessel
+    ? (_prjFilterVessel==='__none__' ? 'Dự án không gắn tàu' : ('Tàu: '+((S.vessels.find(x=>x.id===_prjFilterVessel)||{}).name||'')))
+    : 'Tất cả dự án';
+
+  let tRev=0,tCost=0,tValue=0;
+  const rows=list.map((p,i)=>{
+    const rev=projectRev(p.id), cost=projectCost(p.id), m=rev-cost;
+    tRev+=rev; tCost+=cost; tValue+=(+p.value||0);
+    const v=p.vesselId?(S.vessels.find(x=>x.id===p.vesselId)):null;
+    const pct = rev?((m/rev)*100).toFixed(0)+'%':'—';
+    return `<tr>
+      <td style="text-align:center;color:#888">${i+1}</td>
+      <td><b>${esc(p.name||'')}</b>${p.archived?' <span style="color:#a8362b;font-size:9px">(hoàn thành)</span>':''}<br><span style="color:#666;font-size:10px">${esc(p.client||'—')}</span></td>
+      <td style="font-size:11px">${v?esc(v.name):'—'}</td>
+      <td style="font-size:10px;white-space:nowrap">${esc(p.start||'—')} →<br>${esc(p.end||'—')}</td>
+      <td style="text-align:right;font-family:monospace">${fmtMoney(p.value,p.ccy)}</td>
+      <td style="text-align:right;font-family:monospace">${fmtMoney(rev,p.ccy)}</td>
+      <td style="text-align:right;font-family:monospace">${fmtMoney(cost,p.ccy)}</td>
+      <td style="text-align:right;font-family:monospace;color:${m>=0?'#2d6a2d':'#b8472e'};font-weight:700">${fmtMoney(m,p.ccy)}</td>
+      <td style="text-align:right;font-family:monospace">${pct}</td>
+    </tr>`;
+  }).join('');
+  const tM=tRev-tCost;
+
+  const html=`<!DOCTYPE html><html lang="vi"><head><meta charset="utf-8"><title>Báo cáo Dự án</title>
+  <style>
+    @page{size:A4 landscape;margin:10mm}
+    *{box-sizing:border-box} body{font-family:'Segoe UI',Arial,sans-serif;color:#1a1a1a;margin:20px;font-size:12px}
+    .hd{display:flex;justify-content:space-between;align-items:flex-start;border-bottom:2px solid #1c3a5c;padding-bottom:10px;margin-bottom:14px}
+    .hd h1{font-size:18px;margin:0;color:#1c3a5c} .hd .sub{font-size:11px;color:#666;margin-top:3px}
+    .meta{font-size:10px;color:#666;text-align:right}
+    table{width:100%;border-collapse:collapse;font-size:11px;table-layout:fixed}
+    th{background:#1c3a5c;color:#fff;padding:6px 5px;text-align:left;font-size:10px;text-transform:uppercase;letter-spacing:.03em}
+    td{padding:5px;border-bottom:1px solid #e0e0e0;vertical-align:top;word-wrap:break-word}
+    tr:nth-child(even) td{background:#f7f5f0}
+    .tot td{border-top:2px solid #1c3a5c;font-weight:700;background:#ede8df!important}
+    .foot{margin-top:18px;font-size:10px;color:#888;font-style:italic;text-align:center}
+    @media print{body{margin:0} button{display:none}}
+  </style></head><body>
+    <div class="hd">
+      <div><h1>BÁO CÁO DỰ ÁN</h1><div class="sub">${esc(companyVi)} · ${esc(company)}</div></div>
+      <div class="meta">Phạm vi: <b>${esc(filterLabel)}</b><br>Xuất: ${new Date().toLocaleString('vi-VN')}<br>${list.length} dự án</div>
+    </div>
+    <table>
+      <colgroup><col style="width:3%"><col style="width:30%"><col style="width:13%"><col style="width:11%"><col style="width:11%"><col style="width:11%"><col style="width:11%"><col style="width:11%"><col style="width:5%"></colgroup>
+      <thead><tr>
+      <th>#</th><th>Tên / Khách hàng</th><th>Tàu</th><th>Thời gian</th>
+      <th style="text-align:right">Giá trị HĐ</th><th style="text-align:right">DT thực</th><th style="text-align:right">CP thực</th><th style="text-align:right">Margin</th><th style="text-align:right">%</th>
+    </tr></thead><tbody>${rows}
+      <tr class="tot"><td colspan="4" style="text-align:right">TỔNG (${list.length} dự án)</td>
+        <td style="text-align:right;font-family:monospace">${fmtMoney(tValue)}</td>
+        <td style="text-align:right;font-family:monospace">${fmtMoney(tRev)}</td>
+        <td style="text-align:right;font-family:monospace">${fmtMoney(tCost)}</td>
+        <td style="text-align:right;font-family:monospace;color:${tM>=0?'#2d6a2d':'#b8472e'}">${fmtMoney(tM)}</td>
+        <td style="text-align:right;font-family:monospace">${tRev?((tM/tRev)*100).toFixed(0)+'%':'—'}</td>
+      </tr>
+    </tbody></table>
+    <div class="foot">Báo cáo lập tự động từ hệ thống quản trị Seahorse · ${new Date().toLocaleDateString('vi-VN')}</div>
+    <div style="text-align:center;margin-top:16px"><button onclick="window.print()" style="padding:8px 20px;font-size:13px;cursor:pointer">🖨 In / Lưu PDF</button></div>
+    <script>window.onload=function(){setTimeout(function(){window.print();},250);}<\/script>
+  </body></html>`;
+
+  const w=window.open('','_blank');
+  if(!w){ toast('Trình duyệt chặn cửa sổ in — cho phép popup rồi thử lại','bad'); return; }
+  w.document.write(html); w.document.close();
+}
   const p=(S.projects||[]).find(x=>x.id===pid); if(!p){ toast('Không tìm thấy dự án','bad'); return; }
   const txs=allTx().filter(t=>t.projectId===pid);
   const revs=txs.filter(t=>t.type==='REV');
@@ -26571,15 +26648,23 @@ function _invoiceFromCsv(rows){
 /* PDF text → cố tách 1 hóa đơn (NCC, số HĐ, ngày, MST, tiền, VAT). Heuristic cho HĐ điện tử VN.
    v3.04.10: cải thiện bắt Tên NCC + MST + nội dung. */
 function _invoiceFromPdfText(text){
+  // v3.04.20: nhận diện công ty MÌNH (Hải Mã/Seahorse) để KHÔNG lấy nhầm làm NCC.
+  //   Hóa đơn VN có 2 bên (bán/mua). NCC = bên KHÔNG phải công ty mình.
+  const _OWN_RE=/(h[ảa]i\s*m[ãa]|seahorse)/i;
+  const _ownMst=(S.companyInfo&&(S.companyInfo.taxCode||S.companyInfo.mst))||'';
+  const _isOwn=(s)=>{ if(!s) return false; if(_OWN_RE.test(String(s))) return true; if(_ownMst && String(s).replace(/[^0-9]/g,'').includes(String(_ownMst).replace(/[^0-9]/g,''))) return true; return false; };
   const t=text.replace(/\s+/g,' ').trim();
   const grab=(re)=>{ const m=t.match(re); return m?(m[1]||'').trim():''; };
   const invoiceNo=grab(/(?:Số(?:\s*hóa đơn)?|S[ốô]\s*HĐ|No\.?|Number)\s*[:\.]?\s*([A-Z0-9][A-Z0-9\-\/]{1,19})/i);
-  // MST người bán: lấy MST ĐẦU TIÊN (thường là người bán đứng trước người mua)
+  // v3.04.20: MST — bỏ MST của công ty mình, lấy MST còn lại (NCC/bên bán).
   const allMst=[...t.matchAll(/(?:Mã số thuế|MST|Tax\s*code)\s*[:\.]?\s*([0-9]{10}(?:-[0-9]{3})?)/gi)].map(m=>m[1]);
-  const mst=allMst[0]||'';
-  // Tên NCC (người bán): "Đơn vị bán hàng / Người bán / Tên đơn vị (Seller)" → tới trước Mã số thuế/Địa chỉ
-  let seller=grab(/(?:Đơn vị bán hàng|Tên đơn vị bán|Người bán|Tên người bán|Tên đơn vị|Seller(?:'s name)?|Company name)\s*(?:\(Seller\))?\s*[:：\.]?\s*([^]{3,80}?)\s*(?:Mã số thuế|MST|Tax|Địa chỉ|Address|Điện thoại|Tel)/i);
-  seller=seller.replace(/[:：\-]+$/,'').trim();
+  const mst = allMst.find(x=>!_isOwn(x)) || allMst[0] || '';
+  // v3.04.20: Tên NCC (người bán) — bắt TẤT CẢ ứng viên tên đơn vị, loại bỏ tên công ty mình.
+  const sellerCands=[...t.matchAll(/(?:Đơn vị bán hàng|Tên đơn vị bán|Người bán|Tên người bán|Tên đơn vị|Seller(?:'s name)?|Company name)\s*(?:\(Seller\))?\s*[:：\.]?\s*([^]{3,80}?)\s*(?:Mã số thuế|MST|Tax|Địa chỉ|Address|Điện thoại|Tel)/gi)]
+    .map(m=>(m[1]||'').replace(/[:：\-]+$/,'').trim()).filter(Boolean);
+  let seller = sellerCands.find(x=>!_isOwn(x)) || sellerCands[0] || '';
+  // nếu lỡ vẫn là công ty mình → bỏ trống để NV nhập tay (tránh sai)
+  if(_isOwn(seller)) seller='';
   let issueDate='';
   const dmy=t.match(/ngày\s*(\d{1,2})\s*tháng\s*(\d{1,2})\s*năm\s*(\d{4})/i) || t.match(/(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})/);
   if(dmy){ const d=dmy[1].padStart(2,'0'),mo=dmy[2].padStart(2,'0'),y=dmy[3]; issueDate=`${y}-${mo}-${d}`; }
@@ -26613,11 +26698,25 @@ function _invoiceFromXml(xmlText){
   const hasSig = T('TTChung')||T('NBan')||T('TgTTTBSo')||T('DLHDon');
   if(!hasSig && !T('NBan') && !doc.getElementsByTagName('HDLe').length) return null;
   // Người bán: thường nằm trong <NBan> (hoặc <NDHDon><NBan>)
+  const _OWN_RE=/(h[ảa]i\s*m[ãa]|seahorse)/i;
+  const _ownMst=(S.companyInfo&&(S.companyInfo.taxCode||S.companyInfo.mst))||'';
+  const _isOwn=(s)=>{ if(!s) return false; if(_OWN_RE.test(String(s))) return true; if(_ownMst && String(s).replace(/[^0-9]/g,'').includes(String(_ownMst).replace(/[^0-9]/g,''))) return true; return false; };
   const nbanEls=doc.getElementsByTagName('NBan');
+  const nmuaEls=doc.getElementsByTagName('NMua');
   let seller='', mst='';
   if(nbanEls.length){
     seller=T('Ten', nbanEls[0]) || T('TBan', nbanEls[0]);
     mst=T('MST', nbanEls[0]);
+  }
+  // v3.04.20: nếu NBan là công ty MÌNH (hóa đơn đầu ra) → NCC/khách là NMua.
+  if(_isOwn(seller) || _isOwn(mst)){
+    if(nmuaEls.length){
+      const buyer=T('Ten', nmuaEls[0]) || T('TMua', nmuaEls[0]);
+      const buyerMst=T('MST', nmuaEls[0]);
+      if(buyer && !_isOwn(buyer)){ seller=buyer; mst=buyerMst||''; }
+    }
+    // vẫn là công ty mình → bỏ trống (NV nhập tay), tránh sai
+    if(_isOwn(seller)){ seller=''; mst=''; }
   }
   if(!seller) seller=T('TBan');
   if(!mst){ const m=(xmlText.match(/<MST>([0-9]{10}(?:-[0-9]{3})?)<\/MST>/)||[])[1]; if(m) mst=m; }
@@ -28454,6 +28553,25 @@ function _khoanKey(t){
   const per=String(t.khoanPeriod||'').trim();
   return t.vesselId+'|'+cat+'|'+per;
 }
+/* v3.04.18: suy KỲ KHOÁN (YYYY-MM) cho dòng lương từ diễn giải (April/May/June 2026...) hoặc ngày. */
+function _khoanPeriodOf(t){
+  if(t.khoanPeriod && /^\d{4}-\d{2}/.test(t.khoanPeriod)) return t.khoanPeriod.slice(0,7);
+  const d=(t.desc||'');
+  const MON={january:'01',february:'02',march:'03',april:'04',may:'05',june:'06',july:'07',august:'08',september:'09',october:'10',november:'11',december:'12'};
+  const m=d.toLowerCase().match(/(january|february|march|april|may|june|july|august|september|october|november|december)\s*(\d{4})/);
+  if(m) return m[2]+'-'+MON[m[1]];
+  // fallback: tháng của NGÀY dòng (lương thường trả tháng sau → lùi 1 tháng nếu muốn; ở đây dùng đúng tháng ngày)
+  if(t.date && /^\d{4}-\d{2}/.test(t.date)) return t.date.slice(0,7);
+  return '';
+}
+/* v3.04.18: chuẩn hóa 1 tx lương opTransactions → coi là vế ĐÒI khoán (nếu chưa gắn khoanRole). */
+function _khoanNormalizeCrew(t){
+  if(t.khoanRole==='doi' || t.khoanRole==='chi') return t;  // đã gắn rõ → giữ nguyên
+  if(t.opCat==='CREW_SALARY' && t.type==='OUT'){
+    return {...t, khoanRole:'doi', khoanCat:(t.khoanCat||'Lương thuyền viên'), khoanPeriod:_khoanPeriodOf(t)};
+  }
+  return t;
+}
 /* Đối chiếu khoán cho 1 tàu (hoặc tất cả nếu vid rỗng).
    Trả về { pairs:[{vesselId,cat,period,doi,chi,chenh,doiCount,chiCount,...}], revenueUsd, byVessel:{vid:revenueUsd} } */
 function khoanReconcile(vid){
@@ -28464,8 +28582,9 @@ function khoanReconcile(vid){
                               doi:0, chi:0, doiCount:0, chiCount:0};
     return groups[k];
   };
-  (S.opTransactions||[]).forEach(t=>{
-    if(t.type!=='OUT') return;
+  (S.opTransactions||[]).forEach(_t=>{
+    if(_t.type!=='OUT') return;
+    const t=_khoanNormalizeCrew(_t);   // v3.04.18: tự nhận lương CREW = vế đòi
     if(t.khoanRole!=='doi' && t.khoanRole!=='chi') return;
     if(vid && t.vesselId!==vid) return;
     const g=_ensure(t);
