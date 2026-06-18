@@ -1305,7 +1305,7 @@ body.readonly-mode::before{
     <div class="section-body">
       <div class="form-grid" style="grid-template-columns:repeat(6,1fr)">
         <div class="field"><label>Ngày</label><input type="date" id="opt-date"></div>
-        <div class="field"><label>Tàu QL</label><select id="opt-vessel"></select></div>
+        <div class="field"><label>Tàu QL</label><select id="opt-vessel" onfocus="fillOpVesselPicker()"></select></div>
         <div class="field"><label>Loại</label>
           <select id="opt-type" onchange="opTypeChanged()"><option value="IN">Thu hộ</option><option value="OUT">Chi hộ</option></select>
         </div>
@@ -2087,7 +2087,7 @@ body.readonly-mode::before{
         </select>
         <input type="text" id="op-filter-partner" placeholder="🔎 Lọc NCC / diễn giải…" oninput="renderOpTxList()" title="Lọc theo tên NCC, diễn giải, số HĐ" style="padding:6px 9px;border:1px solid var(--rule);background:var(--paper);font-size:12px;width:180px">
         <button class="btn-primary" onclick="openOpReportModal()" title="Xuất báo cáo PDF cho chủ tàu">📄 Xuất PDF</button>
-        <button class="btn-sec" onclick="opExportExcel()" title="Xuất bản kiểm tra nhập liệu (AP + Chi hộ) theo bộ lọc — để NV tự rà soát" style="font-size:12px">📊 Bản kiểm tra (Excel)</button>
+        <button class="btn-sec" onclick="opExportExcel()" title="Xuất Sổ thu/chi hộ tàu quản lý hộ theo bộ lọc (chỉ tàu QL hộ — không gồm công nợ công ty)" style="font-size:12px">📊 Xuất Excel (thu/chi hộ)</button>
       </div>
     </div>
     <div class="section-body">
@@ -2977,7 +2977,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.04.02';            // bumped on each release
+const APP_VERSION='3.04.09';            // bumped on each release
 
 /* v2.62.0: Token xác thực backend — PHẢI khớp API_TOKEN trong Apps Script (Code.gs).
    Mọi request tới Apps Script tự động được gắn token qua lớp bọc fetch bên dưới.
@@ -4359,6 +4359,12 @@ async function pullCfgFromCloud(scriptUrl, userName, password){
   }
   cfg.scriptUrl=cfg.scriptUrl||scriptUrl;
   cfg.lastCfgSync=new Date().toISOString();
+  // v3.04.03: nếu vừa reset MK (đang khóa) → KHÔNG để cfg cloud (có thể cũ) ghi đè local.
+  //   Vẫn trả cfg về để phục vụ đăng nhập, nhưng giữ nguyên cfg local mới hơn.
+  if(_cfgWriteLocked()){
+    console.warn('[pullCfg] bỏ qua ghi đè local — đang khóa sau reset MK');
+    return getAuthConfig() || cfg;
+  }
   setAuthConfig(cfg);
   return cfg;
 }
@@ -7753,6 +7759,8 @@ async function resetUserPw(idx){
       u.mustUseEmail=true;
     }
     setAuthConfig(cfg);
+    // v3.04.03: khóa pull cfg ghi đè local trong 12s — bảo vệ MK vừa tạo khỏi bị cfg cloud cũ đè
+    _cfgResetGuardUntil = Date.now() + 12000;
     try{ logAuditEvent('reset_pw',{target:u.name,by:actorName()}); }catch(e){}
     // v2.07.0: đẩy lên cloud NGAY với chính mật khẩu vừa sinh —
     // cfg local và cloud chắc chắn cùng 1 mật khẩu, không thể lệch.
@@ -10242,6 +10250,18 @@ function timeAgo(iso){
    pull sau. iOS read-only: cloudSync tự chuyển push→pull nên vẫn an toàn. */
 async function syncBoth(opts){
   opts=opts||{};
+  // v3.04.05: AN TOÀN cho máy mới/trắng — nếu máy gần như KHÔNG có dữ liệu nghiệp vụ
+  //   thì CHỈ PULL (kéo về), KHÔNG push (tránh đẩy dữ liệu rỗng đè cloud).
+  //   NV chỉ có 1 nút Sync nên không tự phân biệt được — app tự xử lý.
+  const _dataCount = (S.receivables||[]).length + (S.payables||[]).length
+                   + (S.cashFunds||[]).length + (S.projects||[]).length;
+  if(_dataCount === 0){
+    try{
+      if(opts.interactive) toast('Máy chưa có dữ liệu — đang TẢI VỀ từ cloud...');
+      await cloudSync('pull', opts);
+    }catch(e){ console.warn('[syncBoth] pull (máy trắng) lỗi:', e&&e.message); }
+    return;
+  }
   try{
     await cloudSync('push', opts);
   }catch(e){ console.warn('[syncBoth] push lỗi (vẫn thử pull):', e&&e.message); }
@@ -12186,6 +12206,10 @@ function saveState(){
 
 let _autoSyncTimer=null;
 let _suppressAutoSync=false;  // Set true temporarily to block auto-push (e.g., during login pull)
+/* v3.04.03: sau khi reset MK NV, khóa việc PULL cfg auth ghi đè local trong vài giây —
+   tránh pull kéo cfg cloud CŨ (chưa kịp có MK mới) về đè mất MK vừa tạo. */
+let _cfgResetGuardUntil=0;
+function _cfgWriteLocked(){ return Date.now() < _cfgResetGuardUntil; }
 
 /* ============================================================
    AUTO-LOGOUT khi idle (không tương tác trong X phút)
@@ -26176,7 +26200,13 @@ function _renderMultiRowModal(){
 
     <!-- HEADER -->
     <div style="background:var(--paper-2);padding:12px 14px;border:1px solid var(--rule);margin-bottom:12px">
-      <div style="font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);font-weight:600;margin-bottom:8px">Header phiếu</div>
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+        <div style="font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);font-weight:600">Header phiếu</div>
+        ${isPayable?`<div>
+          <input type="file" id="mr-invoice-file" accept=".csv,.pdf" style="display:none" onchange="_mrReadInvoiceFile(this.files[0])">
+          <button type="button" class="btn-sec" style="font-size:11px;padding:5px 12px" onclick="document.getElementById('mr-invoice-file').click()" title="Đọc hóa đơn CSV hoặc PDF (có text) → app tự điền. Khác 2 loại này thì nhập tay.">📎 Đọc hóa đơn (CSV/PDF)</button>
+        </div>`:''}
+      </div>
       <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:10px">
         <div class="field" style="margin:0">
           <label style="font-size:10px">Ngày phiếu</label>
@@ -26430,6 +26460,173 @@ function _mrLineSegment(tmpId, value){
   const line = _multiRowState.lines.find(l=>l.tmpId===tmpId);
   if(!line) return;
   line.segment = value;
+}
+
+/* ============================================================
+   v3.04.04: ĐỌC HÓA ĐƠN (CSV / PDF có text) → tự điền phiếu AP nhiều dòng.
+   Ngoài 2 loại này (ảnh scan, PDF không text) → NV nhập tay.
+   ============================================================ */
+let _invoiceParsed = null;  // kết quả đọc tạm để xem trước
+
+/* Lazy-load script CDN (papaparse / pdf.js) — app offline-first nên chỉ tải khi NV bấm đọc. */
+function _loadScriptOnce(src, globalCheck){
+  return new Promise((resolve,reject)=>{
+    if(globalCheck && window[globalCheck]) return resolve();
+    const ex=document.querySelector(`script[data-src="${src}"]`);
+    if(ex){ ex.addEventListener('load',()=>resolve()); ex.addEventListener('error',()=>reject(new Error('load fail'))); return; }
+    const s=document.createElement('script');
+    s.src=src; s.dataset.src=src;
+    s.onload=()=>resolve(); s.onerror=()=>reject(new Error('Không tải được thư viện (cần mạng): '+src));
+    document.head.appendChild(s);
+  });
+}
+
+async function _mrReadInvoiceFile(file){
+  if(!file) return;
+  const ext=(file.name.split('.').pop()||'').toLowerCase();
+  try{
+    if(ext==='csv'){
+      toast('Đang đọc CSV...');
+      await _loadScriptOnce('https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js','Papa');
+      const text=await file.text();
+      const parsed=Papa.parse(text,{header:true,skipEmptyLines:true});
+      _invoiceParsed=_invoiceFromCsv(parsed.data);
+    } else if(ext==='pdf'){
+      toast('Đang đọc PDF...');
+      await _loadScriptOnce('https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js','pdfjsLib');
+      if(window.pdfjsLib) pdfjsLib.GlobalWorkerOptions.workerSrc='https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+      const buf=await file.arrayBuffer();
+      const pdf=await pdfjsLib.getDocument({data:buf}).promise;
+      let fullText='';
+      for(let i=1;i<=pdf.numPages;i++){
+        const page=await pdf.getPage(i);
+        const tc=await page.getTextContent();
+        fullText += tc.items.map(it=>it.str).join(' ')+'\n';
+      }
+      if(!fullText.trim()){ toast('PDF không có text (có thể là ảnh scan) — vui lòng nhập tay','bad'); return; }
+      _invoiceParsed=_invoiceFromPdfText(fullText);
+    } else {
+      toast('Chỉ hỗ trợ CSV hoặc PDF (có text). Loại khác nhập tay.','bad'); return;
+    }
+    if(!_invoiceParsed || !_invoiceParsed.lines.length){ toast('Không tách được dữ liệu — vui lòng nhập tay','bad'); return; }
+    _showInvoicePreview();
+  }catch(e){
+    console.warn('[invoice-read]',e);
+    toast('Lỗi đọc hóa đơn: '+(e.message||e)+' — nhập tay nếu cần','bad');
+  }
+}
+
+/* CSV → {header, lines[]}. Tự dò cột theo tên tiêu đề thường gặp. */
+function _invoiceFromCsv(rows){
+  if(!rows||!rows.length) return null;
+  const keys=Object.keys(rows[0]||{});
+  const find=(cands)=>keys.find(k=>cands.some(c=>k.toLowerCase().replace(/\s/g,'').includes(c)));
+  const kPartner=find(['ncc','nhàcungcấp','nhacungcap','tênncc','seller','nguoiban','người bán'.replace(/\s/g,'')]);
+  const kInv=find(['sốhóađơn','sohoadon','sốhđ','sohd','invoice','sốhoáđơn']);
+  const kDate=find(['ngày','ngay','date','ngàyhđ']);
+  const kDesc=find(['nộidung','noidung','diễngiải','dienngiai','diengiai','môtả','description']);
+  const kNet=find(['chưavat','chuavat','tiềntrướcthuế','truocthue','net','thànhtiền','thanhtien']);
+  const kVat=find(['tiềnvat','tienvat','thuếgtgt','thuegtgt','vatamount']);
+  const kVatPct=find(['%vat','thuếsuất','thuesuat','vatrate','vat%']);
+  const kCcy=find(['loạitiền','loaitien','tiềntệ','tiente','ccy','currency']);
+  const lines=rows.map(r=>{
+    const net=_unformatNumber(r[kNet]||'')||0;
+    const vat=_unformatNumber(r[kVat]||'')||0;
+    let vatPct=kVatPct?(parseFloat(String(r[kVatPct]).replace('%',''))||0):0;
+    if(!vatPct && net>0 && vat>0) vatPct=Math.round(vat/net*100);
+    return {
+      partner:(kPartner?r[kPartner]:'')||'',
+      invoiceNo:(kInv?r[kInv]:'')||'',
+      issueDate:_normInvDate(kDate?r[kDate]:''),
+      desc:(kDesc?r[kDesc]:'')||'',
+      amountNet:net, vatPercent:vatPct, vatAmount:vat,
+      ccy:((kCcy?r[kCcy]:'')||'VND').toUpperCase().trim()||'VND'
+    };
+  }).filter(l=>l.amountNet>0 || l.invoiceNo || l.partner);
+  return {source:'csv', lines};
+}
+
+/* PDF text → cố tách 1 hóa đơn (NCC, số HĐ, ngày, MST, tiền, VAT). Heuristic cho HĐ điện tử VN. */
+function _invoiceFromPdfText(text){
+  const t=text.replace(/\s+/g,' ');
+  const grab=(re)=>{ const m=t.match(re); return m?m[1].trim():''; };
+  const invoiceNo=grab(/(?:Số|No\.?|Number)\s*[:\.]?\s*([A-Z0-9\-\/]{3,20})/i);
+  const mst=grab(/(?:Mã số thuế|MST|Tax code)\s*[:\.]?\s*([0-9\-]{10,14})/i);
+  const seller=grab(/(?:Đơn vị bán hàng|Người bán|Tên đơn vị|Seller)\s*[:\.]?\s*([^0-9]{3,60}?)(?:Mã số|MST|Địa chỉ|Address)/i);
+  let dateStr=grab(/ngày\s*(\d{1,2})\s*tháng\s*(\d{1,2})\s*năm\s*(\d{4})/i);
+  let issueDate='';
+  const dmy=t.match(/ngày\s*(\d{1,2})\s*tháng\s*(\d{1,2})\s*năm\s*(\d{4})/i) || t.match(/(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})/);
+  if(dmy){ const d=dmy[1].padStart(2,'0'),mo=dmy[2].padStart(2,'0'),y=dmy[3]; issueDate=`${y}-${mo}-${d}`; }
+  const totalNet=_unformatNumber(grab(/(?:Cộng tiền hàng|Tiền hàng|Thành tiền chưa thuế|Cộng tiền chưa thuế)\s*[:\.]?\s*([\d\.,]+)/i))||0;
+  const vatAmt=_unformatNumber(grab(/(?:Tiền thuế GTGT|Thuế GTGT)\s*[:\.]?\s*([\d\.,]+)/i))||0;
+  const vatPct=parseFloat(grab(/thuế suất.*?(\d{1,2})\s*%/i))||(totalNet&&vatAmt?Math.round(vatAmt/totalNet*100):0);
+  const grandTotal=_unformatNumber(grab(/(?:Tổng cộng tiền thanh toán|Tổng tiền thanh toán|Tổng cộng)\s*[:\.]?\s*([\d\.,]+)/i))||0;
+  const net = totalNet || (grandTotal && vatAmt ? grandTotal-vatAmt : grandTotal);
+  return {source:'pdf', mst, lines:[{
+    partner:seller||'', invoiceNo:invoiceNo||'', issueDate,
+    desc:'', amountNet:net||0, vatPercent:vatPct||0, vatAmount:vatAmt||0, ccy:'VND'
+  }]};
+}
+
+function _normInvDate(s){
+  if(!s) return '';
+  s=String(s).trim();
+  let m=s.match(/(\d{4})[\-\/](\d{1,2})[\-\/](\d{1,2})/); if(m) return `${m[1]}-${m[2].padStart(2,'0')}-${m[3].padStart(2,'0')}`;
+  m=s.match(/(\d{1,2})[\-\/](\d{1,2})[\-\/](\d{4})/); if(m) return `${m[3]}-${m[2].padStart(2,'0')}-${m[1].padStart(2,'0')}`;
+  return '';
+}
+
+/* Modal xem trước dữ liệu đọc được — NV kiểm rồi bấm Điền vào phiếu. */
+function _showInvoicePreview(){
+  const p=_invoiceParsed; if(!p) return;
+  const rows=p.lines.map((l,i)=>`<tr>
+    <td style="text-align:center;color:var(--muted)">${i+1}</td>
+    <td>${esc(l.partner||'—')}</td>
+    <td class="mono">${esc(l.invoiceNo||'—')}</td>
+    <td class="mono">${esc(l.issueDate||'—')}</td>
+    <td>${esc(l.desc||'—')}</td>
+    <td class="r mono">${l.amountNet?fmt(l.amountNet,l.ccy):'—'}</td>
+    <td class="r mono">${l.vatPercent?l.vatPercent+'%':'0%'}</td>
+    <td class="mono">${esc(l.ccy||'VND')}</td>
+  </tr>`).join('');
+  const body=`<div style="font-size:12px">
+    <div class="help-callout info" style="margin:0 0 10px">📎 Đọc từ <b>${p.source==='csv'?'CSV':'PDF'}</b> · ${p.lines.length} dòng${p.mst?` · MST người bán: <b>${esc(p.mst)}</b>`:''}.
+    Kiểm tra rồi bấm "Điền vào phiếu". <b>App chỉ điền nháp — bạn vẫn sửa + Lưu như thường.</b></div>
+    <div class="tbl-scroll"><table class="tbl" style="font-size:11px"><thead><tr>
+      <th>#</th><th>NCC</th><th>Số HĐ</th><th>Ngày</th><th>Nội dung</th><th class="r">Trước thuế</th><th class="r">%VAT</th><th>Tiền</th>
+    </tr></thead><tbody>${rows}</tbody></table></div>
+    <div style="font-size:11px;color:var(--muted);margin-top:8px">⚠ Đây là dữ liệu máy đọc tự động — có thể sai/thiếu với hóa đơn lạ layout. Luôn đối chiếu với bản gốc trước khi gửi duyệt.</div>
+  </div>`;
+  openModal('📎 Xem trước hóa đơn đã đọc', body,
+    `<button class="btn-sec" onclick="closeModal()">Hủy</button>
+     <button class="btn-primary" onclick="_applyInvoiceToForm()">✓ Điền vào phiếu</button>`);
+}
+
+/* Áp dữ liệu đọc được vào _multiRowState rồi render lại phiếu. */
+function _applyInvoiceToForm(){
+  const p=_invoiceParsed; if(!p||!_multiRowState) return;
+  const s=_multiRowState;
+  // Header: lấy NCC + ngày + ccy từ dòng đầu (nếu trống)
+  const first=p.lines[0]||{};
+  if(first.partner) s.partner=first.partner;
+  if(first.issueDate) s.issueDate=first.issueDate;
+  if(first.ccy) s.ccy=first.ccy;
+  // Thay các dòng bằng dòng đọc được (giữ segment mặc định hiện tại)
+  s.lines = p.lines.map(l=>{
+    const vat=l.vatAmount||Math.round((l.amountNet||0)*(l.vatPercent||0)/100);
+    return {
+      tmpId:'L'+Math.random().toString(36).slice(2,8),
+      invoiceNo:l.invoiceNo||'', desc:l.desc||'',
+      amountNet:l.amountNet||0, vatPercent:l.vatPercent||0,
+      vatAmount:vat, amountGross:(l.amountNet||0)+vat,
+      costCategory:'', segment:s.segment||'OTHER', ccy:l.ccy||s.ccy||'VND',
+      dueDate:'', vesselId:'', projectId:''
+    };
+  });
+  _invoiceParsed=null;
+  closeModal();
+  _renderMultiRowModal();
+  toast('✓ Đã điền '+s.lines.length+' dòng — kiểm tra loại CP/mảng rồi Lưu');
 }
 
 function _mrFieldChange(field, value){
@@ -27965,19 +28162,20 @@ function editOpVessel(id){
 }
 function fillOpVesselPicker(){
   const sel=document.getElementById('opt-vessel');
+  // v3.04.09: nếu element chưa có trong DOM (tab chưa dựng xong) → thử lại sau chút
+  if(!sel){ setTimeout(()=>{ try{ fillOpVesselPicker(); }catch(e){} }, 300); return; }
   // v1.91.0: đổ danh sách ngoại tệ vào ô opt-ccy (sửa lỗi ${c} hiện literal)
   const ccySel=document.getElementById('opt-ccy');
   if(ccySel && !ccySel.options.length){
     ccySel.innerHTML=OP_CURRENCIES.map(c=>`<option value="${c}">${c}</option>`).join('');
     try{ opUsdRecalc(); }catch(e){}
   }
-  if(!sel)return;
   const cur=sel.value;
   // Only allow tàu QL hộ NV được gán
   const allowedIds=userAssignedOpVesselIds();
   // v1.42.0: active only (NOT archived) for new entry
   const visible=S.opVessels.filter(v=>allowedIds.includes(v.id) && !v.archived);
-  sel.innerHTML=visible.map(v=>`<option value="${v.id}">${esc(v.name)} · ${esc(v.owner) || ''}</option>`).join('');
+  sel.innerHTML=visible.map(v=>`<option value="${v.id}">${esc(v.name)}${v.owner?(' · '+esc(v.owner)):''}</option>`).join('');
   if(cur && visible.find(v=>v.id===cur)) sel.value=cur;
 }
 /* v2.71.5: Số tháng quản lý từ 'Ngày bắt đầu QL' đến nay.
@@ -30103,6 +30301,7 @@ function _opClearFilters(){
    Theo BỘ LỌC tab 06 (tàu/tháng/người nhập/tìm) cho phần Chi hộ; AP lọc theo tháng+người nhập tương ứng. */
 function opExportExcel(){
   if(typeof XLSX==='undefined'){ toast('Thiếu thư viện Excel','bad'); return; }
+  const me=actorName();
   const fM=(document.getElementById('op-filter-month')||{}).value||'';
   const fC=(document.getElementById('op-filter-creator')||{}).value||'';
   const fN=((document.getElementById('op-filter-partner')||{}).value||'').trim().toLowerCase();
@@ -30121,9 +30320,18 @@ function opExportExcel(){
 
   // ===== 1) THU/CHI HỘ (tab 06) theo bộ lọc =====
   const allowedIds=userAssignedOpVesselIds();
+  // v3.04.08: NV thường CHỈ tải phần MÌNH nhập (không tải của NV khác). Admin/KT (canSeeAllRecords) tải hết.
+  const _seeAll = (typeof canSeeAllRecords==='function') ? canSeeAllRecords() : isAdmin();
+  const _mineOnly = t => {
+    if(_seeAll) return true;
+    // với chi hộ ảo từ AP: so theo người nhập/nộp phiếu AP gốc
+    if(t._fromAp){ const ap=(S.payables||[]).find(x=>x.id===t._apId); return ap ? (ap.createdBy===me || ap.submittedBy===me) : false; }
+    return t.createdBy===me;
+  };
   const _apVirtual=_opApVirtualTx().filter(t=>allowedIds.includes(t.vesselId));
   const opAll=S.opTransactions.filter(t=>allowedIds.includes(t.vesselId)).concat(_apVirtual);
   opAll.filter(t=>{
+    if(!_mineOnly(t)) return false;     // v3.04.08: giới hạn theo người nhập (NV thường)
     if(fV && t.vesselId!==fV) return false;
     if(fM && !(t.date||'').startsWith(fM)) return false;
     if(fC && t.createdBy!==fC) return false;
@@ -30144,35 +30352,17 @@ function opExportExcel(){
     ]);
   });
 
-  // ===== 2) AP — Sổ Phải trả (chỉ phiếu NV được xem) =====
-  // NV thường chỉ thấy phiếu mình nhập; admin/KT thấy hết. Tôn trọng canSeeAllRecords.
-  const me=actorName();
-  (S.payables||[]).forEach(r=>{
-    if(r._cashClear||r._isYtdHistorical) return;  // bỏ phiếu hệ thống
-    if(!canSeeAllRecords() && (r.createdBy!==me && r.submittedBy!==me)) return;
-    if(fM && !((r.issueDate||r.dueDate||'').startsWith(fM))) return;
-    if(fC && r.createdBy!==fC && r.submittedBy!==fC) return;
-    if(fN){ const hay=((r.partner||'')+' '+(r.desc||'')+' '+(r.invoiceNo||'')).toLowerCase(); if(!hay.includes(fN)) return false; }
-    rows.push([
-      'Phải trả',
-      r.issueDate||r.dueDate||'',
-      r.partner||'',
-      r.desc||'',
-      r.invoiceNo||'',
-      (+r.amount||0),
-      r.ccy||'',
-      r.createdBy||r.submittedBy||'',
-      apStt(r)
-    ]);
-  });
+  // v3.04.06: Sổ tab 06 CHỈ liên quan tàu quản lý hộ chủ tàu.
+  //   AP gắn tàu QL hộ ĐÃ được gộp vào phần (1) qua _apVirtual (chi hộ ảo).
+  //   BỎ phần "AP toàn công ty" trước đây — nó kéo cả công nợ không liên quan tàu QL hộ vào file (SAI phạm vi).
 
-  if(!rows.length){ toast('Không có phiếu nào khớp bộ lọc','warn'); return; }
+  if(!rows.length){ toast('Không có giao dịch thu/chi hộ nào khớp bộ lọc','warn'); return; }
   rows.sort((a,b)=>(a[1]||'').localeCompare(b[1]||''));
 
   // ---- build sheet ----
-  const title=[`BẢN KIỂM TRA NHẬP LIỆU — SEAHORSE MARINE & ENERGY JSC`];
-  const sub=[`Phạm vi: ${fV?(((S.opVessels||[]).find(v=>v.id===fV)||{}).name||''):'Tất cả tàu'}`
-    +` · Tháng: ${fM||'Tất cả'} · Người nhập: ${fC||'Tất cả'}`
+  const title=[`SỔ THU / CHI HỘ TÀU QUẢN LÝ HỘ — SEAHORSE MARINE & ENERGY JSC`];
+  const sub=[`Phạm vi: ${fV?(((S.opVessels||[]).find(v=>v.id===fV)||{}).name||''):'Tất cả tàu QL hộ'}`
+    +` · Tháng: ${fM||'Tất cả'} · Người nhập: ${_seeAll?(fC||'Tất cả'):me}`
     +` · Xuất: ${todayISO()} bởi ${me}`];
   const header=['Nguồn','Ngày','Nhà cung cấp','Diễn giải','Số HĐ/Hóa đơn','Giá trị','Tiền tệ','NV nhập','Tình trạng hồ sơ'];
   const aoa=[title,sub,[],header,...rows];
@@ -30193,10 +30383,10 @@ function opExportExcel(){
     if(cell && typeof cell.v==='number'){ cell.t='n'; cell.z='#,##0'; }
   }
   const wb=XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb,ws,'Kiểm tra nhập liệu');
-  const fname=`KiemTra_NhapLieu_${fM||'TatCa'}`.replace(/[^\w\-]/g,'_')+'.xlsx';
+  XLSX.utils.book_append_sheet(wb,ws,'Thu-Chi hộ tàu QL');
+  const fname=`ThuChiHo_TauQL_${fM||'TatCa'}`.replace(/[^\w\-]/g,'_')+'.xlsx';
   XLSX.writeFile(wb,fname);
-  toast(`Đã xuất ${rows.length} phiếu (AP + Chi hộ) ra Excel`,'good');
+  toast(`Đã xuất ${rows.length} giao dịch thu/chi hộ ra Excel`,'good');
 }
 function renderOpTxList(){
   // Scope: NV chỉ thấy giao dịch của tàu QL hộ được gán
@@ -38421,9 +38611,7 @@ const EXCEL_TEMPLATES={
         aliases:['Contract no','Số HĐ','HD','Hợp đồng']},
       {key:'invoiceNo',    label:'Số hóa đơn',                          required:false, type:'text',
         aliases:['Invoice no','Số HD','HD VAT','Hóa đơn']},
-      // v2.70.0: VAT đầu vào — chỉ Chi hộ. Số tiền cột trên là NET (chưa VAT).
-      {key:'vatPercent',   label:'Thuế suất VAT % (chỉ Chi hộ: 0/5/8/10)', required:false, type:'number',
-        aliases:['VAT','VAT %','Thuế suất','Thue suat','VAT percent']},
+      // v3.04.07: Bỏ cột VAT — chi hộ tàu QL hộ là GROSS (số tiền đã gồm VAT, không tách).
       // v3.02.62: Loại khoản chi — tách Lương thuyền viên trong báo cáo chủ tàu
       {key:'opCat',        label:'Loại khoản (Chi hộ thường / Lương thuyền viên)', required:false, type:'text',
         aliases:['Loại khoản','Loại khoản chi','Loai khoan','Crew','Lương TV','Luong TV']},
@@ -40686,10 +40874,12 @@ function excelConfirmImport(){
       const opCcy = (d.ccy||'USD').toUpperCase();
       const opFx = opCcy==='USD' ? 1 : (+d.fxToUsd||0);
       const opAmt = +d.amount || 0;
-      // v2.70.0: VAT — chỉ Chi hộ; amount nhập = NET (chưa VAT)
-      const opVatPct = isChi ? _parseVatPercent(d.vatPercent) : 0;  // v2.99.87
-      const opVatAmt = Math.round(opAmt*opVatPct/100*100)/100;
-      const opGross = opAmt + opVatAmt;
+      // v3.04.07: Chi hộ tàu QL hộ = GROSS. Số tiền nhập ĐÃ GỒM VAT (nếu có) —
+      //   toàn bộ là khoản chi hộ chủ tàu, KHÔNG tách VAT, KHÔNG lên báo cáo thuế GTGT công ty.
+      //   Nhất quán với form nhập tay (ô "Số tiền (tổng đã gồm VAT)"). App KHÔNG tự cộng thêm VAT.
+      const opVatPct = 0;
+      const opVatAmt = 0;
+      const opGross = opAmt;
       // v3.02.62: Loại khoản — "Lương thuyền viên"/"crew" → CREW_SALARY (tách riêng báo cáo chủ tàu)
       const _ocRaw = String(d.opCat||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase();
       const opCatVal = isChi && (_ocRaw.includes('luong')||_ocRaw.includes('crew')) ? 'CREW_SALARY' : '';
@@ -40706,7 +40896,7 @@ function excelConfirmImport(){
         khoanPeriod: (function(){ const p=String(d.khoanPeriod||'').trim(); if(/^\d{4}-\d{2}/.test(p)) return p.slice(0,7); return (d.date||'').slice(0,7); })(), // v3.03.40
         ccy: opCcy,                                              // v1.89.0
         fxToUsd: opFx,                                           // v1.89.0
-        amountUsd: opCcy==='USD' ? opAmt : (opFx>0?opAmt/opFx:0), // v1.89.0 (net)
+        amountUsd: opCcy==='USD' ? opAmt : (opFx>0?opAmt/opFx:0), // v3.04.07 (gross)
         vatPercent: opVatPct,                                    // v2.70.0
         vatAmount: opVatAmt,                                     // v2.70.0
         amountGross: opGross,                                    // v2.70.0
