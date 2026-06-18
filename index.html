@@ -2977,7 +2977,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.03.100';            // bumped on each release
+const APP_VERSION='3.04.01';            // bumped on each release
 
 /* v2.62.0: Token xác thực backend — PHẢI khớp API_TOKEN trong Apps Script (Code.gs).
    Mọi request tới Apps Script tự động được gắn token qua lớp bọc fetch bên dưới.
@@ -4310,8 +4310,25 @@ async function pullCfgFromCloud(scriptUrl, userName, password){
   if(payload.v!==2 || !Array.isArray(payload.wraps)){
     throw new Error('Cfg cloud schema cũ — admin phải re-push để upgrade lên schema v2');
   }
-  // Find user's wrap (case-insensitive)
-  const wrap=payload.wraps.find(w=>w.name.toLowerCase()===userName.toLowerCase());
+  // v3.03.101: NV chuyển sang đăng nhập EMAIL nhưng wrap trên cloud lưu theo u.name (tên cũ).
+  //   Nếu userName là email → giải mã cfg tạm bằng cách dò user có email khớp, lấy u.name thật
+  //   để tìm wrap. Tránh lỗi "Không tìm thấy wrap" khi NV gõ email.
+  // Tìm wrap: thử khớp trực tiếp; nếu userName chứa '@' và không thấy, sẽ map sau khi giải mã cfg.
+  let wrapName = userName;
+  let wrap=payload.wraps.find(w=>w.name.toLowerCase()===userName.toLowerCase());
+  if(!wrap && userName.indexOf('@')!==-1){
+    // userName là email — chưa khớp wrap nào. Thử từng wrap: giải mã cfg, tìm user có email khớp.
+    for(const w of payload.wraps){
+      try{
+        const mk=await unwrapCfgMasterKey(w, password);
+        const cfgTry=await decryptCfgWithMasterKey({iv:payload.iv, ct:payload.ct}, mk);
+        const uMatch=(cfgTry.users||[]).find(x=>(x.email||'').toLowerCase()===userName.toLowerCase());
+        if(uMatch && (uMatch.name||'').toLowerCase()===w.name.toLowerCase()){
+          wrap=w; wrapName=w.name; break;  // wrap này chính là của NV (email khớp + tên khớp wrap)
+        }
+      }catch(e){ /* mật khẩu không mở được wrap này → thử wrap kế */ }
+    }
+  }
   if(!wrap){
     throw new Error(`Không tìm thấy wrap cho "${userName}". ${userName.toLowerCase()==='admin'?'':'NV cần đăng nhập 1 lần trên máy gốc trước (để tạo wrap), HOẶC admin re-push cfg với password NV.'}`);
   }
@@ -4332,7 +4349,9 @@ async function pullCfgFromCloud(scriptUrl, userName, password){
     const hashTest=await sha256Hex(password + cfg.admin.salt);
     if(hashTest !== cfg.admin.hash) throw new Error('Mật khẩu admin không khớp với hash trong cfg');
   } else {
-    const u=(cfg.users||[]).find(x=>(x.name||'').toLowerCase()===userName.toLowerCase());
+    // v3.03.101: NV có thể đăng nhập bằng email → tìm theo name HOẶC email
+    const uname=userName.toLowerCase();
+    const u=(cfg.users||[]).find(x=>(x.name||'').toLowerCase()===uname || (x.email||'').toLowerCase()===uname);
     if(!u) throw new Error(`User "${userName}" không tồn tại trong cfg`);
     // Verify password matches user hash
     const hashTest=await sha256Hex(password + u.salt);
