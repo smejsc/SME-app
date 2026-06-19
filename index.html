@@ -2974,7 +2974,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.04.34';            // bumped on each release
+const APP_VERSION='3.04.36';            // bumped on each release
 
 /* v2.62.0: Token xác thực backend — PHẢI khớp API_TOKEN trong Apps Script (Code.gs).
    Mọi request tới Apps Script tự động được gắn token qua lớp bọc fetch bên dưới.
@@ -11543,13 +11543,49 @@ function mergeByID(cloudArr, localArr, idField, skipTombstone, fieldName){
     // v3.04.34: CHẶN THEO NỘI DUNG — loại bản ghi khớp khóa đã purge (bất kể ID).
     //   Chỉ áp cho payables / opTransactions (bút toán tiền). Danh mục nền không đụng.
     if(fieldName==='payables' || fieldName==='opTransactions'){
+      // v3.04.35: LUẬT THEO SỐ HĐ (INVRULE) — giữ đúng bản admin, xóa biến thể khác cùng HĐ.
+      const _inv=_invRuleMap();
+      if(Object.keys(_inv).length){
+        const _ni=s=>String(s||'').split('/')[0].trim().toUpperCase();
+        merged=merged.filter(r=>{
+          const keep=_inv[_ni(r.invoiceNo)];
+          if(!keep) return true;
+          return keep.has(_contentKey(r));
+        });
+      }
       const pc=_purgedContentSet(fieldName);
       if(pc.size){
         merged=merged.filter(r=>!pc.has(_contentKey(r)));
       }
+      // v3.04.34: DEDUP — 2+ bản CÙNG khóa nội dung (trùng y hệt, desc giống) → giữ 1 (ID nhỏ nhất/ổn định).
+      merged=_dedupByContent(merged);
     }
   }
   return {merged, conflicts};
+}
+/* v3.04.34: gộp bản trùng cùng khóa nội dung — giữ bản 'gốc' (createdAt sớm nhất; hòa → id nhỏ nhất),
+   bia-mộ-hóa các bản dư để không sống lại qua sync. */
+function _dedupByContent(arr){
+  if(!Array.isArray(arr) || arr.length<2) return arr;
+  const seen=new Map();  // key -> record giữ
+  const out=[];
+  // sắp xếp ổn định: createdAt tăng dần, rồi id tăng dần → bản đầu là bản giữ
+  const sorted=arr.slice().sort((a,b)=>{
+    const ta=Date.parse(a&&a.createdAt||'')||0, tb=Date.parse(b&&b.createdAt||'')||0;
+    if(ta!==tb) return ta-tb;
+    return String(a&&a.id||'').localeCompare(String(b&&b.id||''));
+  });
+  sorted.forEach(r=>{
+    const k=_contentKey(r);
+    if(!k){ out.push(r); return; }
+    if(seen.has(k)){
+      // bản dư → bia mộ (chặn merge-by-id sống lại)
+      try{ if(r&&r.id) markDeleted(r.id); }catch(e){}
+    } else {
+      seen.set(k, r); out.push(r);
+    }
+  });
+  return out;
 }
 /* v3.04.34: khóa NỘI DUNG của 1 bút toán — inv(prefix)|val(round)|date|ccy.
    Dùng để chặn trùng sống lại dù ID khác (re-import / máy NV chưa sạch). */
@@ -11565,10 +11601,17 @@ function _contentKey(r){
   return inv+'|'+amt+'|'+date+'|'+ccy+'|'+d;
 }
 function _purgedContent(){ if(!Array.isArray(S.purgedContent)) S.purgedContent=[]; return S.purgedContent; }
+/* v3.04.35: bản đồ LUẬT theo số HĐ — invUpper -> Set(keepKeys). Bản ghi {invRule, keepKeys} trong purgedContent. */
+function _invRuleMap(){
+  const m={};
+  _purgedContent().forEach(p=>{ if(p && p.invRule){ m[String(p.invRule).toUpperCase()]=new Set(p.keepKeys||[]); } });
+  return m;
+}
 function _purgedContentSet(field){
   const s=new Set();
   _purgedContent().forEach(p=>{
     if(!p||!p.key) return;
+    if(p.invRule) return;  // v3.04.35: bản ghi INVRULE không phải khóa nội dung — bỏ qua
     if(!p.field || p.field===field) s.add(p.key);
   });
   return s;
@@ -11633,6 +11676,29 @@ function enforcePurgedContent(){
   const list=_purgedContent();
   if(!list.length) return 0;
   let removed=0;
+  // v3.04.35: LUẬT THEO SỐ HĐ (INVRULE) — "với HĐ X, chỉ giữ bản có khóa ∈ keepKeys; xóa mọi bản khác cùng HĐ".
+  //   Dùng để lan 'bản đúng' từ máy admin sang máy NV mà không cần biết ID.
+  const invRules={};  // invUpper -> Set(keepKeys)
+  list.forEach(p=>{ if(p && p.invRule){ invRules[String(p.invRule).toUpperCase()]=new Set(p.keepKeys||[]); } });
+  const _ni=s=>String(s||'').split('/')[0].trim().toUpperCase();
+  if(Object.keys(invRules).length){
+    ['payables','opTransactions'].forEach(f=>{
+      if(!Array.isArray(S[f])) return;
+      const before=S[f].length;
+      const victims=S[f].filter(r=>{
+        const iv=_ni(r.invoiceNo);
+        const keep=invRules[iv];
+        if(!keep) return false;            // HĐ không có luật → giữ
+        return !keep.has(_contentKey(r));  // có luật mà khóa KHÁC bản giữ → xóa
+      });
+      if(victims.length){
+        try{ markDeleted(victims.map(r=>r.id).filter(Boolean), f); }catch(e){}
+        const vset=new Set(victims.map(r=>r.id));
+        S[f]=S[f].filter(r=>!vset.has(r.id));
+        removed += (before - S[f].length);
+      }
+    });
+  }
   ['payables','opTransactions'].forEach(f=>{
     if(!Array.isArray(S[f])) return;
     const pc=_purgedContentSet(f);
@@ -11645,7 +11711,14 @@ function enforcePurgedContent(){
       removed += (before - S[f].length);
     }
   });
-  if(removed>0) console.log('[enforcePurgedContent] dọn', removed, 'bản trùng theo nội dung');
+  // v3.04.34: DEDUP tại chỗ — gộp bản trùng y hệt (cùng khóa nội dung) còn sót trên máy.
+  ['payables','opTransactions'].forEach(f=>{
+    if(!Array.isArray(S[f])) return;
+    const before=S[f].length;
+    S[f]=_dedupByContent(S[f]);
+    removed += (before - S[f].length);
+  });
+  if(removed>0) console.log('[enforcePurgedContent] dọn', removed, 'bản trùng (purge nội dung + dedup)');
   return removed;
 }
 /* v3.04.34: Console — XÓA VĨNH VIỄN 1 bút toán theo NỘI DUNG (inv+val+date+ccy).
