@@ -2974,7 +2974,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.04.33';            // bumped on each release
+const APP_VERSION='3.04.34';            // bumped on each release
 
 /* v2.62.0: Token xác thực backend — PHẢI khớp API_TOKEN trong Apps Script (Code.gs).
    Mọi request tới Apps Script tự động được gắn token qua lớp bọc fetch bên dưới.
@@ -5414,7 +5414,7 @@ const TAB_TO_FIELDS={
    IMPORTANT v1.39.1: bankAccounts/bankSnapshots/loans REMOVED from shared — chỉ user có quyền tab 'banking' mới load. */
 // v1.57.0: auditLog REMOVED from shared sync — stays local only (admin trên 1 máy chính)
 // Trade-off: nếu admin đăng nhập máy khác → audit log empty. Đổi lại: giảm payload size.
-const SHARED_FIELDS=['fxRate','fxRateAt','displayCcy','companyInfo','meta','presence','vesselExpenseCats','omProjectExpenseCats','hrExpenseCats','qnExpenseCats','departments','vendors','expenseTypes','revenueTypes','companies','deletedIds','purgedBatches','auditLogShared','cashflowConfig'];
+const SHARED_FIELDS=['fxRate','fxRateAt','displayCcy','companyInfo','meta','presence','vesselExpenseCats','omProjectExpenseCats','hrExpenseCats','qnExpenseCats','departments','vendors','expenseTypes','revenueTypes','companies','deletedIds','purgedBatches','purgedContent','auditLogShared','cashflowConfig'];
 /* All possible data fields (used by admin or for save-merge) */
 const ALL_DATA_FIELDS=[
   'plans','dockPlans','projects','vessels','onhires','events','dailyReports',
@@ -11434,6 +11434,7 @@ function defaultState(){
     lockedHistYears:[],  // v2.39.0: danh sách năm số liệu lịch sử đã KHÓA SỔ (admin khóa — không sửa/xóa được tới khi mở khóa)
     deletedIds:[],  // v2.40.0: danh sách ID đã xóa (tombstone) — [{id,at}] — chống bản ghi hồi sinh qua sync
     purgedBatches:[],  // v3.01.26: lô import bị XÓA VĨNH VIỄN — [{batchId,field,at}] — chặn lô rác sống lại từ cloud/snapshot dù bia mộ bị dọn
+    purgedContent:[],  // v3.04.34: CHẶN THEO NỘI DUNG — [{key,field,at,note}] — bản trùng bị xóa vĩnh viễn theo khóa inv|val|date|ccy (KHÔNG theo id) → chặn re-import/máy NV dù ID khác
     meta:{created:new Date().toISOString()}
   };
 }
@@ -11539,8 +11540,48 @@ function mergeByID(cloudArr, localArr, idField, skipTombstone, fieldName){
       const tomb=deletedIdSetForField(fieldName);
       merged=merged.filter(r=>!tomb.has(String(r[idField])));
     }
+    // v3.04.34: CHẶN THEO NỘI DUNG — loại bản ghi khớp khóa đã purge (bất kể ID).
+    //   Chỉ áp cho payables / opTransactions (bút toán tiền). Danh mục nền không đụng.
+    if(fieldName==='payables' || fieldName==='opTransactions'){
+      const pc=_purgedContentSet(fieldName);
+      if(pc.size){
+        merged=merged.filter(r=>!pc.has(_contentKey(r)));
+      }
+    }
   }
   return {merged, conflicts};
+}
+/* v3.04.34: khóa NỘI DUNG của 1 bút toán — inv(prefix)|val(round)|date|ccy.
+   Dùng để chặn trùng sống lại dù ID khác (re-import / máy NV chưa sạch). */
+function _contentKey(r){
+  if(!r) return '';
+  const inv=String(r.invoiceNo||'').split('/')[0].trim().toUpperCase();
+  const amt=Math.round(+r.amountGross||+r.amount||0);
+  const date=String(r.date||r.issueDate||'').slice(0,10);
+  const ccy=String(r.ccy||r.currency||'').trim().replace('VNĐ','VND').toUpperCase();
+  // v3.04.34: LUÔN gồm desc rút gọn (bỏ dấu) → phân biệt bản GIỮ vs XÓA cùng inv/val/date.
+  //   (2 bản trùng khác desc: "...MV KATRAN" vs "..." → khóa khác nhau → purge ĐÚNG bản xóa, giữ bản kia.)
+  const d=String(r.desc||r._descVi||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/\s+/g,' ').trim().toLowerCase().slice(0,50);
+  return inv+'|'+amt+'|'+date+'|'+ccy+'|'+d;
+}
+function _purgedContent(){ if(!Array.isArray(S.purgedContent)) S.purgedContent=[]; return S.purgedContent; }
+function _purgedContentSet(field){
+  const s=new Set();
+  _purgedContent().forEach(p=>{
+    if(!p||!p.key) return;
+    if(!p.field || p.field===field) s.add(p.key);
+  });
+  return s;
+}
+/* Đánh dấu 1 bút toán là XÓA VĨNH VIỄN theo nội dung (gọi TRƯỚC saveState). */
+function purgeContent(rec, field){
+  const key=_contentKey(rec);
+  if(!key) return false;
+  const list=_purgedContent();
+  if(!list.some(p=>p.key===key && (!p.field||p.field===field))){
+    list.push({key, field:field||'', at:new Date().toISOString(), note:(rec.invoiceNo||'')+' '+(rec.amount||'')+' '+(rec.desc||'').slice(0,30)});
+  }
+  return true;
 }
 
 // Smart merge an entire state object (for cloud sync push)
@@ -11581,8 +11622,50 @@ function enforcePurgedBatches(){
       removed += (before - S[f].length);
     }
   });
-  if(removed>0) console.log('[enforcePurged] đã dọn lại', removed, 'bản ghi thuộc lô đã xóa vĩnh viễn');
+  // v3.04.34: ÁP THÊM CHẶN THEO NỘI DUNG (chống trùng sống lại dù ID khác).
+  removed += enforcePurgedContent();
+  if(removed>0) console.log('[enforcePurged] đã dọn lại', removed, 'bản ghi thuộc lô/nội dung đã xóa vĩnh viễn');
   return removed;
+}
+/* v3.04.34: dọn các bút toán khớp khóa NỘI DUNG đã purge (payables/opTransactions).
+   Chạy khi mở app + sau mỗi pull → bản trùng re-import (ID mới) bị loại; lan qua cloud. */
+function enforcePurgedContent(){
+  const list=_purgedContent();
+  if(!list.length) return 0;
+  let removed=0;
+  ['payables','opTransactions'].forEach(f=>{
+    if(!Array.isArray(S[f])) return;
+    const pc=_purgedContentSet(f);
+    if(!pc.size) return;
+    const before=S[f].length;
+    const victims=S[f].filter(r=>r && pc.has(_contentKey(r)));
+    if(victims.length){
+      try{ markDeleted(victims.map(r=>r.id).filter(Boolean), f); }catch(e){}  // bia mộ ID kèm theo
+      S[f]=S[f].filter(r=>!(r && pc.has(_contentKey(r))));
+      removed += (before - S[f].length);
+    }
+  });
+  if(removed>0) console.log('[enforcePurgedContent] dọn', removed, 'bản trùng theo nội dung');
+  return removed;
+}
+/* v3.04.34: Console — XÓA VĨNH VIỄN 1 bút toán theo NỘI DUNG (inv+val+date+ccy).
+   Dùng: purgeContentNow('CSS5501748') → tìm & purge mọi bản khớp inv đó (giữ 1 bản nếu muốn).
+   An toàn: chỉ purge khi gọi rõ. Sau đó BẮT BUỘC Sync để lan cloud. */
+function purgeContentByInv(invPrefix, keepFirst){
+  if(!invPrefix){ console.log('Cần truyền số HĐ, vd purgeContentByInv("CSS5501748")'); return; }
+  const want=String(invPrefix).split('/')[0].trim().toUpperCase();
+  let purged=0, removed=0;
+  ['payables','opTransactions'].forEach(f=>{
+    if(!Array.isArray(S[f])) return;
+    const hits=S[f].filter(r=>String(r.invoiceNo||'').split('/')[0].trim().toUpperCase()===want);
+    hits.forEach((r,i)=>{
+      if(keepFirst && i===0) return;  // giữ bản đầu nếu yêu cầu
+      if(purgeContent(r,f)) purged++;
+    });
+  });
+  removed=enforcePurgedContent();
+  console.log('purgeContentByInv("'+invPrefix+'"): đã đăng ký purge', purged, 'khóa · dọn', removed, 'bản. → SYNC để lan cloud.');
+  try{ saveState(); }catch(e){}
 }
 /* v3.01.26: Console — xóa VĨNH VIỄN 1 lô theo batchId (hoặc chuỗi con), đăng ký purge + dọn + lưu.
    Dùng: purgeBatchNow('ivsx')  → cấm lô chứa 'ivsx' sống lại mãi mãi. */
