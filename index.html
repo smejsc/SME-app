@@ -2974,7 +2974,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.04.26';            // bumped on each release
+const APP_VERSION='3.04.28';            // bumped on each release
 
 /* v2.62.0: Token xác thực backend — PHẢI khớp API_TOKEN trong Apps Script (Code.gs).
    Mọi request tới Apps Script tự động được gắn token qua lớp bọc fetch bên dưới.
@@ -5419,7 +5419,7 @@ const SHARED_FIELDS=['fxRate','fxRateAt','displayCcy','companyInfo','meta','pres
 const ALL_DATA_FIELDS=[
   'plans','dockPlans','projects','vessels','onhires','events','dailyReports',
   'receivables','payables','bankAccounts','bankSnapshots','loans','creditFacilities','loanAutoCollect','bankBalance','bankBalanceCcy',
-  'opVessels','opTransactions','opMgmtFees','advances','invGroups','invMovements','warehouses',
+  'opVessels','opTransactions','opMgmtFees','ownerReportLocks','advances','invGroups','invMovements','warehouses',
   'vesselExpenseCats','omProjectExpenseCats','hrExpenseCats','qnExpenseCats',
   'fixedAssets','tools',
   'transactions',
@@ -6082,8 +6082,13 @@ function userEditorModal(initial,idx){
               <div style="font-size:11px;color:var(--muted);font-style:italic;margin-top:2px">Duyệt phiếu hoàn ứng của các quỹ có bật "cần Manager duyệt" (vd quỹ O&M). NV nhập hoàn ứng → Manager này duyệt → mới trừ quỹ + ghi chi phí.</div>
             </div>
           </label>
-          <label style="display:flex;align-items:flex-start;gap:8px;padding:6px 0;cursor:pointer;border-top:1px solid var(--rule);background:rgba(184,71,46,.05)">
-            <input type="checkbox" id="user-is-viewer" ${initial.isViewer?'checked':''} style="margin-top:3px" onchange="document.getElementById('viewer-options').style.display=this.checked?'block':'none'">
+          <label style="display:flex;align-items:flex-start;gap:8px;padding:6px 0;cursor:pointer;border-top:1px solid var(--rule);background:rgba(28,58,92,.05)">
+            <input type="checkbox" id="user-can-sign-owner" ${initial.canSignOwnerReport?'checked':''} style="margin-top:3px">
+            <div>
+              <div><b style="color:#1c3a5c">🔒 Ký &amp; khóa báo cáo chủ tàu</b></div>
+              <div style="font-size:11px;color:var(--muted);font-style:italic;margin-top:2px">Được ký duyệt báo cáo thu/chi hộ gửi chủ tàu theo Tàu + Tháng. Sau khi ký: khóa số kỳ đó — không ai nhập thêm/sửa/xóa bút toán thu-chi hộ của tàu+tháng đã gửi. Tên + bộ phận người ký hiện trên PDF.</div>
+            </div>
+          </label>
             <div>
               <div><b style="color:var(--accent)">Viewer — Chỉ đọc Báo cáo (cấp L2)</b></div>
               <div style="font-size:11px;color:var(--muted);font-style:italic;margin-top:2px">NV chỉ vào tab "Báo cáo" để xem. KHÔNG nhập liệu, KHÔNG duyệt, KHÔNG xóa/sửa ở đâu. Phù hợp với cấp QL nhân sự/CFO/cổ đông xem BI báo cáo.</div>
@@ -6269,6 +6274,7 @@ function editUser(idx){
     canConfirmPayment:!!u.canConfirmPayment,
     canApproveL1:!!u.canApproveL1,
     canApproveFund:!!u.canApproveFund,
+    canSignOwnerReport:!!u.canSignOwnerReport,
     canCheckAcc:!!u.canCheckAcc,
     canApproveL2:!!u.canApproveL2,
     assignedVesselIds:u.assignedVesselIds||[],
@@ -7323,6 +7329,7 @@ async function saveUser(idx){
   const canCheckAcc=document.getElementById('user-can-check-acc')?.checked||false;
   const canApproveL2=document.getElementById('user-can-approve-l2').checked;
   const canApproveFund=(document.getElementById('user-can-approve-fund')||{}).checked||false;
+  const canSignOwnerReport=(document.getElementById('user-can-sign-owner')||{}).checked||false;
   const isViewer=document.getElementById('user-is-viewer').checked;
   const isBOD=document.getElementById('user-is-bod')?.checked||false;
   // v1.40.0: canManageUsers — only visible+settable when admin is editing
@@ -7458,6 +7465,7 @@ async function saveUser(idx){
         canCheckAcc:isViewer?false:canCheckAcc,
         canApproveL2:isViewer?false:canApproveL2,
         canApproveFund:isViewer?false:canApproveFund,
+        canSignOwnerReport:isViewer?false:canSignOwnerReport,
         assignedVesselIds:isViewer?[]:assignedVesselIds,
         assignedProjectIds:isViewer?[]:assignedProjectIds,
         assignedOpVesselIds:isViewer?[]:assignedOpVesselIds,
@@ -8030,6 +8038,23 @@ function canSeeFuelPrice(){
 function isBOD(){
   if(CURRENT_ROLE === 'admin') return true;  // admin coi như BOD
   return !!(CURRENT_USER && CURRENT_USER.isBOD);
+}
+/* v3.04.27: quyền ký & khóa báo cáo chủ tàu (gán riêng cho Manager). Admin luôn có. */
+function canSignOwnerReport(){
+  if(CURRENT_ROLE==='admin') return true;
+  return !!(CURRENT_USER && CURRENT_USER.canSignOwnerReport);
+}
+/* Tìm khóa kỳ cho 1 tàu QL hộ + tháng (YYYY-MM). Trả về record khóa hoặc null. */
+function ownerReportLockFor(vesselId, period){
+  if(!vesselId || !period) return null;
+  const per=String(period).slice(0,7);
+  return (S.ownerReportLocks||[]).find(x=>x.vesselId===vesselId && String(x.period).slice(0,7)===per) || null;
+}
+/* True nếu tàu+kỳ đã khóa (đã ký gửi chủ tàu). */
+function isOwnerPeriodLocked(vesselId, dateStr){
+  if(!vesselId || !dateStr) return false;
+  const per=String(dateStr).slice(0,7);
+  return !!ownerReportLockFor(vesselId, per);
 }
 
 /* True if current session is allowed to manage users (CRUD users + push auth to cloud).
@@ -11278,6 +11303,7 @@ function defaultState(){
     fixedAssets:[],   // TSCĐ
     tools:[],         // CCDC + MMTB
     opVessels:[], opTransactions:[], opMgmtFees:[],  // v2.71.5: kỳ phí QL đã phát hành
+    ownerReportLocks:[],  // v3.04.27: [{vesselId, period(YYYY-MM), signedBy, signedByDept, signedAt, note}] — khóa kỳ đã gửi chủ tàu
     advances:[],  // v3.02.89: tạm ứng nhân viên (công tác/cá nhân)
     bankAccounts:[],     // [{id, bankName, branch, accountNo, accountName, ccy, isActive, note, createdAt}]
     bankSnapshots:[],    // v1.31: [{id, bankAccountId, date, balance, note, createdBy, createdAt}]
@@ -14176,7 +14202,7 @@ function _quickStateHash(){
   try{
     const parts=[];
     const keys=['companies','payables','receivables','vessels','fixedAssets','projects',
-      'bankAccounts','loans','opVessels','opTransactions','opMgmtFees','transactions','plans'];
+      'bankAccounts','loans','opVessels','opTransactions','opMgmtFees','ownerReportLocks','transactions','plans'];
     keys.forEach(k=>{ const a=S[k]; parts.push(k+':'+(Array.isArray(a)?a.length:0)); });
     if(S.taxes&&Array.isArray(S.taxes.records)) parts.push('tax:'+S.taxes.records.length);
     // gộp thêm mốc thời gian thay đổi gần nhất (nếu có _lastMutationTs)
@@ -14517,8 +14543,22 @@ function _unformatNumber(s){
       result=str.replace(/\./g,'').replace(/[^0-9-]/g,'');
     }
   } else {
-    // 0 hoặc ≥2 dấu chấm → phân cách nghìn → bỏ hết chấm
-    result=str.replace(/\./g,'').replace(/[^0-9-]/g,'');
+    // v3.04.28: ≥2 dấu chấm — kiểm tra dấu CUỐI có phải thập phân không.
+    //   "1.234.56" → phần sau dấu cuối = "56" (1-2 số) = THẬP PHÂN → giữ; các dấu trước = phân nhóm.
+    //   "1.000.000" → phần sau dấu cuối = "000" (3 số) = phân nhóm → bỏ hết.
+    if(dotCount>=2){
+      const lastDot=str.lastIndexOf('.');
+      const after=str.slice(lastDot+1).replace(/[^0-9]/g,'');
+      if(after.length===1 || after.length===2){
+        const neg=str.startsWith('-');
+        const intp=str.slice(0,lastDot).replace(/[^0-9]/g,'');
+        result=(neg?'-':'')+intp+'.'+after;
+      } else {
+        result=str.replace(/\./g,'').replace(/[^0-9-]/g,'');
+      }
+    } else {
+      result=str.replace(/\./g,'').replace(/[^0-9-]/g,'');
+    }
   }
   return +result||0;
 }
@@ -29158,9 +29198,19 @@ function opCcyChanged(){
    (số tiền VND/đòi đều là số nguyên). Sau format gọi recalc. */
 function opNumFmtLive(input, recalcFn){
   if(!input) return;
-  // chỉ giữ chữ số (số tiền tàu QL là số nguyên — VND, hoặc USD nguyên đơn vị lớn)
-  const digits=(input.value||'').replace(/[^0-9]/g,'').replace(/^0+(?=\d)/,'');
-  input.value = digits ? (+digits).toLocaleString('vi-VN') : '';
+  // v3.04.28: CHO PHÉP số thập phân (USD cent). Trước đây xóa mọi dấu chấm → không gõ được .5/.50
+  //   Dùng _formatThousands: nhóm nghìn phần nguyên + GIỮ tối đa 2 chữ số thập phân (kể cả "1234." đang gõ dở).
+  const caret = input.selectionStart;
+  const oldVal = input.value||'';
+  const newVal = _formatThousands(oldVal);
+  if(newVal !== oldVal){
+    // đếm số chữ số trước con trỏ để khôi phục vị trí
+    const digitsBefore=(oldVal.slice(0,caret).match(/[0-9.]/g)||[]).length;
+    input.value = newVal;
+    let pos=0,seen=0;
+    while(pos<newVal.length && seen<digitsBefore){ if(/[0-9.]/.test(newVal[pos]))seen++; pos++; }
+    try{ input.setSelectionRange(pos,pos); }catch(e){}
+  }
   try{ if(typeof recalcFn==='function') recalcFn(); }catch(e){}
 }
 function opUsdRecalc(){
@@ -29346,6 +29396,15 @@ function addOpTx(){
   // Permission guard: NV chỉ được nhập cho tàu được phân công
   const allowedIds=userAssignedOpVesselIds();
   if(!allowedIds.includes(vesselId)){toast('Bạn không có quyền nhập cho tàu này','bad');return;}
+  // v3.04.27: chặn nhập nếu tàu+kỳ đã KHÓA (đã ký gửi chủ tàu)
+  {
+    const _d=(document.getElementById('opt-date')||{}).value||'';
+    if(isOwnerPeriodLocked(vesselId, _d)){
+      const v=(S.opVessels||[]).find(x=>x.id===vesselId);
+      toast('🔒 '+(v?v.name:'Tàu')+' kỳ '+String(_d).slice(0,7)+' đã KHÓA (đã gửi chủ tàu) — không nhập thêm','bad');
+      return;
+    }
+  }
   const amount=_unformatNumber(document.getElementById('opt-amount').value);
   if(amount<=0){toast('Số tiền > 0','bad');return;}
   const ccy=(document.getElementById('opt-ccy')||{}).value||'VND';
@@ -29500,6 +29559,12 @@ function opTxCcy(t){
 
 function delOpTx(id){
   const t=S.opTransactions.find(x=>x.id===id);if(!t)return;
+  // v3.04.27: chặn xóa nếu tàu+kỳ đã KHÓA (đã gửi chủ tàu)
+  if(isOwnerPeriodLocked(t.vesselId, t.date)){
+    const vv=(S.opVessels||[]).find(x=>x.id===t.vesselId);
+    toast('🔒 '+(vv?vv.name:'Tàu')+' kỳ '+String(t.date).slice(0,7)+' đã KHÓA — không xóa được','bad');
+    return;
+  }
   if(t.paid){toast('Bút toán đã xác nhận TT — bỏ xác nhận trước khi xóa','bad');return;}
   // NV thường chỉ xóa được bút toán mình tạo (audit trail)
   if(!isAdmin() && t.createdBy && t.createdBy!==actorName()){
@@ -29935,6 +30000,12 @@ function advDetailModal(id){
 }
 function editOpTx(id){
   const t=S.opTransactions.find(x=>x.id===id);if(!t)return;
+  // v3.04.27: chặn sửa nếu tàu+kỳ đã KHÓA (đã gửi chủ tàu)
+  if(isOwnerPeriodLocked(t.vesselId, t.date)){
+    const v=(S.opVessels||[]).find(x=>x.id===t.vesselId);
+    toast('🔒 '+(v?v.name:'Tàu')+' kỳ '+String(t.date).slice(0,7)+' đã KHÓA (đã gửi chủ tàu) — không sửa được','bad');
+    return;
+  }
   if(t.paid){toast('Bút toán đã xác nhận TT — chỉ người xác nhận sửa được (nút ✎ trong dòng)','bad');return;}
   if(!t.ccy) t.ccy='USD';
   if(t.fxToUsd==null) t.fxToUsd = t.ccy==='USD'?1:0;
@@ -31006,6 +31077,7 @@ function openOpReportModal(){
       <b>Mẹo:</b> Sau khi bấm "Xuất PDF" → cửa sổ in của browser hiện ra → chọn <b>"Save as PDF"</b> (hoặc <b>"Lưu thành PDF"</b>) trong mục Destination → bấm Lưu.
     </div>`;
   const foot=`<button class="btn-sec" onclick="closeModal()">Hủy</button>
+              ${canSignOwnerReport()?'<button class="btn-sec" style="border-color:#1c3a5c;color:#1c3a5c" onclick="signLockOwnerReport()" title="Ký duyệt + KHÓA số kỳ này cho các tàu đã chọn — không ai nhập/sửa thêm.">🔒 Ký &amp; khóa kỳ</button>':''}
               <button class="btn-primary" onclick="generateOpReport()">📄 Xuất PDF</button>`;
   openModal('Báo cáo Thu/Chi hộ — Xuất PDF',body,foot);
 }
@@ -31020,6 +31092,55 @@ function opReportSetMonth(){
   document.getElementById('rep-to').value=last;
 }
 
+/* v3.04.27: KÝ & KHÓA kỳ báo cáo chủ tàu cho các tàu đã chọn + tháng đã chọn.
+   Sau khi khóa: không ai nhập/sửa/xóa bút toán thu-chi hộ của tàu+kỳ đó. */
+function signLockOwnerReport(){
+  if(!canSignOwnerReport()){ toast('Bạn không có quyền ký & khóa báo cáo chủ tàu','bad'); return; }
+  const month=(document.getElementById('rep-month')||{}).value||'';
+  if(!/^\d{4}-\d{2}$/.test(month)){ toast('Chọn THÁNG báo cáo trước khi khóa','bad'); return; }
+  const vids=Array.from(document.querySelectorAll('#modal input[data-vessel-id]:checked')).map(c=>c.dataset.vesselId);
+  if(!vids.length){ toast('Chọn ít nhất 1 tàu để khóa','bad'); return; }
+  const names=vids.map(id=>{const v=(S.opVessels||[]).find(x=>x.id===id);return v?v.name:'?';}).join(', ');
+  const already=vids.filter(id=>ownerReportLockFor(id, month));
+  let msg='🔒 KÝ & KHÓA kỳ '+month+' cho tàu: '+names+'\n\n'
+    +'Sau khi khóa, KHÔNG ai (kể cả NV) nhập thêm / sửa / xóa bút toán thu-chi hộ của các tàu này trong kỳ '+month+'.\n'
+    +'Tên + bộ phận của bạn sẽ hiện trên báo cáo PDF gửi chủ tàu.\n\n';
+  if(already.length) msg+='⚠ '+already.length+' tàu đã khóa trước đó — sẽ cập nhật lại người ký.\n\n';
+  msg+='Xác nhận ký & khóa?';
+  if(!confirm(msg)) return;
+
+  const signer=actorName();
+  let signerDept='';
+  try{
+    const u=(getAuthConfig().users||[]).find(x=>x.name===(CURRENT_USER&&CURRENT_USER.name));
+    if(u && u.departmentId){ const d=(S.departments||[]).find(x=>x.id===u.departmentId); signerDept=d?d.name:''; }
+  }catch(e){}
+  const nowISO=new Date().toISOString();
+  S.ownerReportLocks=S.ownerReportLocks||[];
+  vids.forEach(vid=>{
+    const ex=ownerReportLockFor(vid, month);
+    if(ex){ ex.signedBy=signer; ex.signedByDept=signerDept; ex.signedAt=nowISO; }
+    else S.ownerReportLocks.push({ vesselId:vid, period:month, signedBy:signer, signedByDept:signerDept, signedAt:nowISO, note:'' });
+  });
+  try{ logAuditEvent('owner_report_lock',{period:month, vessels:vids, signedBy:signer}); }catch(e){}
+  saveState();
+  toast('🔒 Đã ký & khóa kỳ '+month+' ('+vids.length+' tàu). Nhớ bấm Sync để đồng bộ.','good');
+  closeModal();
+  renderAll();
+}
+/* Mở khóa kỳ (chỉ admin/BOD) — trường hợp đặc biệt cần sửa lại. */
+function unlockOwnerReport(vesselId, period){
+  if(!(isBOD()||isAdmin())){ toast('Chỉ admin/BOD mở khóa được','bad'); return; }
+  const v=(S.opVessels||[]).find(x=>x.id===vesselId);
+  if(!confirm('Mở khóa kỳ '+period+' của '+(v?v.name:'tàu')+'?\nSau khi mở, bút toán kỳ này lại sửa được. Số đã gửi chủ tàu có thể thay đổi — cân nhắc kỹ.')) return;
+  const reason=prompt('Lý do mở khóa (bắt buộc — để ghi log):','')||'';
+  if(!reason.trim()){ toast('Cần nhập lý do mở khóa','bad'); return; }
+  S.ownerReportLocks=(S.ownerReportLocks||[]).filter(x=>!(x.vesselId===vesselId && String(x.period).slice(0,7)===String(period).slice(0,7)));
+  try{ logAuditEvent('owner_report_unlock',{period, vesselId, reason, by:actorName()}); }catch(e){}
+  saveState();
+  toast('Đã mở khóa kỳ '+period+'. Nhớ Sync.','good');
+  renderAll();
+}
 function generateOpReport(){
   const from=document.getElementById('rep-from').value;
   const to=document.getElementById('rep-to').value;
@@ -31131,6 +31252,11 @@ function generateOpReport(){
   checked.forEach(vid=>{
     const v=S.opVessels.find(x=>x.id===vid);
     if(!v) return;
+    // v3.04.27: nếu tàu+kỳ (theo 'from') đã KÝ & KHÓA → hiện tên người ký trên ô "Đại diện công ty".
+    const _lk = ownerReportLockFor(vid, String(from).slice(0,7));
+    const _sigCoName = _lk ? ('<b>'+esc(_lk.signedBy||'')+'</b>'+(_lk.signedByDept?('<br><span style=\"font-size:9pt;color:#555\">'+esc(_lk.signedByDept)+'</span>'):'')) : '';
+    const _sigCoDate = _lk && _lk.signedAt ? new Date(_lk.signedAt).toLocaleDateString('vi-VN') : '...........';
+    const _sigCoSub = _lk ? (t.signDate+' '+_sigCoDate) : (t.signDate+' ...........');
     // v1.89.0: báo cáo backcharge — tổng hợp theo USD (đồng chuẩn QL vận hành)
     // Opening balance: sum of all tx before `from` for this vessel (USD)
     // v3.01.62: GỘP cả AP gắn tàu QL (chi hộ ảo) để báo cáo khớp opBalance / số dư thật.
@@ -31297,7 +31423,8 @@ function generateOpReport(){
         </div>
         <div class="pr-sign-block">
           <div class="pr-sign-title">${t.sigCo}</div>
-          <div class="pr-sign-sub">(${t.signDate} ...........)</div>
+          ${_sigCoName?`<div style="margin-top:4pt;font-size:11pt">${_sigCoName}</div>`:''}
+          <div class="pr-sign-sub">(${_sigCoSub})</div>
         </div>
       </div>
     </div>
@@ -31408,7 +31535,8 @@ function generateOpReport(){
         </div>
         <div class="pr-sign-block">
           <div class="pr-sign-title">${t.sigCo}</div>
-          <div class="pr-sign-sub">(${t.signDate} ...........)</div>
+          ${_sigCoName?`<div style="margin-top:4pt;font-size:11pt">${_sigCoName}</div>`:''}
+          <div class="pr-sign-sub">(${_sigCoSub})</div>
         </div>
       </div>
       <div style="margin-top:14pt;font-size:8pt;color:#888;font-style:italic;text-align:center">${t.note}</div>
