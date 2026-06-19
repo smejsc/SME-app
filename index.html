@@ -2974,7 +2974,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.04.38';            // bumped on each release
+const APP_VERSION='3.04.40';            // bumped on each release
 
 /* v2.62.0: Token xác thực backend — PHẢI khớp API_TOKEN trong Apps Script (Code.gs).
    Mọi request tới Apps Script tự động được gắn token qua lớp bọc fetch bên dưới.
@@ -11543,31 +11543,8 @@ function mergeByID(cloudArr, localArr, idField, skipTombstone, fieldName){
     // v3.04.34: CHẶN THEO NỘI DUNG — loại bản ghi khớp khóa đã purge (bất kể ID).
     //   Chỉ áp cho payables / opTransactions (bút toán tiền). Danh mục nền không đụng.
     if(fieldName==='payables' || fieldName==='opTransactions'){
-      // v3.04.35: LUẬT THEO SỐ HĐ (INVRULE) — giữ đúng bản admin, xóa biến thể khác cùng HĐ.
-      const _inv=_invRuleMap();
-      if(Object.keys(_inv).length){
-        const _ni=s=>String(s||'').split('/')[0].trim().toUpperCase();
-        merged=merged.filter(r=>{
-          const keep=_inv[_ni(r.invoiceNo)];
-          if(!keep || !keep.keys.size) return true;       // không luật → giữ
-          if(keep.keys.has(_contentKey(r))) return true;  // bản giữ → giữ
-          if(keep.types && keep.types.size){
-            const rt=String(r.type||'').toUpperCase();
-            if(!keep.types.has(rt)) return true;          // khác loại → giữ
-          }
-          if(keep.amts && keep.amts.size){
-            if(!keep.amts.has(Math.round(+r.amount||0))) return true;  // khác giá trị → giữ
-          }
-          return false;  // cùng inv + cùng loại + cùng giá trị + khóa khác → loại
-        });
-      }
-      const pc=_purgedContentSet(fieldName);
-      if(pc.size){
-        merged=merged.filter(r=>!pc.has(_contentKey(r)));
-      }
-      // v3.04.38: ĐÃ GỠ dedup tự động theo nội dung — RỦI RO XÓA NHẦM dữ liệu thật
-      //   (2 nghiệp vụ khác nhau cùng số tiền/ngày/diễn giải KHÔNG phải trùng).
-      //   Trùng chỉ xử bằng purgedContent/INVRULE đã được admin xác nhận TỪNG BẢN cụ thể.
+      // v3.04.39: KHÔNG áp INVRULE/purgedContent TỰ ĐỘNG khi merge nữa (rủi ro xóa nhầm).
+      //   Việc dọn trùng theo nội dung chỉ chạy khi người dùng bấm nút (applyContentPurgeManual).
     }
   }
   return {merged, conflicts};
@@ -11604,10 +11581,13 @@ function _contentKey(r){
   const amt=Math.round(+r.amountGross||+r.amount||0);
   const date=String(r.date||r.issueDate||'').slice(0,10);
   const ccy=String(r.ccy||r.currency||'').trim().replace('VNĐ','VND').toUpperCase();
-  // v3.04.34: LUÔN gồm desc rút gọn (bỏ dấu) → phân biệt bản GIỮ vs XÓA cùng inv/val/date.
-  //   (2 bản trùng khác desc: "...MV KATRAN" vs "..." → khóa khác nhau → purge ĐÚNG bản xóa, giữ bản kia.)
   const d=String(r.desc||r._descVi||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/\s+/g,' ').trim().toLowerCase().slice(0,50);
-  return inv+'|'+amt+'|'+date+'|'+ccy+'|'+d;
+  // v3.04.39: BẮT BUỘC gồm vesselId + type → 2 TÀU khác nhau / 2 LOẠI (IN/OUT) khác nhau
+  //   KHÔNG BAO GIỜ bị coi là trùng. (Sửa lỗi mất KATRAN advance: advance 2 tàu giống hệt
+  //   nội dung từng bị _dedupByContent cũ gộp xóa vì khóa không có vesselId.)
+  const vid=String(r.vesselId||'').trim();
+  const typ=String(r.type||'').toUpperCase();
+  return vid+'|'+typ+'|'+inv+'|'+amt+'|'+date+'|'+ccy+'|'+d;
 }
 function _purgedContent(){ if(!Array.isArray(S.purgedContent)) S.purgedContent=[]; return S.purgedContent; }
 /* v3.04.35: bản đồ LUẬT theo số HĐ — invUpper -> Set(keepKeys). Bản ghi {invRule, keepKeys} trong purgedContent. */
@@ -11682,9 +11662,10 @@ function enforcePurgedBatches(){
       removed += (before - S[f].length);
     }
   });
-  // v3.04.34: ÁP THÊM CHẶN THEO NỘI DUNG (chống trùng sống lại dù ID khác).
-  removed += enforcePurgedContent();
-  if(removed>0) console.log('[enforcePurged] đã dọn lại', removed, 'bản ghi thuộc lô/nội dung đã xóa vĩnh viễn');
+  // v3.04.39: KHÔNG còn tự động gọi enforcePurgedContent ở đây.
+  //   Xóa theo NỘI DUNG/số HĐ là thao tác RỦI RO → chỉ chạy khi người dùng bấm nút chủ động
+  //   (hàm applyContentPurgeManual). purgedBatches (theo mã lô rõ ràng) vẫn tự động vì an toàn.
+  if(removed>0) console.log('[enforcePurged] đã dọn lại', removed, 'bản ghi thuộc lô đã xóa vĩnh viễn');
   return removed;
 }
 /* v3.04.34: dọn các bút toán khớp khóa NỘI DUNG đã purge (payables/opTransactions).
@@ -11741,6 +11722,48 @@ function enforcePurgedContent(){
   // v3.04.38: ĐÃ GỠ dedup tự động — chỉ xóa bản đã được admin đánh dấu cụ thể (purgedContent/INVRULE type-aware).
   if(removed>0) console.log('[enforcePurgedContent] dọn', removed, 'bản (đã đánh dấu cụ thể)');
   return removed;
+}
+/* v3.04.39: CHẠY THỦ CÔNG dọn trùng theo nội dung/INVRULE — CHỈ khi người dùng chủ động bấm.
+   Hiện xác nhận số bản sẽ xóa TRƯỚC khi xóa. KHÔNG bao giờ tự chạy. */
+function applyContentPurgeManual(){
+  if(!isAdmin() && !(CURRENT_USER&&CURRENT_USER.canManageUsers)){ toast('Chỉ admin/quản lý mới dọn trùng','bad'); return; }
+  const list=_purgedContent();
+  if(!list.length){ toast('Chưa có luật dọn trùng nào (purgedContent rỗng)','warn'); return; }
+  // đếm trước khi xóa
+  const invRules=_invRuleMap();
+  const _ni=s=>String(s||'').split('/')[0].trim().toUpperCase();
+  let preview=[];
+  ['payables','opTransactions'].forEach(f=>{
+    if(!Array.isArray(S[f])) return;
+    const pc=_purgedContentSet(f);
+    S[f].forEach(r=>{
+      const iv=_ni(r.invoiceNo); const keep=invRules[iv];
+      let willDel=false;
+      if(keep && keep.keys.size && !keep.keys.has(_contentKey(r))){
+        const rt=String(r.type||'').toUpperCase();
+        const okType=!keep.types.size || keep.types.has(rt);
+        const okAmt=!keep.amts.size || keep.amts.has(Math.round(+r.amount||0));
+        if(okType && okAmt) willDel=true;
+      }
+      if(!willDel && pc.size && pc.has(_contentKey(r))) willDel=true;
+      if(willDel) preview.push({f, id:r.id, t:r.type, amt:r.amount, ccy:r.ccy, inv:r.invoiceNo, desc:(r.desc||'').slice(0,40)});
+    });
+  });
+  if(!preview.length){ toast('Không có bản nào khớp luật để xóa','good'); return; }
+  const msg='DỌN TRÙNG THỦ CÔNG\n\nSẽ xóa '+preview.length+' bản ghi khớp luật đã đánh dấu:\n\n'
+    +preview.slice(0,15).map(p=>'• '+(p.t||'')+' '+(p.amt)+' '+(p.ccy||'')+' '+(p.inv||'')+' — '+p.desc).join('\n')
+    +(preview.length>15?('\n... và '+(preview.length-15)+' bản nữa'):'')
+    +'\n\nXÁC NHẬN xóa? (đã lưu rescue copy để hoàn tác)';
+  if(!confirm(msg)) { toast('Đã hủy','warn'); return; }
+  // rescue
+  try{
+    const snap=preview.map(p=>{const r=(S[p.f]||[]).find(z=>z.id===p.id); return r?JSON.parse(JSON.stringify(r)):null;}).filter(Boolean);
+    localStorage.setItem('seahorse_rescue_manualPurge', JSON.stringify({at:new Date().toISOString(),records:snap}));
+  }catch(e){}
+  const n=enforcePurgedContent();
+  saveState();
+  toast('Đã dọn '+n+' bản trùng. Bấm Sync để lan máy khác.','good');
+  if(typeof renderAll==='function') renderAll();
 }
 /* v3.04.34: Console — XÓA VĨNH VIỄN 1 bút toán theo NỘI DUNG (inv+val+date+ccy).
    Dùng: purgeContentNow('CSS5501748') → tìm & purge mọi bản khớp inv đó (giữ 1 bản nếu muốn).
