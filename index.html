@@ -2974,7 +2974,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.04.28';            // bumped on each release
+const APP_VERSION='3.04.29';            // bumped on each release
 
 /* v2.62.0: Token xác thực backend — PHẢI khớp API_TOKEN trong Apps Script (Code.gs).
    Mọi request tới Apps Script tự động được gắn token qua lớp bọc fetch bên dưới.
@@ -13828,8 +13828,8 @@ function renderFxRates(){
       h+=`<tr>
         <td><b>${esc(pr)}</b><br><span style="font-size:10px;color:var(--muted)">1 USD = ${avg.toLocaleString('vi-VN',{maximumFractionDigits:4})} ${isToUsd?esc(from):'VND'}</span></td>
         <td class="r mono">${v.n}</td>
-        <td class="r num">${v.base.toLocaleString('vi-VN',{maximumFractionDigits:2})} ${esc(baseCcy)}</td>
-        <td class="r num">${v.converted.toLocaleString('vi-VN',{maximumFractionDigits:2})} ${esc(convCcy)}</td>
+        <td class="r num">${_locN(v.base, baseCcy)} ${esc(baseCcy)}</td>
+        <td class="r num">${_locN(v.converted, convCcy)} ${esc(convCcy)}</td>
         <td class="r num" style="font-weight:600;color:var(--accent)">${avg.toLocaleString('vi-VN',{maximumFractionDigits:4})}</td>
       </tr>`;
     });
@@ -14498,6 +14498,77 @@ function _formatThousands(s){
   if(decPart!==null) out += '.' + decPart;   // gắn lại phần thập phân (kể cả rỗng khi gõ dở)
   return (neg?'-':'')+out;
 }
+
+/* v3.04.29: Định dạng tiền THEO LOẠI TIỀN TỆ để dễ phân biệt dấu nghìn / thập phân.
+   - VND  : KHÔNG thập phân. Nhóm nghìn bằng dấu CHẤM (kiểu VN). VD 12.020.000
+   - Khác (USD/EUR/GBP...) : nhóm nghìn bằng dấu PHẨY, thập phân bằng dấu CHẤM (kiểu US).
+            Tối đa 2 chữ số thập phân. VD 12,020.23 — giữ '1234.' / '1234.5' đang gõ dở.
+   Trả về chuỗi để gán vào input. Dùng cho ô nhập tay (live format). */
+function _formatMoneyByCcy(s, ccy){
+  if(s==null||s==='') return '';
+  ccy=(ccy||'VND').toUpperCase();
+  if(ccy==='VND'){
+    // VND: bỏ phần thập phân (cent), chỉ giữ số nguyên, nhóm nghìn bằng dấu chấm.
+    let str=String(s).trim();
+    const neg=str.startsWith('-');
+    // v3.04.29: phân biệt nguồn chuỗi để KHÔNG mất chữ số khi đang gõ.
+    //   - Có dấu PHẨY ',' → chuỗi đang ở dạng US (vd chuyển từ USD: '12,020.23').
+    //     Gỡ ',' rồi CẮT phần sau '.' (bỏ cent) → '12020'.
+    //   - KHÔNG có phẩy → mọi dấu '.' đều là phân nhóm nghìn kiểu VN (đang gõ: '12.020' /
+    //     '12.020.000') → gỡ hết, GIỮ nguyên mọi chữ số.
+    let t=str;
+    if(t.indexOf(',')!==-1){
+      // dạng US rõ ràng (12,020.23) → gỡ ',' rồi bỏ phần sau '.' (cent)
+      t=t.replace(/,/g,'');
+      const dpos=t.indexOf('.');
+      if(dpos!==-1) t=t.slice(0,dpos);
+    } else {
+      // KHÔNG có phẩy: phân biệt dấu '.' CUỐI là cent US (1-2 số) hay nhóm nghìn VN (3 số).
+      //   '500.50' (đổi từ USD) → cent → bỏ. '12.020' / '12.020.000' (đang gõ VND) → nhóm → giữ.
+      const ld=t.lastIndexOf('.');
+      if(ld!==-1){
+        const after=t.slice(ld+1).replace(/[^0-9]/g,'');
+        if(after.length===1 || after.length===2) t=t.slice(0,ld);  // cent → cắt
+        // 3 số (hoặc 0 = dấu cuối) → nhóm nghìn → giữ nguyên cho replace gỡ
+      }
+    }
+    let digits=t.replace(/[^0-9]/g,'');     // bỏ dấu '.' phân nhóm → VND không có cent
+    if(digits==='') return neg?'-':'';
+    digits=digits.replace(/^0+(?=\d)/,'');    // bỏ số 0 thừa đầu
+    const grouped=digits.replace(/\B(?=(\d{3})+(?!\d))/g,'.');
+    return (neg?'-':'')+grouped;
+  }
+  // Ngoại tệ khác: nhóm nghìn ',' + thập phân '.' (tối đa 2 số).
+  let str=String(s).trim();
+  const neg=str.startsWith('-');
+  let body=str.replace(/,/g,'').replace(/[^0-9.]/g,''); // gỡ phẩy cũ, chỉ giữ số + chấm
+  if(body==='') return neg?'-':'';
+  const lastDot=body.lastIndexOf('.');
+  let intPart, decPart=null;
+  if(lastDot!==-1){
+    const after=body.slice(lastDot+1).replace(/\./g,'');
+    if(after===''){               // '1234.' đang gõ dở
+      intPart=body.slice(0,lastDot).replace(/\./g,''); decPart='';
+    } else {                      // có phần thập phân → giữ tối đa 2 số
+      intPart=body.slice(0,lastDot).replace(/\./g,''); decPart=after.slice(0,2);
+    }
+  } else {
+    intPart=body;
+  }
+  intPart=(intPart||'0').replace(/^0+(?=\d)/,'');
+  const grouped=intPart.replace(/\B(?=(\d{3})+(?!\d))/g,',');
+  let out=grouped;
+  if(decPart!==null) out+='.'+decPart;
+  return (neg?'-':'')+out;
+}
+
+/* v3.04.29: format SỐ theo locale đúng cho ĐƠN VỊ — KHÔNG kèm ký hiệu tiền tệ
+   (dùng ở nơi đã in sẵn nhãn ccy bên cạnh). USD/EUR: en-US 2 số lẻ; còn lại: vi-VN số nguyên. */
+function _locN(n, ccy){
+  n=+n||0;
+  const minor=(ccy==='USD'||ccy==='EUR');
+  return n.toLocaleString(minor?'en-US':'vi-VN', minor?{minimumFractionDigits:2,maximumFractionDigits:2}:{maximumFractionDigits:0});
+}
 /* v2.99.87: Chuẩn hóa cột "% VAT" khi import Excel — chấp nhận nhiều dạng nhập:
      "8" → 8        "0.08" hoặc "0,08" → 8     "10%" → 10
      "0.1" → 10     "0% (không VAT)" → 0       "" / null → 0
@@ -14522,6 +14593,9 @@ function _parseVatPercent(v){
 function _unformatNumber(s){
   if(s==null||s==='') return 0;
   let str=String(s).trim();
+  // v3.04.29: dấu PHẨY = phân nhóm nghìn kiểu US (12,020.23) → bỏ trước khi xử lý.
+  //   VND không bao giờ dùng phẩy. Sau bước này chỉ còn số + dấu chấm.
+  if(str.indexOf(',')!==-1) str=str.replace(/,/g,'');
   // v2.99.84: GIỮ dấu thập phân cho USD (vd 1234.56). Trước đây xóa MỌI dấu chấm
   // (coi là phân cách nghìn kiểu VN) → mất phần thập phân, không nhập được cent.
   // Phân biệt: nếu có dấu phẩy → coi phẩy là thập phân (kiểu EU) hiếm dùng; ở đây
@@ -16975,7 +17049,7 @@ function evFuelRecomputeAll(){
           const inVnd = blockTotalUsd * fx;
           totalCell.textContent = `${inVnd.toLocaleString('vi-VN', {maximumFractionDigits:0})} VND`;
         } else {
-          totalCell.textContent = `${blockTotalUsd.toLocaleString('vi-VN', {maximumFractionDigits:2})} USD`;
+          totalCell.textContent = `${blockTotalUsd.toLocaleString('en-US', {minimumFractionDigits:2,maximumFractionDigits:2})} USD`;
         }
       } else {
         totalCell.textContent = '—';
@@ -20383,7 +20457,7 @@ function sfAddWithdrawFromAP(){
     return;
   }
 
-  const fmtAmt = (a, c) => `${(+a||0).toLocaleString('vi-VN')} ${esc(c||'')}`;
+  const fmtAmt = (a, c) => `${_locN(+a||0, c)} ${esc(c||'')}`;
   const groupLabel = (et) => {
     const grp = et?.group || 'OTHER';
     const labels = {HR:'👥 HR', TRAVEL:'✈ Travel', OVERHEAD:'🏢 Overhead'};
@@ -20510,7 +20584,7 @@ function _sfUpdateLinkSummary(){
     if(!byCcy[ccy]) byCcy[ccy] = 0;
     byCcy[ccy] += amt;
   });
-  const totals = Object.entries(byCcy).map(([c,a]) => `${a.toLocaleString('vi-VN')} ${c}`).join(' · ');
+  const totals = Object.entries(byCcy).map(([c,a]) => `${_locN(a, c)} ${c}`).join(' · ');
   sum.innerHTML = `Đã chọn <b>${checked.length}</b> dòng — Tổng: <b>${totals}</b>`;
 }
 
@@ -21681,7 +21755,7 @@ function renderBanking(){
           balByCcy[c]=(balByCcy[c]||0)+b;
         });
         const balTxt=Object.entries(balByCcy).filter(([_,v])=>v!==0)
-          .map(([c,v])=>`${v.toLocaleString('vi-VN')} ${c}`).join(' + ') || '0';
+          .map(([c,v])=>`${_locN(v, c)} ${c}`).join(' + ') || '0';
         html+=`<details class="bank-group" style="margin:14px 0 0;border:1px solid var(--rule);border-radius:3px;background:var(--paper)">
           <summary style="font-family:var(--font-display);font-size:14px;font-weight:700;padding:10px 14px;background:rgba(28,58,92,.06);border-left:4px solid var(--ink);color:var(--ink);cursor:pointer;list-style:none;display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;user-select:none">
             <span style="display:flex;align-items:center;gap:8px"><span class="bank-group-chevron" style="font-size:10px;width:12px;display:inline-block;color:var(--muted)">▶</span> 🏦 ${esc(bank)} <span style="font-weight:400;color:var(--muted);font-size:11px">(${accs.length} TK)</span></span>
@@ -21814,14 +21888,14 @@ function renderBanking(){
             paidIntByCcy[ccy] = (paidIntByCcy[ccy]||0) + (+p.interest||0);
           });
         });
-        const remTxt = Object.entries(remByCcy).filter(([_,v])=>v>0).map(([c,v])=>`${v.toLocaleString('vi-VN')} ${c}`).join(' · ') || '0';
+        const remTxt = Object.entries(remByCcy).filter(([_,v])=>v>0).map(([c,v])=>`${_locN(v, c)} ${c}`).join(' · ') || '0';
         // v3.01.33: lãi đã trả — tách rõ VND (vay NH trong nước) và USD (vay ngoại tệ)
         const intVnd = +paidIntByCcy['VND']||0;
         const intUsd = +paidIntByCcy['USD']||0;
         const intOther = Object.entries(paidIntByCcy).filter(([c,v])=>c!=='VND'&&c!=='USD'&&v>0).map(([c,v])=>`${Math.round(v).toLocaleString('vi-VN')} ${c}`).join(' · ');
         const intParts=[];
         intParts.push(`<b>${Math.round(intVnd).toLocaleString('vi-VN')} VND</b>`);
-        if(intUsd>0) intParts.push(`<b>${Math.round(intUsd).toLocaleString('vi-VN')} USD</b>`);
+        if(intUsd>0) intParts.push(`<b>${intUsd.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2})} USD</b>`);
         if(intOther) intParts.push(intOther);
         const intTxt = intParts.join(' · ');
         const filterTag = (fTerm||fStatus||fText) ? ' (đang lọc)' : '';
@@ -21864,7 +21938,7 @@ function renderBanking(){
           lenderRemByCcy[c] = (lenderRemByCcy[c]||0) + loanRemainingPrincipal(l);
         });
         const lenderRemTxt = Object.entries(lenderRemByCcy).filter(([_,v])=>v>0)
-          .map(([c,v])=>`${v.toLocaleString('vi-VN')} ${c}`).join(' + ') || '0';
+          .map(([c,v])=>`${_locN(v, c)} ${c}`).join(' + ') || '0';
         const icon = _lenderIcon(lender);
         // v3.03.42: cờ auto tự thu của NH này + nút bật/tắt trên header
         const _autoOn=_loanAutoOn(lender);
@@ -23383,9 +23457,9 @@ function _loanLenderReminders(lenderLoans, lender, autoOn){
       <span style="min-width:0;flex:1">
         ${stateChip} <b>${esc(l.contractNo||l.id.slice(-6))}</b> · Kỳ ${esc(next.period)} ·
         📅 <b>${esc(next.dueDate||'?')}</b> ·
-        Gốc <b>${(+next.principal||0).toLocaleString('vi-VN')}</b> ·
-        Lãi <b>${(+next.interest||0).toLocaleString('vi-VN')}</b> ·
-        Tổng <b style="color:var(--accent)">${(+next.total||((+next.principal||0)+(+next.interest||0))).toLocaleString('vi-VN')} ${esc(ccy)}</b>
+        Gốc <b>${(+next.principal||0).toLocaleString((ccy==='USD'||ccy==='EUR')?'en-US':'vi-VN',(ccy==='USD'||ccy==='EUR')?{minimumFractionDigits:2,maximumFractionDigits:2}:{maximumFractionDigits:0})}</b> ·
+        Lãi <b>${(+next.interest||0).toLocaleString((ccy==='USD'||ccy==='EUR')?'en-US':'vi-VN',(ccy==='USD'||ccy==='EUR')?{minimumFractionDigits:2,maximumFractionDigits:2}:{maximumFractionDigits:0})}</b> ·
+        Tổng <b style="color:var(--accent)">${(+next.total||((+next.principal||0)+(+next.interest||0))).toLocaleString((ccy==='USD'||ccy==='EUR')?'en-US':'vi-VN',(ccy==='USD'||ccy==='EUR')?{minimumFractionDigits:2,maximumFractionDigits:2}:{maximumFractionDigits:0})} ${esc(ccy)}</b>
         ${autoNote?' · '+autoNote:''}
       </span>
       <span style="display:flex;gap:5px">${btns}</span>
@@ -25245,7 +25319,7 @@ function _arEditorBody(r,isPayable){
           const kttMark=p.confirmedByKtt?'<span title="KTT xác nhận" style="color:var(--good);font-weight:600">✓KTT </span>':'';
           return `<tr>
             <td class="mono" style="padding:3px;font-size:11px">${kttMark}${p.date}</td>
-            <td class="r num" style="font-size:11px">${(+p.amount||0).toLocaleString('vi-VN')}</td>
+            <td class="r num" style="font-size:11px">${(+p.amount||0).toLocaleString((r.ccy==='USD'||r.ccy==='EUR')?'en-US':'vi-VN',(r.ccy==='USD'||r.ccy==='EUR')?{minimumFractionDigits:2,maximumFractionDigits:2}:{maximumFractionDigits:0})}</td>
             <td class="r mono" style="font-size:11px;color:var(--muted)">${fxR?fxR.toLocaleString('vi-VN'):'—'}</td>
             <td class="r mono" style="font-size:11px;color:var(--muted)">${typeof inVnd==='number'?inVnd.toLocaleString('vi-VN'):'—'}</td>
             <td style="font-size:11px;color:var(--muted)">${bankAcc?esc(bankAcc.name):(p.method==='cash'?'💵 Tiền mặt':(p.method==='offset'?'🔄 Cấn trừ quỹ':'—'))}</td>
@@ -25980,7 +26054,7 @@ function _renderPayrollModal(){
         <tfoot>
           <tr style="background:rgba(184,71,46,.05);font-weight:700;border-top:2px solid var(--rule)">
             <td colspan="2" style="padding:8px 6px">TỔNG LƯƠNG (${s.lines.length} người)</td>
-            <td class="num" style="font-family:var(--font-mono);padding:8px 4px"><b><span id="pr-total-salary">${_mrFmtNum(totalSalary)}</span> ${ccy}</b></td>
+            <td class="num" style="font-family:var(--font-mono);padding:8px 4px"><b><span id="pr-total-salary">${_mrFmtNum(totalSalary, ccy)}</span> ${ccy}</b></td>
             <td></td>
           </tr>
         </tfoot>
@@ -26014,7 +26088,7 @@ function _renderPayrollModal(){
           <input type="text" inputmode="decimal" class="num" id="pr-khoan-doi" value="${_mrFmtNum(+s.khoanDoi||0)}" oninput="_mrPayrollKhoan(this.value)" onfocus="_mrFmtFocus(this)" onblur="_mrFmtBlur(this)" style="text-align:right;font-family:var(--font-mono)" placeholder="Số khoán đòi chủ tàu (USD)">
         </div>
         <div class="field" style="padding-bottom:6px">
-          <div style="font-size:11px;display:flex;justify-content:space-between"><span style="color:var(--muted)">Thực chi (tổng lương phiếu)</span><b style="font-family:var(--font-mono)"><span id="pr-khoan-chi">${_mrFmtNum(totalSalary)}</span> ${ccy}</b></div>
+          <div style="font-size:11px;display:flex;justify-content:space-between"><span style="color:var(--muted)">Thực chi (tổng lương phiếu)</span><b style="font-family:var(--font-mono)"><span id="pr-khoan-chi">${_mrFmtNum(totalSalary, ccy)}</span> ${ccy}</b></div>
           <div style="font-size:11px;display:flex;justify-content:space-between;margin-top:3px"><span style="color:var(--muted)">Chênh (→ doanh thu QL hộ)</span><b id="pr-khoan-chenh" style="font-family:var(--font-mono);color:#2d6a6a">$0</b></div>
         </div>
       </div>
@@ -26022,9 +26096,9 @@ function _renderPayrollModal(){
     </div>
 
     <div style="margin-top:10px;padding:10px 12px;background:var(--paper-2);border:1px solid var(--rule);font-size:12px">
-      <div style="display:flex;justify-content:space-between"><span>Tổng lương (chi phí → P&amp;L)</span><b style="font-family:var(--font-mono)"><span id="pr-sum-salary">${_mrFmtNum(totalSalary)}</span> ${ccy}</b></div>
-      <div style="display:flex;justify-content:space-between;color:var(--muted)"><span>+ BHXH (→ NSNN mục B)</span><span style="font-family:var(--font-mono)"><span id="pr-sum-bhxh">${_mrFmtNum(bhxh)}</span> ${ccy}</span></div>
-      <div style="display:flex;justify-content:space-between;color:var(--muted)"><span>+ TNCN khấu trừ (→ NSNN mục A)</span><span style="font-family:var(--font-mono)"><span id="pr-sum-pit">${_mrFmtNum(pit)}</span> ${ccy}</span></div>
+      <div style="display:flex;justify-content:space-between"><span>Tổng lương (chi phí → P&amp;L)</span><b style="font-family:var(--font-mono)"><span id="pr-sum-salary">${_mrFmtNum(totalSalary, ccy)}</span> ${ccy}</b></div>
+      <div style="display:flex;justify-content:space-between;color:var(--muted)"><span>+ BHXH (→ NSNN mục B)</span><span style="font-family:var(--font-mono)"><span id="pr-sum-bhxh">${_mrFmtNum(bhxh, ccy)}</span> ${ccy}</span></div>
+      <div style="display:flex;justify-content:space-between;color:var(--muted)"><span>+ TNCN khấu trừ (→ NSNN mục A)</span><span style="font-family:var(--font-mono)"><span id="pr-sum-pit">${_mrFmtNum(pit, ccy)}</span> ${ccy}</span></div>
       ${ccy==='USD' ? `<div style="font-size:10px;color:var(--muted);font-style:italic;margin-top:4px">Lương USD: chi phí giữ USD vào P&amp;L; NSNN quy đổi VND theo tỷ giá ${(_mrFmtNum(+S.fxRate||0))}.</div>` : ''}
     </div>
 
@@ -26434,7 +26508,7 @@ function _renderMultiRowModal(){
             <td colspan="6" style="padding:8px 6px">TỔNG (${s.lines.length} dòng)</td>
             <td class="num" style="font-family:var(--font-mono);padding:8px 4px">${_mrFmtNum(totalNet)}</td>
             <td></td>
-            <td class="num" style="font-family:var(--font-mono);padding:8px 4px"><b>${_mrFmtNum(totalGross)} ${s.ccy}</b></td>
+            <td class="num" style="font-family:var(--font-mono);padding:8px 4px"><b>${_mrFmtNum(totalGross, s.ccy)} ${s.ccy}</b></td>
             <td colspan="2"></td>
           </tr>
         </tfoot>
@@ -26446,7 +26520,7 @@ function _renderMultiRowModal(){
       <button class="btn-sec" onclick="_mrCloneLast()" style="font-size:11px" ${s.lines.length===0?'disabled':''}>⎘ Sao chép dòng cuối</button>
       <button class="btn-sec" onclick="_mrUndo()" style="font-size:11px" ${s.undoStack.length===0?'disabled':''}>↶ Undo (${s.undoStack.length})</button>
       <div style="flex:1"></div>
-      <div style="font-size:11px;color:var(--muted)">Tổng VAT: <b style="font-family:var(--font-mono);color:var(--ink)"><span id="mr-vat-total">${_mrFmtNum(totalVat)}</span> ${s.ccy}</b></div>
+      <div style="font-size:11px;color:var(--muted)">Tổng VAT: <b style="font-family:var(--font-mono);color:var(--ink)"><span id="mr-vat-total">${_mrFmtNum(totalVat, s.ccy)}</span> ${s.ccy}</b></div>
     </div>
 
     <div id="mr-err" style="color:var(--bad);font-size:12px;margin-top:8px"></div>
@@ -26507,11 +26581,14 @@ function _renderMrLine(l, i){
 }
 
 /* Format/parse helpers for amount inputs in multi-row form */
-function _mrFmtNum(n){
+function _mrFmtNum(n, ccy){
   n = +n || 0;
   if(n===0) return '0';
-  // v3.02.13: giữ phần thập phân (USD cents). Nhóm nghìn kiểu VN, tối đa 2 số lẻ.
+  // v3.04.29: định dạng theo loại tiền để PHÂN BIỆT dấu nghìn/thập phân.
+  //   USD/EUR → en-US (',' nghìn + '.' lẻ): 8,250.33. Khác (VND...) → vi-VN, số nguyên/tối đa 2 lẻ.
+  const minor=(ccy==='USD'||ccy==='EUR');
   const hasFrac = Math.abs(n % 1) > 1e-9;
+  if(minor) return n.toLocaleString('en-US', {minimumFractionDigits:2, maximumFractionDigits:2});
   return n.toLocaleString('vi-VN', hasFrac ? {minimumFractionDigits:2, maximumFractionDigits:2} : {maximumFractionDigits:0});
 }
 function _mrParseNum(s){
@@ -26539,7 +26616,14 @@ function _mrFmtFocus(input){
 function _mrFmtBlur(input){
   // Format with separators on blur
   const raw = _mrParseNum(input.value);
-  input.value = _mrFmtNum(raw);
+  // v3.04.29: định dạng theo loại tiền của phiếu/dòng (USD → 8,250.33; VND → 8.250).
+  let _ccy='VND';
+  try{
+    _ccy = (_multiRowState && _multiRowState.ccy) ||
+           (_multiRowState && _multiRowState.lines && input.dataset.tmpid &&
+             (_multiRowState.lines.find(l=>l.tmpId===input.dataset.tmpid)||{}).ccy) || 'VND';
+  }catch(e){}
+  input.value = _mrFmtNum(raw, _ccy);
   // Trigger save with parsed value
   const tmpId = input.dataset.tmpid;
   const field = input.dataset.field;
@@ -26975,7 +27059,7 @@ function _mrUpdateFooter(){
         <td colspan="5" style="padding:8px 6px">TỔNG (${s.lines.length} dòng)</td>
         <td class="num" style="font-family:var(--font-mono);padding:8px 4px">${_mrFmtNum(totalNet)}</td>
         <td></td>
-        <td class="num" style="font-family:var(--font-mono);padding:8px 4px"><b>${_mrFmtNum(totalGross)} ${s.ccy}</b></td>
+        <td class="num" style="font-family:var(--font-mono);padding:8px 4px"><b>${_mrFmtNum(totalGross, s.ccy)} ${s.ccy}</b></td>
         <td colspan="2"></td>
       </tr>`;
   }
@@ -28036,7 +28120,7 @@ function arQuickReceive(id){
     <div class="form-grid" style="grid-template-columns:1fr 1fr">
       <div class="field" style="grid-column:span 2"><label>Số tiền nhận lần này * <span style="color:var(--muted);text-transform:none;font-weight:400;font-size:10px">(mặc định = số còn lại; có thể giảm để thu 1 phần)</span></label>
         <div style="display:flex;gap:6px;align-items:stretch">
-          <input type="number" id="qr-amount" value="${rem}" step="any" min="0.01" max="${rem}" style="flex:1;font-family:var(--font-mono);text-align:right">
+          <input type="number" id="qr-amount" data-ccy="${esc(r.ccy||'VND')}" value="${rem}" step="any" min="0.01" max="${rem}" style="flex:1;font-family:var(--font-mono);text-align:right">
           <button type="button" class="btn-sec" onclick="document.getElementById('qr-amount').value=${rem};_qrUpdateMode()" style="font-size:11px;white-space:nowrap" title="Reset về số còn lại">↺ Thu đủ</button>
         </div>
         <div id="qr-mode-hint" style="font-size:10px;color:var(--muted);font-style:italic;margin-top:3px"></div>
@@ -28088,7 +28172,8 @@ function _qrUpdateMode(){
     btnEl.style.background = '#c5876d';
     if(hintEl){
       const newRem = max - amt;
-      hintEl.innerHTML = `<span style="color:#c5876d">Thu 1 phần — còn lại sau: <b>${(newRem).toLocaleString('vi-VN',{maximumFractionDigits:2})}</b>. KTT có thể thu tiếp lần sau.</span>`;
+      const _qccy = (amtEl.dataset.ccy)||'VND';
+      hintEl.innerHTML = `<span style="color:#c5876d">Thu 1 phần — còn lại sau: <b>${_locN(newRem, _qccy)}</b>. KTT có thể thu tiếp lần sau.</span>`;
     }
   } else {
     btnEl.innerHTML = '✓ Xác nhận';
@@ -28260,7 +28345,7 @@ function runFixFx(){
       <td style="font-size:11px">${esc(r.srcLbl||'Chi hộ')}</td>
       <td class="mono" style="font-size:11px;white-space:nowrap">${esc(r.date)}</td>
       <td style="font-size:11px">${esc((r.desc||'').slice(0,40))}</td>
-      <td class="r mono" style="white-space:nowrap">${(Math.round(r.amount)).toLocaleString('vi-VN')} ${esc(r.ccy)}</td>
+      <td class="r mono" style="white-space:nowrap">${_locN(r.amount, r.ccy)} ${esc(r.ccy)}</td>
       <td class="c mono" style="color:#b8472e">${(Math.round(r.fx)).toLocaleString('vi-VN')}</td>
       <td><input type="text" inputmode="numeric" id="fixfx-new-${i}" placeholder="VD: 26350" style="width:90px;padding:4px 6px;border:1px solid var(--rule);font-family:var(--font-mono);text-align:right"></td>
       <td class="c"><button class="btn-sec" style="font-size:11px;padding:3px 8px" onclick="fixFxApply('${r.src}','${r.id}',${i})">💾</button></td>
@@ -29176,6 +29261,15 @@ function fxAvgSuggest(ccy){
 function opCcyChanged(){
   const ccyEl=document.getElementById('opt-ccy');
   const fxEl=document.getElementById('opt-fx');
+  // v3.04.29: đổi loại tiền → định dạng lại các ô số tiền theo quy ước mới
+  //   (VND bỏ thập phân '.'; ngoại tệ khác dùng ',' nghìn + '.' lẻ).
+  try{
+    const _c=(ccyEl&&ccyEl.value)||'VND';
+    ['opt-amount','opt-khoan-doi-amt'].forEach(fid=>{
+      const el=document.getElementById(fid);
+      if(el && el.value) el.value=_formatMoneyByCcy(el.value, _c);
+    });
+  }catch(e){}
   if(ccyEl && fxEl){
     const ccy=ccyEl.value||'USD';
     if(ccy!=='USD'){
@@ -29198,13 +29292,21 @@ function opCcyChanged(){
    (số tiền VND/đòi đều là số nguyên). Sau format gọi recalc. */
 function opNumFmtLive(input, recalcFn){
   if(!input) return;
-  // v3.04.28: CHO PHÉP số thập phân (USD cent). Trước đây xóa mọi dấu chấm → không gõ được .5/.50
-  //   Dùng _formatThousands: nhóm nghìn phần nguyên + GIỮ tối đa 2 chữ số thập phân (kể cả "1234." đang gõ dở).
+  // v3.04.29: ĐỊNH DẠNG THEO LOẠI TIỀN — VND không thập phân (nhóm nghìn '.'),
+  //   ngoại tệ khác có cent (nhóm nghìn ',' + thập phân '.'). Phân biệt dấu rõ ràng, dễ kiểm tra.
+  //   Ô Tỷ giá (opt-fx / opt-khoan-doi-fx): luôn cho phép thập phân kiểu US (rate có lẻ).
+  const id = input.id||'';
+  let ccy;
+  if(id==='opt-fx' || id==='opt-khoan-doi-fx'){
+    ccy='USD';   // ô tỷ giá: định dạng kiểu có thập phân (',' nghìn + '.' lẻ)
+  } else {
+    ccy=(document.getElementById('opt-ccy')||{}).value||'VND';
+  }
   const caret = input.selectionStart;
   const oldVal = input.value||'';
-  const newVal = _formatThousands(oldVal);
+  const newVal = _formatMoneyByCcy(oldVal, ccy);
   if(newVal !== oldVal){
-    // đếm số chữ số trước con trỏ để khôi phục vị trí
+    // đếm số ký tự "có nghĩa" (số + dấu chấm thập phân) trước con trỏ để khôi phục vị trí
     const digitsBefore=(oldVal.slice(0,caret).match(/[0-9.]/g)||[]).length;
     input.value = newVal;
     let pos=0,seen=0;
@@ -31243,9 +31345,12 @@ function generateOpReport(){
   };
   const fmtMoney=(n,ccy)=>{
     if(n==null||isNaN(n)) return '—';
-    const abs=Math.abs(Math.round(n));
-    const formatted=abs.toLocaleString(ccy==='USD'?'en-US':'vi-VN');
-    return (n<0?'-':'')+(ccy==='USD'?'$'+formatted:formatted+'₫');
+    // v3.04.29: USD/EUR hiển thị 2 số thập phân (cent) kiểu US (',' nghìn + '.' lẻ); VND số nguyên kiểu VN.
+    const isMinor=(ccy==='USD'||ccy==='EUR');
+    const neg=n<0;
+    const formatted=Math.abs(n).toLocaleString(isMinor?'en-US':'vi-VN',
+      isMinor?{minimumFractionDigits:2,maximumFractionDigits:2}:{maximumFractionDigits:0});
+    return (neg?'-':'')+(ccy==='USD'?'$'+formatted:formatted+'₫');
   };
 
   let html='';
