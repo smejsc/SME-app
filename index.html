@@ -2979,7 +2979,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.04.84';            // bumped on each release
+const APP_VERSION='3.04.86';            // bumped on each release
 
 /* v2.62.0: Token xác thực backend — PHẢI khớp API_TOKEN trong Apps Script (Code.gs).
    Mọi request tới Apps Script tự động được gắn token qua lớp bọc fetch bên dưới.
@@ -29445,7 +29445,56 @@ function opManagedMonths(v, toDate){
 }
 /* Tổng phí QL gợi ý lũy kế = phí/tháng × số tháng QL */
 function opMgmtFeeAccrued(v){
+  // v3.04.86: tổng phí QL theo TỪNG THÁNG (tháng NV nhập → số NV; chưa nhập → chuẩn).
+  if(v && v.managedSince && typeof opMgmtFeeMonthly==='function') return opMgmtFeeMonthly(v).total;
   return (+v.fee||0) * opManagedMonths(v);
+}
+/* v3.04.86: PHÍ QL THEO TỪNG THÁNG — nguyên tắc "1 tháng 1 số":
+   tháng NV đã lập (có opMgmtFees.periodMonth) → dùng số NV; chưa lập → số chuẩn (v.fee).
+   Trả {months:[{ym, amount, billed, feeId}], total, totalIssued, totalPending}. */
+function opMgmtFeeMonthly(v, toDate){
+  const out={ months:[], total:0, totalIssued:0, totalPending:0 };
+  if(!v || !v.managedSince) return out;
+  const start=new Date(v.managedSince+'T00:00:00'); if(isNaN(start.getTime())) return out;
+  const end = toDate ? new Date(toDate+'T00:00:00') : new Date();
+  if(end < start) return out;
+  const anchorDay=start.getDate();
+  const nMonths=opManagedMonths(v, toDate);
+  const fees=(S.opMgmtFees||[]).filter(f=>f.vesselId===v.id);
+  // map kỳ đã lập theo periodMonth (YYYY-MM); fallback: suy từ f.date
+  const byMonth={};
+  fees.forEach(f=>{ const ym=f.periodMonth || (String(f.date||'').slice(0,7)); if(ym){ if(!byMonth[ym]) byMonth[ym]=f; } });
+  // duyệt từng tháng QL
+  for(let i=0;i<nMonths;i++){
+    const d=new Date(start.getFullYear(), start.getMonth()+i, 1);
+    const ym=d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0');
+    const f=byMonth[ym];
+    if(f){ const amt=+f.amount||0; out.months.push({ym, amount:amt, billed:true, feeId:f.id}); out.total+=amt; out.totalIssued+=amt; }
+    else { const amt=+v.fee||0; out.months.push({ym, amount:amt, billed:false, feeId:null}); out.total+=amt; out.totalPending+=amt; }
+  }
+  return out;
+}
+/* Tháng QL chưa lập tiếp theo (gợi ý cho ô Kỳ tháng) */
+function _mfNextUnbilledMonth(v){
+  const m=opMgmtFeeMonthly(v);
+  const un=m.months.find(x=>!x.billed);
+  if(un) return un.ym;
+  // tất cả đã lập → tháng hiện tại
+  const n=new Date(); return n.getFullYear()+'-'+String(n.getMonth()+1).padStart(2,'0');
+}
+function _mfMonthChanged(vid){
+  // đổi kỳ tháng → cập nhật mô tả + gợi ý số tiền (chuẩn nếu tháng đó chưa lập)
+  const v=(S.opVessels||[]).find(x=>x.id===vid); if(!v) return;
+  const ymEl=document.getElementById('mf-period-month'); if(!ymEl) return;
+  const ym=ymEl.value||''; if(!ym) return;
+  const [Y,M]=ym.split('-');
+  const descEl=document.getElementById('mf-period'); if(descEl) descEl.value='Phí QL T'+M+'/'+Y;
+  // nếu tháng này đã lập → cảnh báo + điền số cũ; chưa → gợi ý chuẩn
+  const existing=(S.opMgmtFees||[]).find(f=>f.vesselId===vid && (f.periodMonth===ym || String(f.date||'').slice(0,7)===ym));
+  const amtEl=document.getElementById('mf-amount');
+  if(existing){ if(amtEl) amtEl.value=+existing.amount||0; toast('⚠ Tháng '+M+'/'+Y+' đã lập phí — sửa sẽ tạo bản mới (mỗi tháng nên 1 lần)','warn'); }
+  else { if(amtEl && !amtEl.value){ amtEl.value=+v.fee||0; } }
+  try{ mfRecalc(); }catch(e){}
 }
 /* v3.01.72: ngưỡng tối thiểu quy USD (đồng chuẩn so sánh số dư). VND → chia tỷ giá. */
 function opMinUsd(v){
@@ -29473,8 +29522,13 @@ function opBalanceBreakdown(vid){
   });
   const apChi = -(typeof opApChiHo==='function'?opApChiHo(vid):0);  // dương = tổng chi hộ AP
   let mgmtPending=0;
-  if(v){ const accrued=opMgmtFeeAccrued(v), issued=opMgmtFeeIssued(vid); const p=Math.max(0,accrued-issued);
-    const ccy=v.ccy||'USD'; mgmtPending = ccy==='USD'?p:((+S.fxRate||0)>0?p/(+S.fxRate):p); }
+  if(v){
+    // v3.04.86: phí QL theo TỪNG THÁNG (tháng NV nhập → số NV; chưa nhập → chuẩn).
+    //   issued (tháng đã lập) đã nằm trong 'chi' qua bút toán cấn trừ → pending = phần CHƯA lập.
+    const mm=opMgmtFeeMonthly(v);
+    const p=mm.totalPending;   // tổng các tháng chưa lập (theo mức chuẩn)
+    const ccy=v.ccy||'USD'; mgmtPending = ccy==='USD'?p:((+S.fxRate||0)>0?p/(+S.fxRate):p);
+  }
   const chiTotal = chi + apChi + fees;     // tổng đã chi (chi hộ opTx + AP + phí giao dịch)
   const chiReal = chiTotal - chiBudget;    // chi thực = tổng − dự kiến
   const bal = thu - chiTotal - mgmtPending;
@@ -29969,8 +30023,9 @@ function openMgmtFeeModal(vid){
       ${v.managedSince?`QL từ <b>${esc(v.managedSince)}</b> · <b>${months}</b> tháng · phí ${fmt(v.fee,v.ccy)}/tháng`:'<span style="color:var(--warn)">Chưa đặt Ngày bắt đầu QL — sửa tàu để app gợi ý số tháng</span>'}<br>
       Phí lũy kế gợi ý: <b>${fmt(accrued,v.ccy)}</b> · Đã phát hành: <b>${fmt(issued,v.ccy)}</b> · Còn lại gợi ý: <b style="color:var(--accent)">${fmt(suggest,v.ccy)}</b>
     </div>
-    <div class="form-grid" style="grid-template-columns:1fr 1fr">
-      <div class="field"><label>Kỳ phí (mô tả)</label><input type="text" id="mf-period" value="Phí QL đến T${String(now.getMonth()+1).padStart(2,'0')}/${now.getFullYear()}"></div>
+    <div class="form-grid" style="grid-template-columns:1fr 1fr 1fr">
+      <div class="field"><label>Kỳ tháng <span style="color:var(--bad)">*</span> <span style="font-weight:400;color:var(--muted);font-size:10px;text-transform:none">(phí của tháng nào)</span></label><input type="month" id="mf-period-month" value="${_mfNextUnbilledMonth(v)}" onchange="_mfMonthChanged('${v.id}')"></div>
+      <div class="field"><label>Kỳ phí (mô tả)</label><input type="text" id="mf-period" value="Phí QL T${String(now.getMonth()+1).padStart(2,'0')}/${now.getFullYear()}"></div>
       <div class="field"><label>Ngày phát hành</label><input type="date" id="mf-date" value="${todayISO()}"></div>
       <div class="field"><label>Số tiền (chưa VAT) ${esc(v.ccy)} <span style="font-weight:400;color:var(--muted);font-size:10px;text-transform:none">— nhập tự do theo thực tế/thỏa thuận</span></label><input type="number" id="mf-amount" data-ccy="${esc(v.ccy||'VND')}" data-standard="${(+v.fee||0)}" step="any" value="${suggest>0?(Math.round(suggest*100)/100):''}" placeholder="${suggest>0?'':'Nhập số tiền phí QL'}" oninput="mfRecalc()"><div id="mf-std-hint" style="font-size:10px;color:var(--muted);margin-top:3px"></div></div>
       <div class="field"><label>Thuế suất %</label>
@@ -30118,6 +30173,7 @@ function issueMgmtFee(vid){
   const gross=net+vat;
   const date=(document.getElementById('mf-date')||{}).value||todayISO();
   const period=((document.getElementById('mf-period')||{}).value||'').trim();
+  const periodMonth=((document.getElementById('mf-period-month')||{}).value||'').trim();  // v3.04.86: kỳ tháng YYYY-MM
   const invoiceNo=((document.getElementById('mf-invoice')||{}).value||'').trim();
   const deduct=!!(document.getElementById('mf-deduct')||{}).checked;
   const adjustNote=((document.getElementById('mf-adjust-note')||{}).value||'').trim();  // v3.04.43: lý do phí khác mức chuẩn
@@ -30177,7 +30233,7 @@ function issueMgmtFee(vid){
   // (3) Lưu record phí QL để theo dõi đã phát hành
   if(!S.opMgmtFees) S.opMgmtFees=[];
   S.opMgmtFees.push({
-    id:feeId, vesselId:vid, date, period, amount:net, vatPercent:pct, vatAmount:vat, amountGross:gross,
+    id:feeId, vesselId:vid, date, period, periodMonth, amount:net, vatPercent:pct, vatAmount:vat, amountGross:gross,
     ccy, invoiceNo, deducted:!!deduct, arId:arRec.id, opTxId,
     standardFee:+v.fee||0, adjustNote:adjustNote||'',   // v3.04.43: mức chuẩn + lý do điều chỉnh
     revenueRecognized:false,   // v3.04.44: chưa ghi doanh thu (chờ chủ tàu duyệt)
@@ -32021,7 +32077,7 @@ function renderOpInputRecent(){
   const amtRaw = (document.getElementById('opi-filter-amt')||{}).value;
   const amtTarget = (amtRaw!==''&&amtRaw!=null)?+amtRaw:null;
   const allowedIds = userAssignedOpVesselIds();
-  let txs = (S.opTransactions||[]).filter(t=>allowedIds.includes(t.vesselId));
+  let txs = (S.opTransactions||[]).filter(t=>allowedIds.includes(t.vesselId) && !t._mgmtFeeId);  // v3.04.85: phí QL là Phải thu, không hiện ở sổ chi hộ
   if(filterV) txs = txs.filter(t=>t.vesselId===filterV);
   if(pFilter) txs = txs.filter(t=>((t.vendor||'')+' '+(t.desc||'')+' '+(t.contractNo||'')+' '+(t.invoiceNo||'')).toLowerCase().includes(pFilter));
   if(amtTarget!=null && !isNaN(amtTarget)){
