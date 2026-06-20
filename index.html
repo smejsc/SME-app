@@ -2977,7 +2977,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.04.73';            // bumped on each release
+const APP_VERSION='3.04.74';            // bumped on each release
 
 /* v2.62.0: Token xác thực backend — PHẢI khớp API_TOKEN trong Apps Script (Code.gs).
    Mọi request tới Apps Script tự động được gắn token qua lớp bọc fetch bên dưới.
@@ -27259,6 +27259,8 @@ async function _mrDocReadAI(inputEl){
     const rv=_resolveVendorFromAI(d.vendor,d.vendorTaxCode);
     if(rv.name && !(_multiRowState.partner||'').trim()){ _multiRowState.partner=rv.name; }
     const aiLines=Array.isArray(d.lines)&&d.lines.length?d.lines:[{desc:d.desc||'',amountNet:+d.amountNet||0,vatPercent:+d.vatPercent||0}];
+    // v3.04.74: nếu ĐỌC LẠI trên cùng dòng → xóa các dòng con đã sinh từ lần đọc trước (tránh cộng đôi)
+    _multiRowState.lines = _multiRowState.lines.filter(x=> !(x._fromAiOf===l.tmpId));
     // DÒNG ĐẦU → điền vào dòng hiện tại (giữ invoiceNo + attachments của dòng)
     const first=aiLines[0];
     if(d.invoiceNo) l.invoiceNo=d.invoiceNo;
@@ -27274,6 +27276,7 @@ async function _mrDocReadAI(inputEl){
       for(let k=1;k<aiLines.length;k++){
         const aL=aiLines[k];
         const nl=_newLine();
+        nl._fromAiOf=l.tmpId;            // v3.04.74: đánh dấu dòng sinh từ AI của dòng gốc này
         nl.invoiceNo=d.invoiceNo||'';   // cùng số hóa đơn
         nl.desc=aL.desc||'';
         nl.amountNet=+aL.amountNet||0;
@@ -30499,7 +30502,13 @@ function _renderOpMrModal(){
   const totalUsd=s.lines.reduce((a,l)=>a+_opMrConvUsd(l.gross,s.ccy,s.fxInput),0);
   const body=`
     <div style="background:var(--paper-2);padding:12px 14px;border-radius:6px;margin-bottom:12px">
-      <div style="font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);font-weight:600;margin-bottom:8px">Header phiếu chi hộ</div>
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+        <div style="font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);font-weight:600">Header phiếu chi hộ</div>
+        <div>
+          <input type="file" id="opmr-head-ai" accept=".pdf,image/*" style="display:none" onchange="_opMrHeadReadAI(this)">
+          <button type="button" class="btn-sec" style="font-size:11px;padding:4px 10px" onclick="document.getElementById('opmr-head-ai').click()" title="Đọc hóa đơn (PDF/ảnh, AI) → tự điền NCC + các dòng">📎 Đọc hóa đơn (AI)</button>
+        </div>
+      </div>
       <div class="form-grid" style="grid-template-columns:repeat(4,1fr)">
         <div class="field" style="margin:0"><label style="font-size:10px">Ngày</label><input type="date" value="${esc(s.date)}" oninput="_opMrHead('date',this.value)"></div>
         <div class="field" style="margin:0"><label style="font-size:10px">Tàu QL</label>
@@ -30616,6 +30625,36 @@ async function _opMrDocUpload(inputEl){
   }
   if(inputEl) inputEl.value='';
 }
+/* v3.04.74: ĐỌC HÓA ĐƠN cho CẢ PHIẾU (header) — điền NCC + tạo các dòng */
+async function _opMrHeadReadAI(inputEl){
+  const file=inputEl&&inputEl.files&&inputEl.files[0]; if(!file) return;
+  const cfg=getAuthConfig(); if(!cfg||!cfg.scriptUrl){ toast('Chưa cấu hình Apps Script','bad'); return; }
+  toast('⏳ AI đang đọc hóa đơn…');
+  try{
+    const b64=await new Promise((res,rej)=>{const r=new FileReader();r.onload=()=>{const x=String(r.result||'');res(x.includes(',')?x.split(',')[1]:x);};r.onerror=()=>rej(new Error('đọc lỗi'));r.readAsDataURL(file);});
+    const mime=file.type||(/\.pdf$/i.test(file.name)?'application/pdf':'image/jpeg');
+    const resp=await fetch(cfg.scriptUrl,{method:'POST',headers:{'Content-Type':'text/plain'},body:JSON.stringify({action:'gemini_extract',fileBase64:b64,mimeType:mime,mode:'ap'})});
+    const data=await resp.json(); if(!data||!data.ok){ throw new Error((data&&data.error)||'AI không đọc được'); }
+    const d=data.data||{};
+    const rv=_resolveVendorFromAI(d.vendor,d.vendorTaxCode);
+    if(rv.name) _opMrState.vendor=rv.name;
+    if(rv.taxCode) _opMrState.vendorTax=rv.taxCode;
+    if(d.invoiceNo && !(_opMrState.contractNo||'')){ /* số HĐ giữ ở dòng */ }
+    const aiLines=Array.isArray(d.lines)&&d.lines.length?d.lines:[{desc:d.desc||'',amountNet:+d.amountNet||0,vatPercent:+d.vatPercent||0}];
+    // tạo dòng cho cả phiếu (chi hộ = GROSS = net*(1+vat/100))
+    _opMrState.lines=aiLines.map(L=>{
+      const nl=_opNewLine();
+      nl.invoiceNo=d.invoiceNo||'';
+      nl.desc=L.desc||'';
+      const g=(+L.amountNet||0)*(1+(+L.vatPercent||0)/100);
+      nl.gross=Math.round(g*100)/100;
+      return nl;
+    });
+    _renderOpMrModal();
+    toast('✓ AI đã đọc — '+aiLines.length+' dòng (NCC: '+(rv.name||'?')+')','good');
+  }catch(e){ toast('Lỗi đọc AI: '+(e&&e.message||''),'bad'); }
+  if(inputEl) inputEl.value='';
+}
 async function _opMrDocReadAI(inputEl){
   const l=_opMrDocsCurLine(); if(!l) return; const file=inputEl&&inputEl.files&&inputEl.files[0]; if(!file) return;
   const cfg=getAuthConfig(); if(!cfg||!cfg.scriptUrl){ toast('Chưa cấu hình Apps Script','bad'); return; }
@@ -30625,6 +30664,8 @@ async function _opMrDocReadAI(inputEl){
     const resp=await fetch(cfg.scriptUrl,{method:'POST',headers:{'Content-Type':'text/plain'},body:JSON.stringify({action:'gemini_extract',fileBase64:b64,mimeType:mime,mode:'ap'})});
     const data=await resp.json(); if(!data||!data.ok){ throw new Error((data&&data.error)||'AI không đọc được'); }
     const d=data.data||{}; const aiLines=Array.isArray(d.lines)&&d.lines.length?d.lines:[{desc:d.desc||'',amountNet:+d.amountNet||0,vatPercent:+d.vatPercent||0}];
+    // v3.04.74: đọc lại cùng dòng → xóa dòng con sinh lần trước (tránh cộng đôi)
+    _opMrState.lines=_opMrState.lines.filter(x=> !(x._fromAiOf===l.tmpId));
     const first=aiLines[0];
     if(d.invoiceNo){ l.invoiceNo=d.invoiceNo; }
     if(first.desc) l.desc=first.desc;
@@ -30635,7 +30676,7 @@ async function _opMrDocReadAI(inputEl){
     if(rv.name && !(_opMrState.vendor||'').trim()){ _opMrState.vendor=rv.name; _opMrState.vendorTax=rv.taxCode||''; }
     if(d.invoiceNo && !(_opMrState.contractNo||'')){ /* giữ */ }
     // các dòng còn lại → thêm dòng
-    let added=0; if(aiLines.length>1){ const base=_opMrState.lines.findIndex(x=>x.tmpId===l.tmpId); for(let k=1;k<aiLines.length;k++){ const aL=aiLines[k]; const nl=_opNewLine(); nl.invoiceNo=d.invoiceNo||''; nl.desc=aL.desc||''; const gg=(+aL.amountNet||0)*(1+(+aL.vatPercent||0)/100); nl.gross=Math.round(gg*100)/100; _opMrState.lines.splice(base+k,0,nl); added++; } }
+    let added=0; if(aiLines.length>1){ const base=_opMrState.lines.findIndex(x=>x.tmpId===l.tmpId); for(let k=1;k<aiLines.length;k++){ const aL=aiLines[k]; const nl=_opNewLine(); nl._fromAiOf=l.tmpId; nl.invoiceNo=d.invoiceNo||''; nl.desc=aL.desc||''; const gg=(+aL.amountNet||0)*(1+(+aL.vatPercent||0)/100); nl.gross=Math.round(gg*100)/100; _opMrState.lines.splice(base+k,0,nl); added++; } }
     if(st){ st.style.color='var(--good)'; st.textContent='✓ Đã điền '+aiLines.length+' dòng (NCC: '+(rv.name||'?')+')'; }
     toast('✓ AI đã đọc — '+aiLines.length+' dòng','good');
     if(added>0){ closeModal(); _renderOpMrModal(); }
