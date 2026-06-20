@@ -2975,7 +2975,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.04.58';            // bumped on each release
+const APP_VERSION='3.04.62';            // bumped on each release
 
 /* v2.62.0: Token xác thực backend — PHẢI khớp API_TOKEN trong Apps Script (Code.gs).
    Mọi request tới Apps Script tự động được gắn token qua lớp bọc fetch bên dưới.
@@ -25673,9 +25673,9 @@ function _arEditorBody(r,isPayable){
 
   const _arBodyHtml = `
     ${lockedNote}
-    ${(isPayable && !lockedAttr) ? `<div style="display:flex;justify-content:flex-end;margin-bottom:8px">
+    ${(!lockedAttr) ? `<div style="display:flex;justify-content:flex-end;margin-bottom:8px">
       <input type="file" id="ap1-invoice-file" accept=".csv,.pdf,.xml,image/*" style="display:none" onchange="_mrReadInvoiceFile(this.files[0],'ap1')">
-      <button type="button" class="btn-sec" style="font-size:11px;padding:5px 12px" onclick="document.getElementById('ap1-invoice-file').click()" title="Đọc hóa đơn XML/PDF/CSV + ẢNH & PDF scan (AI Gemini) → tự điền phiếu.">📎 Đọc hóa đơn (XML/PDF/CSV/Ảnh-AI)</button>
+      <button type="button" class="btn-sec" style="font-size:11px;padding:5px 12px" onclick="document.getElementById('ap1-invoice-file').click()" title="Đọc ${isPayable?'hóa đơn':'hóa đơn đầu ra'} XML/PDF/CSV + ẢNH & PDF scan (AI Gemini) → tự điền phiếu.">📎 Đọc hóa đơn (XML/PDF/CSV/Ảnh-AI)</button>
     </div>` : ''}
     <div class="form-grid">
       <div class="field"><label>${isPayable?'Nhà cung cấp':'Khách hàng'} *</label>
@@ -26107,7 +26107,7 @@ function _apOrdersBlock(r){
 
 function openReceivableModal(id){
   const isEdit=!!id;
-  const r=isEdit?S.receivables.find(x=>x.id===id):{ccy:'USD',issueDate:todayISO(),payments:[]};
+  const r=isEdit?S.receivables.find(x=>x.id===id):{ccy:'VND',issueDate:todayISO(),payments:[]};  // v3.04.60: mặc định VNĐ
   if(isEdit && !r){toast('Không tìm thấy','bad');return;}
   try{ window._arCurrentKind='ar'; }catch(e){}
   const body=_arEditorBody(r,false);
@@ -26379,7 +26379,7 @@ function saveApProvisional(){
 }
 function openPayableModal(id){
   const isEdit=!!id;
-  const r=isEdit?S.payables.find(x=>x.id===id):{ccy:'USD',issueDate:todayISO(),payments:[]};
+  const r=isEdit?S.payables.find(x=>x.id===id):{ccy:'VND',issueDate:todayISO(),payments:[]};  // v3.04.60: mặc định VNĐ
   if(isEdit && !r){toast('Không tìm thấy','bad');return;}
   try{ window._curApId = isEdit ? id : ''; window._arCurrentKind='ap'; }catch(e){}
   const body=_arEditorBody(r,true);
@@ -26404,7 +26404,7 @@ function openPayableModal(id){
 // Holds current multi-row form state (in-memory only — not persisted)
 let _multiRowState = {
   mode: 'ap',         // 'ar' or 'ap'
-  ccy: 'USD',
+  ccy: 'VND',  // v3.04.60: mặc định VNĐ
   partner: '',
   vendorId: '',
   issueDate: '',
@@ -26426,7 +26426,7 @@ let _multiRowState = {
 function openMultiRowModal(kind){
   _multiRowState = {
     mode: kind,
-    ccy: 'USD',
+    ccy: 'VND',  // v3.04.60: mặc định VNĐ giảm thao tác
     partner: '',
     vendorId: '',
     issueDate: todayISO(),
@@ -27186,7 +27186,7 @@ async function _mrDocUpload(inputEl){
     if(st){ st.style.color='var(--accent)'; st.textContent='⏳ Đang tải "'+file.name+'"…'; }
     try{
       const b64=await new Promise((res,rej)=>{const r=new FileReader();r.onload=()=>{const x=String(r.result||'');res(x.includes(',')?x.split(',')[1]:x);};r.onerror=()=>rej(new Error('đọc lỗi'));r.readAsDataURL(file);});
-      const resp=await fetch(cfg.scriptUrl,{method:'POST',headers:{'Content-Type':'text/plain'},body:JSON.stringify({action:'upload_attachment',fileBase64:b64,mimeType:file.type||'application/octet-stream',fileName:file.name,sub:'AP',viewers:_attachViewerEmails()})});
+      const resp=await fetch(cfg.scriptUrl,{method:'POST',headers:{'Content-Type':'text/plain'},body:JSON.stringify({action:'upload_attachment',fileBase64:b64,mimeType:file.type||'application/octet-stream',fileName:file.name,sub:(_multiRowState.mode==='ap'?'AP':'AR'),viewers:_attachViewerEmails()})});
       const data=await resp.json();
       if(!data||!data.ok){ throw new Error((data&&data.error)||'upload lỗi'); }
       const dt=(document.getElementById('mrdoc-type')||{}).value||'';
@@ -32285,8 +32285,9 @@ function generateOpReport(){
     const outRows=outAll.filter(x=>x.opCat!=='CREW_SALARY');
     const crewRows=outAll.filter(x=>x.opCat==='CREW_SALARY');
     const budgetRows=period.filter(x=>x.type==='OUT' && x._isBudget && !_isKhoanChi(x));
-    // v3.04.55: gom chứng từ (ảnh/PDF) của các khoản chi hộ trong kỳ → phụ lục
-    [...inRows, ...outRows, ...crewRows].forEach(x=>{
+    // v3.04.55/61: gom chứng từ (ảnh/PDF) của các khoản chi hộ trong kỳ → phụ lục
+    //   gồm cả dòng dự kiến (_isBudget) để chứng từ không bị bỏ sót.
+    [...inRows, ...outRows, ...crewRows, ...budgetRows].forEach(x=>{
       (Array.isArray(x.attachments)?x.attachments:[]).forEach(a=>{
         if(a && a.id) _annexItems.push({ vessel:v.name, date:x.date, vendor:x.vendor||'', invoiceNo:x.invoiceNo||'', desc:x.desc||'', amount:x.amount, ccy:x.ccy||'USD', fileId:a.id, fileName:a.name||'', mimeType:a.mimeType||'', url:a.url||'', docType:a.docType||'' });
       });
@@ -32649,6 +32650,32 @@ function generateOpReport(){
 }
 
 /* v3.04.55: dựng phụ lục ảnh chứng từ — tải file base64 qua Apps Script, nhúng <img> kèm nhãn. */
+/* v3.04.62: render mọi trang PDF (base64) thành mảng ảnh dataURL để nhúng vào báo cáo (in được). */
+async function _pdfBase64ToImages(b64){
+  try{
+    await _loadScriptOnce('https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js','pdfjsLib');
+    if(window.pdfjsLib) pdfjsLib.GlobalWorkerOptions.workerSrc='https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+  }catch(e){ console.warn('[pdf.js load]', e&&e.message); return []; }
+  if(!window.pdfjsLib) return [];
+  // base64 → Uint8Array
+  const bin=atob(b64); const buf=new Uint8Array(bin.length);
+  for(let i=0;i<bin.length;i++) buf[i]=bin.charCodeAt(i);
+  const imgs=[];
+  try{
+    const pdf=await pdfjsLib.getDocument({data:buf}).promise;
+    const maxPages=Math.min(pdf.numPages, 10);  // tối đa 10 trang/chứng từ để PDF báo cáo không quá nặng
+    for(let p=1;p<=maxPages;p++){
+      const page=await pdf.getPage(p);
+      const viewport=page.getViewport({scale:1.5});  // 1.5x cho nét khi in
+      const canvas=document.createElement('canvas');
+      canvas.width=viewport.width; canvas.height=viewport.height;
+      const ctx=canvas.getContext('2d');
+      await page.render({canvasContext:ctx, viewport}).promise;
+      imgs.push(canvas.toDataURL('image/jpeg', 0.82));
+    }
+  }catch(e){ console.warn('[pdf render]', e&&e.message); }
+  return imgs;
+}
 async function _buildOwnerReportAnnex(items, en, bi){
   const cfg=getAuthConfig();
   if(!cfg || !cfg.scriptUrl){ toast('Chưa cấu hình Apps Script — bỏ phụ lục','warn'); return ''; }
@@ -32665,7 +32692,8 @@ async function _buildOwnerReportAnnex(items, en, bi){
   const title = en?'Annex — Supporting Documents':bi?'Phụ lục — Chứng từ · Supporting Documents':'Phụ lục — Chứng từ';
   const lblDate=en?'Date':'Ngày', lblVendor=en?'Vendor':'NCC', lblInv=en?'Invoice':'Số HĐ', lblAmt=en?'Amount':'Số tiền';
   let blocks='';
-  items.forEach((it,idx)=>{
+  for(let idx=0; idx<items.length; idx++){
+    const it=items[idx];
     const f=byId[it.fileId];
     const cap=`<div style="font-size:9pt;color:#333;margin-bottom:4pt;border-bottom:1pt solid #ccc;padding-bottom:3pt">
       <b>#${idx+1}</b> ${(()=>{const T={quote:en?'Quotation':'Báo giá',invoice:en?'Invoice':'Hóa đơn',contract:en?'Contract':'Hợp đồng',other:en?'Other':'Khác'};return it.docType&&T[it.docType]?('· <b style=\"color:#1c3a5c\">'+T[it.docType]+'</b> '):'';})()}· ${lblDate}: ${esc(fmtDate?fmtDate(it.date):it.date)} · ${lblVendor}: ${esc(it.vendor||'—')} · ${lblInv}: ${esc(it.invoiceNo||'—')} · ${lblAmt}: ${esc(String(it.amount))} ${esc(it.ccy)}
@@ -32674,16 +32702,24 @@ async function _buildOwnerReportAnnex(items, en, bi){
     if(f && f.base64 && /^image\//i.test(f.mimeType||'')){
       media=`<img src="data:${f.mimeType};base64,${f.base64}" style="max-width:100%;max-height:560pt;display:block;margin:0 auto;border:1pt solid #ddd"/>`;
     } else if(f && f.base64 && /pdf/i.test(f.mimeType||'')){
-      // PDF: nhúng object (in được trang đầu); kèm ghi chú link
-      media=`<embed src="data:application/pdf;base64,${f.base64}" type="application/pdf" style="width:100%;height:560pt;border:1pt solid #ddd"/>
-             <div style="font-size:8pt;color:#888;font-style:italic">${en?'PDF document':'Tài liệu PDF'}: ${esc(it.fileName||'')}</div>`;
+      // v3.04.62: render MỌI trang PDF thành ẢNH (in được) thay vì <embed> (không in được).
+      try{
+        const imgs=await _pdfBase64ToImages(f.base64);
+        if(imgs && imgs.length){
+          media=imgs.map((src,pi)=>`<img src="${src}" style="max-width:100%;max-height:560pt;display:block;margin:0 auto ${pi<imgs.length-1?'10pt':'0'};border:1pt solid #ddd"/>`).join('');
+        } else {
+          media=`<div style="font-size:9pt;color:#888;padding:10pt;border:1pt dashed #ccc">${en?'PDF document':'Tài liệu PDF'}: ${esc(it.fileName||'')} — <a href="${esc(it.url||'')}" target="_blank">${en?'open link':'mở link'}</a></div>`;
+        }
+      }catch(ePdf){
+        media=`<div style="font-size:9pt;color:#888;padding:10pt;border:1pt dashed #ccc">${en?'PDF document':'Tài liệu PDF'}: ${esc(it.fileName||'')} — <a href="${esc(it.url||'')}" target="_blank">${en?'open link':'mở link'}</a></div>`;
+      }
     } else if(f && f.tooLarge){
       media=`<div style="font-size:9pt;color:#a00;padding:10pt;border:1pt dashed #a00">${en?'File too large to embed':'File quá lớn để nhúng'} — ${esc(it.fileName||'')}</div>`;
     } else {
       media=`<div style="font-size:9pt;color:#888;padding:10pt;border:1pt dashed #ccc">${en?'Document not available for embedding':'Không nhúng được tài liệu này'} — ${esc(it.fileName||'')}</div>`;
     }
     blocks+=`<div style="page-break-inside:avoid;margin-bottom:16pt">${cap}${media}</div>`;
-  });
+  }
 
   return `<div class="pr-page" style="page-break-before:always;padding:24pt">
     <div style="text-align:center;border-bottom:2pt solid #1c3a5c;padding-bottom:8pt;margin-bottom:14pt">
