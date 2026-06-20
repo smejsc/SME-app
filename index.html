@@ -676,6 +676,7 @@ body.readonly-mode::before{
         </div>
         <button class="manage-users-item" onclick="closeAdminMenu();openSettings()"><span class="ico">⚙</span>Cài đặt &amp; Phân quyền</button>
         <button class="admin-only-item" onclick="closeAdminMenu();openAdminChecklist()"><span class="ico">✅</span>Checklist vận hành</button>
+        <button class="ktt-allowed-item" onclick="closeAdminMenu();openDupChecker()" title="Quét chứng từ trùng (Phải trả / Phải thu / Thu-Chi hộ) — xem, sửa, xóa từng bản; không tự động"><span class="ico">🔍</span>Kiểm tra chứng từ trùng</button>
         <button class="admin-only-item" onclick="closeAdminMenu();openHistoricalData()"><span class="ico">📊</span>Số liệu lịch sử (năm cũ)</button>
         <button class="admin-only-item" onclick="closeAdminMenu();seedDemo()"><span class="ico">▤</span>Nạp Demo Data</button>
         <div class="divider ktt-allowed-item"></div>
@@ -1277,8 +1278,8 @@ body.readonly-mode::before{
         <select id="ap-filter-company" class="company-ui" onchange="renderAR()" style="padding:6px 10px;border:1px solid var(--rule);background:var(--paper);font-family:var(--font-mono);font-size:12px;min-width:150px" title="Lọc theo công ty">
           <option value="">— Tất cả công ty —</option>
         </select>
-        <button class="btn-primary" onclick="openPayableModal(null)">+ Thêm phải trả</button>
-        <button class="btn-sec" onclick="openMultiRowModal('ap')" title="Nhập phiếu nhiều dòng — 1 NCC có nhiều hóa đơn">📋 Nhập nhiều dòng</button>
+        <button class="btn-primary" onclick="openProvisionalAp()" title="Phải trả DỰ KIẾN — khi mới có đề xuất/hợp đồng, chưa có hóa đơn. Ghi NGAY vào P&L dự án/tàu (trạng thái 'Chi phí dự kiến'). Khi có hóa đơn, cập nhật → vào AP bình thường.">+ Phải trả dự kiến</button>
+        <button class="btn-sec" onclick="openMultiRowModal('ap')" title="Thêm phải trả (có hóa đơn) — 1 hoặc nhiều dòng, cùng cơ chế">📋 Thêm Phải trả</button>
         <button class="btn-sec" onclick="openPayrollModal()" title="Phiếu lương — 1 dự án/tàu, 1 kỳ; tự gán loại Lương, tổng BHXH/TNCN sinh NSNN" style="font-size:12px">🧾 Phiếu lương</button>
         <button class="btn-sec" onclick="openPayrollReview()" title="Xem lại các phiếu (gom theo batchId): kỳ, dự án/tàu, tổng lương, BHXH, TNCN" style="font-size:12px">🗂 Xem lại phiếu</button>
         <button class="btn-sec" onclick="arExportExcel('ap')" title="Xuất sổ phải trả ra Excel để đối chiếu" style="font-size:12px">📊 Xuất Excel</button>
@@ -1304,8 +1305,8 @@ body.readonly-mode::before{
   <div class="section">
     <div class="section-head"><div class="section-title"><span class="tag">⊕</span>Ghi nhận thu hộ / chi hộ</div>
       <div>
-        <input type="file" id="op-invoice-file" accept=".csv,.pdf,.xml" style="display:none" onchange="_mrReadInvoiceFile(this.files[0],'op')">
-        <button type="button" class="btn-sec" style="font-size:11px;padding:5px 12px" onclick="document.getElementById('op-invoice-file').click()" title="Đọc hóa đơn XML/PDF(có text)/CSV → tự điền form. Ảnh scan nhập tay.">📎 Đọc hóa đơn (XML/PDF/CSV)</button>
+        <input type="file" id="op-invoice-file" accept=".csv,.pdf,.xml,image/*" style="display:none" onchange="_mrReadInvoiceFile(this.files[0],'op')">
+        <button type="button" class="btn-sec" style="font-size:11px;padding:5px 12px" onclick="document.getElementById('op-invoice-file').click()" title="Đọc hóa đơn XML/PDF/CSV + ẢNH & PDF scan (AI Gemini) → tự điền form.">📎 Đọc hóa đơn (XML/PDF/CSV/Ảnh-AI)</button>
       </div>
     </div>
     <div class="section-body">
@@ -2974,7 +2975,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.04.40';            // bumped on each release
+const APP_VERSION='3.04.56';            // bumped on each release
 
 /* v2.62.0: Token xác thực backend — PHẢI khớp API_TOKEN trong Apps Script (Code.gs).
    Mọi request tới Apps Script tự động được gắn token qua lớp bọc fetch bên dưới.
@@ -8160,6 +8161,8 @@ function docStatusInfo(r){
   }
   switch(st){
     case 'draft':
+      // v3.04.47: phải trả dự kiến (chưa có hóa đơn) — nhãn riêng để phân biệt nháp thường.
+      if(r._isProvisional) return {label:'Chi phí dự kiến', who:esc(r.submittedBy||r.createdBy||''), cls:'chip-warn', icon:'📋'};
       return {label:'Nháp', who:esc(r.submittedBy||r.createdBy||''), cls:'', icon:'📝'};
     case 'pending_acc':
       return {label:'KT đang kiểm', who:esc(r.submittedBy||''), cls:'chip-warn', icon:'🔍'};
@@ -8585,6 +8588,7 @@ function wfSubmit(r, kind){
     try{ logAuditEvent('fast_track_ar',{recordId:r.id,partner:r.partner||'',amount:r.amount||0,ccy:r.ccy||'',actor:actorName()}); }catch(e){}
   } else {
     r.status='pending_acc';
+    if(r._isProvisional){ r._isProvisional=false; }  // v3.04.47: gửi duyệt = đã hoàn thiện (có hóa đơn) → hết 'dự kiến'
   }
   touchRecord(r);  // v2.61.0: timestamp cho sync
 }
@@ -9821,6 +9825,17 @@ async function cloudSync(mode, opts){
     toast('Chưa cấu hình Apps Script URL. Vào "Cài đặt" để cài.','bad');
     return;
   }
+  // v3.04.56: CHỐT CHẶN MÁY MỚI — nếu state đang TRỐNG (chưa pull) mà định PUSH → tự chuyển PULL.
+  //   Tránh máy mới đẩy state rỗng lên, gây cảnh báo "mất dữ liệu" / rủi ro đè cloud.
+  //   Chỉ áp khi KHÔNG do người chủ động bấm (interactive) — người bấm vẫn được hỏi confirm bình thường.
+  if((mode==='push' || mode==='both') && !_interactive){
+    try{
+      if(typeof _stateLooksEmpty==='function' && _stateLooksEmpty()){
+        console.warn('[sync] State trống → CHẶN auto-push, chuyển PULL (chống đè cloud từ máy mới).');
+        mode='pull';
+      }
+    }catch(e){}
+  }
   // Fire-and-forget update check (doesn't block sync)
   checkForUpdate();
   updateSyncStatus('syncing');
@@ -10661,6 +10676,7 @@ function reverseAdvanceFromFund(r){
   if(fund){
     fund.balance=(+fund.balance||0)-(+r._advanceTxnAmount||0);
   }
+  try{ const _rm=(S.cashTxns||[]).filter(t=>(t.sourceType==='ap'&&t.sourceId===r.id&&t.category==='Ứng quỹ')).map(t=>t.id); if(_rm.length) markDeleted(_rm,'cashTxns'); }catch(e){}  // v3.04.42: bia mộ
   S.cashTxns=(S.cashTxns||[]).filter(t=>!(t.sourceType==='ap'&&t.sourceId===r.id&&t.category==='Ứng quỹ'));
   r._advanceApplied=false;
   delete r._advanceTxnAmount;
@@ -14981,27 +14997,39 @@ function _attachNumberHint(inp){
       if(!isFinite(n) || n===0){ hint.textContent=''; return; }
       if(Math.abs(n) < 1000){ hint.textContent=''; return; }
       let ccy = 'VND';
-      // v2.99.90: dò CCY ở phạm vi RỘNG (leo lên modal/form lớn, không chỉ .field cha trực tiếp).
-      // Lỗi cũ: inp.closest('div') chỉ bắt .field bao quanh ô → không thấy select CCY ở .field
-      // anh em → luôn mặc định VND → ô USD vẫn hiện "đồng".
-      let scope = inp.closest('.modal, .modal-body, .form-grid, form');
-      if(!scope) scope = inp.parentNode && inp.parentNode.parentNode;  // leo 2 cấp
-      if(scope){
-        const ccySel = scope.querySelector('select[id*="ccy"], select[id*="-ccy"], select.ccy');
-        if(ccySel && ccySel.value) ccy = ccySel.value.toUpperCase();
+      // v3.04.41: ƯU TIÊN data-ccy gắn trực tiếp trên ô (chính xác tuyệt đối cho ô tiền cố định ccy,
+      //   vd phí QL theo ccy của tàu — không có dropdown). Nếu không có mới dò select.
+      const dccy = (inp.getAttribute('data-ccy')||'').trim().toUpperCase();
+      if(dccy){ ccy = dccy; }
+      else {
+        // v2.99.90: dò CCY ở phạm vi RỘNG (leo lên modal/form lớn, không chỉ .field cha trực tiếp).
+        let scope = inp.closest('.modal, .modal-body, .form-grid, form');
+        if(!scope) scope = inp.parentNode && inp.parentNode.parentNode;  // leo 2 cấp
+        if(scope){
+          const ccySel = scope.querySelector('select[id*="ccy"], select[id*="-ccy"], select.ccy');
+          if(ccySel && ccySel.value) ccy = ccySel.value.toUpperCase();
+        }
       }
       const formatted = ccy==='USD'
         ? n.toLocaleString('en-US', {minimumFractionDigits: n%1?2:0, maximumFractionDigits:2}) + ' USD'
-        : Math.round(n).toLocaleString('vi-VN') + '₫';
-      // v2.99.90: USD → đọc tiếng Anh + 'dollars' (kể cả số nguyên); VND → tiếng Việt + 'đồng'.
+        : (ccy!=='VND'
+            ? n.toLocaleString('en-US',{minimumFractionDigits:n%1?2:0,maximumFractionDigits:2})+' '+ccy
+            : Math.round(n).toLocaleString('vi-VN') + '₫');
+      // v2.99.90: USD → đọc tiếng Anh + 'dollars'; VND → tiếng Việt + 'đồng'.
       let words;
       if(ccy==='USD'){
         words = _numberToEnglishWords(Math.floor(n)) + ' dollars'
               + (n%1 ? ' ' + Math.round((n%1)*100) + ' cents' : '');
-      } else {
+      } else if(ccy==='VND'){
         words = _numberToVietnameseWords(Math.round(n));
+      } else { words=''; }
+      // v3.04.41: ô ngoại tệ (USD/EUR...) → kèm quy đổi ≈ VND theo tỷ giá hệ thống (khớp số phát hành).
+      let vndHint='';
+      if(ccy!=='VND'){
+        const fx=+S.fxRate||0;
+        if(fx>0 && ccy==='USD'){ vndHint = ' · ≈ '+Math.round(n*fx).toLocaleString('vi-VN')+'₫ (tỷ giá '+fx.toLocaleString('vi-VN')+')'; }
       }
-      hint.innerHTML = `≈ <b>${formatted}</b>${words?' · '+words:''}`;
+      hint.innerHTML = `≈ <b>${formatted}</b>${words?' · '+words:''}${vndHint}`;
     });
   };
   inp.addEventListener('input', update);
@@ -21503,6 +21531,7 @@ function deleteCashTxn(fundId, txnId){
   // hoàn tác ảnh hưởng số dư
   f.balance=(+f.balance||0) - (t.direction==='IN'? (+t.amount||0) : -(+t.amount||0));
   S.cashTxns=S.cashTxns.filter(x=>x.id!==txnId);
+  try{ markDeleted(txnId,'cashTxns'); }catch(e){}  // v3.04.42: bia mộ để xóa lan máy khác
   touchRecord(f); saveState(); renderAll();
   toast('Đã xóa giao dịch');
   viewCashLedger(fundId);
@@ -21808,6 +21837,8 @@ function rejectFundClear(fundId, batchId){
   if(!confirm(`Từ chối & HỦY phiếu hoàn ứng này (${recs.length} khoản)? Phiếu sẽ bị xóa, quỹ giữ nguyên.`)) return;
   const ids=new Set(recs.map(r=>r.id));
   S.payables=S.payables.filter(r=>!ids.has(r.id));
+  try{ markDeleted([...ids],'payables'); }catch(e){}  // v3.04.42: bia mộ để xóa lan máy khác
+  try{ const _rm=(S.cashTxns||[]).filter(t=>(t.sourceId===batchId && t._pending)).map(t=>t.id); if(_rm.length) markDeleted(_rm,'cashTxns'); }catch(e){}
   S.cashTxns=(S.cashTxns||[]).filter(t=>!(t.sourceId===batchId && t._pending));
   try{ logAuditEvent('fund_clear_reject',{fundId,batchId,n:recs.length,by:actorName()}); }catch(e){}
   saveState(); renderAll();
@@ -23632,7 +23663,7 @@ function loanDeletePrepay(loanId, ppId){
   // v1.34: Remove linked fee AP if any
   if(pp.linkedFeeApId){
     const idx = (S.payables||[]).findIndex(x=>x.id===pp.linkedFeeApId);
-    if(idx>=0) S.payables.splice(idx,1);
+    if(idx>=0){ S.payables.splice(idx,1); try{ markDeleted(pp.linkedFeeApId,'payables'); }catch(e){} }  // v3.04.42: bia mộ để xóa lan máy khác
   }
   l.prepayments=l.prepayments.filter(x=>x.id!==ppId);
   // Recalc schedule
@@ -23834,6 +23865,7 @@ function _loanUnmarkPaid(loanId, period){
     const idx = (S.payables||[]).findIndex(x=>x.id===p.linkedApId);
     if(idx>=0){
       S.payables.splice(idx,1);
+      try{ markDeleted(p.linkedApId,'payables'); }catch(e){}  // v3.04.42: bia mộ để xóa lan máy khác
       apRemoved = ` · 🗑 Xóa AP lãi vay đã tạo`;
     }
     delete p.linkedApId;
@@ -25264,6 +25296,65 @@ function _arKhoanToggle(){
   if(!isOp){ const chk=document.getElementById('ar-khoan-chk'); if(chk) chk.checked=false; }
 }
 
+/* v3.04.51: ĐÍNH KÈM CHỨNG TỪ — upload lên Google Drive qua Apps Script, lưu link vào bản ghi. */
+window._curAttachments = window._curAttachments || [];
+/* v3.04.52: danh sách email NV active (@seahorse.com.vn) để cấp quyền XEM chứng từ trên Drive. */
+function _attachViewerEmails(){
+  try{
+    const cfg=getAuthConfig()||{};
+    const emails=(cfg.users||[])
+      .filter(u=>u && u.active!==false && u.email && u.email.indexOf('@')>0)
+      .map(u=>u.email.trim());
+    // gồm cả email admin hiện tại nếu có
+    if(CURRENT_USER && CURRENT_USER.email && emails.indexOf(CURRENT_USER.email)<0) emails.push(CURRENT_USER.email);
+    return Array.from(new Set(emails));
+  }catch(e){ return []; }
+}
+async function arAttachUpload(inputEl){
+  const files = inputEl && inputEl.files;
+  if(!files || !files.length) return;
+  const cfg=getAuthConfig();
+  if(!cfg || !cfg.scriptUrl){ toast('Chưa cấu hình Apps Script URL','bad'); return; }
+  const st=document.getElementById('ar-attach-status');
+  const kind=(window._arCurrentKind||'ar')==='ap'?'AP':'AR';
+  for(const file of files){
+    if(file.size > 20*1024*1024){ toast('Bỏ qua "'+file.name+'" (>20MB)','warn'); continue; }
+    if(st){ st.style.color='var(--accent)'; st.textContent='⏳ Đang tải "'+file.name+'" lên Drive…'; }
+    try{
+      const b64=await new Promise((res,rej)=>{ const r=new FileReader(); r.onload=()=>{const x=String(r.result||'');res(x.includes(',')?x.split(',')[1]:x);}; r.onerror=()=>rej(new Error('đọc lỗi')); r.readAsDataURL(file); });
+      const resp=await fetch(cfg.scriptUrl,{method:'POST',headers:{'Content-Type':'text/plain'},body:JSON.stringify({
+        action:'upload_attachment', fileBase64:b64, mimeType:file.type||'application/octet-stream',
+        fileName:file.name, sub:kind, viewers:_attachViewerEmails()
+      })});
+      const data=await resp.json();
+      if(!data || !data.ok){ throw new Error((data&&data.error)||'upload lỗi'); }
+      window._curAttachments.push({ id:data.file.id, name:data.file.name, url:data.file.url, size:data.file.size, mimeType:data.file.mimeType, uploadedAt:data.file.uploadedAt, uploadedBy:actorName() });
+      if(st){ st.style.color='var(--good)'; st.textContent='✓ Đã tải '+window._curAttachments.length+' chứng từ'; }
+      _renderArAttachList();
+    }catch(e){ if(st){ st.style.color='var(--bad)'; st.textContent='✗ '+(e&&e.message||'lỗi'); } toast('Lỗi tải "'+file.name+'": '+(e&&e.message||''),'bad'); }
+  }
+  if(inputEl) inputEl.value='';
+}
+function _renderArAttachList(){
+  const box=document.getElementById('ar-attach-list'); if(!box) return;
+  const list=window._curAttachments||[];
+  if(!list.length){ box.innerHTML='<span style="color:var(--muted);font-style:italic">Chưa có chứng từ đính kèm</span>'; return; }
+  box.innerHTML=list.map((f,i)=>{
+    const kb=f.size?(f.size>1048576?(f.size/1048576).toFixed(1)+' MB':Math.round(f.size/1024)+' KB'):'';
+    return `<div style="display:flex;align-items:center;gap:8px;padding:4px 0;border-bottom:1px dashed var(--rule)">
+      <span style="flex:1">📄 <a href="${esc(f.url)}" target="_blank" rel="noopener" style="color:var(--accent)">${esc(f.name)}</a> <span style="color:var(--muted);font-size:10px">${kb}</span></span>
+      <button type="button" class="icon-btn danger" title="Gỡ đính kèm khỏi phiếu" onclick="arAttachRemove(${i})">✕</button>
+    </div>`;
+  }).join('');
+}
+function arAttachRemove(i){
+  if(!window._curAttachments) return;
+  const f=window._curAttachments[i];
+  // v3.04.53: gỡ liên kết + chuyển file vào thùng rác Drive
+  if(f && f.id){ try{ _trashDriveFiles([f.id]); }catch(e){} }
+  window._curAttachments.splice(i,1);
+  _renderArAttachList();
+}
 function _arEditorBody(r,isPayable){
   const segOpts=Object.entries(SEGMENTS).map(([k,v])=>`<option value="${k}" ${k===(r.segment||'')?'selected':''}>${esc(v.name)}</option>`).join('');
   const projOpts='<option value="">— Không gắn dự án —</option>'+activeOnly(S.projects).map(p=>`<option value="${p.id}" ${p.id===r.projectId?'selected':''}>${esc(p.code)} · ${esc(p.name)}</option>`).join('');
@@ -25558,11 +25649,11 @@ function _arEditorBody(r,isPayable){
       + '</tbody></table>'
     : '<div style="font-size:11px;color:var(--muted);font-style:italic;padding:6px 0">Chưa có thanh toán nào</div>';
 
-  return `
+  const _arBodyHtml = `
     ${lockedNote}
     ${(isPayable && !lockedAttr) ? `<div style="display:flex;justify-content:flex-end;margin-bottom:8px">
-      <input type="file" id="ap1-invoice-file" accept=".csv,.pdf,.xml" style="display:none" onchange="_mrReadInvoiceFile(this.files[0],'ap1')">
-      <button type="button" class="btn-sec" style="font-size:11px;padding:5px 12px" onclick="document.getElementById('ap1-invoice-file').click()" title="Đọc hóa đơn XML/PDF(có text)/CSV → tự điền phiếu. Ảnh scan nhập tay.">📎 Đọc hóa đơn (XML/PDF/CSV)</button>
+      <input type="file" id="ap1-invoice-file" accept=".csv,.pdf,.xml,image/*" style="display:none" onchange="_mrReadInvoiceFile(this.files[0],'ap1')">
+      <button type="button" class="btn-sec" style="font-size:11px;padding:5px 12px" onclick="document.getElementById('ap1-invoice-file').click()" title="Đọc hóa đơn XML/PDF/CSV + ẢNH & PDF scan (AI Gemini) → tự điền phiếu.">📎 Đọc hóa đơn (XML/PDF/CSV/Ảnh-AI)</button>
     </div>` : ''}
     <div class="form-grid">
       <div class="field"><label>${isPayable?'Nhà cung cấp':'Khách hàng'} *</label>
@@ -25657,7 +25748,17 @@ function _arEditorBody(r,isPayable){
     </div>
     ${isPayable ? _apOrdersBlock(r) : ''}
     ${creatorBlock}
+    <div style="margin-top:12px;padding:10px 12px;border:1px solid var(--rule);border-radius:6px;background:var(--paper-2)">
+      <div style="font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);font-weight:600;margin-bottom:6px">📎 Chứng từ đính kèm <span style="text-transform:none;font-weight:400">(hóa đơn/báo giá — lưu trên Google Drive)</span></div>
+      <div id="ar-attach-list" style="font-size:12px;margin-bottom:8px"></div>
+      <input type="file" id="ar-attach-file" accept=".pdf,.xml,.csv,image/*,.doc,.docx,.xlsx" style="display:none" onchange="arAttachUpload(this)" multiple>
+      <button type="button" class="btn-sec" style="font-size:12px" onclick="document.getElementById('ar-attach-file').click()">📎 Thêm chứng từ</button>
+      <span id="ar-attach-status" style="font-size:11px;margin-left:8px;color:var(--muted)"></span>
+    </div>
     <div id="ar-err" style="font-size:12px;color:var(--bad);min-height:14px;font-family:var(--font-mono);margin-top:8px"></div>`;
+  // v3.04.51: nạp danh sách đính kèm sẵn có vào state tạm + render
+  try{ window._curAttachments = Array.isArray(r.attachments) ? JSON.parse(JSON.stringify(r.attachments)) : []; setTimeout(_renderArAttachList, 50); }catch(e){ window._curAttachments=[]; }
+  return _arBodyHtml;
 }
 
 /* v1.43.0: Show/hide fuel block when expense type changes */
@@ -26046,11 +26147,207 @@ function saveArAndIssue(id){
     r.approvedL1By=tag; r.approvedL1At=nowIso;
     r.approvedL2By=tag; r.approvedL2At=nowIso;
     r.rejectedBy='';r.rejectedAt='';r.rejectReason='';r.rejectedAtLevel=null;
+    // v3.04.45: PHÍ QL đã cấn trừ quỹ chủ tàu → xuất HĐ = DT thực hiện + ĐÃ THU LUÔN.
+    //   Ghi payment 'offset' đúng lúc này (không ghi sớm khi còn dự kiến).
+    if(r._mgmtFeeDeducted && r._mgmtOffsetPending && !(r.payments||[]).some(p=>p._mgmtFeeOffset)){
+      if(!Array.isArray(r.payments)) r.payments=[];
+      const op=r._mgmtOffsetPending;
+      r.payments.push({
+        date: op.date||nowIso.slice(0,10), amount: +op.amount||+r.amountGross||+r.amount||0,
+        fxRate: (r.ccy==='USD') ? (+S.fxRate||0) : 0,
+        note:'Cấn trừ vào tiền chủ tàu ứng (quỹ thu/chi hộ) — đã thu khi phát HĐ',
+        method:'offset', recordedBy:actorName(), recordedAt:nowIso, _mgmtFeeOffset:true
+      });
+      try{ const fee=(S.opMgmtFees||[]).find(f=>f.arId===r.id || f.id===r._mgmtFeeId); if(fee){ fee.revenueRecognized=true; fee.recognizedBy=actorName(); fee.recognizedAt=nowIso; } }catch(e){}
+    }
     touchRecord(r);
     try{ logAuditEvent('ar_issue_invoice',{recordId:r.id,partner:r.partner||'',amount:r.amountGross||r.amount||0,ccy:r.ccy||'',actor:actorName(),note:'Phát hóa đơn — Đã xuất HĐ (approved)'}); }catch(e){}
     saveState();renderAll();
   }
   toast('🧾 Đã phát hóa đơn — trạng thái "Đã xuất HĐ"','good');
+}
+/* v3.04.46: TRÌNH KIỂM TRA CHỨNG TỪ TRÙNG — tập trung 1 chỗ (menu admin).
+   Quét Phải trả (AP) / Phải thu (AR) / Thu-Chi hộ (opTx). Nhóm theo khóa:
+   loại + tàu/đối tác + số tiền + tiền tệ + ngày + số HĐ. Hiển thị từng cặp,
+   cho XEM/SỬA/XÓA từng bản THỦ CÔNG (không tự động xóa). */
+function _dupKeyGeneric(r, kind){
+  const inv=String(r.invoiceNo||'').split('/')[0].trim().toUpperCase();
+  const amt=Math.round(+r.amountGross||+r.amount||0);
+  const date=String(r.date||r.issueDate||'').slice(0,10);
+  const ccy=String(r.ccy||r.currency||'').trim().replace('VNĐ','VND').toUpperCase();
+  const party=(kind==='op')?(r.vesselId||''):(String(r.partner||r.vendor||'').trim().toLowerCase());
+  const typ=String(r.type||'').toUpperCase();
+  return [kind,typ,party,inv,amt,date,ccy].join('|');
+}
+function openDupChecker(){
+  if(!(isAdmin()||(CURRENT_USER&&CURRENT_USER.canManageUsers))){ toast('Chỉ admin/quản lý','bad'); return; }
+  const groups={};
+  const add=(r,kind)=>{
+    const k=_dupKeyGeneric(r,kind);
+    (groups[k]=groups[k]||{kind, recs:[]}).recs.push(r);
+  };
+  (S.payables||[]).forEach(r=>{ if(r.invoiceNo) add(r,'ap'); });
+  (S.receivables||[]).forEach(r=>{ if(r.invoiceNo) add(r,'ar'); });
+  (S.opTransactions||[]).forEach(r=>{ if(r.invoiceNo) add(r,'op'); });
+
+  const dupGroups=Object.entries(groups).filter(([k,g])=>g.recs.length>1);
+  const kindLabel={ap:'Phải trả',ar:'Phải thu',op:'Thu-Chi hộ'};
+  const vName=id=>{ const v=(S.opVessels||[]).find(x=>x.id===id); return v?v.name:''; };
+
+  let body;
+  if(!dupGroups.length){
+    body='<div style="padding:30px;text-align:center;color:var(--good);font-weight:600">✓ Không phát hiện chứng từ trùng (theo loại + đối tác/tàu + số tiền + tiền tệ + ngày + số HĐ).</div>';
+  } else {
+    let total=dupGroups.reduce((s,[k,g])=>s+g.recs.length,0);
+    body='<div style="font-size:12px;color:var(--muted);margin-bottom:10px">Phát hiện <b style="color:var(--bad)">'+dupGroups.length+'</b> nhóm nghi trùng ('+total+' bản ghi). Mỗi nhóm = các bản CÙNG loại·đối tác/tàu·số tiền·tiền tệ·ngày·số HĐ.<br><span style="color:var(--warn)">⚠ Trùng số tiền chưa chắc là trùng thật — kiểm diễn giải kỹ trước khi xóa. Việc xóa là THỦ CÔNG.</span></div>';
+    body+=dupGroups.map(([k,g])=>{
+      const head=kindLabel[g.kind]+' · '+g.recs.length+' bản';
+      const rows=g.recs.map(r=>{
+        const partyTxt=(g.kind==='op')?vName(r.vesselId):(r.partner||r.vendor||'');
+        const editCall=g.kind==='ap'?`openPayableModal('${r.id}')`:(g.kind==='op'?`editOpTx('${r.id}')`:`arIssueInvoice('${r.id}')`);
+        const delCall =g.kind==='ap'?`deleteAr('ap','${r.id}')`:(g.kind==='op'?`delOpTx('${r.id}')`:`deleteAr('ar','${r.id}')`);
+        return `<tr>
+          <td style="font-size:11px">${esc((r.date||r.issueDate||'').slice(0,10))}</td>
+          <td style="font-size:11px">${esc(partyTxt).slice(0,28)}</td>
+          <td style="font-size:11px">${esc(String(r.type||''))}</td>
+          <td class="r num" style="font-size:11px">${fmtCcy(+r.amountGross||+r.amount||0, r.ccy||'VND')}</td>
+          <td style="font-size:11px;color:var(--muted)">${esc((r.desc||'').slice(0,46))}</td>
+          <td style="white-space:nowrap">
+            <button class="icon-btn" title="Xem/Sửa" onclick="closeModal();${editCall}">✎</button>
+            <button class="icon-btn danger" title="Xóa bản này" onclick="if(confirm('Xóa bản ghi này? (đã ghi bia mộ để lan máy khác)')){${delCall};setTimeout(openDupChecker,300);}">✕</button>
+          </td></tr>`;
+      }).join('');
+      return `<div style="border:1px solid var(--rule);border-radius:8px;margin-bottom:12px;overflow:hidden">
+        <div style="background:rgba(184,71,46,.06);padding:6px 10px;font-weight:600;font-size:12px">⚠ ${head} · HĐ ${esc((g.recs[0].invoiceNo||'').slice(0,20))}</div>
+        <table class="tbl" style="font-size:12px;margin:0"><thead><tr><th>Ngày</th><th>Đối tác/Tàu</th><th>Loại</th><th class="r">Số tiền</th><th>Diễn giải</th><th></th></tr></thead><tbody>${rows}</tbody></table>
+      </div>`;
+    }).join('');
+  }
+  const foot='<button class="btn-sec" onclick="closeModal()">Đóng</button><button class="btn-sec" onclick="openDupChecker()">🔄 Quét lại</button>';
+  openModal('🔍 Kiểm tra chứng từ trùng', body, foot);
+}
+/* v3.04.48: ĐỌC BÁO GIÁ bằng AI (Gemini qua Apps Script) → điền form Phải trả dự kiến.
+   File (PDF/ảnh) gửi base64 lên Apps Script (action=gemini_extract); key Gemini giấu ở server. */
+function aiQuotePick(){ var el=document.getElementById('ai-quote-file'); if(el) el.click(); }
+/* v3.04.50: đối chiếu NCC từ AI với danh mục — ưu tiên MST, rồi tên chuẩn hóa.
+   Trả {name, taxCode, matched, vendorId} — name là TÊN CHUẨN trong app nếu khớp,
+   nếu không khớp thì giữ tên đầy đủ AI trả (để tạo NCC mới khi lưu). */
+function _resolveVendorFromAI(aiVendor, aiTax){
+  const rawName=String(aiVendor||'').trim();
+  const tax=String(aiTax||'').replace(/[^0-9]/g,'');
+  // 1) khớp theo MST (chính xác nhất)
+  if(tax && typeof findVendorByTaxCode==='function'){
+    const byTax=findVendorByTaxCode(tax);
+    if(byTax) return {name:byTax.name, taxCode:byTax.taxCode||tax, matched:'tax', vendorId:byTax.id};
+  }
+  // 2) khớp theo tên chuẩn hóa
+  if(rawName && typeof normalizeVendorName==='function'){
+    const norm=normalizeVendorName(rawName);
+    const exact=(S.vendors||[]).find(v=>v.normalized===norm);
+    if(exact) return {name:exact.name, taxCode:exact.taxCode||tax, matched:'name', vendorId:exact.id};
+    // 3) gần giống (chứa nhau) — gợi ý nhưng vẫn dùng tên AI đầy đủ
+    const sim=(S.vendors||[]).find(v=>v.normalized&&(v.normalized.includes(norm)||norm.includes(v.normalized)));
+    if(sim) return {name:rawName, taxCode:tax, matched:'similar', vendorId:sim.id, similarName:sim.name};
+  }
+  return {name:rawName, taxCode:tax, matched:'new', vendorId:null};
+}
+async function aiReadQuote(inputEl){
+  const file = inputEl && inputEl.files && inputEl.files[0];
+  if(!file){ return; }
+  const cfg = getAuthConfig();
+  if(!cfg || !cfg.scriptUrl){ toast('Chưa cấu hình Apps Script URL','bad'); return; }
+  const okType = /pdf|image\//i.test(file.type) || /\.(pdf|png|jpe?g|webp)$/i.test(file.name||'');
+  if(!okType){ toast('Chỉ nhận PDF hoặc ảnh (PDF/PNG/JPG)','bad'); return; }
+  if(file.size > 15*1024*1024){ toast('File quá lớn (>15MB) — nén hoặc cắt bớt trang','bad'); return; }
+
+  const statusEl = document.getElementById('ai-quote-status');
+  if(statusEl){ statusEl.style.color='var(--accent)'; statusEl.textContent='⏳ Đang đọc báo giá bằng AI…'; }
+  try{
+    const b64 = await new Promise((res,rej)=>{
+      const r=new FileReader();
+      r.onload=()=>{ const s=String(r.result||''); res(s.includes(',')?s.split(',')[1]:s); };
+      r.onerror=()=>rej(new Error('Đọc file lỗi'));
+      r.readAsDataURL(file);
+    });
+    const mime = file.type || (/\.pdf$/i.test(file.name)?'application/pdf':'image/jpeg');
+    const resp = await fetch(cfg.scriptUrl, {
+      method:'POST', headers:{'Content-Type':'text/plain'},
+      body: JSON.stringify({ action:'gemini_extract', fileBase64:b64, mimeType:mime })
+    });
+    const data = await resp.json();
+    if(!data || !data.ok){ throw new Error((data&&data.error)||'AI không đọc được'); }
+    _fillProvisionalFromAI(data.data||{});
+    if(statusEl){ statusEl.style.color='var(--good)'; statusEl.textContent='✓ Đã điền từ báo giá — kiểm lại số liệu trước khi lưu.'; }
+    toast('✓ AI đã đọc báo giá — vui lòng kiểm lại','good');
+  }catch(e){
+    if(statusEl){ statusEl.style.color='var(--bad)'; statusEl.textContent='✗ '+(e&&e.message||'Lỗi đọc báo giá'); }
+    toast('Lỗi đọc báo giá: '+(e&&e.message||''),'bad');
+  }
+}
+function _fillProvisionalFromAI(d){
+  const set=(id,val)=>{ const el=document.getElementById(id); if(el && val!=null && val!=='' ){ el.value=val; } };
+  if(d.vendor){
+    const rv=_resolveVendorFromAI(d.vendor, d.vendorTaxCode);
+    set('ar-partner', rv.name);
+    if(rv.matched==='tax'||rv.matched==='name'){ toast('✓ Khớp NCC có sẵn: '+rv.name,'good'); }
+    else if(rv.matched==='similar'){ toast('⚠ NCC gần giống đã có: '+rv.similarName+' — kiểm lại để tránh trùng','warn'); }
+  }
+  if(d.desc)     set('ar-desc', d.desc);
+  if(d.invoiceNo)set('ar-invoice', d.invoiceNo);
+  if(d.amountNet)set('ar-amount-net', d.amountNet);
+  if(d.issueDate)set('ar-issue', d.issueDate);
+  // CCY
+  if(d.ccy){ const c=document.getElementById('ar-ccy'); if(c){ const v=String(d.ccy).toUpperCase(); if([...c.options].some(o=>o.value===v)){ c.value=v; try{arCcyChanged()}catch(e){} } } }
+  // VAT %
+  if(d.vatPercent!=null){ const vp=document.getElementById('ar-vat-percent'); if(vp){ const v=String(d.vatPercent); if([...vp.options].some(o=>o.value===v)) vp.value=v; } }
+  try{ arRecalcVat(); }catch(e){}
+  try{ const p=document.getElementById('ar-partner'); if(p) arPartnerCheck(p); }catch(e){}
+}
+/* v3.04.47: PHẢI TRẢ DỰ KIẾN — chi phí khi mới có đề xuất/HĐ, CHƯA có hóa đơn.
+   Tạo AP ở status 'draft' + cờ _isProvisional → VÀO P&L NGAY (allTx tính cả draft),
+   trạng thái hiển thị "Chi phí dự kiến". KHÔNG phải _isBudget (budget bị loại khỏi P&L).
+   Khi có hóa đơn: NV mở sửa, điền số HĐ → bỏ cờ provisional → gửi duyệt bình thường. */
+function openProvisionalAp(){
+  if(typeof openPayableModal!=='function'){ toast('Lỗi giao diện','bad'); return; }
+  window._AP_PROVISIONAL_NEW = true;   // cờ để openPayableModal/saveAr biết đây là phải trả dự kiến
+  openPayableModal(null);
+  // tùy biến modal: tiêu đề + ghi chú + nút lưu
+  setTimeout(()=>{
+    try{
+      const titleEl=document.querySelector('.modal-title, .modal h3, #modal-title');
+      if(titleEl) titleEl.textContent='📋 Phải trả dự kiến (chưa có hóa đơn)';
+      const err=document.getElementById('ar-err');
+      if(err){ err.style.color='var(--muted)'; err.textContent='Chi phí dự kiến — gắn Dự án/Tàu để vào P&L ngay. Số hóa đơn để trống; khi có hóa đơn sẽ cập nhật sau.'; }
+      // v3.04.48: chèn nút ĐỌC BÁO GIÁ (AI) lên đầu form
+      try{
+        const host = err && err.parentNode;
+        if(host && !document.getElementById('ai-quote-box')){
+          const box=document.createElement('div');
+          box.id='ai-quote-box';
+          box.style.cssText='margin:8px 0 12px;padding:10px 12px;border:1.5px dashed var(--accent);border-radius:6px;background:rgba(28,58,92,.04)';
+          box.innerHTML='<div style="font-size:12px;font-weight:600;margin-bottom:6px">📄 Đọc báo giá tự động (AI)</div>'
+            +'<div style="font-size:11px;color:var(--muted);margin-bottom:8px">Tải lên file báo giá NCC (PDF hoặc ảnh) — AI tự điền NCC, số tiền, VAT, ngày, mô tả. Kiểm lại trước khi lưu.</div>'
+            +'<input type="file" id="ai-quote-file" accept=".pdf,image/*" style="display:none" onchange="aiReadQuote(this)">'
+            +'<button type="button" class="btn-sec" style="font-size:12px" onclick="aiQuotePick()">📤 Chọn file báo giá (PDF/ảnh)</button>'
+            +'<div id="ai-quote-status" style="font-size:11px;margin-top:6px"></div>';
+          host.insertBefore(box, err.nextSibling);
+        }
+      }catch(e){ console.warn('[ai-quote ui]', e&&e.message); }
+      // đổi nút "Lưu phải trả" → "Lưu chi phí dự kiến"
+      const btns=[...document.querySelectorAll('.modal-foot button, .modal button')];
+      const saveBtn=btns.find(b=>/Lưu phải trả/i.test(b.textContent));
+      if(saveBtn){ saveBtn.textContent='📋 Lưu chi phí dự kiến'; saveBtn.setAttribute('onclick',"saveApProvisional()"); }
+    }catch(e){ console.warn('[provisional ui]',e&&e.message); }
+  }, 90);
+}
+function saveApProvisional(){
+  window._LAST_SAVED_AR_ID=null;
+  window._AR_FORCE_DRAFT=true;        // ép draft (dùng chung cờ với AR)
+  window._AP_PROVISIONAL_SAVE=true;   // đánh dấu provisional khi tạo record
+  try{ saveAr('ap',''); } finally { window._AR_FORCE_DRAFT=false; window._AP_PROVISIONAL_SAVE=false; window._AP_PROVISIONAL_NEW=false; }
+  const err=document.getElementById('ar-err');
+  if(err && err.textContent && /[⚠✗]|thiếu|lỗi|phải/i.test(err.textContent) && !window._LAST_SAVED_AR_ID){ return; }
+  if(window._LAST_SAVED_AR_ID){ toast('📋 Đã lưu Phải trả dự kiến — đã vào P&L (Chi phí dự kiến). Khi có hóa đơn, mở sửa để cập nhật.','good'); }
 }
 function openPayableModal(id){
   const isEdit=!!id;
@@ -26535,6 +26832,7 @@ function _payrollReviewDetail(batchId){
   const lineRows = recs.map((r,i)=>{
     // v3.02.92: dùng nhãn hồ sơ thống nhất (v3.02.64) — approved chưa chi → "Chờ chi tiền", đã chi đủ → "Đã TT"
     const ds = (typeof docStatusInfo==='function') ? docStatusInfo(r) : null;
+    const _hasAtt = Array.isArray(r.attachments) && r.attachments.length>0;  // v3.04.51: cờ có chứng từ
     const st = (WF_STATES[r.status]||WF_STATES.draft);
     const stHtml = ds ? `<span class="chip ${ds.cls}" style="font-size:9px">${ds.icon} ${ds.label}</span>`
                       : `<span class="chip ${st.chip}" style="font-size:9px">${st.short}</span>`;
@@ -26544,7 +26842,7 @@ function _payrollReviewDetail(batchId){
       </td>` : '';
     return `<tr>
       <td class="row-idx">${i+1}</td>
-      <td>${esc(r.recipientName||r.desc||'—')}</td>
+      <td>${esc(r.recipientName||r.desc||'—')}${_hasAtt?' <span title="Có chứng từ đính kèm" style="color:var(--accent)">📎</span>':''}</td>
       <td class="num" style="font-family:var(--font-mono)">${fmtCcy(+r.amountNet||+r.amount||0, ccy)}</td>
       <td>${stHtml}</td>${actHtml}
     </tr>`;
@@ -26669,8 +26967,8 @@ function _renderMultiRowModal(){
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
         <div style="font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);font-weight:600">Header phiếu</div>
         ${isPayable?`<div>
-          <input type="file" id="mr-invoice-file" accept=".csv,.pdf,.xml" style="display:none" onchange="_mrReadInvoiceFile(this.files[0])">
-          <button type="button" class="btn-sec" style="font-size:11px;padding:5px 12px" onclick="document.getElementById('mr-invoice-file').click()" title="Đọc hóa đơn XML (chính xác nhất) / PDF có text / CSV → app tự điền. Ảnh scan thì nhập tay.">📎 Đọc hóa đơn (XML/PDF/CSV)</button>
+          <input type="file" id="mr-invoice-file" accept=".csv,.pdf,.xml,image/*" style="display:none" onchange="_mrReadInvoiceFile(this.files[0])">
+          <button type="button" class="btn-sec" style="font-size:11px;padding:5px 12px" onclick="document.getElementById('mr-invoice-file').click()" title="Đọc hóa đơn XML / PDF / CSV + ẢNH & PDF scan (AI Gemini) → app tự điền.">📎 Đọc hóa đơn (XML/PDF/CSV/Ảnh-AI)</button>
         </div>`:''}
       </div>
       <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:10px">
@@ -26958,6 +27256,35 @@ function _loadScriptOnce(src, globalCheck){
   });
 }
 
+/* v3.04.49: Đọc hóa đơn bằng AI (Gemini qua Apps Script) cho ẢNH / PDF scan.
+   Tạo _invoiceParsed cùng định dạng {source,lines[]} → dùng lại preview/apply sẵn có. */
+async function _invoiceViaAI(file){
+  const cfg=getAuthConfig();
+  if(!cfg || !cfg.scriptUrl){ toast('Chưa cấu hình Apps Script URL','bad'); return false; }
+  if(file.size > 15*1024*1024){ toast('File quá lớn (>15MB)','bad'); return false; }
+  try{
+    const b64=await new Promise((res,rej)=>{ const r=new FileReader(); r.onload=()=>{const x=String(r.result||'');res(x.includes(',')?x.split(',')[1]:x);}; r.onerror=()=>rej(new Error('Đọc file lỗi')); r.readAsDataURL(file); });
+    const mime=file.type || (/\.pdf$/i.test(file.name)?'application/pdf':'image/jpeg');
+    const resp=await fetch(cfg.scriptUrl,{method:'POST',headers:{'Content-Type':'text/plain'},body:JSON.stringify({action:'gemini_extract',fileBase64:b64,mimeType:mime})});
+    const data=await resp.json();
+    if(!data || !data.ok){ throw new Error((data&&data.error)||'AI không đọc được'); }
+    const d=data.data||{};
+    const net=Number(d.amountNet)||0;
+    const vatPct=Number(d.vatPercent)||0;
+    const rv=_resolveVendorFromAI(d.vendor, d.vendorTaxCode);  // v3.04.50: NCC chuẩn theo MST/tên
+    if(rv.matched==='tax'||rv.matched==='name') toast('✓ Khớp NCC có sẵn: '+rv.name,'good');
+    else if(rv.matched==='similar') toast('⚠ NCC gần giống: '+rv.similarName+' — kiểm lại tránh trùng','warn');
+    _invoiceParsed={ source:'ai', lines:[{
+      partner:rv.name||d.vendor||'', vendorTaxCode:rv.taxCode||'', invoiceNo:d.invoiceNo||'',
+      issueDate:_normInvDate(d.issueDate||''), desc:d.desc||'',
+      amountNet:net, vatPercent:vatPct, vatAmount:Math.round(net*vatPct/100*100)/100,
+      ccy:(d.ccy||'VND').toString().toUpperCase().replace('VNĐ','VND')
+    }]};
+    if(!_invoiceParsed.lines[0].amountNet && !_invoiceParsed.lines[0].partner){ toast('AI không trích được dữ liệu — nhập tay','bad'); return false; }
+    _showInvoicePreview();
+    return true;
+  }catch(e){ console.warn('[invoice-ai]',e); toast('Lỗi đọc AI: '+(e&&e.message||e),'bad'); return false; }
+}
 async function _mrReadInvoiceFile(file, target){
   if(!file) return;
   _invoiceTarget = target || 'multirow';  // 'multirow' | 'op' | 'ap1'
@@ -26981,15 +27308,26 @@ async function _mrReadInvoiceFile(file, target){
         const tc=await page.getTextContent();
         fullText += tc.items.map(it=>it.str).join(' ')+'\n';
       }
-      if(!fullText.trim()){ toast('PDF không có text (có thể là ảnh scan) — vui lòng nhập tay','bad'); return; }
-      _invoiceParsed=_invoiceFromPdfText(fullText);
+      if(!fullText.trim()){
+        // v3.04.49: PDF scan (không text) → dùng AI Gemini đọc thay vì bắt nhập tay.
+        toast('PDF scan — đang đọc bằng AI…');
+        const okAI = await _invoiceViaAI(file);
+        if(!okAI) return;  // _invoiceViaAI tự toast lỗi
+      } else {
+        _invoiceParsed=_invoiceFromPdfText(fullText);
+      }
     } else if(ext==='xml'){
       toast('Đang đọc XML hóa đơn...');
       const text=await file.text();
       _invoiceParsed=_invoiceFromXml(text);
       if(!_invoiceParsed){ toast('XML không đúng chuẩn hóa đơn điện tử VN — nhập tay','bad'); return; }
+    } else if(/^(png|jpe?g|webp|gif|bmp|tif?f|heic)$/i.test(ext) || /^image\//i.test(file.type||'')){
+      // v3.04.49: ẢNH hóa đơn → đọc bằng AI Gemini.
+      toast('Ảnh hóa đơn — đang đọc bằng AI…');
+      const okAI = await _invoiceViaAI(file);
+      if(!okAI) return;
     } else {
-      toast('Hỗ trợ XML / PDF (có text) / CSV. Ảnh scan nhập tay.','bad'); return;
+      toast('Hỗ trợ XML / PDF / CSV / ảnh (AI đọc scan & ảnh).','bad'); return;
     }
     if(!_invoiceParsed || !_invoiceParsed.lines.length){ toast('Không tách được dữ liệu — vui lòng nhập tay','bad'); return; }
     _showInvoicePreview();
@@ -27864,6 +28202,7 @@ function saveAr(kind,id){
       r.payments.forEach(p=>{ if(p) p.ccy=ccy; });
     }
     Object.assign(r, updates);
+    if(Array.isArray(window._curAttachments)) r.attachments = JSON.parse(JSON.stringify(window._curAttachments));  // v3.04.51: chứng từ đính kèm
     touchRecord(r);  // v1.38.4: track for concurrency merge
   } else {
     // v2.84.0: AR (phải thu) — nếu người nhập là KTT (canCheckAcc) hoặc Admin, hóa đơn vào sổ NGAY
@@ -27871,15 +28210,17 @@ function saveAr(kind,id){
     // thì coi như đã duyệt nội bộ — không cần workflow nhiều cấp như AP.
     // NV thường nhập AR vẫn qua workflow để KTT kiểm.
     // v3.01.28: _AR_FORCE_DRAFT — khi user bấm "Lưu dự kiến", ép trạng thái draft kể cả KTT/Admin.
+    // v3.04.47: _AR_FORCE_DRAFT ép draft cho cả AR (lưu dự kiến) lẫn AP (phải trả dự kiến).
     const arFastTrack = (kind==='ar' && !window._AR_FORCE_DRAFT && (isAdmin() || canCheckAcc()));
     // v3.02.03: AP loại BOD_ONLY (admin nhập) → chi thẳng vào sổ (approved ngay), bỏ qua phê duyệt.
-    const apBodFastTrack = (kind==='ap' && isAdmin() && isExpenseBODOnly(expenseType));
+    const apBodFastTrack = (kind==='ap' && !window._AR_FORCE_DRAFT && isAdmin() && isExpenseBODOnly(expenseType));
     const fastTrack = arFastTrack || apBodFastTrack;
     const histTag = arFastTrack ? '(KTT nhập trực tiếp — '+actorName()+')'
                   : (apBodFastTrack ? '('+actorName()+' — BOD nội bộ)' : '');
     const nowIso = new Date().toISOString();
     const newRec = {
       id:uid(),
+      attachments: Array.isArray(window._curAttachments) ? JSON.parse(JSON.stringify(window._curAttachments)) : [],  // v3.04.51
       partner,vendorId,desc,invoiceNo,amountNet:amountNetS,vatPercent,vatAmount:vatAmountS,amountGross:amountGrossS,amount:amountS,ccy,fxToUsd,fxToVnd,segment,companyId,projectId,vesselId,issueDate,dueDate,dueMonth,dueAmount,_isCreditNote:_isCreditNote,_adjustsInvoice:_isCreditNote?_adjustsInvoice:'',_adjustsInvoiceId:_isCreditNote?_adjustsInvoiceId:'',
       payments:[],
       status: fastTrack ? 'approved' : 'draft',
@@ -27895,6 +28236,8 @@ function saveAr(kind,id){
     if(kind==='ap'){
       newRec.expenseType = expenseType;
       newRec._isBudget = apIsBudget;  // v2.99.32: loại 'Dự kiến chi'
+      // v3.04.47: PHẢI TRẢ DỰ KIẾN — vào P&L ngay (khác _isBudget vốn bị loại khỏi P&L).
+      if(window._AP_PROVISIONAL_SAVE){ newRec._isProvisional = true; }
       // v3.04.25: khoán chi thực
       newRec.khoanCat = apKhoanCat || '';
       newRec.khoanRole = apKhoanCat ? 'chi' : '';
@@ -28666,8 +29009,21 @@ function deleteAr(kind,id){
         try{ if(r._dockApplied) reverseDockFromAsset(r); }catch(e){console.warn('reverseDock on delete',e);}
         try{ if(r._assetApplied) reverseAssetFromTools(r); }catch(e){console.warn('reverseAsset on delete',e);}
       }
+      // v3.04.53: chuyển chứng từ đính kèm vào thùng rác Drive (gọn; khôi phục được 30 ngày)
+      try{ const ids=(r.attachments||[]).map(a=>a&&a.id).filter(Boolean); if(ids.length) _trashDriveFiles(ids); }catch(e){}
       S[list]=S[list].filter(x=>x.id!==id);markDeleted(id);saveState();toast('Đã xóa');renderAll();
     });
+}
+/* v3.04.53: chuyển file Drive vào thùng rác qua Apps Script (không chặn UI; lỗi chỉ log). */
+function _trashDriveFiles(fileIds){
+  try{
+    const cfg=getAuthConfig(); if(!cfg||!cfg.scriptUrl) return;
+    const ids=(fileIds||[]).filter(Boolean); if(!ids.length) return;
+    fetch(cfg.scriptUrl,{method:'POST',headers:{'Content-Type':'text/plain'},
+      body:JSON.stringify({action:'trash_attachment', fileIds:ids})})
+      .then(r=>r.json()).then(d=>{ if(d&&d.ok) console.log('[trash drive]', d.trashed, 'file → thùng rác'); })
+      .catch(e=>console.warn('[trash drive]', e&&e.message));
+  }catch(e){ console.warn('[trash drive]', e&&e.message); }
 }
 
 /* ============================================================
@@ -29328,8 +29684,15 @@ function openMgmtFeeModal(vid){
   const ym=now.getFullYear()+'-'+String(now.getMonth()+1).padStart(2,'0');
   const issuedList=(S.opMgmtFees||[]).filter(f=>f.vesselId===vid).sort((a,b)=>(b.date||'').localeCompare(a.date||''));
   const histHtml = issuedList.length
-    ? issuedList.map(f=>`<tr><td class="mono" style="font-size:11px">${esc(f.date||'')}</td><td>${esc(f.period||'')}</td><td class="r num">${fmt(f.amount,v.ccy)}</td><td style="font-size:11px;color:var(--muted)">${esc(f.invoiceNo||'')}</td><td><button class="icon-btn danger" title="Hủy phí này" onclick="deleteMgmtFee('${f.id}')">✕</button></td></tr>`).join('')
-    : '<tr><td colspan="5" class="empty">Chưa phát hành kỳ phí QL nào</td></tr>';
+    ? issuedList.map(f=>{
+        const ar=(S.receivables||[]).find(x=>x.id===f.arId || x._mgmtFeeId===f.id);
+        const issued = ar && wfStatus(ar)==='approved';
+        const stCell = issued
+          ? `<span style="color:var(--good);font-size:11px;font-weight:600" title="Đã phát hóa đơn → DT thực hiện${ar&&(ar.payments||[]).some(p=>p._mgmtFeeOffset)?' · đã thu (cấn trừ quỹ)':''}">✓ Đã xuất HĐ${ar&&(ar.payments||[]).some(p=>p._mgmtFeeOffset)?' · đã thu':''}</span>`
+          : `<span style="color:var(--accent);font-size:11px" title="Doanh thu dự kiến — chưa phát hóa đơn. Sang tab Phải thu, bấm 🧾 để phát HĐ sau khi chủ tàu duyệt.">📋 DT dự kiến (chưa HĐ)</span>`;
+        return `<tr><td class="mono" style="font-size:11px">${esc(f.date||'')}</td><td>${esc(f.period||'')}${f.adjustNote?`<div style="font-size:10px;color:var(--warn);font-style:italic">⚙ ${esc(f.adjustNote)}</div>`:''}</td><td class="r num">${fmt(f.amount,v.ccy)}${(f.standardFee&&Math.abs((+f.amount||0)-(+f.standardFee||0))>0.005*(+f.standardFee||1))?`<div style="font-size:9px;color:var(--muted)">chuẩn: ${fmt(f.standardFee,v.ccy)}</div>`:''}</td><td>${stCell}</td><td style="font-size:11px;color:var(--muted)">${esc(f.invoiceNo||'')}</td><td><button class="icon-btn danger" title="Hủy phí này" onclick="deleteMgmtFee('${f.id}')">✕</button></td></tr>`;
+      }).join('')
+    : '<tr><td colspan="6" class="empty">Chưa phát hành kỳ phí QL nào</td></tr>';
   const body=`
     <div style="font-size:12px;color:var(--muted);margin-bottom:12px;padding:8px 12px;background:rgba(28,58,92,.05);border-left:3px solid var(--accent)">
       <b>${esc(v.name)}</b> · Chủ tàu: ${esc(v.owner||'—')}<br>
@@ -29339,7 +29702,7 @@ function openMgmtFeeModal(vid){
     <div class="form-grid" style="grid-template-columns:1fr 1fr">
       <div class="field"><label>Kỳ phí (mô tả)</label><input type="text" id="mf-period" value="Phí QL đến T${String(now.getMonth()+1).padStart(2,'0')}/${now.getFullYear()}"></div>
       <div class="field"><label>Ngày phát hành</label><input type="date" id="mf-date" value="${todayISO()}"></div>
-      <div class="field"><label>Số tiền (chưa VAT) ${esc(v.ccy)}</label><input type="number" id="mf-amount" step="any" value="${suggest>0?(Math.round(suggest*100)/100):''}" placeholder="${suggest>0?'':'Nhập số tiền phí QL'}" oninput="mfRecalc()"></div>
+      <div class="field"><label>Số tiền (chưa VAT) ${esc(v.ccy)} <span style="font-weight:400;color:var(--muted);font-size:10px;text-transform:none">— nhập tự do theo thực tế/thỏa thuận</span></label><input type="number" id="mf-amount" data-ccy="${esc(v.ccy||'VND')}" data-standard="${(+v.fee||0)}" step="any" value="${suggest>0?(Math.round(suggest*100)/100):''}" placeholder="${suggest>0?'':'Nhập số tiền phí QL'}" oninput="mfRecalc()"><div id="mf-std-hint" style="font-size:10px;color:var(--muted);margin-top:3px"></div></div>
       <div class="field"><label>Thuế suất %</label>
         <select id="mf-vat" onchange="mfRecalc()">
           <option value="0">0%</option><option value="5">5%</option><option value="8">8%</option><option value="10" selected>10%</option>
@@ -29348,26 +29711,65 @@ function openMgmtFeeModal(vid){
       <div class="field"><label>Tiền VAT</label><input type="text" id="mf-vat-amt" readonly style="background:var(--paper-2)"></div>
       <div class="field"><label><b>Tổng có VAT</b></label><input type="text" id="mf-gross" readonly style="background:var(--paper-2);font-weight:600"></div>
       <div class="field"><label>Số hóa đơn</label><input type="text" id="mf-invoice" placeholder="VD: HD-QL-2026-001"></div>
+      <div class="field" style="grid-column:1/-1"><label>Lý do điều chỉnh <span style="font-weight:400;color:var(--muted);font-size:10px;text-transform:none">(nếu phí kỳ này khác mức chuẩn — vd phát sinh thêm việc, giảm theo thỏa thuận)</span></label><input type="text" id="mf-adjust-note" placeholder="VD: T4 cao do hỗ trợ sự cố máy chính; hoặc T6 giảm 20% theo thỏa thuận"></div>
     </div>
     <label style="display:flex;align-items:center;gap:8px;margin-top:10px;font-size:12px;cursor:pointer">
       <input type="checkbox" id="mf-deduct" checked>
       Cấn trừ vào quỹ chủ tàu ứng (ghi 1 bút toán giảm quỹ thu/chi hộ)
     </label>
-    <div style="font-size:11px;color:var(--muted);font-style:italic;margin-top:6px">Phát hành sẽ tạo 1 khoản <b>Phải thu</b> (mảng QL tàu — lên báo cáo doanh thu)${''} và nếu tick, 1 bút toán <b>giảm quỹ</b>. Phí QL chỉ là doanh thu một lần (ở Phải thu); trong quỹ là khoản đã dùng tiền ứng để trả phí.</div>
+    <div style="font-size:11px;color:var(--muted);font-style:italic;margin-top:6px">Lập phí tạo 1 khoản <b>Phải thu = "Doanh thu dự kiến — chưa phát hóa đơn"</b> (lên mục DT dự kiến, chưa vào DT thực hiện), và nếu tick, 1 bút toán <b>giảm quỹ</b> ngay (cấn trừ tiền ứng). <b>Sau khi chủ tàu duyệt</b>: sang tab <b>Phải thu</b>, bấm <b>🧾 Phát hóa đơn</b> để bổ sung số HĐ → trạng thái "Đã xuất HĐ" = DT thực hiện. Phí QL đã cấn trừ quỹ → xuất HĐ là <b>tự đánh dấu đã thu</b>.</div>
     <div style="margin-top:14px;font-family:var(--font-display);font-size:13px;font-weight:600">Các kỳ phí QL đã phát hành</div>
-    <div class="tbl-scroll" style="margin-top:6px"><table class="tbl" style="font-size:12px"><thead><tr><th>Ngày</th><th>Kỳ</th><th class="r">Số tiền (net)</th><th>Số HĐ</th><th></th></tr></thead><tbody>${histHtml}</tbody></table></div>
+    <div class="tbl-scroll" style="margin-top:6px"><table class="tbl" style="font-size:12px"><thead><tr><th>Ngày</th><th>Kỳ</th><th class="r">Số tiền (net)</th><th>Doanh thu</th><th>Số HĐ</th><th></th></tr></thead><tbody>${histHtml}</tbody></table></div>
   `;
   const foot=`<button class="btn-sec" onclick="closeModal()">Đóng</button>
-              <button class="btn-primary" onclick="issueMgmtFee('${vid}')">🧾 Phát hành phí QL</button>`;
+              <button class="btn-primary" onclick="issueMgmtFee('${vid}')">📋 Lập phí QL (DT dự kiến — chờ duyệt)</button>`;
   openModal('🧾 Phát hành phí quản lý · '+esc(v.name), body, foot);
   setTimeout(mfRecalc,30);
 }
+/* v3.04.44: GHI DOANH THU phí QL sau khi chủ tàu DUYỆT.
+   Chuyển AR liên kết từ 'pending' → 'approved' → lên báo cáo doanh thu mảng QL tàu. */
+function recognizeMgmtFee(feeId){
+  if(!(isAdmin()||canApproveL1()||canApproveL2())){ toast('Không có quyền ghi doanh thu','bad'); return; }
+  const fee=(S.opMgmtFees||[]).find(f=>f.id===feeId); if(!fee){ toast('Không tìm thấy kỳ phí','bad'); return; }
+  if(fee.revenueRecognized){ toast('Kỳ phí này đã ghi doanh thu rồi','warn'); return; }
+  const ar=(S.receivables||[]).find(r=>r.id===fee.arId || r._mgmtFeeId===feeId);
+  if(!ar){ toast('Không tìm thấy khoản Phải thu liên kết','bad'); return; }
+  if(!confirm('XÁC NHẬN chủ tàu đã DUYỆT phí QL kỳ "'+(fee.period||'')+'"?\n\nGhi nhận doanh thu '+fmtCcy(fee.amount,fee.ccy)+' (chưa VAT) vào báo cáo mảng Quản lý tàu.\n\nChỉ bấm OK khi đã có duyệt của chủ tàu.')) return;
+  const now=new Date().toISOString();
+  ar.status='approved';
+  ar.approvedL1By=actorName(); ar.approvedL1At=now;
+  ar.approvedL2By=actorName(); ar.approvedL2At=now;
+  ar.updatedAt=now;
+  try{ touchRecord(ar); }catch(e){}
+  fee.revenueRecognized=true;
+  fee.recognizedBy=actorName(); fee.recognizedAt=now;
+  saveState();
+  try{ logAuditEvent('mgmt_fee_recognize',{feeId, arId:ar.id, amount:fee.amount}); }catch(e){}
+  toast('✓ Đã ghi doanh thu phí QL — lên báo cáo mảng Quản lý tàu','good');
+  renderAll();
+}
 function mfRecalc(){
-  const net=+(document.getElementById('mf-amount')||{}).value||0;
+  const amtEl=document.getElementById('mf-amount');
+  const net=+(amtEl||{}).value||0;
   const pct=+(document.getElementById('mf-vat')||{}).value||0;
   const vat=Math.round(net*pct/100*100)/100;
   const va=document.getElementById('mf-vat-amt'); if(va) va.value=vat.toLocaleString('vi-VN');
   const g=document.getElementById('mf-gross'); if(g) g.value=(net+vat).toLocaleString('vi-VN');
+  // v3.04.43: so với mức chuẩn/tháng (v.fee) — nhắc nhập lý do nếu lệch.
+  const std=+(amtEl&&amtEl.getAttribute('data-standard'))||0;
+  const hint=document.getElementById('mf-std-hint');
+  if(hint){
+    if(std>0){
+      if(net>0 && Math.abs(net-std)>0.005*std){
+        const diff=net-std, sign=diff>0?'+':'';
+        hint.innerHTML='Mức chuẩn/tháng: <b>'+std.toLocaleString('vi-VN')+'</b> · kỳ này '+(diff>0?'cao hơn':'thấp hơn')+' <b>'+sign+diff.toLocaleString('vi-VN')+'</b> → <span style="color:var(--warn)">nên ghi Lý do điều chỉnh bên dưới</span>';
+        hint.style.color='var(--warn)';
+      } else {
+        hint.textContent='Mức chuẩn/tháng: '+std.toLocaleString('vi-VN')+' (kỳ này đúng mức chuẩn)';
+        hint.style.color='var(--muted)';
+      }
+    } else hint.textContent='';
+  }
 }
 function issueMgmtFee(vid){
   if(!(isAdmin()||canApproveL1()||canApproveL2())){ toast('Không có quyền phát hành phí QL','bad'); return; }
@@ -29385,6 +29787,7 @@ function issueMgmtFee(vid){
   const period=((document.getElementById('mf-period')||{}).value||'').trim();
   const invoiceNo=((document.getElementById('mf-invoice')||{}).value||'').trim();
   const deduct=!!(document.getElementById('mf-deduct')||{}).checked;
+  const adjustNote=((document.getElementById('mf-adjust-note')||{}).value||'').trim();  // v3.04.43: lý do phí khác mức chuẩn
   const ccy=v.ccy||'VND';
   const feeId=uid();
 
@@ -29394,17 +29797,19 @@ function issueMgmtFee(vid){
   const arRec={
     id:uid(),
     partner:v.owner||v.name,
-    desc:(period||'Phí quản lý vận hành')+' · '+v.name,
+    desc:(period||'Phí quản lý vận hành')+' · '+v.name+(adjustNote?(' — '+adjustNote):''),
     amountNet:net, vatPercent:pct, vatAmount:vat, amountGross:gross, amount:gross,
     ccy, segment:'VESSEL_MGMT', projectId:null, vesselId:null,
     issueDate:date, dueDate:'', invoiceNo, payments:[],
     _mgmtFeeId:feeId, _opVesselId:vid,
     createdBy:actorName(), createdByDept:getActorDeptName(),
     createdAt:new Date().toISOString(), updatedAt:new Date().toISOString(),
-    status:'approved',
-    submittedBy:actorName(), submittedAt:new Date().toISOString(),
-    approvedL1By:actorName(), approvedL1At:new Date().toISOString(),
-    approvedL2By:actorName(), approvedL2At:new Date().toISOString()
+    // v3.04.45: tab 6 = LẬP phí → AR ở 'draft' = "Doanh thu DỰ KIẾN — chưa phát hóa đơn".
+    //   Lên mục 'DT dự kiến' (tách khỏi DT thực hiện). Khi chủ tàu duyệt, KT tích PHÁT HÓA ĐƠN
+    //   (nút 🧾 ở tab Phải thu) → approved = DT thực hiện. Phí QL đã cấn trừ quỹ → tự đánh dấu ĐÃ THU.
+    status:'draft',
+    _mgmtFeeDeducted: !!deduct,   // cờ: đã cấn trừ quỹ → khi xuất HĐ tự coi là đã thu
+    _mgmtFeeGross: gross
   };
   S.receivables.push(arRec);
 
@@ -29416,7 +29821,7 @@ function issueMgmtFee(vid){
     const fx = ccy==='USD' ? 1 : (+S.fxRate||0);
     S.opTransactions.push({
       id:opTxId, date, vesselId:vid, type:'OUT',
-      desc:'Cấn trừ phí quản lý'+(period?(' ('+period+')'):''),
+      desc:'Cấn trừ phí quản lý'+(period?(' ('+period+')'):'')+(adjustNote?(' — '+adjustNote):''),
       amount:gross, ccy, fxToUsd:fx, amountUsd: ccy==='USD'?gross:(fx>0?gross/fx:0),
       vatPercent:0, vatAmount:0, amountGross:gross,
       vendor:'(Phí QL Seahorse)', invoiceNo, contractNo:'',
@@ -29427,14 +29832,10 @@ function issueMgmtFee(vid){
     });
     // v2.71.9: cấn trừ quỹ = ĐÃ THU bằng tiền chủ tàu ứng → đánh dấu RP đã thu đủ,
     // KHÔNG qua ngân hàng (không cộng số dư bank), tránh thu trùng + sai báo cáo công nợ.
-    arRec.payments.push({
-      date, amount:gross,
-      fxRate: ccy==='USD' ? (+S.fxRate||0) : 0,
-      note:'Cấn trừ vào tiền chủ tàu ứng (quỹ thu/chi hộ)',
-      method:'offset',  // phương thức riêng: cấn trừ, không phải bank/cash
-      recordedBy:actorName(), recordedAt:new Date().toISOString(),
-      _mgmtFeeOffset:true
-    });
+    // v3.04.45: KHÔNG ghi payment ngay khi LẬP (AR còn là DT dự kiến).
+    //   Payment (đã thu qua cấn trừ quỹ) sẽ được ghi TỰ ĐỘNG khi KT XUẤT HÓA ĐƠN (saveArAndIssue),
+    //   để khớp nguyên tắc: DT thực hiện = đã thu chỉ tính từ lúc phát hóa đơn.
+    arRec._mgmtOffsetPending = { date, amount:gross, ccy };
   }
   // Nếu KHÔNG cấn trừ → RP để chờ thu; khi chủ tàu chuyển khoản, KT ghi nhận thanh toán
   // qua tab Công nợ như bình thường (cộng số dư ngân hàng).
@@ -29444,6 +29845,8 @@ function issueMgmtFee(vid){
   S.opMgmtFees.push({
     id:feeId, vesselId:vid, date, period, amount:net, vatPercent:pct, vatAmount:vat, amountGross:gross,
     ccy, invoiceNo, deducted:!!deduct, arId:arRec.id, opTxId,
+    standardFee:+v.fee||0, adjustNote:adjustNote||'',   // v3.04.43: mức chuẩn + lý do điều chỉnh
+    revenueRecognized:false,   // v3.04.44: chưa ghi doanh thu (chờ chủ tàu duyệt)
     createdBy:actorName(), createdAt:new Date().toISOString()
   });
 
@@ -29451,6 +29854,7 @@ function issueMgmtFee(vid){
   try{ logAuditEvent('mgmt_fee_issue',{vesselId:vid, net, gross, deducted:!!deduct}); }catch(e){}
   closeModal();
   renderAll();
+  toast(deduct ? '✓ Đã lập phí QL + cấn trừ quỹ. Phải thu ở trạng thái CHỜ DUYỆT — sau khi chủ tàu duyệt, bấm "Ghi doanh thu".' : '✓ Đã lập phí QL (chờ chủ tàu duyệt). Sau duyệt, bấm "Ghi doanh thu".','good');
   toast('Đã phát hành phí QL '+fmt(gross,ccy)+(deduct?' · đã cấn trừ quỹ':''),'good');
   }catch(err){
     console.error('[issueMgmtFee] lỗi:', err);
@@ -29467,6 +29871,7 @@ function deleteMgmtFee(feeId){
       if(f.arId){ S.receivables=(S.receivables||[]).filter(r=>r.id!==f.arId); ids.push(f.arId); }
       if(f.opTxId){ S.opTransactions=(S.opTransactions||[]).filter(t=>t.id!==f.opTxId); ids.push(f.opTxId); }
       S.opMgmtFees=(S.opMgmtFees||[]).filter(x=>x.id!==feeId);
+      ids.push(feeId);  // v3.04.42: bia mộ CẢ feeId (trước thiếu → phí QL xóa máy A sống lại máy B)
       try{ markDeleted(ids); }catch(e){}
       saveState();
       try{ logAuditEvent('mgmt_fee_delete',{feeId}); }catch(e){}
@@ -31091,7 +31496,8 @@ function _opApVirtualTx(){
       khoanRole: (p.khoanCat && String(p.khoanCat).trim()) ? 'chi' : '',
       khoanCat: p.khoanCat||'', khoanPeriod: p.khoanPeriod||'',
       createdBy:p.createdBy||'', createdByDept:p.createdByDept||'',
-      createdAt:p.createdAt||'', updatedAt:p.updatedAt||''
+      createdAt:p.createdAt||'', updatedAt:p.updatedAt||'',
+      attachments: Array.isArray(p.attachments)?p.attachments:[]   // v3.04.54: mang chứng từ để hiện trên báo cáo chủ tàu
     };
   });
 }
@@ -31510,6 +31916,12 @@ function openOpReportModal(){
         ${vesselChecks}
       </div>
     </div>
+    <div style="margin-top:12px;padding:8px 12px;background:rgba(28,58,92,.05);border-left:3px solid var(--accent);font-size:12px">
+      <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+        <input type="checkbox" id="rep-annex" checked>
+        <span><b>📎 Kèm phụ lục ảnh chứng từ</b> — nhúng hóa đơn/báo giá vào cuối PDF để chủ tàu xem trực tiếp (không cần truy cập Drive). <span style="color:var(--muted)">Tải ảnh có thể mất ít giây.</span></span>
+      </label>
+    </div>
     <div style="margin-top:12px;padding:8px 12px;background:rgba(45,106,106,.06);border-left:3px solid var(--good);font-size:11px">
       <b>Mẹo:</b> Sau khi bấm "Xuất PDF" → cửa sổ in của browser hiện ra → chọn <b>"Save as PDF"</b> (hoặc <b>"Lưu thành PDF"</b>) trong mục Destination → bấm Lưu.
     </div>`;
@@ -31689,6 +32101,7 @@ function generateOpReport(){
   };
 
   let html='';
+  const _annexItems=[];  // v3.04.55: gom chứng từ để dựng phụ lục ảnh ( vid → items)
   checked.forEach(vid=>{
     const v=S.opVessels.find(x=>x.id===vid);
     if(!v) return;
@@ -31725,6 +32138,12 @@ function generateOpReport(){
     const outRows=outAll.filter(x=>x.opCat!=='CREW_SALARY');
     const crewRows=outAll.filter(x=>x.opCat==='CREW_SALARY');
     const budgetRows=period.filter(x=>x.type==='OUT' && x._isBudget && !_isKhoanChi(x));
+    // v3.04.55: gom chứng từ (ảnh/PDF) của các khoản chi hộ trong kỳ → phụ lục
+    [...inRows, ...outRows, ...crewRows].forEach(x=>{
+      (Array.isArray(x.attachments)?x.attachments:[]).forEach(a=>{
+        if(a && a.id) _annexItems.push({ vessel:v.name, date:x.date, vendor:x.vendor||'', invoiceNo:x.invoiceNo||'', desc:x.desc||'', amount:x.amount, ccy:x.ccy||'USD', fileId:a.id, fileName:a.name||'', mimeType:a.mimeType||'', url:a.url||'' });
+      });
+    });
     let sumIn=0, sumOut=0, sumBudget=0, sumFee=0, sumCrew=0;
     period.forEach(x=>{
       if(_isKhoanChi(x)) return;  // v3.03.52: bỏ qua dòng thực chi của khoán (không lên báo cáo chủ tàu)
@@ -31791,15 +32210,20 @@ function generateOpReport(){
     };
     // v1.40.1: Chi hộ table now has 3 extra columns: NCC / HĐ / HD
     const tableRowsOUT=(rows)=>{
-      if(!rows.length) return `<tr><td colspan="7" style="text-align:center;font-style:italic;color:#888">— Không có giao dịch —</td></tr>`;
+      if(!rows.length) return `<tr><td colspan="8" style="text-align:center;font-style:italic;color:#888">— Không có giao dịch —</td></tr>`;
       return rows.map(x=>{
         const xccy=x.ccy||'USD';
+        const _att=Array.isArray(x.attachments)?x.attachments:[];
+        const _attCell=_att.length
+          ? _att.map((a,i)=>`<a href="${(a.url||'').replace(/"/g,'')}" target="_blank" rel="noopener" style="color:#1c3a5c;text-decoration:underline">${_att.length>1?('#'+(i+1)):'📎'}</a>`).join(' ')
+          : '—';
         return `<tr>
           <td>${fmtDate(x.date)}</td>
           <td>${(x.desc||'').replace(/</g,'&lt;')}</td>
           <td style="font-size:9pt">${(x.vendor||'').replace(/</g,'&lt;')||'—'}</td>
           <td style="font-size:8.5pt;font-family:monospace">${(x.contractNo||'').replace(/</g,'&lt;')||'—'}</td>
           <td style="font-size:8.5pt;font-family:monospace">${(x.invoiceNo||'').replace(/</g,'&lt;')||'—'}</td>
+          <td class="c" style="font-size:8.5pt">${_attCell}</td>
           <td class="c" style="font-size:9pt">${xccy}</td>
           <td class="r">${fmtMoney(x.amount,xccy)}</td>
           <td class="r">${fmtMoney(opTxUsd(x),'USD')}</td>
@@ -31908,7 +32332,8 @@ function generateOpReport(){
           <th style="width:26%">${esc(t.desc)}</th>
           <th style="width:18%">${en?'Vendor':bi?'NCC · Vendor':'Tên NCC'}</th>
           <th style="width:11%">${en?'Contract':bi?'HĐ · Contract':'Số HĐ'}</th>
-          <th style="width:11%">${en?'Invoice':bi?'HD · Invoice':'Số HD'}</th>
+          <th style="width:10%">${en?'Invoice':bi?'HD · Invoice':'Số HD'}</th>
+          <th class="c" style="width:7%">${en?'Docs':bi?'CT · Docs':'Chứng từ'}</th>
           <th class="c" style="width:8%">${enOrBi?'CCY':'Tiền tệ'}</th>
           <th class="r" style="width:14%">${enOrBi?'Original':'Số tiền gốc'}</th>
           <th class="r" style="width:13%">USD</th>
@@ -31916,7 +32341,7 @@ function generateOpReport(){
         <tbody>
           ${tableRowsOUT(outRows)}
           ${outRows.length?`<tr class="total">
-            <td colspan="7">${t.total} ${t.expense.split('·')[0].trim()} <span style="font-weight:400;color:#888;font-size:8pt">(USD)</span></td>
+            <td colspan="8">${t.total} ${t.expense.split('·')[0].trim()} <span style="font-weight:400;color:#888;font-size:8pt">(USD)</span></td>
             <td class="r">${fmtMoney(sumOutNormal,'USD')}</td>
           </tr>`:''}
         </tbody>
@@ -31938,7 +32363,7 @@ function generateOpReport(){
         <tbody>
           ${tableRowsOUT(crewRows)}
           <tr class="total">
-            <td colspan="7">${t.total} ${en?'Crew Wages':'Chi lương thuyền viên'} <span style="font-weight:400;color:#888;font-size:8pt">(USD)</span></td>
+            <td colspan="8">${t.total} ${en?'Crew Wages':'Chi lương thuyền viên'} <span style="font-weight:400;color:#888;font-size:8pt">(USD)</span></td>
             <td class="r">${fmtMoney(sumCrew,'USD')}</td>
           </tr>
         </tbody>
@@ -31960,7 +32385,7 @@ function generateOpReport(){
         <tbody>
           ${tableRowsOUT(budgetRows)}
           <tr class="total" style="background:rgba(196,138,57,.08)">
-            <td colspan="7">${t.total} ${t.expenseBudget.split('·')[0].trim()} <span style="font-weight:400;color:#888;font-size:8pt">(USD)</span></td>
+            <td colspan="8">${t.total} ${t.expenseBudget.split('·')[0].trim()} <span style="font-weight:400;color:#888;font-size:8pt">(USD)</span></td>
             <td class="r" style="color:#8a5a1e">${fmtMoney(sumBudget,'USD')}</td>
           </tr>
         </tbody>
@@ -32064,10 +32489,62 @@ function generateOpReport(){
 
   document.getElementById('print-area').innerHTML=html;
   closeModal();
-  // Slight delay to allow DOM update
-  setTimeout(()=>{
-    window.print();
-  },100);
+  // v3.04.55: nếu chọn kèm phụ lục ảnh chứng từ → tải base64 qua Apps Script rồi nhúng, sau đó in.
+  const wantAnnex = !!(document.getElementById('rep-annex')||{}).checked;
+  if(wantAnnex && _annexItems.length){
+    _buildOwnerReportAnnex(_annexItems, en, bi).then(annexHtml=>{
+      if(annexHtml){ document.getElementById('print-area').innerHTML = html + annexHtml; }
+      setTimeout(()=>window.print(), 150);
+    }).catch(e=>{ console.warn('[annex]',e); setTimeout(()=>window.print(),100); });
+  } else {
+    setTimeout(()=>{ window.print(); },100);
+  }
+}
+
+/* v3.04.55: dựng phụ lục ảnh chứng từ — tải file base64 qua Apps Script, nhúng <img> kèm nhãn. */
+async function _buildOwnerReportAnnex(items, en, bi){
+  const cfg=getAuthConfig();
+  if(!cfg || !cfg.scriptUrl){ toast('Chưa cấu hình Apps Script — bỏ phụ lục','warn'); return ''; }
+  toast('Đang tải '+items.length+' chứng từ cho phụ lục…');
+  const ids=items.map(it=>it.fileId);
+  let files=[];
+  try{
+    const resp=await fetch(cfg.scriptUrl,{method:'POST',headers:{'Content-Type':'text/plain'},body:JSON.stringify({action:'fetch_attachments', fileIds:ids})});
+    const data=await resp.json();
+    if(data && data.ok) files=data.files||[];
+  }catch(e){ console.warn('[annex fetch]',e); toast('Lỗi tải chứng từ phụ lục','bad'); return ''; }
+  const byId={}; files.forEach(f=>{ byId[f.id]=f; });
+
+  const title = en?'Annex — Supporting Documents':bi?'Phụ lục — Chứng từ · Supporting Documents':'Phụ lục — Chứng từ';
+  const lblDate=en?'Date':'Ngày', lblVendor=en?'Vendor':'NCC', lblInv=en?'Invoice':'Số HĐ', lblAmt=en?'Amount':'Số tiền';
+  let blocks='';
+  items.forEach((it,idx)=>{
+    const f=byId[it.fileId];
+    const cap=`<div style="font-size:9pt;color:#333;margin-bottom:4pt;border-bottom:1pt solid #ccc;padding-bottom:3pt">
+      <b>#${idx+1}</b> · ${lblDate}: ${esc(fmtDate?fmtDate(it.date):it.date)} · ${lblVendor}: ${esc(it.vendor||'—')} · ${lblInv}: ${esc(it.invoiceNo||'—')} · ${lblAmt}: ${esc(String(it.amount))} ${esc(it.ccy)}
+      <span style="color:#888"> · ${esc(it.vessel)}</span></div>`;
+    let media='';
+    if(f && f.base64 && /^image\//i.test(f.mimeType||'')){
+      media=`<img src="data:${f.mimeType};base64,${f.base64}" style="max-width:100%;max-height:560pt;display:block;margin:0 auto;border:1pt solid #ddd"/>`;
+    } else if(f && f.base64 && /pdf/i.test(f.mimeType||'')){
+      // PDF: nhúng object (in được trang đầu); kèm ghi chú link
+      media=`<embed src="data:application/pdf;base64,${f.base64}" type="application/pdf" style="width:100%;height:560pt;border:1pt solid #ddd"/>
+             <div style="font-size:8pt;color:#888;font-style:italic">${en?'PDF document':'Tài liệu PDF'}: ${esc(it.fileName||'')}</div>`;
+    } else if(f && f.tooLarge){
+      media=`<div style="font-size:9pt;color:#a00;padding:10pt;border:1pt dashed #a00">${en?'File too large to embed':'File quá lớn để nhúng'} — ${esc(it.fileName||'')}</div>`;
+    } else {
+      media=`<div style="font-size:9pt;color:#888;padding:10pt;border:1pt dashed #ccc">${en?'Document not available for embedding':'Không nhúng được tài liệu này'} — ${esc(it.fileName||'')}</div>`;
+    }
+    blocks+=`<div style="page-break-inside:avoid;margin-bottom:16pt">${cap}${media}</div>`;
+  });
+
+  return `<div class="pr-page" style="page-break-before:always;padding:24pt">
+    <div style="text-align:center;border-bottom:2pt solid #1c3a5c;padding-bottom:8pt;margin-bottom:14pt">
+      <div style="font-size:15pt;font-weight:700;color:#1c3a5c">${title}</div>
+      <div style="font-size:9pt;color:#666">${en?'Scanned invoices / quotations supporting the disbursement statement':'Hóa đơn/báo giá gốc kèm theo bảng kê chi hộ'} · ${items.length} ${en?'documents':'chứng từ'}</div>
+    </div>
+    ${blocks}
+  </div>`;
 }
 
 /* ============================================================
@@ -32949,6 +33426,7 @@ function invMergeDuplicateWarehouses(){
     });
     // Xóa kho dư
     S.warehouses=S.warehouses.filter(w=>!dropIds.includes(w.id));
+    try{ markDeleted(dropIds,'warehouses'); }catch(e){}  // v3.04.42: bia mộ kho đã gộp
     removed+=dropIds.length;
   });
   if(!dupGroups){toast('Không có kho trùng mã ✓');return;}
@@ -33343,6 +33821,7 @@ function saveInvMovement(id){
   if(dup){
     if(!confirm('Đã có bản ghi cùng kho + tháng + tên vật tư. Ghi đè?')){return;}
     S.invMovements=S.invMovements.filter(x=>x.id!==dup.id);
+    try{ markDeleted(dup.id,'invMovements'); }catch(e){}  // v3.04.42: bia mộ bản bị ghi đè
   }
 
   const rec={
