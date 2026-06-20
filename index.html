@@ -2979,7 +2979,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.04.88';            // bumped on each release
+const APP_VERSION='3.04.92';            // bumped on each release
 
 /* v2.62.0: Token xác thực backend — PHẢI khớp API_TOKEN trong Apps Script (Code.gs).
    Mọi request tới Apps Script tự động được gắn token qua lớp bọc fetch bên dưới.
@@ -29474,6 +29474,27 @@ function opMgmtFeeMonthly(v, toDate){
   }
   return out;
 }
+/* v3.04.92: Phí QL phát sinh trong KỲ BÁO CÁO [from..to] — dùng chung opMgmtFeeMonthly
+   (nguyên tắc "1 tháng 1 số": tháng đã lập→số NV, chưa lập→số chuẩn). Khớp với form & tab 6.
+   Trả {amount, ccy, issuedCount, billedMonths, pendingMonths, invoiceNos[], anyDeducted}. */
+function opMgmtFeeForPeriod(v, from, to){
+  const out={ amount:0, ccy:(v&&v.ccy)||'USD', issuedCount:0, billedMonths:0, pendingMonths:0, invoiceNos:[], anyDeducted:false };
+  if(!v || !v.managedSince) return out;
+  const m=opMgmtFeeMonthly(v, to);                 // tới hết ngày 'to'
+  const fmYM=String(from||'').slice(0,7), toYM=String(to||'').slice(0,7);
+  if(!fmYM || !toYM) return out;
+  const fees=(S.opMgmtFees||[]).filter(f=>f.vesselId===v.id);
+  m.months.forEach(mo=>{
+    if(mo.ym < fmYM || mo.ym > toYM) return;        // chỉ tháng nằm trong kỳ báo cáo
+    out.amount += (+mo.amount||0);
+    if(mo.billed){
+      out.billedMonths++; out.issuedCount++;
+      const f=fees.find(x=>x.id===mo.feeId);
+      if(f){ if(f.invoiceNo) out.invoiceNos.push(f.invoiceNo); if(f.deducted) out.anyDeducted=true; }
+    } else out.pendingMonths++;
+  });
+  return out;
+}
 /* Tháng QL chưa lập tiếp theo (gợi ý cho ô Kỳ tháng) */
 function _mfNextUnbilledMonth(v){
   const m=opMgmtFeeMonthly(v);
@@ -29841,7 +29862,7 @@ function renderOpVessels(){
     }
   }
   if(!visible.length){tbl.innerHTML='<tr><td class="empty">Chưa có tàu quản lý nào ' + (canSeeAllRecords()?'':'(hoặc bạn chưa được phân công)') + '</td></tr>';return;}
-  let html=`<thead><tr><th>Tàu · Chủ tàu</th><th class="r">Thu / ứng trước</th><th class="r" title="Tổng chi hộ (chi hộ trực tiếp + AP gắn tàu + phí giao dịch)">Chi hộ</th><th class="r" title="Phí quản lý: đã phát hành HĐ + phần tự tính chưa xuất HĐ">Phí quản lý</th><th class="r">Số dư hiện tại</th><th class="r">Ngưỡng tối thiểu</th><th class="c">Trạng thái</th><th></th></tr></thead><tbody>`;
+  let html=`<thead><tr><th>Tàu · Chủ tàu</th><th class="r">Thu / ứng trước</th><th class="r" title="Tổng chi hộ (chi hộ trực tiếp + AP gắn tàu + phí giao dịch)">Chi hộ</th><th class="r" title="Phí quản lý — tổng lũy kế quy USD (theo từng tháng: tháng đã lập dùng số NV nhập, tháng chưa lập dùng mức chuẩn). Đồng bộ với báo cáo chủ tàu.">Phí quản lý</th><th class="r">Số dư hiện tại</th><th class="r">Ngưỡng tối thiểu</th><th class="c">Trạng thái</th><th></th></tr></thead><tbody>`;
   const canIssue = isAdmin() || canApproveL1() || canApproveL2();
   const _rowFor=(v)=>{
     const bal=opBalance(v.id);
@@ -29856,11 +29877,19 @@ function renderOpVessels(){
     const months=opManagedMonths(v);
     const issued=opMgmtFeeIssued(v.id);
     const bd = bd0;
+    // v3.04.92: PHÍ QL — 1 dòng tổng lũy kế quy USD (bỏ dòng "tự tính" + tránh trộn VND/USD).
+    //   total = opMgmtFeeMonthly(v).total (tháng lập→số NV, chưa lập→chuẩn) — đồng bộ báo cáo chủ tàu.
+    const _mfm = (v.managedSince ? opMgmtFeeMonthly(v) : {total:0, totalIssued:0, totalPending:0});
+    const _mfCcy = v.ccy||'USD';
+    const _mfToUsd = (x)=> _mfCcy==='USD' ? x : ((+S.fxRate||0)>0 ? x/(+S.fxRate) : x);
+    const mgmtTotalUsd = _mfToUsd(_mfm.total||0);
+    const mgmtIssuedUsd = _mfToUsd(_mfm.totalIssued||0);
+    const mgmtPendingUsd = _mfToUsd(_mfm.totalPending||0);
     return `<tr>
       <td><b>${esc(v.name)}</b>${v.owner?` <span style="color:var(--muted);font-weight:400">· ${esc(v.owner)}</span>`:''}${v.managedSince?`<div style="font-size:10px;color:var(--muted)">QL từ ${esc(v.managedSince)} · ${months} tháng · phí ${fmt(v.fee,v.ccy)}/tháng</div>`:'<div style="font-size:10px;color:var(--warn)">chưa đặt ngày QL</div>'}</td>
       <td class="r num" style="color:var(--good);font-weight:600">${fmtCcy(bd.thu,'USD')}</td>
       <td class="r num" style="color:var(--bad);font-weight:600">−${fmtCcy(bd.chiReal,'USD')}<div style="font-size:9px;color:var(--muted);font-weight:400;line-height:1.4">${bd.chiBudget>0?`Dự kiến thêm: ${fmtCcy(bd.chiBudget,'USD')}`:'(đã chi thực)'}</div></td>
-      <td class="r num">${(issued>0||bd.mgmtPending>0)?`${issued>0?`<div style="color:var(--good);font-weight:600" title="Đã phát hành hóa đơn">${fmt(issued,v.ccy)}<span style="font-size:9px;font-weight:400"> đã PH</span></div>`:''}${bd.mgmtPending>0?`<div style="color:var(--warn);font-size:11px" title="Tự tính — chưa xuất hóa đơn (${months} tháng × ${fmt(v.fee,v.ccy)} − đã PH)">${fmtCcy(bd.mgmtPending,'USD')}<span style="font-size:9px"> tự tính</span></div>`:''}`:'—'}</td>
+      <td class="r num" title="Tổng phí QL lũy kế (quy USD): đã phát HĐ ${fmtCcy(mgmtIssuedUsd,'USD')} + chưa xuất HĐ ${fmtCcy(mgmtPendingUsd,'USD')}. Theo từng tháng: tháng đã lập dùng số NV nhập, tháng chưa lập dùng mức chuẩn.">${mgmtTotalUsd>0?`<span style="font-weight:600;color:#8a5a1e">${fmtCcy(mgmtTotalUsd,'USD')}</span>`:'—'}</td>
       <td class="r num" style="font-weight:600;color:${balReal<minUsd?'var(--bad)':balReal<minUsd*1.2?'var(--warn)':'var(--ink)'}" title="Số dư THỰC (chưa gồm dự kiến chi). = Thu/ứng − Chi thực − Phí QL.">${fmtCcy(balReal,'USD')}<div style="font-size:10px;color:var(--muted);font-weight:400" title="Quy đổi VND theo tỷ giá ${(+S.fxRate||0).toLocaleString('vi-VN')}">≈ ${(balReal*(+S.fxRate||0)).toLocaleString('vi-VN',{maximumFractionDigits:0})}₫</div>${bd.chiBudget>0?`<div style="font-size:9px;color:var(--warn);font-weight:400;margin-top:2px" title="Nếu chi hết khoản dự kiến, số dư còn lại">sau dự kiến: ${fmtCcy(bal,'USD')}</div>`:''}</td>
       <td class="r num">${fmtCcy(minUsd,'USD')}</td>
       <td class="c"><span class="chip ${statusCls}">${status}</span></td>
@@ -29881,7 +29910,11 @@ function renderOpVessels(){
     // dòng tổng theo chủ tàu — chỉ hiện khi chủ có >1 tàu (1 tàu thì dòng tàu đã đủ)
     if(vs.length>1){
       let gThu=0,gChiReal=0,gBudget=0,gBal=0,gMin=0,gMgmt=0;
-      vs.forEach(v=>{ const bd=opBalanceBreakdown(v.id); gThu+=bd.thu; gChiReal+=bd.chiReal; gBudget+=(bd.chiBudget||0); gMgmt+=bd.mgmtPending; gBal+=opBalance(v.id); gMin+=opMinUsd(v); });
+      vs.forEach(v=>{ const bd=opBalanceBreakdown(v.id); gThu+=bd.thu; gChiReal+=bd.chiReal; gBudget+=(bd.chiBudget||0);
+        // v3.04.92: tổng phí QL nhóm = Σ tổng lũy kế quy USD (đồng bộ dòng tàu), không phải chỉ pending.
+        const _gm=(v.managedSince?opMgmtFeeMonthly(v):{total:0}); const _gc=v.ccy||'USD';
+        gMgmt += (_gc==='USD'?(_gm.total||0):((+S.fxRate||0)>0?(_gm.total||0)/(+S.fxRate):(_gm.total||0)));
+        gBal+=opBalance(v.id); gMin+=opMinUsd(v); });
       const gBalReal = gBal + gBudget;   // số dư thực nhóm
       let gStatus,gCls;
       if(gBalReal<gMin){gStatus='⚠ DƯỚI NGƯỠNG';gCls='chip-bad';}
@@ -29891,7 +29924,7 @@ function renderOpVessels(){
         <td><b>TỔNG · ${esc(owner)}</b> <span style="font-size:10px;color:var(--muted);font-weight:400">(${vs.length} tàu)</span></td>
         <td class="r num" style="color:var(--good);font-weight:700">${fmtCcy(gThu,'USD')}</td>
         <td class="r num" style="color:var(--bad);font-weight:700">−${fmtCcy(gChiReal,'USD')}${gBudget>0?`<div style="font-size:9px;color:var(--muted);font-weight:400">Dự kiến thêm: ${fmtCcy(gBudget,'USD')}</div>`:''}</td>
-        <td class="r num" style="color:var(--warn);font-weight:600">${gMgmt>0?fmtCcy(gMgmt,'USD'):'—'}</td>
+        <td class="r num" style="color:#8a5a1e;font-weight:700" title="Tổng phí QL lũy kế (quy USD) của nhóm">${gMgmt>0?fmtCcy(gMgmt,'USD'):'—'}</td>
         <td class="r num" style="font-weight:700;color:${gBalReal<gMin?'var(--bad)':gBalReal<gMin*1.2?'var(--warn)':'var(--ink)'}">${fmtCcy(gBalReal,'USD')}${gBudget>0?`<div style="font-size:9px;color:var(--warn);font-weight:400">sau dự kiến: ${fmtCcy(gBal,'USD')}</div>`:''}</td>
         <td class="r num" style="font-weight:600">${fmtCcy(gMin,'USD')}</td>
         <td class="c"><span class="chip ${gCls}">${gStatus}</span></td>
@@ -30001,10 +30034,21 @@ function internalSummaryReport(){
    Gợi ý kỳ + số tiền từ managedSince × fee; KT điều chỉnh được rồi phát hành.
    Phát hành tạo: (1) 1 Phải thu mảng VESSEL_MGMT (lên báo cáo doanh thu),
    (2) 1 bút toán GIẢM QUỸ thu/chi hộ (cấn trừ tiền chủ tàu ứng), (3) lưu vào S.opMgmtFees. */
-/* v3.04.72: mở form Thu phí QL TỪ tab Thu/Chi hộ — dùng tàu đang chọn, hoặc cho chọn tàu. */
+/* v3.04.72: mở form Thu phí QL TỪ tab Thu/Chi hộ — dùng tàu đang LỌC, hoặc cho chọn tàu.
+   v3.04.92 FIX: đọc ô LỌC 'op-filter-vessel' (Sổ Thu/Chi hộ — có option "Tất cả tàu" = rỗng),
+   KHÔNG đọc 'opt-vessel' (dropdown của form nhập nhanh đang ẩn — luôn auto-chọn tàu đầu,
+   khiến nút này luôn nhảy thẳng 1 tàu thay vì hỏi chọn). */
 function openMgmtFeeFromOpTab(){
-  const sel=document.getElementById('opt-vessel');
-  const vid=sel && sel.value ? sel.value : '';
+  const fsel=document.getElementById('op-filter-vessel');
+  let vid = fsel && fsel.value ? fsel.value : '';
+  // fallback: nếu chỉ có đúng 1 tàu NV được gán → mở luôn tàu đó
+  if(!vid){
+    try{
+      const allowed=(typeof userAssignedOpVesselIds==='function')?userAssignedOpVesselIds():[];
+      const active=(S.opVessels||[]).filter(v=>allowed.includes(v.id) && !v.archived);
+      if(active.length===1) vid=active[0].id;
+    }catch(e){}
+  }
   if(vid){ openMgmtFeeModal(vid); return; }
   // chưa chọn tàu → popup chọn nhanh
   const vessels=(S.opVessels||[]);
@@ -30012,7 +30056,7 @@ function openMgmtFeeFromOpTab(){
   const opts=vessels.map(v=>`<button class="btn-sec" style="display:block;width:100%;text-align:left;margin-bottom:6px;font-size:13px" onclick="closeModal();openMgmtFeeModal('${v.id}')">🚢 ${esc(v.name)} <span style="color:var(--muted);font-size:11px">· ${esc(v.owner||'—')} · phí ${fmt(v.fee,v.ccy)}/tháng</span></button>`).join('');
   openModal('📋 Chọn tàu để thu phí QL', '<div style="font-size:12px;color:var(--muted);margin-bottom:10px">Chọn tàu cần lập/thu phí quản lý:</div>'+opts, '<button class="btn-sec" onclick="closeModal()">Đóng</button>');
 }
-/* v3.04.88: XEM CHI TIẾT PHÍ QL (chỉ xem, không lập) — mở từ tab 6 */
+/* v3.04.92: XEM CHI TIẾT PHÍ QL (chỉ xem, không lập) — mở từ tab 6 */
 function openMgmtFeeDetail(vid){
   const v=(S.opVessels||[]).find(x=>x.id===vid); if(!v){ toast('Không tìm thấy tàu','bad'); return; }
   const m=opMgmtFeeMonthly(v);
@@ -30026,9 +30070,10 @@ function openMgmtFeeDetail(vid){
         const stCell = issued
           ? `<span style="color:var(--good);font-size:11px;font-weight:600">✓ Đã xuất HĐ${ar&&(ar.payments||[]).some(p=>p._mgmtFeeOffset)?' · đã thu':''}</span>`
           : `<span style="color:var(--accent);font-size:11px">📋 DT dự kiến (chưa HĐ)</span>`;
-        return `<tr><td class="mono" style="font-size:11px">${esc(f.date||'')}</td><td>${esc(f.period||'')}</td><td class="r num">${fmtMoney(f.amount)}</td><td>${stCell}</td><td style="font-size:11px;color:var(--muted)">${esc(f.invoiceNo||'—')}</td></tr>`;
+        const ymTag = f.periodMonth ? '' : `<div style="font-size:10px;color:var(--warn)" title="Bản ghi chưa gán Kỳ tháng — app đang suy từ ngày phát hành (${esc(String(f.date||'').slice(0,7))}). Bấm ⚙ để gán đúng tháng phí.">⚠ chưa gán kỳ tháng</div>`;
+        return `<tr><td class="mono" style="font-size:11px">${esc(f.date||'')}</td><td>${esc(f.period||'')}${f.periodMonth?`<div style="font-size:10px;color:var(--muted)">kỳ tháng: ${esc(f.periodMonth)}</div>`:''}${ymTag}</td><td class="r num">${fmtMoney(f.amount)}</td><td>${stCell}</td><td style="font-size:11px;color:var(--muted)">${esc(f.invoiceNo||'—')}</td><td><button class="icon-btn" title="Sửa kỳ tháng của phí này" onclick="editMgmtFeePeriod('${f.id}','${vid}')">⚙</button></td></tr>`;
       }).join('')
-    : '<tr><td colspan="5" class="empty">Chưa lập kỳ phí QL nào</td></tr>';
+    : '<tr><td colspan="6" class="empty">Chưa lập kỳ phí QL nào</td></tr>';
   const body=`
     <div style="font-size:12px;color:var(--muted);margin-bottom:12px;padding:8px 12px;background:rgba(28,58,92,.05);border-left:3px solid var(--accent)">
       <b>${esc(v.name)}</b> · Chủ tàu: ${esc(v.owner||'—')}<br>
@@ -30038,10 +30083,146 @@ function openMgmtFeeDetail(vid){
     <div style="font-family:var(--font-display);font-size:13px;font-weight:600;margin-bottom:6px">📅 Phí QL theo từng tháng</div>
     <div class="tbl-scroll"><table class="tbl" style="font-size:12px"><thead><tr><th>Tháng</th><th class="r">Số phí (net)</th><th>Nguồn</th><th>Tình trạng</th></tr></thead><tbody>${_mfMonthlyRows(v)}</tbody></table></div>
     <div style="font-family:var(--font-display);font-size:13px;font-weight:600;margin:14px 0 6px">Các kỳ đã lập</div>
-    <div class="tbl-scroll"><table class="tbl" style="font-size:12px"><thead><tr><th>Ngày</th><th>Kỳ</th><th class="r">Số tiền (net)</th><th>Doanh thu</th><th>Số HĐ</th></tr></thead><tbody>${histHtml}</tbody></table></div>
-    <div style="font-size:11px;color:var(--muted);font-style:italic;margin-top:10px">→ Để LẬP / THU phí QL: vào tab <b>Công nợ → Thu/Chi hộ</b>, bấm <b>📋 Thu phí QL</b>.</div>
+    <div class="tbl-scroll"><table class="tbl" style="font-size:12px"><thead><tr><th>Ngày</th><th>Kỳ</th><th class="r">Số tiền (net)</th><th>Doanh thu</th><th>Số HĐ</th><th></th></tr></thead><tbody>${histHtml}</tbody></table></div>
+    <div style="font-size:11px;color:var(--muted);font-style:italic;margin-top:10px">→ Để LẬP / THU phí QL: vào tab <b>Công nợ → Thu/Chi hộ</b>, bấm <b>📋 Thu phí QL</b>. Bấm <b>⚙</b> ở mỗi dòng để gán/sửa kỳ tháng (khi 1 phiếu thuộc về tháng khác với ngày phát hành — vd phát sinh thêm việc).</div>
   `;
   openModal('👁 Chi tiết phí quản lý · '+esc(v.name), body, '<button class="btn-sec" onclick="closeModal()">Đóng</button>');
+}
+/* v3.04.92: Sửa KỲ THÁNG (periodMonth) của 1 bản ghi phí QL — dùng khi một phiếu thuộc
+   về tháng khác với ngày phát hành (vd T4 phát sinh thêm việc, lập gộp/lập trễ).
+   Chỉ đổi periodMonth (+ tùy chọn mô tả "Kỳ phí"); KHÔNG đổi số tiền/HĐ ở đây. */
+function editMgmtFeePeriod(feeId, vid){
+  const f=(S.opMgmtFees||[]).find(x=>x.id===feeId);
+  if(!f){ toast('Không tìm thấy bản ghi phí QL','bad'); return; }
+  if(!(isAdmin()||canApproveL1()||canApproveL2())){ toast('Không có quyền sửa kỳ phí QL','bad'); return; }
+  const v=(S.opVessels||[]).find(x=>x.id===(vid||f.vesselId));
+  const curYM=f.periodMonth || String(f.date||'').slice(0,7);
+  const body=`
+    <div style="font-size:12px;color:var(--muted);margin-bottom:12px;padding:8px 12px;background:rgba(28,58,92,.05);border-left:3px solid var(--accent)">
+      ${v?`<b>${esc(v.name)}</b> · `:''}Ngày phát hành: <b>${esc(f.date||'—')}</b> · Số tiền: <b>${fmt(f.amount,(v&&v.ccy)||f.ccy)}</b>${f.invoiceNo?` · HĐ: <b>${esc(f.invoiceNo)}</b>`:''}<br>
+      <span style="font-size:11px">Phí này thuộc về <b>tháng phí</b> nào? (Không nhất thiết trùng ngày phát hành — vd phát sinh thêm việc trong tháng đó, hoặc lập trễ/gộp.)</span>
+    </div>
+    <div class="form-grid" style="grid-template-columns:1fr 1fr">
+      <div class="field"><label>Kỳ tháng (phí của tháng nào) <span style="color:var(--bad)">*</span></label><input type="month" id="emf-ym" value="${esc(curYM)}"></div>
+      <div class="field"><label>Kỳ phí (mô tả)</label><input type="text" id="emf-period" value="${esc(f.period||'')}"></div>
+    </div>
+    <div style="font-size:11px;color:var(--muted);margin-top:8px">Lưu ý: bảng "Phí QL theo từng tháng" và báo cáo chủ tàu gom theo <b>kỳ tháng</b> này (nguyên tắc 1 tháng 1 số).</div>
+  `;
+  openModal('⚙ Sửa kỳ tháng phí QL', body,
+    '<button class="btn-sec" onclick="closeModal()">Hủy</button><button class="btn-pri" onclick="saveMgmtFeePeriod(\''+feeId+'\',\''+(vid||f.vesselId)+'\')">Lưu kỳ tháng</button>');
+}
+function saveMgmtFeePeriod(feeId, vid){
+  const f=(S.opMgmtFees||[]).find(x=>x.id===feeId);
+  if(!f){ toast('Không tìm thấy bản ghi','bad'); return; }
+  const ym=((document.getElementById('emf-ym')||{}).value||'').trim();
+  if(!/^\d{4}-\d{2}$/.test(ym)){ toast('Kỳ tháng không hợp lệ (YYYY-MM)','bad'); return; }
+  // chặn trùng kỳ tháng với bản ghi khác cùng tàu (mỗi tháng chỉ 1 phiếu phí QL)
+  const dup=(S.opMgmtFees||[]).find(x=>x.vesselId===f.vesselId && x.id!==feeId && (x.periodMonth||String(x.date||'').slice(0,7))===ym);
+  if(dup){ toast('Tháng '+ym+' đã có phiếu phí QL khác — không thể gán trùng','bad'); return; }
+  const period=((document.getElementById('emf-period')||{}).value||'').trim();
+  const oldYM=f.periodMonth||String(f.date||'').slice(0,7);
+  f.periodMonth=ym;
+  if(period) f.period=period;
+  f.updatedAt=new Date().toISOString();
+  f.updatedBy=actorName();
+  saveState();
+  try{ logAuditEvent('mgmt_fee_period_edit',{feeId:f.id, vesselId:f.vesselId, from:oldYM, to:ym}); }catch(e){}
+  renderAll();
+  toast('Đã cập nhật kỳ tháng → '+ym,'good');
+  closeModal();
+  try{ openMgmtFeeDetail(vid||f.vesselId); }catch(e){}
+}
+/* v3.04.92 — BƯỚC 2 PHÍ QL: KTT/Admin đánh dấu ĐÃ PHÁT HÓA ĐƠN cho 1 kỳ phí QL.
+   Bắt buộc nhập SỐ HĐ. Chuyển AR liên kết sang 'approved' (DT thực hiện), ghi payment
+   cấn trừ quỹ nếu phí đã cấn trừ (giống saveArAndIssue), set fee.revenueRecognized=true.
+   Có thể đính kèm chứng từ (giữ luồng). */
+function mgmtFeeMarkIssued(feeId, vid){
+  if(!(isAdmin()||canApproveL2())){ toast('Chỉ Admin/KTT được đánh dấu đã phát hóa đơn','bad'); return; }
+  const f=(S.opMgmtFees||[]).find(x=>x.id===feeId);
+  if(!f){ toast('Không tìm thấy kỳ phí QL','bad'); return; }
+  const v=(S.opVessels||[]).find(x=>x.id===(vid||f.vesselId));
+  const ccy=(f.ccy||(v&&v.ccy)||'VND');
+  const body=`
+    <div style="font-size:12px;color:var(--muted);margin-bottom:12px;padding:8px 12px;background:rgba(28,58,92,.05);border-left:3px solid var(--good)">
+      ${v?`<b>${esc(v.name)}</b> · `:''}Kỳ: <b>${esc(f.period||f.periodMonth||'')}</b> · Số tiền: <b>${fmt(f.amountGross||f.amount,ccy)}</b>${f.deducted?' · <span style="color:var(--accent)">đã cấn trừ quỹ</span>':''}<br>
+      <span style="font-size:11px">Xác nhận đã phát hành hóa đơn cho chủ tàu → chuyển "DT dự kiến" sang <b>"✓ Đã xuất HĐ"</b> (ghi doanh thu thực hiện${f.deducted?' + đánh dấu đã thu qua cấn trừ quỹ':''}).</span>
+    </div>
+    <div class="form-grid" style="grid-template-columns:1fr 1fr">
+      <div class="field"><label>Số hóa đơn <span style="color:var(--bad)">*</span></label><input type="text" id="mfi-invoice" value="${esc(f.invoiceNo||'')}" placeholder="VD: HD-QL-2026-001"></div>
+      <div class="field"><label>Ngày phát hành HĐ</label><input type="date" id="mfi-date" value="${esc(f.date||todayISO())}"></div>
+    </div>
+    <div style="font-size:11px;color:var(--muted);margin-top:8px">→ Chứng từ (file HĐ scan) đính kèm ở khối "Chứng từ đính kèm" của form Thu phí QL, hoặc ở khoản Phải thu tương ứng.</div>
+  `;
+  openModal('🧾 Đánh dấu đã phát hóa đơn — Phí QL', body,
+    '<button class="btn-sec" onclick="closeModal()">Hủy</button><button class="btn-pri" style="background:var(--good);border-color:var(--good)" onclick="mgmtFeeConfirmIssued(\''+feeId+'\',\''+(vid||f.vesselId)+'\')">Xác nhận đã phát HĐ</button>');
+}
+function mgmtFeeConfirmIssued(feeId, vid){
+  const f=(S.opMgmtFees||[]).find(x=>x.id===feeId);
+  if(!f){ toast('Không tìm thấy kỳ phí QL','bad'); return; }
+  const inv=((document.getElementById('mfi-invoice')||{}).value||'').trim();
+  if(!inv){ toast('Bắt buộc nhập số hóa đơn','bad'); return; }
+  const dt=((document.getElementById('mfi-date')||{}).value||'').trim()||f.date||todayISO();
+  const nowIso=new Date().toISOString();
+  f.invoiceNo=inv; f.date=dt;
+  // AR liên kết → set approved + payment offset (tái dùng đúng logic saveArAndIssue)
+  const r=(S.receivables||[]).find(x=>x.id===f.arId || x._mgmtFeeId===f.id);
+  if(r && wfStatus(r)!=='approved'){
+    r.status='approved';
+    r.invoiceNo=r.invoiceNo||inv;
+    r.submittedBy=r.submittedBy||actorName(); r.submittedAt=r.submittedAt||nowIso;
+    const tag='(Phát hóa đơn phí QL — '+actorName()+')';
+    r.accCheckedBy=tag; r.accCheckedAt=nowIso;
+    r.approvedL1By=tag; r.approvedL1At=nowIso;
+    r.approvedL2By=tag; r.approvedL2At=nowIso;
+    r.rejectedBy='';r.rejectedAt='';r.rejectReason='';r.rejectedAtLevel=null;
+    if(r._mgmtFeeDeducted && r._mgmtOffsetPending && !(r.payments||[]).some(p=>p._mgmtFeeOffset)){
+      if(!Array.isArray(r.payments)) r.payments=[];
+      const op=r._mgmtOffsetPending;
+      r.payments.push({
+        date: op.date||nowIso.slice(0,10), amount:+op.amount||+r.amountGross||+r.amount||0,
+        fxRate:(r.ccy==='USD')?(+S.fxRate||0):0,
+        note:'Cấn trừ vào tiền chủ tàu ứng (quỹ thu/chi hộ) — đã thu khi phát HĐ',
+        method:'offset', recordedBy:actorName(), recordedAt:nowIso, _mgmtFeeOffset:true
+      });
+    }
+    try{ touchRecord(r); }catch(e){}
+  }
+  f.revenueRecognized=true; f.recognizedBy=actorName(); f.recognizedAt=nowIso;
+  f.issuedBy=actorName(); f.issuedAt=nowIso;
+  saveState();
+  try{ logAuditEvent('mgmt_fee_issue_invoice',{feeId:f.id, vesselId:f.vesselId, invoiceNo:inv, arId:f.arId||''}); }catch(e){}
+  renderAll();
+  closeModal();
+  toast('🧾 Đã phát hóa đơn phí QL '+esc(inv)+' — DT thực hiện','good');
+  try{ openMgmtFeeModal(vid||f.vesselId); }catch(e){}
+}
+/* Bỏ đánh dấu (revert về DT dự kiến) — tích nhầm. Gỡ approved + payment offset của AR. */
+function mgmtFeeUnmarkIssued(feeId, vid){
+  if(!(isAdmin()||canApproveL2())){ toast('Chỉ Admin/KTT được bỏ đánh dấu','bad'); return; }
+  const f=(S.opMgmtFees||[]).find(x=>x.id===feeId);
+  if(!f){ toast('Không tìm thấy kỳ phí QL','bad'); return; }
+  confirmDelete('việc đánh dấu "đã phát HĐ" của kỳ phí này',
+    `Kỳ: ${esc(f.period||f.periodMonth||'')}<br>Sẽ đưa về <b>DT dự kiến (chưa HĐ)</b>, gỡ ghi nhận doanh thu${f.deducted?' và bút toán đã thu qua cấn trừ quỹ':''}.`,
+    ()=>{
+      const nowIso=new Date().toISOString();
+      const r=(S.receivables||[]).find(x=>x.id===f.arId || x._mgmtFeeId===f.id);
+      if(r){
+        // gỡ payment offset
+        if(Array.isArray(r.payments)) r.payments=r.payments.filter(p=>!p._mgmtFeeOffset);
+        // đưa AR về draft (dự kiến)
+        r.status='draft';
+        r.accCheckedBy='';r.accCheckedAt='';r.approvedL1By='';r.approvedL1At='';r.approvedL2By='';r.approvedL2At='';
+        try{ touchRecord(r); }catch(e){}
+      }
+      f.revenueRecognized=false; f.recognizedBy=''; f.recognizedAt='';
+      f.issuedBy=''; f.issuedAt='';
+      f.unmarkedBy=actorName(); f.unmarkedAt=nowIso;
+      saveState();
+      try{ logAuditEvent('mgmt_fee_unissue',{feeId:f.id, vesselId:f.vesselId}); }catch(e){}
+      renderAll();
+      toast('↩ Đã đưa kỳ phí QL về DT dự kiến (chưa HĐ)','good');
+      try{ openMgmtFeeModal(vid||f.vesselId); }catch(e){}
+    });
 }
 function openMgmtFeeModal(vid){
   if(!(isAdmin()||canApproveL1()||canApproveL2())){ toast('Không có quyền phát hành phí QL','bad'); return; }
@@ -30057,9 +30238,10 @@ function openMgmtFeeModal(vid){
     ? issuedList.map(f=>{
         const ar=(S.receivables||[]).find(x=>x.id===f.arId || x._mgmtFeeId===f.id);
         const issued = ar && wfStatus(ar)==='approved';
+        const canIssue=(isAdmin()||canApproveL2());
         const stCell = issued
-          ? `<span style="color:var(--good);font-size:11px;font-weight:600" title="Đã phát hóa đơn → DT thực hiện${ar&&(ar.payments||[]).some(p=>p._mgmtFeeOffset)?' · đã thu (cấn trừ quỹ)':''}">✓ Đã xuất HĐ${ar&&(ar.payments||[]).some(p=>p._mgmtFeeOffset)?' · đã thu':''}</span>`
-          : `<span style="color:var(--accent);font-size:11px" title="Doanh thu dự kiến — chưa phát hóa đơn. Sang tab Phải thu, bấm 🧾 để phát HĐ sau khi chủ tàu duyệt.">📋 DT dự kiến (chưa HĐ)</span>`;
+          ? `<span style="color:var(--good);font-size:11px;font-weight:600" title="Đã phát hóa đơn → DT thực hiện${ar&&(ar.payments||[]).some(p=>p._mgmtFeeOffset)?' · đã thu (cấn trừ quỹ)':''}">✓ Đã xuất HĐ${ar&&(ar.payments||[]).some(p=>p._mgmtFeeOffset)?' · đã thu':''}</span>${canIssue?`<br><button class="link-btn" style="font-size:10px;color:var(--muted);background:none;border:none;cursor:pointer;padding:2px 0;text-decoration:underline" title="Bỏ đánh dấu — đưa về DT dự kiến (tích nhầm)" onclick="mgmtFeeUnmarkIssued('${f.id}','${vid}')">↩ bỏ đánh dấu</button>`:''}`
+          : `<span style="color:var(--accent);font-size:11px" title="Doanh thu dự kiến — chưa phát hóa đơn cho chủ tàu.">📋 DT dự kiến (chưa HĐ)</span>${canIssue?`<br><button class="btn-mini" style="font-size:10px;margin-top:3px;padding:2px 8px;background:var(--good);color:#fff;border:none;border-radius:4px;cursor:pointer" title="KTT/Admin: đánh dấu đã phát hóa đơn cho chủ tàu (bắt buộc nhập số HĐ)" onclick="mgmtFeeMarkIssued('${f.id}','${vid}')">🧾 Đánh dấu đã phát HĐ</button>`:'<br><span style="font-size:9px;color:var(--muted);font-style:italic">(KTT phát HĐ)</span>'}`;
         return `<tr><td class="mono" style="font-size:11px">${esc(f.date||'')}</td><td>${esc(f.period||'')}${f.adjustNote?`<div style="font-size:10px;color:var(--warn);font-style:italic">⚙ ${esc(f.adjustNote)}</div>`:''}</td><td class="r num">${fmt(f.amount,v.ccy)}${(f.standardFee&&Math.abs((+f.amount||0)-(+f.standardFee||0))>0.005*(+f.standardFee||1))?`<div style="font-size:9px;color:var(--muted)">chuẩn: ${fmt(f.standardFee,v.ccy)}</div>`:''}</td><td>${stCell}</td><td style="font-size:11px;color:var(--muted)">${esc(f.invoiceNo||'')}</td><td><button class="icon-btn danger" title="Hủy phí này" onclick="deleteMgmtFee('${f.id}')">✕</button></td></tr>`;
       }).join('')
     : '<tr><td colspan="6" class="empty">Chưa phát hành kỳ phí QL nào</td></tr>';
@@ -32927,38 +33109,38 @@ function generateOpReport(){
     // - Nếu CHƯA → lấy giá trị QUY ĐỊNH (phí/tháng × số tháng trong kỳ báo cáo) làm tham chiếu dự kiến.
     // Dòng này là THÔNG TIN cho chủ tàu; KHÔNG cộng/trừ lại vào số dư (nếu đã cấn trừ thì
     // khoản đó đã nằm trong "Tổng chi hộ" rồi — tránh trừ trùng).
-    const mfIssued=(S.opMgmtFees||[]).filter(f=>f.vesselId===vid && (f.date||'')>=from && (f.date||'')<=to);
+    // v3.04.92: ĐỒNG BỘ với form/tab 6 — phí QL theo TỪNG THÁNG (opMgmtFeeMonthly), "1 tháng 1 số".
+    //   Mỗi tháng trong kỳ báo cáo: đã lập→số NV chốt; chưa lập→số chuẩn. Khớp tuyệt đối với
+    //   bảng "Phí QL theo từng tháng" ở tab 6 và form Thu phí QL (hết tình trạng lệch date vs periodMonth).
+    const mfP=opMgmtFeeForPeriod(v, from, to);
+    const mfCcy=(mfP.ccy||v.ccy||'USD');
+    const mfUsd = mfCcy==='USD' ? mfP.amount : ((+S.fxRate||0)>0 ? mfP.amount/(+S.fxRate) : mfP.amount);
     let mgmtFeeInfo;
-    if(mfIssued.length){
-      const mfTotal=mfIssued.reduce((s,f)=>s+(+f.amountGross||+f.amount||0),0);
-      const mfCcy=(mfIssued[0].ccy||v.ccy||'USD');
-      const mfUsd = mfCcy==='USD' ? mfTotal : ((+S.fxRate||0)>0 ? mfTotal/(+S.fxRate) : mfTotal);
-      const invList=mfIssued.map(f=>f.invoiceNo).filter(Boolean).join(', ');
+    if(mfP.billedMonths>0 && mfP.pendingMonths===0){
+      // toàn bộ tháng trong kỳ đã lập
+      const invList=mfP.invoiceNos.join(', ');
       mgmtFeeInfo={ has:true, amountUsd:mfUsd,
-        note:(invList?('HĐ: '+invList):'(đã phát hành)'), deducted:mfIssued.some(f=>f.deducted) };
+        note:(invList?('HĐ: '+invList):'(đã phát hành)'), deducted:mfP.anyDeducted };
+    } else if(mfP.billedMonths>0){
+      // kỳ hỗn hợp: có tháng đã lập + có tháng chưa → coi là chưa hoàn tất phát hành (dự kiến),
+      // số tiền vẫn là tổng theo từng tháng (đã lập dùng số NV, chưa lập dùng chuẩn).
+      const invList=mfP.invoiceNos.join(', ');
+      mgmtFeeInfo={ has:false, amountUsd:mfUsd,
+        note:(lang==='bi'?'Một phần đã xuất HĐ · Partially invoiced':'Một phần đã xuất HĐ')+(invList?(' (HĐ: '+invList+')'):''), deducted:false };
     } else {
-      const sM=new Date(from+'T00:00:00'), eM=new Date(to+'T00:00:00');
-      let mInPeriod=1;
-      if(!isNaN(sM.getTime())&&!isNaN(eM.getTime())&&eM>=sM){
-        // v3.01.74: TÍNH TRÒN THÁNG THEO NGÀY NEO (anniversary), không theo tháng dương lịch.
-        // VD 15/4 → 14/5 = 1 tháng (chưa tới 15/5). Tới 15/5 mới sang tháng 2.
-        const anchorDay=sM.getDate();
-        mInPeriod=(eM.getFullYear()-sM.getFullYear())*12+(eM.getMonth()-sM.getMonth());
-        if(eM.getDate()>=anchorDay) mInPeriod+=1;
-        mInPeriod=Math.max(1,mInPeriod);
-      }
-      const planned=(+v.fee||0)*Math.max(1,mInPeriod);
-      const mfCcy=(v.ccy||'USD');
-      const plannedUsd = mfCcy==='USD' ? planned : ((+S.fxRate||0)>0 ? planned/(+S.fxRate) : planned);
-      mgmtFeeInfo={ has:false, amountUsd:plannedUsd,
+      // chưa lập tháng nào trong kỳ → toàn bộ dùng số chuẩn theo tháng
+      mgmtFeeInfo={ has:false, amountUsd:mfUsd,
         note:lang==='bi'?'Dự kiến — chưa xuất hóa đơn · Estimated — not yet invoiced':'Dự kiến — chưa xuất hóa đơn', deducted:false };
     }
-    // v3.02.72: TRỪ PHÍ QL vào số dư cuối kỳ (theo nguyên tắc: phí quản lý phải trừ).
-    //   - Phí QL ĐÃ phát hành HĐ: đã có bút toán giảm quỹ trong opTx/AP → KHÔNG trừ lại (tránh trùng).
-    //   - Phí QL CHƯA phát hành (dự kiến/pending): trừ THÊM vào closeBal để khớp số dư app (opBalance).
+    // v3.02.72 / v3.04.92: TRỪ PHÍ QL vào số dư cuối kỳ (nguyên tắc: phí quản lý phải trừ).
+    //   - Tháng ĐÃ lập (billed): đã có bút toán giảm quỹ trong opTx/AP → KHÔNG trừ lại (tránh trùng).
+    //   - Tháng CHƯA lập (pending): trừ THÊM phần dự kiến vào closeBal để khớp số dư app (opBalance).
+    //   Kỳ hỗn hợp chỉ trừ ĐÚNG phần pending (số chuẩn × số tháng chưa lập), không trừ phần đã lập.
     let mgmtFeeDeducted=0;
-    if(mgmtFeeInfo && !mgmtFeeInfo.has && !mgmtFeeInfo.deducted){
-      mgmtFeeDeducted = +mgmtFeeInfo.amountUsd||0;
+    if(mgmtFeeInfo && mfP.pendingMonths>0 && !mgmtFeeInfo.deducted){
+      const pendingNative=(+v.fee||0)*mfP.pendingMonths;
+      const pendingUsd = mfCcy==='USD' ? pendingNative : ((+S.fxRate||0)>0 ? pendingNative/(+S.fxRate) : pendingNative);
+      mgmtFeeDeducted = pendingUsd;
       closeBal -= mgmtFeeDeducted;
     }
 
