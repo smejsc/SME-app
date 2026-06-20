@@ -2975,7 +2975,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.04.64';            // bumped on each release
+const APP_VERSION='3.04.67';            // bumped on each release
 
 /* v2.62.0: Token xác thực backend — PHẢI khớp API_TOKEN trong Apps Script (Code.gs).
    Mọi request tới Apps Script tự động được gắn token qua lớp bọc fetch bên dưới.
@@ -27212,17 +27212,45 @@ async function _mrDocReadAI(inputEl){
     const d=data.data||{};
     // điền vào dòng
     const rv=_resolveVendorFromAI(d.vendor,d.vendorTaxCode);
+    if(rv.name && !(_multiRowState.partner||'').trim()){ _multiRowState.partner=rv.name; }
+    const aiLines=Array.isArray(d.lines)&&d.lines.length?d.lines:[{desc:d.desc||'',amountNet:+d.amountNet||0,vatPercent:+d.vatPercent||0}];
+    // DÒNG ĐẦU → điền vào dòng hiện tại (giữ invoiceNo + attachments của dòng)
+    const first=aiLines[0];
     if(d.invoiceNo) l.invoiceNo=d.invoiceNo;
-    if(d.desc) l.desc=d.desc;
-    if(d.amountNet){ l.amountNet=+d.amountNet||0; }
-    if(d.vatPercent!=null) l.vatPercent=+d.vatPercent||0;
-    // tính lại gross
+    if(first.desc) l.desc=first.desc;
+    l.amountNet=+first.amountNet||0;
+    l.vatPercent=+first.vatPercent||0;
     l.vatAmount=Math.round((l.amountNet*l.vatPercent/100)*100)/100;
     l.amountGross=l.amountNet+l.vatAmount;
-    // ghi NCC vào header phiếu nếu trống
-    if(rv.name && !(_multiRowState.partner||'').trim()){ _multiRowState.partner=rv.name; }
-    if(st){ st.style.color='var(--good)'; st.textContent='✓ Đã điền dòng — kiểm lại. (NCC: '+(rv.name||'?')+')'; }
-    toast('✓ AI đã điền dòng từ hóa đơn','good');
+    // CÁC DÒNG SAU → thêm dòng mới (mỗi mặt hàng/thuế suất 1 dòng)
+    let added=0;
+    if(aiLines.length>1){
+      const baseIdx=_multiRowState.lines.findIndex(x=>x.tmpId===l.tmpId);
+      for(let k=1;k<aiLines.length;k++){
+        const aL=aiLines[k];
+        const nl=_newLine();
+        nl.invoiceNo=d.invoiceNo||'';   // cùng số hóa đơn
+        nl.desc=aL.desc||'';
+        nl.amountNet=+aL.amountNet||0;
+        nl.vatPercent=+aL.vatPercent||0;
+        nl.vatAmount=Math.round((nl.amountNet*nl.vatPercent/100)*100)/100;
+        nl.amountGross=nl.amountNet+nl.vatAmount;
+        // chèn ngay sau dòng gốc (giữ thứ tự hóa đơn)
+        _multiRowState.lines.splice(baseIdx+k, 0, nl);
+        added++;
+      }
+    }
+    if(st){
+      st.style.color='var(--good)';
+      let msg='✓ Đã điền '+aiLines.length+' dòng từ hóa đơn';
+      if(d.multiVat) msg+=' ⚠ nhiều thuế suất — đã tách dòng';
+      msg+=' (NCC: '+(rv.name||'?')+')';
+      st.textContent=msg;
+    }
+    if(d.multiVat) toast('⚠ Hóa đơn nhiều thuế suất VAT — app đã tách thành '+aiLines.length+' dòng riêng','warn');
+    else toast('✓ AI đã đọc hóa đơn ('+aiLines.length+' dòng)','good');
+    // đóng popup + render lại form để thấy các dòng mới
+    if(added>0){ closeModal(); _renderMultiRowModal(); }
   }catch(e){ if(st){ st.style.color='var(--bad)'; st.textContent='✗ '+(e&&e.message||'lỗi'); } toast('Lỗi đọc AI: '+(e&&e.message||''),'bad'); }
   if(inputEl) inputEl.value='';
 }
@@ -27415,18 +27443,22 @@ async function _invoiceViaAI(file){
     const data=await resp.json();
     if(!data || !data.ok){ throw new Error((data&&data.error)||'AI không đọc được'); }
     const d=data.data||{};
-    const net=Number(d.amountNet)||0;
-    const vatPct=Number(d.vatPercent)||0;
     const rv=_resolveVendorFromAI(d.vendor, d.vendorTaxCode);  // v3.04.50: NCC chuẩn theo MST/tên
     if(rv.matched==='tax'||rv.matched==='name') toast('✓ Khớp NCC có sẵn: '+rv.name,'good');
     else if(rv.matched==='similar') toast('⚠ NCC gần giống: '+rv.similarName+' — kiểm lại tránh trùng','warn');
-    _invoiceParsed={ source:'ai', lines:[{
-      partner:rv.name||d.vendor||'', vendorTaxCode:rv.taxCode||'', invoiceNo:d.invoiceNo||'',
-      issueDate:_normInvDate(d.issueDate||''), desc:d.desc||'',
-      amountNet:net, vatPercent:vatPct, vatAmount:Math.round(net*vatPct/100*100)/100,
-      ccy:(d.ccy||'VND').toString().toUpperCase().replace('VNĐ','VND')
-    }]};
-    if(!_invoiceParsed.lines[0].amountNet && !_invoiceParsed.lines[0].partner){ toast('AI không trích được dữ liệu — nhập tay','bad'); return false; }
+    // v3.04.66: hóa đơn nhiều dòng (khác thuế suất) → nhiều dòng preview
+    const aiLines=Array.isArray(d.lines)&&d.lines.length?d.lines:[{desc:d.desc||'',amountNet:+d.amountNet||0,vatPercent:+d.vatPercent||0}];
+    _invoiceParsed={ source:'ai', lines: aiLines.map(L=>{
+      const net=Number(L.amountNet)||0, vatPct=Number(L.vatPercent)||0;
+      return {
+        partner:rv.name||d.vendor||'', vendorTaxCode:rv.taxCode||'', invoiceNo:d.invoiceNo||'',
+        issueDate:_normInvDate(d.issueDate||''), desc:L.desc||'',
+        amountNet:net, vatPercent:vatPct, vatAmount:Math.round(net*vatPct/100*100)/100,
+        ccy:(d.ccy||'VND').toString().toUpperCase().replace('VNĐ','VND')
+      };
+    })};
+    if(!_invoiceParsed.lines.length || (!_invoiceParsed.lines[0].amountNet && !_invoiceParsed.lines[0].partner)){ toast('AI không trích được dữ liệu — nhập tay','bad'); return false; }
+    if(d.multiVat) toast('⚠ Hóa đơn nhiều thuế suất VAT ('+aiLines.length+' dòng) — đã tách dòng, kiểm lại trước khi lưu','warn');
     _showInvoicePreview();
     return true;
   }catch(e){ console.warn('[invoice-ai]',e); toast('Lỗi đọc AI: '+(e&&e.message||e),'bad'); return false; }
@@ -27706,6 +27738,12 @@ function _applyInvoiceToOpForm(){
 /* Điền vào phiếu PHẢI TRẢ 1 DÒNG (AP đơn) */
 function _applyInvoiceToApSingle(){
   const p=_invoiceParsed; if(!p||!p.lines.length) return;
+  // v3.04.66: hóa đơn nhiều dòng (khác thuế suất) KHÔNG nhập đủ ở form ĐƠN
+  if(p.lines.length>1){
+    const vatSet=Array.from(new Set(p.lines.map(x=>x.vatPercent)));
+    const msg='⚠ Hóa đơn này có '+p.lines.length+' dòng'+(vatSet.length>1?(' với '+vatSet.length+' mức thuế suất khác nhau ('+vatSet.map(v=>v+'%').join(', ')+')'):'')+'.\n\nForm ĐƠN chỉ nhập được 1 dòng → sẽ MẤT các dòng còn lại.\n\nNên dùng form NHIỀU DÒNG (📋 Thêm Phải trả / Phải thu) để nhập đủ + đúng VAT từng dòng.\n\nVẫn điền dòng đầu vào form đơn?';
+    if(!confirm(msg)){ _invoiceParsed=null; closeModal(); toast('Đã hủy — hãy dùng form nhiều dòng để nhập đủ','warn'); return; }
+  }
   const l=p.lines[0];
   const set=(id,val)=>{ const el=document.getElementById(id); if(el && val!=null && val!=='') el.value=val; };
   set('ar-partner', l.partner||'');
@@ -32639,10 +32677,8 @@ function generateOpReport(){
   closeModal();
   // v3.04.55: nếu chọn kèm phụ lục ảnh chứng từ → tải base64 qua Apps Script rồi nhúng, sau đó in.
   const wantAnnex = !!(document.getElementById('rep-annex')||{}).checked;
-  console.log('[annex] wantAnnex:', wantAnnex, '| _annexItems:', _annexItems.length, _annexItems.map(i=>i.fileName));
   if(wantAnnex && _annexItems.length){
     _buildOwnerReportAnnex(_annexItems, en, bi).then(annexHtml=>{
-      console.log('[annex] annexHtml length:', (annexHtml||'').length);
       if(annexHtml){ document.getElementById('print-area').innerHTML = html + annexHtml; }
       setTimeout(()=>window.print(), 600);
     }).catch(e=>{ console.warn('[annex]',e); setTimeout(()=>window.print(),100); });
