@@ -2975,7 +2975,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.04.68';            // bumped on each release
+const APP_VERSION='3.04.71';            // bumped on each release
 
 /* v2.62.0: Token xác thực backend — PHẢI khớp API_TOKEN trong Apps Script (Code.gs).
    Mọi request tới Apps Script tự động được gắn token qua lớp bọc fetch bên dưới.
@@ -8162,7 +8162,7 @@ function docStatusInfo(r){
   switch(st){
     case 'draft':
       // v3.04.47: phải trả dự kiến (chưa có hóa đơn) — nhãn riêng để phân biệt nháp thường.
-      if(r._isProvisional) return {label:'Chi phí dự kiến', who:esc(r.submittedBy||r.createdBy||''), cls:'chip-warn', icon:'📋'};
+      if(r._isProvisional){ var _isAR = (S.receivables||[]).some(function(x){return x.id===r.id;}); return {label:(_isAR?'Doanh thu dự kiến':'Chi phí dự kiến'), who:esc(r.submittedBy||r.createdBy||''), cls:'chip-warn', icon:'📋'}; }
       return {label:'Nháp', who:esc(r.submittedBy||r.createdBy||''), cls:'', icon:'📝'};
     case 'pending_acc':
       return {label:'KT đang kiểm', who:esc(r.submittedBy||''), cls:'chip-warn', icon:'🔍'};
@@ -26300,7 +26300,7 @@ async function aiReadQuote(inputEl){
     const mime = file.type || (/\.pdf$/i.test(file.name)?'application/pdf':'image/jpeg');
     const resp = await fetch(cfg.scriptUrl, {
       method:'POST', headers:{'Content-Type':'text/plain'},
-      body: JSON.stringify({ action:'gemini_extract', fileBase64:b64, mimeType:mime, mode:'ap' })
+      body: JSON.stringify({ action:'gemini_extract', fileBase64:b64, mimeType:mime, mode:(window._AR_PROVISIONAL_NEW?'ar':'ap') })
     });
     const data = await resp.json();
     if(!data || !data.ok){ throw new Error((data&&data.error)||'AI không đọc được'); }
@@ -26376,6 +26376,49 @@ function saveApProvisional(){
   const err=document.getElementById('ar-err');
   if(err && err.textContent && /[⚠✗]|thiếu|lỗi|phải/i.test(err.textContent) && !window._LAST_SAVED_AR_ID){ return; }
   if(window._LAST_SAVED_AR_ID){ toast('📋 Đã lưu Phải trả dự kiến — đã vào P&L (Chi phí dự kiến). Khi có hóa đơn, mở sửa để cập nhật.','good'); }
+}
+/* v3.04.69: DOANH THU DỰ KIẾN (AR) — tương tự Phải trả dự kiến nhưng cho Phải thu.
+   Tạo AR status 'draft' + cờ _isProvisional → vào P&L doanh thu NGAY (trạng thái 'Doanh thu dự kiến').
+   Khi xuất hóa đơn (mở sửa → gửi duyệt/phát HĐ) → _isProvisional tự hết, vào DT thực hiện. */
+function openProvisionalAr(){
+  if(typeof openReceivableModal!=='function'){ toast('Lỗi giao diện','bad'); return; }
+  window._AR_PROVISIONAL_NEW = true;
+  openReceivableModal(null);
+  setTimeout(()=>{
+    try{
+      const titleEl=document.querySelector('.modal-title, .modal h3, #modal-title');
+      if(titleEl) titleEl.textContent='📋 Doanh thu dự kiến (chưa xuất hóa đơn)';
+      const err=document.getElementById('ar-err');
+      if(err){ err.style.color='var(--muted)'; err.textContent='Doanh thu dự kiến — gắn Dự án/Tàu để vào P&L ngay. Số hóa đơn để trống; khi xuất hóa đơn sẽ cập nhật sau.'; }
+      // chèn nút ĐỌC HỢP ĐỒNG/BÁO GIÁ (AI)
+      try{
+        const host = err && err.parentNode;
+        if(host && !document.getElementById('ai-quote-box')){
+          const box=document.createElement('div');
+          box.id='ai-quote-box';
+          box.style.cssText='margin:8px 0 12px;padding:10px 12px;border:1.5px dashed var(--accent);border-radius:6px;background:rgba(28,58,92,.04)';
+          box.innerHTML='<div style="font-size:12px;font-weight:600;margin-bottom:6px">📄 Đọc hợp đồng/báo giá tự động (AI)</div>'
+            +'<div style="font-size:11px;color:var(--muted);margin-bottom:8px">Tải lên file (PDF hoặc ảnh) — AI tự điền Khách hàng, số tiền, VAT, ngày, mô tả. Kiểm lại trước khi lưu.</div>'
+            +'<input type="file" id="ai-quote-file" accept=".pdf,image/*" style="display:none" onchange="aiReadQuote(this)">'
+            +'<button type="button" class="btn-sec" style="font-size:12px" onclick="aiQuotePick()">📤 Chọn file (PDF/ảnh)</button>'
+            +'<div id="ai-quote-status" style="font-size:11px;margin-top:6px"></div>';
+          host.insertBefore(box, err.nextSibling);
+        }
+      }catch(e){ console.warn('[ai-quote ui ar]', e&&e.message); }
+      const btns=[...document.querySelectorAll('.modal-foot button, .modal button')];
+      const saveBtn=btns.find(b=>/Lưu phải thu/i.test(b.textContent));
+      if(saveBtn){ saveBtn.textContent='📋 Lưu doanh thu dự kiến'; saveBtn.setAttribute('onclick',"saveArProvisional()"); }
+    }catch(e){ console.warn('[provisional ar ui]',e&&e.message); }
+  }, 90);
+}
+function saveArProvisional(){
+  window._LAST_SAVED_AR_ID=null;
+  window._AR_FORCE_DRAFT=true;
+  window._AR_PROVISIONAL_SAVE=true;
+  try{ saveAr('ar',''); } finally { window._AR_FORCE_DRAFT=false; window._AR_PROVISIONAL_SAVE=false; window._AR_PROVISIONAL_NEW=false; }
+  const err=document.getElementById('ar-err');
+  if(err && err.textContent && /[⚠✗]|thiếu|lỗi|phải/i.test(err.textContent) && !window._LAST_SAVED_AR_ID){ return; }
+  if(window._LAST_SAVED_AR_ID){ toast('📋 Đã lưu Doanh thu dự kiến — đã vào P&L (Doanh thu dự kiến). Khi xuất hóa đơn, mở sửa để cập nhật.','good'); }
 }
 function openPayableModal(id){
   const isEdit=!!id;
@@ -27476,25 +27519,11 @@ async function _mrReadInvoiceFile(file, target){
       const parsed=Papa.parse(text,{header:true,skipEmptyLines:true});
       _invoiceParsed=_invoiceFromCsv(parsed.data);
     } else if(ext==='pdf'){
-      toast('Đang đọc PDF...');
-      await _loadScriptOnce('https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js','pdfjsLib');
-      if(window.pdfjsLib) pdfjsLib.GlobalWorkerOptions.workerSrc='https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
-      const buf=await file.arrayBuffer();
-      const pdf=await pdfjsLib.getDocument({data:buf}).promise;
-      let fullText='';
-      for(let i=1;i<=pdf.numPages;i++){
-        const page=await pdf.getPage(i);
-        const tc=await page.getTextContent();
-        fullText += tc.items.map(it=>it.str).join(' ')+'\n';
-      }
-      if(!fullText.trim()){
-        // v3.04.49: PDF scan (không text) → dùng AI Gemini đọc thay vì bắt nhập tay.
-        toast('PDF scan — đang đọc bằng AI…');
-        const okAI = await _invoiceViaAI(file);
-        if(!okAI) return;  // _invoiceViaAI tự toast lỗi
-      } else {
-        _invoiceParsed=_invoiceFromPdfText(fullText);
-      }
+      // v3.04.70: PDF LUÔN đọc bằng AI Gemini (chính xác hơn parse text local:
+      //   đúng người bán/mua theo AP/AR, tách dòng theo thuế suất, bỏ qua MST nhà cung cấp HĐĐT).
+      toast('Đang đọc PDF bằng AI…');
+      const okAI = await _invoiceViaAI(file);
+      if(!okAI) return;  // _invoiceViaAI tự toast lỗi
     } else if(ext==='xml'){
       toast('Đang đọc XML hóa đơn...');
       const text=await file.text();
@@ -27739,11 +27768,38 @@ function _applyInvoiceToOpForm(){
 /* Điền vào phiếu PHẢI TRẢ 1 DÒNG (AP đơn) */
 function _applyInvoiceToApSingle(){
   const p=_invoiceParsed; if(!p||!p.lines.length) return;
-  // v3.04.66: hóa đơn nhiều dòng (khác thuế suất) KHÔNG nhập đủ ở form ĐƠN
+  // v3.04.71: hóa đơn NHIỀU DÒNG → TỰ MỞ RỘNG sang form nhiều dòng (đổ sẵn tất cả dòng).
   if(p.lines.length>1){
+    const mode=(window._arCurrentKind==='ap')?'ap':'ar';
     const vatSet=Array.from(new Set(p.lines.map(x=>x.vatPercent)));
-    const msg='⚠ Hóa đơn này có '+p.lines.length+' dòng'+(vatSet.length>1?(' với '+vatSet.length+' mức thuế suất khác nhau ('+vatSet.map(v=>v+'%').join(', ')+')'):'')+'.\n\nForm ĐƠN chỉ nhập được 1 dòng → sẽ MẤT các dòng còn lại.\n\nNên dùng form NHIỀU DÒNG (📋 Thêm Phải trả / Phải thu) để nhập đủ + đúng VAT từng dòng.\n\nVẫn điền dòng đầu vào form đơn?';
-    if(!confirm(msg)){ _invoiceParsed=null; closeModal(); toast('Đã hủy — hãy dùng form nhiều dòng để nhập đủ','warn'); return; }
+    const head=p.lines[0]||{};
+    _invoiceParsed=null;
+    closeModal();
+    // mở form nhiều dòng + đổ dữ liệu
+    openMultiRowModal(mode);
+    setTimeout(()=>{
+      try{
+        const s=_multiRowState;
+        s.partner=head.partner||'';
+        s.ccy=head.ccy||'VND';
+        if(head.issueDate) s.issueDate=head.issueDate;
+        // tạo đúng số dòng
+        s.lines=p.lines.map(L=>{
+          const nl=_newLine();
+          nl.invoiceNo=head.invoiceNo||'';
+          nl.desc=L.desc||'';
+          nl.amountNet=+L.amountNet||0;
+          nl.vatPercent=+L.vatPercent||0;
+          nl.vatAmount=Math.round((nl.amountNet*nl.vatPercent/100)*100)/100;
+          nl.amountGross=nl.amountNet+nl.vatAmount;
+          return nl;
+        });
+        _renderMultiRowModal();
+        const tip=vatSet.length>1?(' (⚠ '+vatSet.length+' mức thuế suất — đã tách dòng)'):'';
+        toast('✓ Hóa đơn '+p.lines.length+' dòng — đã mở form nhiều dòng'+tip+'. Kiểm Mảng/Tàu/VAT rồi Lưu.','good');
+      }catch(e){ console.warn('[auto-expand]',e&&e.message); toast('Lỗi mở form nhiều dòng — nhập tay','bad'); }
+    }, 120);
+    return;
   }
   const l=p.lines[0];
   const set=(id,val)=>{ const el=document.getElementById(id); if(el && val!=null && val!=='') el.value=val; };
@@ -28442,6 +28498,8 @@ function saveAr(kind,id){
       newRec._fromAdvance=_advLinkId||null; newRec._advAmount=_advLinkId?_advLinkAmt:0;
       newRec._advEmployee=_empAdvName||''; newRec._advType=_empAdvType;  // v3.03.07
     }
+    // v3.04.69: DOANH THU DỰ KIẾN (AR) — vào P&L doanh thu ngay (như provisional AP)
+    if(kind==='ar' && window._AR_PROVISIONAL_SAVE){ newRec._isProvisional = true; }
     S[list].push(newRec);
     window._LAST_SAVED_AR_ID = newRec.id;  // v3.01.28: để saveArDraft / saveArAndIssue lấy id bản mới
     var _auditRecId=newRec.id, _auditIsNew=true;
