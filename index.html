@@ -3083,7 +3083,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.06.11';            // bumped on each release
+const APP_VERSION='3.06.12';            // bumped on each release
 
 /* v2.62.0: Token xác thực backend — PHẢI khớp API_TOKEN trong Apps Script (Code.gs).
    Mọi request tới Apps Script tự động được gắn token qua lớp bọc fetch bên dưới.
@@ -20248,10 +20248,12 @@ function approvalBulkApprove(){
               if(!isAdmin() && o.approvedL1By===actorName()){ fail++; return; }  // SOD cross-level
               o.status='approved'; o.approvedBy=actorName(); o.approvedAt=new Date().toISOString();
               o.approvedL2By=actorName(); o.approvedL2At=new Date().toISOString();
-              try{ _apOrderAutoPay(r, o); }catch(e){ console.warn('[order autopay]',e); }
-              o.status='paid'; o.paidAt=new Date().toISOString();
+              let _payOk=false;
+              try{ _apOrderAutoPay(r, o); _payOk=!!o._paymentApplied; }catch(e){ console.warn('[order autopay]',e); }
+              if(_payOk){ o.status='paid'; o.paidAt=new Date().toISOString(); }
+              // nếu autopay lỗi → giữ status 'approved' (chờ ghi chi tay), KHÔNG đánh 'paid' để tránh lệch sổ.
               touchRecord(r); ok++; okRecords.push(c);
-              try{ logAuditEvent('ap_order_approve_l2',{recordId:r.id,orderId:o.id,actor:actorName()}); }catch(e){}
+              try{ logAuditEvent('ap_order_approve_l2',{recordId:r.id,orderId:o.id,paid:_payOk,actor:actorName()}); }catch(e){}
             } else { fail++; }
             return;
           }
@@ -28157,6 +28159,7 @@ function _paymentProgressBlock(r, isPayable){
         </div>
         <div style="flex-shrink:0;text-align:right;white-space:nowrap">
           ${orderStatusChip(o)}
+          ${o.status==='approved'&&!locked?`<div style="margin-top:2px"><button class="icon-btn" title="Ghi nhận đã chi (lệnh đã duyệt)" onclick="apPayOrder('${r.id}','${o.id}')">$</button></div>`:''}
           ${(o.status==='pending_l1'||o.status==='pending_l2')&&!locked?`<div style="margin-top:2px"><button class="icon-btn danger" title="Hủy lệnh chi" onclick="apCancelOrder('${r.id}','${o.id}')">✕</button></div>`:''}
         </div>
       </div>`;
@@ -30976,13 +30979,27 @@ function _apOrderAutoPay(r, o){
   r.payments=r.payments||[];
   const bid=o._payBankId||r._payBankId||'';
   const method=(o._payMethod||r._payMethod)==='cash'?'cash':'bank';
-  r.payments.push({
-    date:todayISO(), amount:amt, ccy:o.ccy||r.ccy,
+  const bankAccountId=(method==='cash')?'':bid;
+  // v3.06.11: gợi ý tỷ giá để khối quy đổi VND + cập nhật số dư NH đúng (giống saveArPayment).
+  let fxRate=0;
+  if(r.ccy==='USD') fxRate=+S.fxRate||0;
+  const pay={ date:todayISO(), amount:amt, fxRate, ccy:o.ccy||r.ccy,
     note:(o.note?o.note+' · ':'')+'Auto từ lệnh chi đã duyệt L2',
-    method, bankId:method==='bank'?bid:'',
-    recordedBy:actorName(), recordedAt:new Date().toISOString(),
-    _fromOrder:o.id, _autoOrderPay:true
-  });
+    method, recordedBy:actorName(), recordedAt:new Date().toISOString(),
+    _fromOrder:o.id, _autoOrderPay:true };
+  if(bankAccountId) pay.bankAccountId=bankAccountId;
+  r.payments.push(pay);
+  // Cập nhật số dư tài khoản ngân hàng (AP trả → trừ), giống saveArPayment.
+  if(bankAccountId){
+    const acc=(S.bankAccounts||[]).find(a=>a.id===bankAccountId);
+    if(acc && typeof _arPayAmountInCcy==='function'){
+      try{
+        const delta=_arPayAmountInCcy(pay, r.ccy, acc.ccy||'USD');
+        acc.balance=(+acc.balance||0) - delta;
+        try{ touchRecord(acc); }catch(e){ acc.updatedAt=new Date().toISOString(); }
+      }catch(e){ console.warn('[autopay bank balance]',e); }
+    }
+  }
   o._paymentApplied=true;
   try{ logAuditEvent('ap_order_autopay',{recordId:r.id,orderId:o.id,amount:amt,ccy:o.ccy||r.ccy,actor:actorName()}); }catch(e){}
 }
