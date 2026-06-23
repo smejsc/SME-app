@@ -2272,7 +2272,9 @@ body.readonly-mode::before{
   <div class="section" style="background:var(--paper-2);padding:18px 20px;margin-top:14px;border:1px solid var(--rule)">
     <div style="display:flex;gap:14px;align-items:center;flex-wrap:wrap;justify-content:space-between">
       <div id="appr-action-summary" style="font-size:13px;color:var(--ink)">Chọn bút toán để hiện chi tiết</div>
-      <div style="display:flex;gap:10px">
+      <div style="display:flex;gap:10px;flex-wrap:wrap">
+        <button class="btn-sec" onclick="openApprovalOrderPdf('l1')" id="appr-btn-l1order" title="Trình duyệt (L1): xem lại các phiếu đang chờ trình ký, sửa hình thức chi / ngân hàng, in PDF" style="display:none">📋 Trình duyệt (L1)</button>
+        <button class="btn-sec" onclick="openApprovalOrderPdf('l2')" id="appr-btn-l2order" title="Duyệt chi (L2): xem lại các phiếu đang chờ duyệt chi, sửa hình thức chi / ngân hàng, in PDF" style="display:none">📋 Duyệt chi (L2)</button>
         <button class="btn-primary" style="background:var(--good)" onclick="approvalBulkApprove()" id="appr-btn-approve">✓ Duyệt các bút toán đã chọn</button>
         <button class="btn-sec" style="background:var(--bad);color:#fff;border-color:var(--bad)" onclick="approvalBulkReject()">✗ Từ chối với lý do</button>
       </div>
@@ -3104,7 +3106,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.06.32';            // bumped on each release
+const APP_VERSION='3.06.33';            // bumped on each release
 
 /* v2.62.0: Token xác thực backend — PHẢI khớp API_TOKEN trong Apps Script (Code.gs).
    Mọi request tới Apps Script tự động được gắn token qua lớp bọc fetch bên dưới.
@@ -20225,31 +20227,13 @@ function renderApprovalList(){
   const _banksActive=(S.bankAccounts||[]).filter(a=>a.isActive!==false);
   const _payMethLabel=(m)=> m==='cash'?'💵 Tiền mặt' : m==='loan'?'💳 Giải ngân (vay NH)' : '🏦 Chuyển khoản';
   const _payCell=(r)=>{
+    // v3.06.33: tab Phê duyệt CHỈ HIỂN THỊ đề xuất hình thức/NH (read-only) cho đỡ rối.
+    //   Việc xem lại & sửa NH/hình thức làm trong modal "Trình duyệt (L1)" / "Duyệt chi (L2)" (in PDF).
     const m=r._payMethod||'';
     const bid=r._payBankId||'';
     const bankNm=bid?(()=>{const a=(S.bankAccounts||[]).find(x=>x.id===bid);return a?bankAcctLabel(a):'';})():'';
-    if(!_canEditPay){
-      if(!m) return '<span style="font-size:10px;color:var(--muted)">— chưa đề xuất —</span>';
-      return `<div style="font-size:11px;font-weight:600">${_payMethLabel(m)}</div>${bankNm?`<div style="font-size:10px;color:var(--muted)">${esc(bankNm)}</div>`:''}`;
-    }
-    const bankOpts2='<option value="">— NH —</option>'+_banksActive.map(a=>`<option value="${a.id}" ${a.id===bid?'selected':''}>${esc(bankAcctLabel(a))}</option>`).join('');
-    const showBank=(m==='transfer'||m==='loan');
-    // v3.06.17: nếu KT đã đề xuất sẵn → báo cho KTT biết (giữ nguyên hoặc sửa khi cần).
-    const _ktProposed = !!(r._payMethod && r._payProposedBy);
-    const _proposeHint = _ktProposed
-      ? `<div style="font-size:9px;color:var(--good);margin-bottom:2px">✓ ${esc(r._payProposedBy)} đã đề xuất — giữ nguyên hoặc sửa</div>`
-      : '';
-    return `<div onclick="event.stopPropagation()" style="min-width:160px">
-      ${_proposeHint}
-      <div style="font-size:9px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;margin-bottom:2px">Hình thức chi ${_canEditPay?'(KTT chọn)':'(KT đề xuất)'}</div>
-      <select onchange="apprSetPayMethod('${r.id}',this.value)" style="font-size:11px;padding:3px 5px;width:100%">
-        <option value="" ${!m?'selected':''}>— chọn —</option>
-        <option value="cash" ${m==='cash'?'selected':''}>💵 Tiền mặt</option>
-        <option value="transfer" ${m==='transfer'?'selected':''}>🏦 Chuyển khoản</option>
-        <option value="loan" ${m==='loan'?'selected':''}>💳 Giải ngân (vay NH)</option>
-      </select>
-      <select onchange="apprSetPayBank('${r.id}',this.value)" style="font-size:11px;padding:3px 5px;width:100%;margin-top:3px;${showBank?'':'display:none'}">${bankOpts2}</select>
-    </div>`;
+    if(!m) return '<span style="font-size:10px;color:var(--muted)">— chưa đề xuất —</span>';
+    return `<div style="font-size:11px;font-weight:600">${_payMethLabel(m)}</div>${bankNm?`<div style="font-size:10px;color:var(--muted)">${esc(bankNm)}</div>`:''}`;
   };
   const _dueBadge=(dd)=>{
     if(!dd) return '';
@@ -20346,6 +20330,13 @@ function renderApprovalList(){
   // Update select-all checkbox state
   const allChecked=candidates.every(c=>APPROVAL_SELECTED.has(c.id));
   document.getElementById('appr-select-all').checked=allChecked;
+  // v3.06.33: hiện nút "Trình duyệt (L1)" / "Duyệt chi (L2)" theo cấp đang xem + quyền
+  try{
+    const _lvl=(document.getElementById('appr-level')||{}).value;
+    const b1=document.getElementById('appr-btn-l1order'), b2=document.getElementById('appr-btn-l2order');
+    if(b1) b1.style.display=(_lvl==='pending_l1' && (canApproveL1()||isAdmin()))?'':'none';
+    if(b2) b2.style.display=(_lvl==='pending_l2' && (canApproveL2()||isAdmin()))?'':'none';
+  }catch(e){}
   updateApprovalSummary();
 }
 
@@ -45613,15 +45604,23 @@ function _apPayOrderSet(id, field, val){
   else if(field==='bank') _apPayOrderState.bank[id]=val;
   _renderApPayOrderModal();
 }
-function _renderApPayOrderModal(){
+function _renderApPayOrderModal(level){
   const S0=_apPayOrderState; if(!S0) return;
+  level = level || S0._orderLevel || '';
+  const _isL1=(level==='l1'), _isL2=(level==='l2');
+  const _modalTitle = _isL1 ? '📋 Trình duyệt (L1) — xem lại & in PDF'
+                     : _isL2 ? '📋 Duyệt chi (L2) — xem lại & in PDF'
+                     : '📋 Lệnh trình duyệt — NV KT → KTT';
+  const _introTxt = _isL1 ? 'Các phiếu đang chờ <b>Trình ký (L1)</b>. Xem lại, có thể sửa <b>hình thức chi</b> + <b>ngân hàng</b> rồi in PDF.'
+                  : _isL2 ? 'Các phiếu đang chờ <b>Duyệt chi (L2)</b>. Xem lại, có thể sửa <b>hình thức chi</b> + <b>ngân hàng</b> rồi in PDF.'
+                  : 'Chọn phiếu cần trình KTT duyệt. Mỗi phiếu chọn <b>hình thức chi</b> + <b>ngân hàng</b>. Bấm "In PDF" để in phiếu trình duyệt. <i>(Lựa chọn được LƯU vào phiếu để KTT thấy sẵn khi duyệt — không đổi trạng thái phiếu.)</i>';
   const rows=S0._rows||[];
   const fmtN=n=>(+n||0).toLocaleString('vi-VN');
   const banks=(S.bankAccounts||[]).filter(a=>a.isActive!==false);
   const bankOpts=(sel)=>'<option value="">— Chọn NH —</option>'+banks.map(a=>`<option value="${a.id}" ${a.id===sel?'selected':''}>${esc(bankAcctLabel(a))} (${a.ccy||'USD'})</option>`).join('');
   const selCount=rows.filter(r=>S0.sel[r.id]).length;
   const body=`
-    <div style="font-size:12px;color:var(--muted);margin-bottom:10px">Chọn phiếu cần trình KTT duyệt. Mỗi phiếu chọn <b>hình thức chi</b> + <b>ngân hàng</b>. Bấm "In PDF" để in phiếu trình duyệt. <i>(Lựa chọn được LƯU vào phiếu để KTT thấy sẵn khi duyệt — không đổi trạng thái phiếu.)</i></div>
+    <div style="font-size:12px;color:var(--muted);margin-bottom:10px">${_introTxt}</div>
     <div style="max-height:420px;overflow:auto;border:1px solid var(--rule);border-radius:6px">
     <table style="width:100%;border-collapse:collapse;font-size:11.5px">
       <thead><tr style="background:var(--paper-2);color:var(--muted);font-size:10px;text-transform:uppercase;position:sticky;top:0">
@@ -45659,7 +45658,7 @@ function _renderApPayOrderModal(){
       </tbody>
     </table></div>
     <div style="margin-top:8px;font-size:11px;color:var(--muted)">Đã chọn <b>${selCount}</b>/${rows.length} phiếu. ${banks.length?'':'<span style="color:var(--bad)">⚠ Chưa có tài khoản ngân hàng — thêm ở mục Ngân hàng.</span>'}</div>`;
-  openModal('📋 Lệnh trình duyệt — NV KT → KTT', body,
+  openModal(_modalTitle, body,
     `<button class="btn-sec" onclick="closeModal()">Đóng</button>
      <button class="btn-sec" onclick="_apPayOrderSelectAll(true)" title="Chọn tất cả phiếu">☑ Chọn tất cả</button>
      <button class="btn-sec" onclick="_apPayOrderSelectAll(false)" title="Bỏ chọn tất cả">☐ Bỏ chọn</button>
@@ -45673,6 +45672,10 @@ function _apPayOrderSelectAll(val){
 }
 function apPaymentOrderPdf(){
   const S0=_apPayOrderState; if(!S0){ toast('Chưa có dữ liệu','bad'); return; }
+  const _lvl=S0._orderLevel||'';
+  const _subTitle = _lvl==='l1' ? '(Trình duyệt L1 — Kế toán trưởng trình Giám đốc)'
+                  : _lvl==='l2' ? '(Duyệt chi L2 — Giám đốc tài chính duyệt)'
+                  : '(Lệnh trình duyệt — Kế toán trình Kế toán trưởng duyệt)';
   const rows=(S0._rows||[]).filter(r=>S0.sel[r.id]);
   if(!rows.length){ toast('Chọn ít nhất 1 phiếu','bad'); return; }
   // kiểm tra: Chuyển khoản + Giải ngân (vay NH) phải có ngân hàng
@@ -45770,7 +45773,7 @@ function apPaymentOrderPdf(){
     </style></head><body>
     <div style="text-align:center;font-weight:700;font-size:13px">${esc2(coName)}</div>
     <h1>TỔNG HỢP GIÁ TRỊ ĐỀ XUẤT CHI</h1>
-    <div class="sub">(Lệnh trình duyệt — Kế toán trình Kế toán trưởng duyệt)</div>
+    <div class="sub">${_subTitle}</div>
     <div class="meta">
       <div>Số: <b>${orderNo}</b></div>
       <div>Ngày: <b>${today}</b></div>
@@ -45904,6 +45907,21 @@ function printPayOrderFromRecords(recs){
     </body></html>`);
   win.document.close();
   toast('✓ Đã mở bản xem trước — KTT kiểm tra rồi tự bấm In nếu cần');
+}
+
+/* v3.06.33 — TRÌNH DUYỆT (L1) / DUYỆT CHI (L2) — bản PDF giống "Lệnh trình duyệt" của KT.
+   L1/L2 mở modal xem lại các phiếu đang chờ ở cấp mình, giữ nguyên nội dung lệnh trình duyệt,
+   được SỬA hình thức chi / ngân hàng (giống KT làm), rồi in PDF. Không đổi trạng thái phiếu. */
+function openApprovalOrderPdf(level){
+  const isL1=(level==='l1');
+  if(isL1 && !(canApproveL1()||isAdmin())){ toast('Cần quyền duyệt L1','bad'); return; }
+  if(!isL1 && !(canApproveL2()||isAdmin())){ toast('Cần quyền duyệt L2','bad'); return; }
+  const want = isL1 ? 'pending_l1' : 'pending_l2';
+  const rows=_arExportRows('ap').filter(r=>wfStatus(r)===want);
+  if(!rows.length){ toast('Không có phiếu nào đang ở cấp '+(isL1?'Trình ký (L1)':'Duyệt chi (L2)'),'warn'); return; }
+  _apPayOrderState={ sel:{}, method:{}, bank:{}, _rows:rows, _orderLevel:level };
+  rows.forEach(r=>{ _apPayOrderState.sel[r.id]=true; _apPayOrderState.method[r.id]=r._payMethod||'transfer'; _apPayOrderState.bank[r.id]=r._payBankId||''; });
+  _renderApPayOrderModal(level);
 }
 
 /* v1.86.0: Lấy danh sách bản ghi AR/AP theo đúng filter đang hiển thị trên bảng */
