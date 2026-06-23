@@ -3083,7 +3083,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.06.15';            // bumped on each release
+const APP_VERSION='3.06.20';            // bumped on each release
 
 /* v2.62.0: Token xác thực backend — PHẢI khớp API_TOKEN trong Apps Script (Code.gs).
    Mọi request tới Apps Script tự động được gắn token qua lớp bọc fetch bên dưới.
@@ -4273,6 +4273,7 @@ async function pushCfgToCloud(adminPassword, extraUserPasswords){
   // Try to preserve existing wraps from cloud (for NV who self-wrapped)
   let existingWraps=[];
   let existingMasterKey=null;
+  let cloudPayloadForMerge=null;  // v3.06.20: payload cloud (iv+ct) để merge users cloud↔local
   // v2.05.0: phân biệt "cloud xác nhận trống" vs "không đọc được cloud".
   // cloudReadOk=true CHỈ khi đã đọc cloud thành công (dù trống hay có dữ liệu).
   // Nếu fetch/parse lỗi → cloudReadOk=false → KHÔNG được tạo master key mới
@@ -4320,6 +4321,7 @@ async function pushCfgToCloud(adminPassword, extraUserPasswords){
           // Giữ TẤT CẢ wrap cũ để mọi NV vẫn đăng nhập được, dù lần đẩy này
           // admin chỉ nhập mật khẩu cho một vài NV. (Trước đây có nhánh xóa sạch.)
           existingWraps=data0.payload.wraps;
+          cloudPayloadForMerge=data0.payload;  // v3.06.20: giữ để merge users cloud↔local
         }catch(e){
           // Password admin đổi / sai → không lấy được master key cũ.
           if(!isPushingAsAdmin){
@@ -4369,6 +4371,40 @@ async function pushCfgToCloud(adminPassword, extraUserPasswords){
   const masterKey = existingMasterKey || await generateCfgMasterKey();
 
   // Re-encrypt cfg with master key (cfg may have changed)
+  // v3.06.20 — MERGE USERS CLOUD↔LOCAL (chống mất NV/wrap khi máy đẩy có cfg cũ/thiếu NV).
+  //   Bản chất lỗi cũ: buildCfgToSync chỉ lấy users LOCAL → nếu máy đẩy thiếu 1 NV
+  //   (vd sub-admin cfg cũ), NV đó biến mất khỏi cfg → wrap bị filter xóa → NV mất quyền login.
+  //   Khắc phục: nếu giải mã được cfg cloud, hợp nhất user cloud mà local KHÔNG có (theo name+email),
+  //   ưu tiên bản updatedAt mới hơn cho user trùng. KHÔNG tự xóa user — xóa NV phải có chủ ý qua UI.
+  if(existingMasterKey && cloudPayloadForMerge && cloudPayloadForMerge.iv && cloudPayloadForMerge.ct){
+    try{
+      const cloudCfg=await decryptCfgWithMasterKey({iv:cloudPayloadForMerge.iv, ct:cloudPayloadForMerge.ct}, existingMasterKey);
+      const cloudUsers=Array.isArray(cloudCfg.users)?cloudCfg.users:[];
+      const localUsers=Array.isArray(cfg.users)?cfg.users:[];
+      const keyOf=(u)=>((u && (u.name||'')).toLowerCase())+'|'+((u && (u.email||'')).toLowerCase());
+      const localMap=new Map(localUsers.map(u=>[keyOf(u),u]));
+      let added=0, kept=0;
+      cloudUsers.forEach(cu=>{
+        const k=keyOf(cu);
+        const lu=localMap.get(k);
+        if(!lu){
+          // User chỉ có trên cloud → GIỮ LẠI (không để mất NV/wrap).
+          localUsers.push(cu); added++;
+        } else {
+          // Trùng → giữ bản updatedAt mới hơn (nếu cloud mới hơn local thì thay).
+          const lt=Date.parse(lu.updatedAt||'')||0;
+          const ct=Date.parse(cu.updatedAt||'')||0;
+          if(ct>lt){ const idx=localUsers.indexOf(lu); if(idx>=0){ localUsers[idx]=cu; kept++; } }
+        }
+      });
+      cfg.users=localUsers;
+      try{ setAuthConfig(cfg); }catch(e){}
+      if(added>0) console.log('[push merge] giữ '+added+' NV chỉ-có-trên-cloud (chống mất wrap), cập nhật '+kept+' NV theo bản cloud mới hơn.');
+    }catch(mergeErr){
+      // Giải mã cloud lỗi → KHÔNG merge, nhưng cũng KHÔNG được xóa wrap bên dưới (lớp 1 lo).
+      console.warn('[push merge] bỏ qua merge users (giải mã cloud lỗi):', mergeErr&&mergeErr.message);
+    }
+  }
   const cfgToSync=buildCfgToSync(cfg);
   const envelope=await encryptCfgWithMasterKey(cfgToSync, masterKey);
 
@@ -4403,9 +4439,21 @@ async function pushCfgToCloud(adminPassword, extraUserPasswords){
     }
   }
 
-  // Remove wraps for users no longer in cfg.users (and not admin)
-  const validNames=new Set(['admin', ...(cfg.users||[]).map(u=>u.name.toLowerCase())]);
-  wraps=wraps.filter(w=>validNames.has(w.name.toLowerCase()));
+  // v3.06.20 — BẢO TOÀN WRAP (lớp 1): KHÔNG xóa wrap chỉ vì tên không có trong cfg.users local.
+  //   Lỗi cũ: filter theo validNames(local) → máy đẩy thiếu NV → wrap NV đó bị xóa → mất quyền login.
+  //   Nay CHỈ xóa wrap của NV bị XÓA CÓ CHỦ Ý (UI xóa NV ghi tên vào _deletedUserNames + window).
+  //   Sau khi merge users cloud↔local ở trên, cfg.users đã đầy đủ → validNames cũng đầy đủ;
+  //   nhưng để chắc chắn an toàn, chỉ loại theo danh sách xóa-có-chủ-ý.
+  let _deletedSet=new Set();
+  try{
+    const d1=Array.isArray(cfg._deletedUserNames)?cfg._deletedUserNames:[];
+    const d2=Array.isArray(window._deletedUserNames)?window._deletedUserNames:[];
+    [...d1,...d2].forEach(n=>{ if(n) _deletedSet.add(String(n).toLowerCase()); });
+  }catch(e){}
+  if(_deletedSet.size>0){
+    wraps=wraps.filter(w=>w.name.toLowerCase()==='admin' || !_deletedSet.has(w.name.toLowerCase()));
+  }
+  // (Bỏ filter theo validNames(local) — chính là nguồn gây mất wrap NV khi máy đẩy có cfg cũ.)
 
   const payload={v:2, iv:envelope.iv, ct:envelope.ct, wraps};
   const res=await fetch(cfg.scriptUrl, {
@@ -5088,10 +5136,9 @@ async function authAction(){
     // Force password change on first login (mustChangePassword flag)
     if(CURRENT_ROLE==='user' && CURRENT_USER && CURRENT_USER.mustChangePassword){
       setTimeout(()=>showChangePasswordModal(true),500);
-    } else {
-      // v1.41.0: Welcome popup (only if NOT forced to change password — that takes priority)
-      try{ checkWelcomePopup(); }catch(e){console.warn('[welcome popup]',e);}
     }
+    // v3.06.16: welcome onboarding KHÔNG gọi rời rạc ở đây nữa — đã nối SAU popup chào
+    //   trong _postLoginGreet (tránh 2 modal đè nhau làm mất popup chào).
     // Reminder backup if last export >7 days ago (admin only)
     if(CURRENT_ROLE==='admin'){
       // Auto-migrate: vendors from AR/AP (one-time, safe to re-run)
@@ -6679,9 +6726,8 @@ async function _complete2FALogin(){
   startMaxSessionTimer();
   if(CURRENT_ROLE === 'user' && CURRENT_USER && CURRENT_USER.mustChangePassword){
     setTimeout(() => showChangePasswordModal(true), 500);
-  } else {
-    try{ checkWelcomePopup(); }catch(e){}
   }
+  // v3.06.16: welcome onboarding nối SAU popup chào (trong _postLoginGreet) — không gọi rời rạc.
   if(CURRENT_ROLE === 'admin'){
     setTimeout(() => {
       try{ updateBackupBanner(); }catch(e){} try{ updateEmptyStateBanner(); }catch(e){}
@@ -8110,9 +8156,20 @@ function deleteUser(idx){
   confirmDelete('nhân viên "'+u.name+'"',
     `Sau khi xóa, mật khẩu của ${esc(u.name)} sẽ không đăng nhập được nữa.`,
     ()=>{
+      const _delName=u.name;
       cfg.users.splice(idx,1);
+      // v3.06.20: ghi tên NV bị XÓA CÓ CHỦ Ý → để pushCfgToCloud dọn đúng wrap NV này
+      //   (lớp 1 bảo toàn wrap mặc định KHÔNG xóa wrap; chỉ wrap trong danh sách này mới bị dọn).
+      try{
+        cfg._deletedUserNames=Array.isArray(cfg._deletedUserNames)?cfg._deletedUserNames:[];
+        if(!cfg._deletedUserNames.map(x=>String(x).toLowerCase()).includes(String(_delName).toLowerCase())){
+          cfg._deletedUserNames.push(_delName);
+        }
+        window._deletedUserNames=Array.isArray(window._deletedUserNames)?window._deletedUserNames:[];
+        window._deletedUserNames.push(_delName);
+      }catch(e){}
       setAuthConfig(cfg);
-      toast('Đã xóa '+u.name);
+      toast('Đã xóa '+_delName);
       closeModal();
       openSettings();
     });
@@ -8817,14 +8874,13 @@ function wfCanEdit(r){
   const st=wfStatus(r);
   if(st==='approved') return false;
   if(st==='draft' || st==='rejected'){
-    // v3.02.97: NHÁP/BỊ TỪ CHỐI — chỉ NGƯỜI TẠO sửa được (đồng bộ wfCanDelete; trước đây
-    //   nháp chưa gửi duyệt có submittedBy rỗng → NV nào cũng sửa được nháp người khác).
+    // NHÁP/BỊ TỪ CHỐI (còn ở cấp nhập liệu) — chỉ NGƯỜI TẠO sửa nội dung được.
     const me=actorName();
     if(r.createdBy) return r.createdBy===me;
     if(r.submittedBy) return r.submittedBy===me;   // legacy: không có createdBy
     return true;                                    // legacy: không có dấu vết người tạo
   }
-  // pending_acc / pending_l1 / pending_l2: locked for editor; only L1/L2 can sửa qua "Trả về Draft"
+  // pending_acc / pending_l1 / pending_l2: ĐÃ CHUYỂN KHỎI CẤP → locked; chỉ L1/L2 "Trả về Draft" mới sửa.
   return false;
 }
 
@@ -8846,6 +8902,28 @@ function wfCanDelete(r){
   // Fallback: nếu không có createdBy (legacy) → vẫn cho phép NV gốc (submittedBy)
   if(!r.createdBy && r.submittedBy && r.submittedBy!==me) return false;
   return true;
+}
+
+/* v3.06.19 — QUYỀN CẬP NHẬT HỒ SƠ (bổ sung chứng từ/hóa đơn/giấy tờ/giải trình).
+   KHÁC HẲN sửa/xóa nội dung: không đổi số tiền/đối tác/nội dung — chỉ thêm hồ sơ.
+   Nguyên tắc:
+   - Admin → luôn được.
+   - NGƯỜI TẠO phiếu → cập nhật hồ sơ của mình ở MỌI trạng thái (kể cả đã trình ký/đã duyệt).
+   - KT viên (canCheckAcc) → cập nhật được MỌI phiếu KHI ĐÃ CHUYỂN TỚI CẤP (pending_acc trở đi),
+     không phân biệt NV nào nhập. (KT không đụng nháp riêng của NV khác.)
+   - Người duyệt L1/L2 cũng được cập nhật hồ sơ phiếu đã tới cấp mình. */
+function wfCanUpdateDocs(r){
+  if(isAdmin()) return true;
+  if(!r) return false;
+  const me=actorName();
+  // Người tạo → mọi trạng thái.
+  if(r.createdBy && r.createdBy===me) return true;
+  if(!r.createdBy && r.submittedBy && r.submittedBy===me) return true;
+  // KT / người duyệt → phiếu đã chuyển khỏi cấp nhập liệu (không phải nháp/bị từ chối của NV khác).
+  const st=wfStatus(r);
+  const movedUp = !['draft','rejected'].includes(st);
+  if(movedUp && (canCheckAcc()||canApproveL1()||canApproveL2())) return true;
+  return false;
 }
 
 /* Submit → KT viên (Hằng) kiểm hồ sơ
@@ -9315,6 +9393,12 @@ function _showOccasionPopup(list){
    (để nối tiếp popup dịp/lễ — không để 2 modal đè nhau). */
 function _showGreetingPopup(onClose){
   const _cb = (typeof onClose==='function') ? onClose : function(){};
+  // v3.06.16: nếu đang có modal mở (vd buộc đổi mật khẩu lần đầu) → hoãn, thử lại sau khi đóng,
+  //   để popup chào không đè modal kia (và ngược lại).
+  try{
+    const m=document.getElementById('modal');
+    if(m && m.classList.contains('show')){ setTimeout(()=>_showGreetingPopup(onClose), 1500); return; }
+  }catch(e){}
   let msg='';
   try{ msg=_greetingMessage(); }catch(e){ msg='✓ Đăng nhập thành công'; }
   const _fam=(typeof _familyInfo==='function')?_familyInfo():null;
@@ -9365,11 +9449,13 @@ function _postLoginGreet(){
   const _hasSpecialDay = (_occ.length>0) || (_hol.length>0);
   if(_hasSpecialDay){
     // ƯU TIÊN ngày lễ/dịp → bỏ popup chào thường, chỉ chạy lời chúc/cảm ơn riêng.
+    // Welcome onboarding nhường: chạy sau (nếu chưa xem) để không đè popup dịp/lễ.
     try{ _runOccasionGreetings(_fam,_occ,_hol); }catch(e){ console.warn('[occasion/holiday check]',e&&e.message); }
+    setTimeout(()=>{ try{ _checkWelcomeNow(); }catch(e){} }, 600);
     return;
   }
-  // Ngày bình thường → popup chào (bấm mới tắt). Không có dịp/lễ nối tiếp.
-  _showGreetingPopup(function(){});
+  // Ngày bình thường → popup chào (bấm mới tắt) → đóng xong mới tới welcome onboarding (nếu chưa xem).
+  _showGreetingPopup(function(){ try{ _checkWelcomeNow(); }catch(e){} });
 }
 
 /* v3.06.15 — Chạy popup/toast dịp-lễ-sinh nhật (tách khỏi _postLoginGreet để tái dùng). */
@@ -9391,15 +9477,22 @@ function _runOccasionGreetings(_fam,_occ,_hol){
 /* Welcome onboarding — fires on first login per user.
    localStorage key: seahorse_welcome_seen_<username> */
 function checkWelcomePopup(){
+  // v3.06.16: giữ tương thích — nhưng nay welcome được nối SAU popup chào (xem _postLoginGreet),
+  //   nên hàm này chỉ còn là wrapper gọi _checkWelcomeNow có trễ nhẹ (cho UI ổn định).
+  setTimeout(()=>{ try{ _checkWelcomeNow(); }catch(e){} }, 300);
+}
+/* v3.06.16: hiện welcome onboarding NGAY (không setTimeout) — chỉ khi chưa xem VÀ
+   không có modal nào đang mở (tránh đè popup chào/dịp-lễ). Gọi từ callback đóng popup chào. */
+function _checkWelcomeNow(){
   const userKey = isAdmin() ? 'admin' : (CURRENT_USER && CURRENT_USER.name) || 'unknown';
   const flag = 'seahorse_welcome_seen_' + userKey;
+  try{ if(localStorage.getItem(flag)) return; }catch(e){ return; }
+  // Nếu đang có modal mở (vd popup dịp/lễ) → hoãn, thử lại sau khi đóng.
   try{
-    if(localStorage.getItem(flag)) return;  // already seen
-  }catch(e){return;}
-  // Show welcome modal after slight delay (let UI settle)
-  setTimeout(()=>{
-    showWelcomeModal(userKey, flag);
-  }, 800);
+    const m=document.getElementById('modal');
+    if(m && m.classList.contains('show')){ setTimeout(_checkWelcomeNow, 1200); return; }
+  }catch(e){}
+  showWelcomeModal(userKey, flag);
 }
 
 function showWelcomeModal(userKey, flag){
@@ -20019,7 +20112,13 @@ function renderApprovalList(){
     }
     const bankOpts2='<option value="">— NH —</option>'+_banksActive.map(a=>`<option value="${a.id}" ${a.id===bid?'selected':''}>${esc(bankAcctLabel(a))}</option>`).join('');
     const showBank=(m==='transfer'||m==='loan');
+    // v3.06.17: nếu KT đã đề xuất sẵn → báo cho KTT biết (giữ nguyên hoặc sửa khi cần).
+    const _ktProposed = !!(r._payMethod && r._payProposedBy);
+    const _proposeHint = _ktProposed
+      ? `<div style="font-size:9px;color:var(--good);margin-bottom:2px">✓ ${esc(r._payProposedBy)} đã đề xuất — giữ nguyên hoặc sửa</div>`
+      : '';
     return `<div onclick="event.stopPropagation()" style="min-width:160px">
+      ${_proposeHint}
       <div style="font-size:9px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;margin-bottom:2px">Hình thức chi ${_canEditPay?'(KTT chọn)':'(KT đề xuất)'}</div>
       <select onchange="apprSetPayMethod('${r.id}',this.value)" style="font-size:11px;padding:3px 5px;width:100%">
         <option value="" ${!m?'selected':''}>— chọn —</option>
@@ -27720,7 +27819,7 @@ function _arEditorBody(r,isPayable){
     ${(typeof contractProgressPanel==='function' && isContractAdvance(r)) ? contractProgressPanel(r) : ''}
     ${creatorBlock}
     ${(!isNew && r.id) ? _recordStatusTimeline(r) : ''}
-    <div style="margin-top:12px;padding:10px 12px;border:1px solid var(--rule);border-radius:6px;background:var(--paper-2)">
+    <div id="ar-attach-block" style="margin-top:12px;padding:10px 12px;border:1px solid var(--rule);border-radius:6px;background:var(--paper-2)">
       <div style="font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);font-weight:600;margin-bottom:6px">📎 Chứng từ đính kèm <span style="text-transform:none;font-weight:400">(hóa đơn/báo giá — lưu trên Google Drive)</span></div>
       <div id="ar-attach-list" style="font-size:12px;margin-bottom:8px"></div>
       <input type="file" id="ar-attach-file" accept=".pdf,.xml,.csv,image/*,.doc,.docx,.xlsx" style="display:none" onchange="arAttachUpload(this)" multiple>
@@ -27732,6 +27831,11 @@ function _arEditorBody(r,isPayable){
       </select>
       <button type="button" class="btn-sec" style="font-size:12px" onclick="document.getElementById('ar-attach-file').click()">📎 Thêm chứng từ</button>
       <span id="ar-attach-status" style="font-size:11px;margin-left:8px;color:var(--muted)"></span>
+      <div style="margin-top:10px">
+        <div style="font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);font-weight:600;margin-bottom:4px">📝 Giải trình <span style="text-transform:none;font-weight:400">(ghi chú bổ sung — không đổi nội dung phiếu)</span></div>
+        <textarea id="ar-explain-note" rows="2" style="width:100%;font-size:12px;padding:6px 8px;border:1px solid var(--rule);border-radius:6px;resize:vertical" placeholder="Nhập giải trình nếu cần...">${esc(r._explainNote||'')}</textarea>
+        ${r._explainBy?`<div style="font-size:10px;color:var(--muted);margin-top:2px">Cập nhật bởi ${esc(r._explainBy)}${r._explainAt?' · '+esc(String(r._explainAt).slice(0,10)):''}</div>`:''}
+      </div>
     </div>
     <div id="ar-err" style="font-size:12px;color:var(--bad);min-height:14px;font-family:var(--font-mono);margin-top:8px"></div>`;
   // v3.04.51: nạp danh sách đính kèm sẵn có vào state tạm + render
@@ -28278,21 +28382,29 @@ function _apOrdersBlock(r){
    Gọi sau khi mở modal khi NV xem hồ sơ đã trình ký/đã duyệt (!wfCanEdit).
    Disable toàn bộ input/select/textarea + nút thao tác trong thân modal,
    chèn banner báo trạng thái. KHÔNG đụng dữ liệu — chỉ khóa UI. */
-function _arApplyViewOnly(){
+function _arApplyViewOnly(canDocs){
   const body=document.getElementById('modal-body');
   if(!body) return;
+  // v3.06.19: nếu được CẬP NHẬT HỒ SƠ → chừa khối chứng từ/giải trình (#ar-attach-block) khỏi khóa.
+  const docsBlock = canDocs ? body.querySelector('#ar-attach-block') : null;
+  const inBlock = (el)=> docsBlock && docsBlock.contains(el);
   body.querySelectorAll('input,select,textarea').forEach(el=>{
+    if(inBlock(el)) return;  // chừa ô trong khối hồ sơ
     el.disabled=true;
     el.style.opacity='0.85';
     el.style.cursor='not-allowed';
   });
-  // Vô hiệu các nút thao tác bên trong thân (vd thêm dòng, xóa dòng, gán...) — giữ link đóng
-  body.querySelectorAll('button').forEach(el=>{ el.disabled=true; el.style.opacity='0.5'; el.style.cursor='not-allowed'; });
+  body.querySelectorAll('button').forEach(el=>{
+    if(inBlock(el)) return;  // chừa nút trong khối hồ sơ (Thêm chứng từ, gỡ...)
+    el.disabled=true; el.style.opacity='0.5'; el.style.cursor='not-allowed';
+  });
   if(!body.querySelector('#ar-viewonly-banner')){
     const b=document.createElement('div');
     b.id='ar-viewonly-banner';
     b.style.cssText='margin:0 0 10px;padding:7px 10px;border-radius:6px;background:rgba(28,58,92,.08);border:1px solid var(--accent);font-size:12px;color:var(--accent);font-weight:600';
-    b.textContent='👁 Chế độ xem — hồ sơ đã trình ký, không thể sửa/xóa.';
+    b.innerHTML = canDocs
+      ? '👁 Chế độ xem — hồ sơ đã trình ký, KHÔNG sửa/xóa nội dung. <b>Bạn vẫn được bổ sung chứng từ / giải trình bên dưới.</b>'
+      : '👁 Chế độ xem — hồ sơ đã trình ký, không thể sửa/xóa.';
     body.insertBefore(b, body.firstChild);
   }
 }
@@ -28304,11 +28416,11 @@ function openReceivableModal(id){
   const body=_arEditorBody(r,false);
   // v3.06.13: NV xem được ở mọi trạng thái. Đã trình ký/đã duyệt (!wfCanEdit) → CHẾ ĐỘ XEM.
   const _viewOnly = isEdit && !wfCanEdit(r);
-  // v3.01.28: AR THÊM MỚI — 2 nút lưu: "Lưu dự kiến" (Chưa xuất HĐ) vs "Xuất hóa đơn" (lưu + duyệt).
-  // Khi SỬA — giữ 1 nút "Cập nhật" như cũ (đổi trạng thái xuất HĐ qua nút ngoài bảng).
+  const _canDocs = isEdit && _viewOnly && wfCanUpdateDocs(r);  // v3.06.19: vẫn bổ sung hồ sơ
   let foot;
   if(_viewOnly){
-    foot=`<button class="btn-sec" onclick="closeModal()">Đóng</button>`;
+    foot=`<button class="btn-sec" onclick="closeModal()">Đóng</button>`
+      + (_canDocs ? `<button class="btn-primary" onclick="saveArDocsOnly('ar','${id}')" title="Lưu chứng từ/giải trình vừa bổ sung — không đổi nội dung phiếu" style="background:var(--good);border-color:var(--good)">💾 Lưu hồ sơ</button>` : '');
   } else if(isEdit){
     foot=`<button class="btn-sec" onclick="closeModal()">Hủy</button>
           <button class="btn-primary" onclick="saveAr('ar','${id}')">Cập nhật</button>`;
@@ -28320,7 +28432,7 @@ function openReceivableModal(id){
   openModal(_viewOnly?('Xem khoản phải thu · '+docStatusInfo(r).label):(isEdit?'Sửa khoản phải thu':'Thêm phải thu'),body,foot);
   setTimeout(_arSegmentChanged, 60);  // v1.82.0: áp lọc tàu theo mảng
   setTimeout(()=>{ try{ arCcyChanged(); }catch(e){} }, 60);  // v3.03.41: hiện ô tỷ giá nếu ngoại tệ ≠ USD/VND
-  if(_viewOnly) setTimeout(_arApplyViewOnly, 90);
+  if(_viewOnly) setTimeout(()=>_arApplyViewOnly(_canDocs), 90);
 }
 /* v3.01.27: PHÁT HÓA ĐƠN cho khoản ĐANG Chưa xuất HĐ (từ nút 🧾 ngoài bảng) —
    mở modal cho sửa giá trị, lưu xong tự duyệt. */
@@ -28661,9 +28773,11 @@ function openPayableModal(id){
   const body=_arEditorBody(r,true);
   // v3.06.13: NV xem được ở mọi trạng thái. Đã trình ký/đã duyệt (!wfCanEdit) → CHẾ ĐỘ XEM.
   const _viewOnly = isEdit && !wfCanEdit(r);
+  const _canDocs = isEdit && _viewOnly && wfCanUpdateDocs(r);  // v3.06.19: vẫn bổ sung hồ sơ
   let foot;
   if(_viewOnly){
-    foot=`<button class="btn-sec" onclick="closeModal()">Đóng</button>`;
+    foot=`<button class="btn-sec" onclick="closeModal()">Đóng</button>`
+      + (_canDocs ? `<button class="btn-primary" onclick="saveArDocsOnly('ap','${id}')" title="Lưu chứng từ/giải trình vừa bổ sung — không đổi nội dung phiếu" style="background:var(--good);border-color:var(--good)">💾 Lưu hồ sơ</button>` : '');
   } else {
     foot=`<button class="btn-sec" onclick="closeModal()">Hủy</button>
               ${isEdit?`<button class="btn-sec" style="border-color:#b8472e;color:#b8472e;font-weight:600" onclick="closeModal();deleteAr('ap','${id}')" title="Xóa bút toán này (cần quyền admin/người tạo; nếu đã gửi duyệt phải Trả về Nháp trước)">🗑 Xóa</button>`:''}
@@ -28674,7 +28788,7 @@ function openPayableModal(id){
   setTimeout(()=>{ try{ arCcyChanged(); }catch(e){} }, 60);  // v3.03.41: hiện ô tỷ giá nếu ngoại tệ ≠ USD/VND
   setTimeout(()=>{ try{ _arRecalcRemain(); }catch(e){} }, 70);  // v3.02.48: hiện còn lại ngay khi mở
   setTimeout(()=>{ try{ _apFuelFillEvents(r.fuelEventId||''); }catch(e){} }, 80);  // v3.01.00: điền dropdown đoạn vận hành
-  if(_viewOnly) setTimeout(_arApplyViewOnly, 90);
+  if(_viewOnly) setTimeout(()=>_arApplyViewOnly(_canDocs), 90);
 }
 
 /* ============================================================
@@ -29906,8 +30020,9 @@ async function _mrReadInvoiceFile(file, target){
       toast('Đang đọc CSV...');
       await _loadScriptOnce('https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js','Papa');
       const text=await file.text();
-      const parsed=Papa.parse(text,{header:true,skipEmptyLines:true});
-      _invoiceParsed=_invoiceFromCsv(parsed.data);
+      // v3.06.18: tự dò dấu phân tách (, ; tab) + tự tìm dòng tiêu đề (bỏ qua header công ty/tiêu đề bảng kê).
+      const rowsObj=_csvAutoParse(text);
+      _invoiceParsed=_invoiceFromCsv(rowsObj);
     } else if(ext==='pdf'){
       // v3.04.70: PDF LUÔN đọc bằng AI Gemini (chính xác hơn parse text local:
       //   đúng người bán/mua theo AP/AR, tách dòng theo thuế suất, bỏ qua MST nhà cung cấp HĐĐT).
@@ -29936,15 +30051,79 @@ async function _mrReadInvoiceFile(file, target){
 }
 
 /* CSV → {header, lines[]}. Tự dò cột theo tên tiêu đề thường gặp. */
+/* v3.06.18 — Tự dò CSV bền hơn:
+   - Dò dấu phân tách: ; , hoặc tab (đếm tần suất trên 1 dòng nhiều cột nhất).
+   - Tự TÌM DÒNG TIÊU ĐỀ: nhiều file bảng kê NCC có vài dòng đầu là tên công ty / địa chỉ /
+     tiêu đề "BẢNG KÊ...". Header thật = dòng có nhiều ô không rỗng nhất trong ~25 dòng đầu,
+     VÀ chứa ít nhất 1 từ khóa cột quen thuộc (ngày/số/tiền/hóa đơn...).
+   - Trả mảng object {colName: value} như Papa header:true. */
+function _csvAutoParse(text){
+  try{
+    if(!text) return [];
+    // BOM
+    text=String(text).replace(/^\uFEFF/,'');
+    const rawLines=text.split(/\r?\n/);
+    // Dò delimiter trên 40 dòng đầu: chọn ký tự cho NHIỀU cột nhất ổn định.
+    const cands=[';','\t',','];
+    let delim=',', best=-1;
+    cands.forEach(d=>{
+      let maxCols=0;
+      for(let i=0;i<Math.min(40,rawLines.length);i++){
+        const n=rawLines[i].split(d).length;
+        if(n>maxCols) maxCols=n;
+      }
+      if(maxCols>best){ best=maxCols; delim=d; }
+    });
+    const parsed=Papa.parse(text,{header:false,skipEmptyLines:false,delimiter:delim});
+    const grid=parsed.data||[];
+    // Tìm dòng header: trong 25 dòng đầu, dòng có nhiều ô không rỗng nhất + có từ khóa.
+    const HDR_HINTS=['ngày','ngay','số','so','tiền','tien','hóa đơn','hoa don','hđ','hd','thành tiền','thanhtien','tổng','tong','vat','thuế','thue','nội dung','noidung','diễn giải','diengiai','ncc','tên','ten','giá','gia','đơn giá','dongia'];
+    let hdrIdx=-1, hdrScore=-1;
+    for(let i=0;i<Math.min(25,grid.length);i++){
+      const row=grid[i]||[];
+      const nonEmpty=row.filter(c=>String(c||'').trim()!=='').length;
+      if(nonEmpty<3) continue;  // header thật thường ≥3 cột
+      const joined=row.map(c=>String(c||'').toLowerCase()).join(' ');
+      const hasHint=HDR_HINTS.some(h=>joined.includes(h));
+      if(!hasHint) continue;
+      if(nonEmpty>hdrScore){ hdrScore=nonEmpty; hdrIdx=i; }
+    }
+    if(hdrIdx<0){
+      // fallback: dòng đầu có nhiều ô nhất
+      let mx=-1; for(let i=0;i<Math.min(25,grid.length);i++){ const n=(grid[i]||[]).filter(c=>String(c||'').trim()!=='').length; if(n>mx){mx=n;hdrIdx=i;} }
+      if(hdrIdx<0) hdrIdx=0;
+    }
+    const header=(grid[hdrIdx]||[]).map((c,i)=>{ const t=String(c||'').trim(); return t || ('col'+i); });
+    const out=[];
+    for(let i=hdrIdx+1;i<grid.length;i++){
+      const row=grid[i]||[];
+      if(row.every(c=>String(c||'').trim()==='')) continue;  // bỏ dòng trống
+      const obj={};
+      header.forEach((h,j)=>{ obj[h]=row[j]!=null?row[j]:''; });
+      out.push(obj);
+    }
+    return out;
+  }catch(e){ console.warn('[csvAutoParse]',e&&e.message); return []; }
+}
 function _invoiceFromCsv(rows){
   if(!rows||!rows.length) return null;
   const keys=Object.keys(rows[0]||{});
-  const find=(cands)=>keys.find(k=>cands.some(c=>k.toLowerCase().replace(/\s/g,'').includes(c)));
-  const kPartner=find(['ncc','nhàcungcấp','nhacungcap','tênncc','seller','nguoiban','người bán'.replace(/\s/g,'')]);
-  const kInv=find(['sốhóađơn','sohoadon','sốhđ','sohd','invoice','sốhoáđơn']);
-  const kDate=find(['ngày','ngay','date','ngàyhđ']);
-  const kDesc=find(['nộidung','noidung','diễngiải','dienngiai','diengiai','môtả','description']);
-  const kNet=find(['chưavat','chuavat','tiềntrướcthuế','truocthue','net','thànhtiền','thanhtien']);
+  // v3.06.18: ƯU TIÊN theo THỨ TỰ từ khóa — thử từng từ khóa lần lượt, khớp cột đầu chứa nó.
+  //   (trước đây trả cột đầu khớp BẤT KỲ từ khóa nào → "Ngày" bắt nhầm "Ngày Xuất Vé" thay vì "Ngày Hóa Đơn").
+  const find=(cands)=>{
+    for(const c of cands){
+      const hit=keys.find(k=>k.toLowerCase().replace(/\s/g,'').includes(c));
+      if(hit) return hit;
+    }
+    return undefined;
+  };
+  const kPartner=find(['tênncc','tenncc','ncc','nhàcungcấp','nhacungcap','ngườibán','nguoiban','seller','tênkhách','tenkhach','kháchhàng','khachhang']);
+  const kInv=find(['sốhóađơn','sohoadon','sốhoáđơn','sốhđ','sohd','sốhd','invoice']);
+  // ƯU TIÊN "ngày hóa đơn" trước "ngày" chung.
+  const kDate=find(['ngàyhóađơn','ngayhoadon','ngàyhđ','ngayhd','ngàyhd','date','ngày','ngay']);
+  const kDesc=find(['nộidung','noidung','diễngiải','dienngiai','diengiai','môtả','description','hànhtrình','hanhtrinh','tênkhách','tenkhach']);
+  // ƯU TIÊN "tổng cộng thanh toán / thành tiền" trước "giá vé / giá".
+  const kNet=find(['tổngcộngthanhtoán','tongcongthanhtoan','tổngthanhtoán','tongthanhtoan','tổngcộng','tongcong','thànhtiền','thanhtien','chưavat','chuavat','tiềntrướcthuế','truocthue','net','thanhtoán','thanhtoan','tổngtiền','tongtien','sốtiền','sotien','giávé','giave','giá','gia']);
   const kVat=find(['tiềnvat','tienvat','thuếgtgt','thuegtgt','vatamount']);
   const kVatPct=find(['%vat','thuếsuất','thuesuat','vatrate','vat%']);
   const kCcy=find(['loạitiền','loaitien','tiềntệ','tiente','ccy','currency']);
@@ -30069,6 +30248,18 @@ function _normInvDate(s){
   s=String(s).trim();
   let m=s.match(/(\d{4})[\-\/](\d{1,2})[\-\/](\d{1,2})/); if(m) return `${m[1]}-${m[2].padStart(2,'0')}-${m[3].padStart(2,'0')}`;
   m=s.match(/(\d{1,2})[\-\/](\d{1,2})[\-\/](\d{4})/); if(m) return `${m[3]}-${m[2].padStart(2,'0')}-${m[1].padStart(2,'0')}`;
+  // v3.06.18: dạng Excel "DD-Mon" / "DD-Mon-YY" (vd 11-May, 28-Apr-26) — tên tháng tiếng Anh.
+  //   Không có năm → suy năm HIỆN TẠI. (Bảng kê NCC kiểu Excel hay xuất dạng này.)
+  const MON={jan:1,feb:2,mar:3,apr:4,may:5,jun:6,jul:7,aug:8,sep:9,oct:10,nov:11,dec:12};
+  m=s.match(/^(\d{1,2})[\-\/\s]([A-Za-z]{3,9})(?:[\-\/\s](\d{2,4}))?$/);
+  if(m){
+    const dd=+m[1]; const mo=MON[m[2].slice(0,3).toLowerCase()];
+    if(mo){
+      let yy = m[3] ? +m[3] : new Date().getFullYear();
+      if(yy<100) yy += 2000;
+      return `${yy}-${String(mo).padStart(2,'0')}-${String(dd).padStart(2,'0')}`;
+    }
+  }
   return '';
 }
 
@@ -30995,6 +31186,36 @@ function saveAr(kind,id){
     });
   }catch(e){}
   toast(kind==='ap'?'Đã lưu phải trả':((isAdmin()||canCheckAcc())?'Đã lưu phải thu (vào sổ ngay)':'Đã lưu phải thu (chờ KT kiểm)'));
+}
+
+/* v3.06.19 — LƯU CHỈ HỒ SƠ (chứng từ đính kèm + giải trình) — KHÔNG đụng nội dung phiếu.
+   Dùng cho chế độ XEM khi phiếu đã trình ký/đã duyệt: NV (chủ phiếu) + KT vẫn bổ sung hồ sơ được.
+   Gate bằng wfCanUpdateDocs (khác hẳn wfCanEdit). */
+function saveArDocsOnly(kind,id){
+  const list=kind==='ap'?'payables':'receivables';
+  const r=(S[list]||[]).find(x=>x.id===id);
+  if(!r){ toast('Không tìm thấy phiếu','bad'); return; }
+  if(!wfCanUpdateDocs(r)){ toast('Bạn không có quyền cập nhật hồ sơ phiếu này','bad'); return; }
+  // Chứng từ đính kèm (đã upload Drive, nằm ở _curAttachments)
+  if(Array.isArray(window._curAttachments)){
+    r.attachments = JSON.parse(JSON.stringify(window._curAttachments));
+  }
+  // Giải trình (nếu có ô nhập)
+  const exEl=document.getElementById('ar-explain-note');
+  if(exEl){
+    const v=exEl.value.trim();
+    if(v){
+      r._explainNote = v;
+      r._explainBy = actorName();
+      r._explainAt = new Date().toISOString();
+    }
+  }
+  touchRecord(r);
+  saveState();
+  try{ logAuditEvent('docs_update',{kind,id,attachments:(r.attachments||[]).length}); }catch(e){}
+  toast('✓ Đã cập nhật hồ sơ (chứng từ/giải trình)','good');
+  closeModal();
+  try{ renderAll(); }catch(e){}
 }
 
 /* v2.84.0: Migration một-lần — nâng tất cả AR đang Nháp/chờ duyệt sang trạng thái 'approved'.
@@ -45052,7 +45273,7 @@ function _renderApPayOrderModal(){
   const bankOpts=(sel)=>'<option value="">— Chọn NH —</option>'+banks.map(a=>`<option value="${a.id}" ${a.id===sel?'selected':''}>${esc(bankAcctLabel(a))} (${a.ccy||'USD'})</option>`).join('');
   const selCount=rows.filter(r=>S0.sel[r.id]).length;
   const body=`
-    <div style="font-size:12px;color:var(--muted);margin-bottom:10px">Chọn phiếu cần trình KTT duyệt. Mỗi phiếu chọn <b>hình thức chi</b> + <b>ngân hàng</b>. Bấm "In PDF" để in phiếu trình duyệt. <i>(Không đổi trạng thái phiếu.)</i></div>
+    <div style="font-size:12px;color:var(--muted);margin-bottom:10px">Chọn phiếu cần trình KTT duyệt. Mỗi phiếu chọn <b>hình thức chi</b> + <b>ngân hàng</b>. Bấm "In PDF" để in phiếu trình duyệt. <i>(Lựa chọn được LƯU vào phiếu để KTT thấy sẵn khi duyệt — không đổi trạng thái phiếu.)</i></div>
     <div style="max-height:420px;overflow:auto;border:1px solid var(--rule);border-radius:6px">
     <table style="width:100%;border-collapse:collapse;font-size:11.5px">
       <thead><tr style="background:var(--paper-2);color:var(--muted);font-size:10px;text-transform:uppercase;position:sticky;top:0">
