@@ -6,7 +6,7 @@
    để force trình duyệt invalidate cache cũ.
 */
 
-const SW_VERSION = 'v3.05.98';
+const SW_VERSION = 'v3.06.00';
 const CACHE_NAME = `seahorse-${SW_VERSION}`;
 
 // Pre-cache critical files on install
@@ -63,7 +63,7 @@ self.addEventListener('fetch', event => {
   const isHTML = req.mode === 'navigate' || url.pathname.endsWith('.html') || url.pathname.endsWith('/');
 
   if (isHTML) {
-    // v3.05.98: STALE-WHILE-REVALIDATE cho index.html (app ~2.5MB).
+    // v3.06.00: STALE-WHILE-REVALIDATE cho index.html (app ~2.5MB).
     //   Trả ngay bản CACHE (hiện app tức thì, không màn trắng), đồng thời tải bản mới
     //   ngầm để cập nhật cache cho lần sau. Nếu chưa có cache (lần đầu) → tải network.
     event.respondWith(
