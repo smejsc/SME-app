@@ -3106,7 +3106,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.06.33';            // bumped on each release
+const APP_VERSION='3.06.37';            // bumped on each release
 
 /* v2.62.0: Token xác thực backend — PHẢI khớp API_TOKEN trong Apps Script (Code.gs).
    Mọi request tới Apps Script tự động được gắn token qua lớp bọc fetch bên dưới.
@@ -5670,6 +5670,7 @@ const ALL_DATA_FIELDS=[
   'departments','vendors','expenseTypes','revenueTypes',
   'salaryFund','taxes',
   'historicalData','lockedHistYears','deletedIds',
+  'adminChecklist',  // v3.06.37: checklist vận hành (nhập tay) — TRƯỚC ĐÂY KHÔNG SYNC → mất khi đổi máy
   'auditLogShared'  // v2.73.0: nhật ký quan trọng toàn hệ thống (merge theo _id)
 ];
 
@@ -13098,7 +13099,15 @@ function _stateLooksEmpty(s){
   const ln=(s.loans||[]).length;
   const ov=(s.opVessels||[]).length;       // v2.99.31: tàu QL hộ — TRƯỚC ĐÂY BỊ BỎ SÓT
   const ot=(s.opTransactions||[]).length;   // v2.99.31: bút toán thu/chi hộ — TRƯỚC ĐÂY BỊ BỎ SÓT
-  const totalNow = co+ap+ar+ve+fa+pr+ba+ln+ov+ot;
+  // v3.06.37: thêm các KHO LỚN khác vào high-water mark (trước đây mất sạch không kích hoạt bảo vệ)
+  const tx=(s.transactions||[]).length;
+  const cf=(s.cashTxns||[]).length;
+  const adv=(s.advances||[]).length;
+  const dr=(s.dailyReports||[]).length;
+  const oh=(s.onhires||[]).length;
+  const im=(s.invMovements||[]).length;
+  const mf=(s.opMgmtFees||[]).length;
+  const totalNow = co+ap+ar+ve+fa+pr+ba+ln+ov+ot+tx+cf+adv+dr+oh+im+mf;
   // v2.99.30: STRICT hơn — không chỉ check rỗng hoàn toàn, mà còn so với mốc cao nhất từng đạt.
   // 1. Hoàn toàn rỗng (case cũ): TẤT CẢ kho chính = 0
   if(totalNow === 0) return true;
@@ -13125,7 +13134,10 @@ function _updateLastKnownRecordCount(){
       + (s.receivables||[]).length + (s.vessels||[]).length
       + (s.fixedAssets||[]).length + (s.projects||[]).length
       + (s.bankAccounts||[]).length + (s.loans||[]).length
-      + (s.opVessels||[]).length + (s.opTransactions||[]).length;  // v2.99.31: tính cả tàu QL hộ
+      + (s.opVessels||[]).length + (s.opTransactions||[]).length  // v2.99.31: tính cả tàu QL hộ
+      + (s.transactions||[]).length + (s.cashTxns||[]).length     // v3.06.37: khớp với _stateLooksEmpty mở rộng
+      + (s.advances||[]).length + (s.dailyReports||[]).length
+      + (s.onhires||[]).length + (s.invMovements||[]).length + (s.opMgmtFees||[]).length;
     const cfg = getAuthConfig();
     if(!cfg) return;
     const prev = +cfg.lastKnownRecordCount || 0;
@@ -24218,7 +24230,110 @@ function creditFacilityTotalsUsd(){
      - gracePeriodMonths: N tháng đầu CHỈ trả lãi (gốc=0), giảm dần cho các kỳ sau
      - paymentFrequency: 1=tháng, 3=quý, 6=nửa năm, 12=năm
 */
+/* v3.06.35 — Lịch trả nợ theo NGÀY thực tế (ACT/365) cho khoản vay GIẢI NGÂN NHIỀU ĐỢT.
+   Lãi mỗi kỳ = tích lũy ngày-qua-ngày: dư_nợ_giải_ngân_thực_tế(ngày) × rate/365.
+   Dư nợ = (tổng đã giải ngân tới ngày) − (gốc đã trả). Hỗ trợ 3 phương thức + ân hạn.
+   Kỳ cuối luôn trả nốt dư nợ thực tế (khử sai số làm tròn của niên kim). */
+function _generateLoanScheduleDayBased(loan){
+  const draws=(loan.drawdowns||[]).filter(x=>x.date && (+x.amount>0))
+    .map(x=>({date:x.date, amount:+x.amount})).sort((a,b)=>a.date.localeCompare(b.date));
+  if(!draws.length) return [];
+  const P=draws.reduce((s,x)=>s+x.amount,0);
+  const start=draws[0].date;
+  const freq=+loan.paymentFrequency||1;
+  const grace=+loan.gracePeriodMonths||0;
+  const term=+loan.termMonths||1;
+  const BASIS=365;
+  // v3.06.36: các mốc ĐỔI PHƯƠNG ÁN giữa kỳ (reschedules)
+  const resched=(loan.reschedules||[]).slice().map(r=>({...r, _applied:false})).sort((a,b)=>String(a.date).localeCompare(String(b.date)));
+  const addM=(iso,n)=>{ const d=new Date(iso); const day=d.getDate(); d.setDate(1); d.setMonth(d.getMonth()+n);
+    const last=new Date(d.getFullYear(),d.getMonth()+1,0).getDate(); d.setDate(Math.min(day,last));
+    return d.toISOString().slice(0,10); };
+  const gper=Math.floor(grace/freq);
+  const rem=Math.max(term-grace, freq);
+  const npay=Math.ceil(rem/freq) || 1;
+  const each=P/npay;
+  const dayMs=86400000;
+  const disbursedAt=(isoDay)=>draws.reduce((s,x)=>s+(x.date<=isoDay?x.amount:0),0);
+  // lãi tích lũy ngày-qua-ngày, dùng rate hiệu lực theo từng ngày (đổi khi có change_rate)
+  const rateAt=(isoDay)=>{
+    let r=(+loan.interestRate||0)/100;
+    resched.forEach(rs=>{ if(rs.action==='change_rate' && String(rs.date)<=isoDay) r=(+rs.rate||0)/100; });
+    return r;
+  };
+  const accrue=(prevIso, curIso, paidPrincipal)=>{
+    let tot=0; let cd=new Date(prevIso); const end=new Date(curIso);
+    while(cd<end){
+      const iso=cd.toISOString().slice(0,10);
+      const out=Math.max(0, disbursedAt(iso)-paidPrincipal);
+      tot += out*rateAt(iso)/BASIS;
+      cd=new Date(cd.getTime()+dayMs);
+    }
+    return tot;
+  };
+  const sched=[]; let prev=start; let paid=0; let idx=1;
+  // PHASE 1: ân hạn ban đầu
+  for(let i=0;i<gper;i++){
+    const dd=addM(start,(i+1)*freq);
+    const days=Math.max(0,Math.round((new Date(dd)-new Date(prev))/dayMs));
+    const interest=accrue(prev,dd,paid);
+    const out=Math.max(0,disbursedAt(dd)-paid);
+    sched.push({period:idx++,dueDate:dd,principal:0,interest:Math.round(interest),total:Math.round(interest),isGrace:true,dayBased:true,_interestDays:days,_outstanding:Math.round(out),paid:false,paidDate:null});
+    prev=dd;
+  }
+  // PHASE 2: các kỳ trả, áp reschedule động
+  let curMethod=loan.repayMethod||'equal_principal';
+  let extraGrace=0;        // số kỳ ân hạn chèn thêm còn lại
+  let payLeft=npay;        // số kỳ trả gốc danh nghĩa còn lại
+  let periodMonth=gper;
+  let safety=0;
+  let outstanding=Math.max(0,disbursedAt(prev)-paid);
+  while(outstanding>0.5 && safety<600){
+    safety++;
+    periodMonth+=freq;
+    const dd=addM(start,periodMonth);
+    // áp các mốc reschedule rơi vào (prev, dd]
+    resched.forEach(r=>{
+      if(!r._applied && String(r.date)>prev && String(r.date)<=dd){
+        if(r.action==='grace') extraGrace += (+r.n||0);
+        else if(r.action==='change_method') curMethod=r.method||curMethod;
+        // change_rate đã xử lý trong rateAt()
+        r._applied=true;
+      }
+    });
+    const days=Math.max(0,Math.round((new Date(dd)-new Date(prev))/dayMs));
+    const interest=accrue(prev,dd,paid);
+    const out=Math.max(0,disbursedAt(dd)-paid);
+    let prin, graceFlag=false, plus=false;
+    if(extraGrace>0){ prin=0; extraGrace--; graceFlag=true; plus=true; }
+    else {
+      if(curMethod==='bullet') prin=(payLeft<=1)?out:0;
+      else if(curMethod==='equal_total'){
+        // niên kim: gốc = M - lãi, M tính lại trên dư nợ + số kỳ còn lại
+        const rper=rateAt(dd)*freq/12;
+        const n=Math.max(1,payLeft);
+        const M=rper===0?out/n:out*rper*Math.pow(1+rper,n)/(Math.pow(1+rper,n)-1);
+        prin=Math.max(0,Math.min(M-interest,out));
+      }
+      else prin=Math.min(each,out); // equal_principal
+      payLeft--;
+    }
+    if(payLeft<=0 && extraGrace<=0) prin=out; // kỳ cuối trả nốt
+    prin=Math.min(prin,out);
+    paid+=prin; outstanding=out-prin;
+    sched.push({period:idx++,dueDate:dd,principal:Math.round(prin),interest:Math.round(interest),total:Math.round(prin+interest),isGrace:graceFlag,_graceExtra:plus,dayBased:true,_interestDays:days,_outstanding:Math.round(outstanding),paid:false,paidDate:null});
+    prev=dd;
+    if(outstanding<=0.5) break;
+  }
+  return sched;
+}
+
 function generateLoanSchedule(loan){
+  // v3.06.35: nếu có ≥1 đợt GIẢI NGÂN (drawdowns) → tính lãi theo NGÀY thực tế (ACT/365)
+  //   trên dư nợ giải ngân thực tế từng giai đoạn. Khoản 1 đợt (không drawdowns) → giữ cách cũ.
+  if(Array.isArray(loan.drawdowns) && loan.drawdowns.length>=1){
+    return _generateLoanScheduleDayBased(loan);
+  }
   const P = +loan.principal||0;
   const annualRate = (+loan.interestRate||0)/100;
   const termMonths = +loan.termMonths||1;
@@ -24334,6 +24449,12 @@ function loanApplyPrepay(loan, prepayId){
   // Rebuild schedule from scratch: original + apply all prepayments in order
   // Use original principal & terms, then walk through and apply prepays at their dates
   if(!loan) return;
+  // v3.06.35: khoản GIẢI NGÂN NHIỀU ĐỢT (day-based) — chỉ build lại schedule theo ngày,
+  //   prepay kiểu kỳ-tháng chưa áp dụng (sẽ xử lý ở Lớp 3 reschedule). Giữ trạng thái paid ở _saveLoan.
+  if(Array.isArray(loan.drawdowns) && loan.drawdowns.length>=1){
+    loan.paymentSchedule=_generateLoanScheduleDayBased(loan);
+    return;
+  }
   const prepayments = (loan.prepayments||[]).slice().sort((a,b)=>(a.date||'').localeCompare(b.date||''));
   if(prepayments.length===0){
     loan.paymentSchedule = generateLoanSchedule(loan);
@@ -24991,6 +25112,15 @@ function _loanModal(l){
         <label>Ngày giải ngân *</label>
         <input type="date" id="ln-start" value="${esc(l.startDate||'')}">
       </div>
+      <div class="field" style="grid-column:1/3;background:rgba(28,58,92,.04);border:1px solid var(--rule);padding:10px 12px;border-radius:6px">
+        <label style="display:flex;justify-content:space-between;align-items:center">
+          <span>Giải ngân nhiều đợt <span style="color:var(--muted);text-transform:none;font-weight:400;font-size:10px">(để trống = giải ngân 1 lần theo "Số tiền vay" + "Ngày giải ngân")</span></span>
+          <button type="button" class="btn-sec" onclick="_loanDrawAddRow()" style="font-size:10px;padding:2px 8px">+ Thêm đợt</button>
+        </label>
+        <div id="ln-draw-rows" style="margin-top:6px"></div>
+        <div id="ln-draw-sum" style="font-size:11px;color:var(--muted);margin-top:4px"></div>
+        <div style="font-size:10px;color:var(--accent);font-style:italic;margin-top:3px">⊙ Khi có ≥2 đợt: lãi tính theo SỐ NGÀY thực tế (ACT/365) trên dư nợ giải ngân thực tế từng giai đoạn.</div>
+      </div>
       <div class="field">
         <label>Ngày đáo hạn</label>
         <input type="date" id="ln-end" value="${esc(l.endDate||'')}">
@@ -25030,6 +25160,36 @@ function _loanModal(l){
   openModal(isEdit?'Sửa món vay':'+ Thêm món vay mới', body,
     `<button class="btn-sec" onclick="closeModal()">Hủy</button>
      <button class="btn-primary" onclick="_saveLoan('${isEdit?esc(l.id):''}')">${isEdit?'Cập nhật':'Thêm'}</button>`);
+  // v3.06.35: nạp các đợt giải ngân hiện có (nếu khoản vay đã có drawdowns)
+  _loanDrawState = (l.drawdowns&&l.drawdowns.length) ? l.drawdowns.map(x=>({date:x.date||'', amount:+x.amount||0})) : [];
+  _loanDrawRender();
+}
+/* v3.06.35 — UI quản lý các đợt GIẢI NGÂN (drawdowns) trong form vay */
+let _loanDrawState = [];
+function _loanDrawAddRow(){ _loanDrawState.push({date:'', amount:0}); _loanDrawRender(); }
+function _loanDrawDelRow(i){ _loanDrawState.splice(i,1); _loanDrawRender(); }
+function _loanDrawSet(i, field, val){
+  if(!_loanDrawState[i]) return;
+  _loanDrawState[i][field] = field==='amount' ? (+val||0) : val;
+  _loanDrawSumOnly();
+}
+function _loanDrawSumOnly(){
+  const sum=_loanDrawState.reduce((s,x)=>s+(+x.amount||0),0);
+  const el=document.getElementById('ln-draw-sum');
+  if(el) el.innerHTML = _loanDrawState.length
+    ? `Tổng ${_loanDrawState.length} đợt: <b>${sum.toLocaleString('vi-VN')}</b> — sẽ dùng làm Số tiền vay (gốc). ${_loanDrawState.length>=2?'<span style="color:var(--accent)">⊙ tính lãi theo ngày</span>':''}`
+    : '';
+}
+function _loanDrawRender(){
+  const host=document.getElementById('ln-draw-rows'); if(!host) return;
+  host.innerHTML = _loanDrawState.map((x,i)=>`
+    <div style="display:flex;gap:6px;align-items:center;margin-bottom:4px">
+      <span style="font-size:11px;color:var(--muted);width:42px">Đợt ${i+1}</span>
+      <input type="date" value="${esc(x.date||'')}" onchange="_loanDrawSet(${i},'date',this.value)" style="font-size:11px;padding:3px 5px">
+      <input type="number" step="any" value="${x.amount||''}" placeholder="Số tiền đợt này" oninput="_loanDrawSet(${i},'amount',this.value)" style="font-size:11px;padding:3px 5px;flex:1">
+      <button type="button" class="icon-btn danger" onclick="_loanDrawDelRow(${i})" title="Xóa đợt">✕</button>
+    </div>`).join('');
+  _loanDrawSumOnly();
 }
 function _saveLoan(id){
   const err=document.getElementById('ln-err');
@@ -25047,14 +25207,22 @@ function _saveLoan(id){
   const paymentFrequency=+document.getElementById('ln-freq').value||1;
   let gracePeriodMonths=parseInt(document.getElementById('ln-grace').value,10)||0;
   const note=document.getElementById('ln-note').value.trim();
+  // v3.06.35: thu thập các đợt giải ngân (drawdowns). Nếu có ≥1 đợt hợp lệ → tổng = principal, đợt đầu = startDate.
+  const draws=(_loanDrawState||[]).filter(x=>x.date && (+x.amount>0)).map(x=>({date:x.date, amount:+x.amount}))
+    .sort((a,b)=>a.date.localeCompare(b.date));
+  let principalEff=principal, startEff=start;
+  if(draws.length){
+    principalEff=draws.reduce((s,x)=>s+x.amount,0);
+    startEff=draws[0].date;
+  }
   // v2.85.0: liên kết khoản vay với hạn mức (facility) nếu có
   const facilityIdEl = document.getElementById('ln-facility');
   const facilityId = facilityIdEl ? (facilityIdEl.value || null) : null;
   if(!bank){err.textContent='Nhập tên NH';return;}
-  if(!(principal>0)){err.textContent='Số tiền vay phải > 0';return;}
+  if(!(principalEff>0)){err.textContent='Số tiền vay phải > 0 (hoặc nhập ít nhất 1 đợt giải ngân)';return;}
   if(isNaN(rate)||rate<0){err.textContent='Lãi suất không hợp lệ';return;}
   if(!(term>0)){err.textContent='Số kỳ phải > 0';return;}
-  if(!start){err.textContent='Nhập ngày giải ngân';return;}
+  if(!startEff){err.textContent='Nhập ngày giải ngân (hoặc đợt giải ngân đầu)';return;}
   // v1.33: Ân hạn chỉ áp dụng cho vay trung-dài hạn
   if(type==='short' && gracePeriodMonths>0){
     err.textContent='Vay ngắn hạn không hỗ trợ ân hạn gốc. Đổi loại vay sang Trung/Dài hạn hoặc đặt ân hạn = 0.';
@@ -25065,7 +25233,7 @@ function _saveLoan(id){
     return;
   }
   // Auto-compute endDate if not provided
-  const finalEnd = end || (()=>{ const d=new Date(start); d.setMonth(d.getMonth()+term); return d.toISOString().slice(0,10); })();
+  const finalEnd = end || (()=>{ const d=new Date(startEff); d.setMonth(d.getMonth()+term); return d.toISOString().slice(0,10); })();
   if(!S.loans) S.loans=[];
   let loan;
   if(id){
@@ -25074,7 +25242,7 @@ function _saveLoan(id){
     // Preserve paid status from old schedule
     const oldPaid={};
     (loan.paymentSchedule||[]).forEach(p=>{if(p.paid)oldPaid[p.period]=p;});
-    Object.assign(loan,{bankName:bank,lender:bank,loanType:type,contractNo:contract,principal,ccy,interestRate:rate,termMonths:term,startDate:start,endDate:finalEnd,repayMethod:method,paymentFrequency,gracePeriodMonths,note,facilityId,updatedAt:new Date().toISOString()});
+    Object.assign(loan,{bankName:bank,lender:bank,loanType:type,contractNo:contract,principal:principalEff,ccy,interestRate:rate,termMonths:term,startDate:startEff,endDate:finalEnd,repayMethod:method,paymentFrequency,gracePeriodMonths,note,facilityId,drawdowns:draws,updatedAt:new Date().toISOString()});
     // Regenerate schedule + re-apply prepays + paid flags
     loanApplyPrepay(loan);  // builds schedule from base + applies all prepayments
     loan.paymentSchedule.forEach(p=>{if(oldPaid[p.period]){p.paid=true; p.paidDate=oldPaid[p.period].paidDate;}});
@@ -25082,9 +25250,10 @@ function _saveLoan(id){
     loan={
       id:'LOAN-'+uid().slice(-6),
       bankName:bank, lender:bank, loanType:type, contractNo:contract,
-      principal, ccy, interestRate:rate, termMonths:term,
-      startDate:start, endDate:finalEnd, repayMethod:method,
+      principal:principalEff, ccy, interestRate:rate, termMonths:term,
+      startDate:startEff, endDate:finalEnd, repayMethod:method,
       paymentFrequency, gracePeriodMonths,
+      drawdowns:draws,
       prepayments:[],
       note, status:'active',
       facilityId,  // v2.85.0: liên kết hạn mức
@@ -25140,6 +25309,7 @@ function viewLoanSchedule(id){
         <b>${esc(l.bankName)}</b> · ${esc(l.contractNo||'(không số HĐ)')} · ${l.interestRate}%/năm
         <br>Kỳ hạn: <b>${l.termMonths}</b> tháng · Trả: <b>${freqLabel}</b>${(+l.gracePeriodMonths>0)?` · Ân hạn gốc: <b style="color:var(--accent)">${l.gracePeriodMonths} tháng</b>`:''}
         <br>Đã trả: <b style="color:var(--good)">${paidCount}/${sched.length}</b> kỳ${totalPrepay>0?` · Đã trả trước: <b style="color:var(--accent)">${totalPrepay.toLocaleString()} ${esc(l.ccy)}</b>`:''}
+        ${(l.drawdowns&&l.drawdowns.length>=1)?`<br>💳 Giải ngân <b style="color:var(--accent)">${l.drawdowns.length} đợt</b> (lãi tính theo ngày ACT/365): ${l.drawdowns.map(x=>`${esc(x.date)}: ${(+x.amount||0).toLocaleString()}`).join(' · ')}`:''}
       </div>
 
       ${isLongTerm ? `
@@ -25167,15 +25337,41 @@ function viewLoanSchedule(id){
       </div>
       `:''}
 
+      ${(l.drawdowns&&l.drawdowns.length>=1) ? `
+      <div style="margin-bottom:14px;padding:10px 14px;background:rgba(28,58,92,.04);border:1px solid var(--rule)">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+          <b style="font-size:12px">🔄 Đổi phương án / Gia hạn giữa kỳ (${(l.reschedules||[]).length})</b>
+          <button class="btn-sec" onclick="loanAddReschedule('${esc(l.id)}')" style="font-size:11px">+ Thêm mốc đổi phương án</button>
+        </div>
+        ${(l.reschedules&&l.reschedules.length)?`
+          <table class="table" style="font-size:11px;margin-top:6px">
+            <thead><tr><th>Từ ngày</th><th>Thay đổi</th><th>Chi tiết</th><th>Ghi chú</th><th></th></tr></thead>
+            <tbody>
+              ${l.reschedules.slice().sort((a,b)=>String(a.date).localeCompare(String(b.date))).map(r=>`
+                <tr>
+                  <td>${esc(r.date)}</td>
+                  <td>${r.action==='grace'?'Ân hạn gốc thêm':r.action==='change_method'?'Đổi phương thức':'Đổi lãi suất'}</td>
+                  <td>${r.action==='grace'?(r.n+' kỳ'):r.action==='change_method'?({equal_principal:'Gốc đều',equal_total:'Niên kim',bullet:'Bullet'}[r.method]||r.method):(r.rate+'%/năm')}</td>
+                  <td style="font-size:10px;color:var(--muted)">${esc(r.note||'')}</td>
+                  <td><button class="icon-btn danger" onclick="loanDeleteReschedule('${esc(l.id)}','${esc(r.id)}')" title="Xóa mốc (lịch tính lại)">✕</button></td>
+                </tr>`).join('')}
+            </tbody>
+          </table>
+        `:'<div style="font-size:11px;color:var(--muted);font-style:italic">Chưa có mốc đổi phương án. VD: trả vài kỳ rồi xin ân hạn gốc tiếp N tháng.</div>'}
+      </div>
+      `:''}
+
       <div style="max-height:380px;overflow-y:auto">
         <table class="table" style="font-size:11px">
           <thead style="position:sticky;top:0;background:var(--paper)">
             <tr>
               <th>Kỳ</th>
               <th>Hạn TT</th>
+              <th class="num">Ngày</th>
               <th class="num" style="min-width:92px;padding-right:14px">Gốc</th>
               <th class="num" style="min-width:80px">Lãi</th>
               <th class="num">Tổng</th>
+              <th class="num">Dư nợ</th>
               <th>Loại</th>
               <th>Trạng thái</th>
               <th></th>
@@ -25186,16 +25382,20 @@ function viewLoanSchedule(id){
               const rowStyle = p.paid ? 'opacity:.55' : (p.isGrace ? 'background:rgba(197,135,109,.08)' : (p.isPrepayPayoff ? 'background:rgba(184,71,46,.1);font-weight:600' : ''));
               const typeChip = p.isPrepayPayoff
                 ? '<span class="chip" style="background:var(--accent);color:#fff;font-size:9px">TT TRƯỚC</span>'
-                : (p.isGrace
-                  ? '<span class="chip chip-warn" style="font-size:9px">ÂN HẠN</span>'
-                  : '<span style="color:var(--muted);font-size:10px">—</span>');
+                : (p._graceExtra
+                  ? '<span class="chip" style="background:#c5876d;color:#fff;font-size:9px">ÂN HẠN+</span>'
+                  : (p.isGrace
+                    ? '<span class="chip chip-warn" style="font-size:9px">ÂN HẠN</span>'
+                    : '<span style="color:var(--muted);font-size:10px">—</span>'));
               return `
               <tr style="${rowStyle}">
                 <td>${p.period}</td>
                 <td>${esc(p.dueDate)}${(!p.paid && !p.isPrepayPayoff && canEditTreasury())?` <button class="icon-btn" style="font-size:10px;padding:1px 4px" onclick="editScheduleDate('${esc(l.id)}',${p.period})" title="Sửa ngày thu lãi — app tính lại lãi theo số ngày thực tế">✎</button>`:''}${p.dayBased?' <span title="Lãi tính theo số ngày thực tế" style="color:var(--accent);font-size:9px">⊙</span>':''}</td>
+                <td class="num" style="color:var(--muted);font-size:10px">${p._interestDays!=null?p._interestDays:''}</td>
                 <td class="num" style="padding-right:14px">${(+p.principal||0).toLocaleString()}</td>
                 <td class="num">${(+p.interest||0).toLocaleString()}</td>
                 <td class="num"><b>${(+p.total||0).toLocaleString()}</b></td>
+                <td class="num" style="color:var(--muted);font-size:10px">${p._outstanding!=null?(+p._outstanding).toLocaleString():''}</td>
                 <td>${typeChip}</td>
                 <td>${p.paid?'<span class="chip chip-good" style="font-size:9px">ĐÃ TRẢ '+(p.paidDate?esc(p.paidDate):'')+'</span>':'<span class="chip chip-warn" style="font-size:9px">CHƯA</span>'}</td>
                 <td>
@@ -25209,11 +25409,11 @@ function viewLoanSchedule(id){
           </tbody>
           <tfoot>
             <tr style="font-weight:700;border-top:2px solid var(--rule);background:rgba(184,71,46,.05)">
-              <td colspan="2">TỔNG</td>
+              <td colspan="3">TỔNG</td>
               <td class="num" style="padding-right:14px">${totalPrincipal.toLocaleString()}</td>
               <td class="num">${totalInterest.toLocaleString()}</td>
               <td class="num">${(totalPrincipal+totalInterest).toLocaleString()} ${esc(l.ccy)}</td>
-              <td colspan="3"></td>
+              <td colspan="4"></td>
             </tr>
           </tfoot>
         </table>
@@ -25255,6 +25455,79 @@ function editScheduleDate(loanId, period){
   p._interestDays = days;
   touchRecord(l); saveState(); renderAll();
   toast(`Kỳ ${period}: ${days} ngày → lãi ${interest.toLocaleString('vi-VN')} ${l.ccy}`,'good');
+  viewLoanSchedule(loanId);
+}
+
+/* v3.06.36 — ĐỔI PHƯƠNG ÁN / GIA HẠN giữa kỳ (chỉ khoản giải ngân nhiều đợt / day-based) */
+function loanAddReschedule(loanId){
+  if(!canEditTreasury()){ toast('Chỉ Admin / Kế toán trưởng','bad'); return; }
+  const l=(S.loans||[]).find(x=>x.id===loanId); if(!l) return;
+  const body=`
+    <div style="font-size:13px;display:grid;grid-template-columns:1fr 1fr;gap:10px;max-width:520px">
+      <div style="grid-column:1/3;padding:8px 12px;background:rgba(28,58,92,.05);font-size:11px;border-left:3px solid var(--ink)">
+        <b>${esc(l.bankName)}</b> · ${esc(l.contractNo||'')} — áp dụng cho các kỳ TỪ NGÀY chọn trở đi. Lịch trả sẽ tính lại.
+      </div>
+      <div class="field"><label>Loại thay đổi *</label>
+        <select id="rs-action" onchange="_rsActionChange()">
+          <option value="grace">Ân hạn gốc thêm (chỉ trả lãi N kỳ)</option>
+          <option value="change_method">Đổi phương thức trả</option>
+          <option value="change_rate">Đổi lãi suất</option>
+        </select>
+      </div>
+      <div class="field"><label>Từ ngày *</label><input type="date" id="rs-date" value="${todayISO()}"></div>
+      <div class="field" id="rs-n-wrap"><label>Số kỳ ân hạn thêm *</label><input type="number" id="rs-n" min="1" step="1" value="3"></div>
+      <div class="field" id="rs-method-wrap" style="display:none"><label>Phương thức mới</label>
+        <select id="rs-method">
+          <option value="equal_principal">Gốc đều</option>
+          <option value="equal_total">Niên kim</option>
+          <option value="bullet">Bullet</option>
+        </select>
+      </div>
+      <div class="field" id="rs-rate-wrap" style="display:none"><label>Lãi suất mới (%/năm)</label><input type="number" id="rs-rate" step="0.01" value="${l.interestRate||''}"></div>
+      <div class="field" style="grid-column:1/3"><label>Ghi chú</label><input type="text" id="rs-note" placeholder="VD: NH chấp thuận gia hạn ân hạn gốc 4 tháng"></div>
+      <div id="rs-err" style="grid-column:1/3;color:var(--bad);font-size:12px"></div>
+    </div>`;
+  openModal('🔄 Thêm mốc đổi phương án', body,
+    `<button class="btn-sec" onclick="closeModal()">Hủy</button>
+     <button class="btn-primary" onclick="_saveReschedule('${esc(loanId)}')">Lưu & tính lại lịch</button>`);
+}
+function _rsActionChange(){
+  const a=document.getElementById('rs-action').value;
+  document.getElementById('rs-n-wrap').style.display = a==='grace'?'':'none';
+  document.getElementById('rs-method-wrap').style.display = a==='change_method'?'':'none';
+  document.getElementById('rs-rate-wrap').style.display = a==='change_rate'?'':'none';
+}
+function _saveReschedule(loanId){
+  const l=(S.loans||[]).find(x=>x.id===loanId); if(!l) return;
+  const err=document.getElementById('rs-err'); err.textContent='';
+  const action=document.getElementById('rs-action').value;
+  const date=document.getElementById('rs-date').value;
+  const note=document.getElementById('rs-note').value.trim();
+  if(!date){ err.textContent='Chọn ngày áp dụng'; return; }
+  const r={ id:'RS-'+uid().slice(-6), date, action, note };
+  if(action==='grace'){ const n=parseInt(document.getElementById('rs-n').value,10)||0; if(!(n>0)){err.textContent='Số kỳ ân hạn phải > 0';return;} r.n=n; }
+  else if(action==='change_method'){ r.method=document.getElementById('rs-method').value; }
+  else if(action==='change_rate'){ const rt=+document.getElementById('rs-rate').value; if(isNaN(rt)||rt<0){err.textContent='Lãi suất không hợp lệ';return;} r.rate=rt; }
+  if(!l.reschedules) l.reschedules=[];
+  // giữ trạng thái paid theo period trước khi build lại
+  const oldPaid={}; (l.paymentSchedule||[]).forEach(p=>{ if(p.paid) oldPaid[p.dueDate]=p.paidDate||true; });
+  l.reschedules.push(r);
+  l.paymentSchedule=_generateLoanScheduleDayBased(l);
+  l.paymentSchedule.forEach(p=>{ if(oldPaid[p.dueDate]){ p.paid=true; p.paidDate=(oldPaid[p.dueDate]===true?null:oldPaid[p.dueDate]); } });
+  touchRecord(l); saveState();
+  toast('✓ Đã thêm mốc đổi phương án — lịch trả tính lại','good');
+  closeModal(); viewLoanSchedule(loanId);
+}
+function loanDeleteReschedule(loanId, rsId){
+  if(!canEditTreasury()){ toast('Chỉ Admin / Kế toán trưởng','bad'); return; }
+  const l=(S.loans||[]).find(x=>x.id===loanId); if(!l) return;
+  if(!confirm('Xóa mốc đổi phương án này? Lịch trả sẽ tính lại.')) return;
+  const oldPaid={}; (l.paymentSchedule||[]).forEach(p=>{ if(p.paid) oldPaid[p.dueDate]=p.paidDate||true; });
+  l.reschedules=(l.reschedules||[]).filter(x=>x.id!==rsId);
+  l.paymentSchedule=_generateLoanScheduleDayBased(l);
+  l.paymentSchedule.forEach(p=>{ if(oldPaid[p.dueDate]){ p.paid=true; p.paidDate=(oldPaid[p.dueDate]===true?null:oldPaid[p.dueDate]); } });
+  touchRecord(l); saveState();
+  toast('Đã xóa mốc — lịch trả tính lại','good');
   viewLoanSchedule(loanId);
 }
 
@@ -45658,11 +45931,50 @@ function _renderApPayOrderModal(level){
       </tbody>
     </table></div>
     <div style="margin-top:8px;font-size:11px;color:var(--muted)">Đã chọn <b>${selCount}</b>/${rows.length} phiếu. ${banks.length?'':'<span style="color:var(--bad)">⚠ Chưa có tài khoản ngân hàng — thêm ở mục Ngân hàng.</span>'}</div>`;
+  const _pdfBtnLabel = _isL1 ? '🖨 In PDF trình duyệt' : _isL2 ? '🖨 In PDF duyệt chi' : '🖨 In PDF lệnh trình duyệt';
+  const _approveBtn = _isL1
+    ? `<button class="btn-primary" style="background:var(--good)" onclick="apprOrderApproveAll('l1')" title="Lưu hình thức/NH + DUYỆT L1 các phiếu đã chọn → chuyển sang Duyệt chi (L2)">✓ Duyệt &amp; chuyển L2</button>`
+    : _isL2
+    ? `<button class="btn-primary" style="background:var(--good)" onclick="apprOrderApproveAll('l2')" title="Lưu hình thức/NH + DUYỆT L2 các phiếu đã chọn → Đã duyệt (vào báo cáo)">✓ Duyệt chi (L2)</button>`
+    : '';
   openModal(_modalTitle, body,
     `<button class="btn-sec" onclick="closeModal()">Đóng</button>
      <button class="btn-sec" onclick="_apPayOrderSelectAll(true)" title="Chọn tất cả phiếu">☑ Chọn tất cả</button>
      <button class="btn-sec" onclick="_apPayOrderSelectAll(false)" title="Bỏ chọn tất cả">☐ Bỏ chọn</button>
-     <button class="btn-primary" onclick="apPaymentOrderPdf()">🖨 In PDF lệnh trình duyệt</button>`);
+     <button class="btn-sec" onclick="apPaymentOrderPdf()">${_pdfBtnLabel}</button>
+     ${_approveBtn}`);
+}
+/* v3.06.34 — DUYỆT NGAY TRONG MODAL Trình duyệt(L1)/Duyệt chi(L2): lưu hình thức chi + NH
+   (giống PDF) rồi chạy wfApproveL1/wfApproveL2 cho các phiếu đã chọn → chuyển cấp luôn. */
+function apprOrderApproveAll(level){
+  const S0=_apPayOrderState; if(!S0){ toast('Chưa có dữ liệu','bad'); return; }
+  const isL1=(level==='l1');
+  if(isL1 && !(canApproveL1()||isAdmin())){ toast('Cần quyền duyệt L1','bad'); return; }
+  if(!isL1 && !(canApproveL2()||isAdmin())){ toast('Cần quyền duyệt L2','bad'); return; }
+  const rows=(S0._rows||[]).filter(r=>S0.sel[r.id]);
+  if(!rows.length){ toast('Chọn ít nhất 1 phiếu','bad'); return; }
+  // chuyển khoản / giải ngân phải có NH
+  const missingBank=rows.filter(r=>{ const m=S0.method[r.id]||'transfer'; return (m==='transfer'||m==='loan') && !S0.bank[r.id]; });
+  if(missingBank.length){ toast('Có '+missingBank.length+' phiếu Chuyển khoản/Giải ngân chưa chọn ngân hàng','bad'); return; }
+  if(!confirm((isL1?'DUYỆT L1 (trình ký) → chuyển sang Duyệt chi (L2)':'DUYỆT CHI (L2) → Đã duyệt, vào báo cáo')+' cho '+rows.length+' phiếu đã chọn?\nHình thức chi + ngân hàng sẽ được lưu vào phiếu.')) return;
+  let ok=0, fail=0;
+  rows.forEach(r=>{
+    const rec=(S.payables||[]).find(x=>x.id===r.id);
+    if(!rec){ fail++; return; }
+    // lưu hình thức chi + NH (giống lúc in PDF) — L1/L2 đã xem & sửa khi cần
+    rec._payMethod=S0.method[r.id]||'transfer';
+    rec._payBankId=(rec._payMethod==='cash')?'':(S0.bank[r.id]||'');
+    rec._payMethodBy=actorName(); rec._payMethodAt=new Date().toISOString();
+    // duyệt đúng cấp (chỉ khi phiếu đang ở đúng trạng thái)
+    const st=wfStatus(rec);
+    if(isL1 && st==='pending_l1'){ if(wfApproveL1(rec)) ok++; else fail++; }
+    else if(!isL1 && st==='pending_l2'){ if(wfApproveL2(rec)) ok++; else fail++; }
+    else { fail++; }
+  });
+  saveState();
+  closeModal();
+  try{ renderAll(); }catch(e){}
+  toast('✓ Đã duyệt '+ok+' phiếu'+(fail?' · '+fail+' phiếu không duyệt được (SOD/sai cấp)':'')+(isL1?' → chuyển L2':' → Đã duyệt'), ok?'good':'warn');
 }
 /* v3.06.00: chọn/bỏ chọn tất cả phiếu trong lệnh trình duyệt */
 function _apPayOrderSelectAll(val){
