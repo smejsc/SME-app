@@ -287,7 +287,8 @@ body.readonly-mode::before{
 /* v2.99.59: ẩn ô/bộ lọc Công ty (app 1 công ty Seahorse). Bỏ rule này nếu muốn hiện lại. */
 /* v3.03.49: hiện lại UI đa công ty (công ty con). Trước đây ẩn bằng display:none.
    Để ẩn lại, đổi .company-ui thành display:none !important. */
-.company-ui{}
+/* v3.06.53: ẩn lại bộ lọc Công ty theo yêu cầu. Để hiện lại: đổi thành .company-ui{} */
+.company-ui{display:none !important}
 .tbl.compact{font-size:12px}
 .tbl.compact th{padding:8px 8px;font-size:9px}
 .tbl.compact td{padding:8px 8px}
@@ -3105,7 +3106,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.06.52';            // bumped on each release
+const APP_VERSION='3.06.54';            // bumped on each release
 
 /* v2.62.0: Token xác thực backend — PHẢI khớp API_TOKEN trong Apps Script (Code.gs).
    Mọi request tới Apps Script tự động được gắn token qua lớp bọc fetch bên dưới.
@@ -17684,6 +17685,19 @@ function editProject(id){
 let _prjFilterVessel='';  // v3.03.78: bộ lọc dự án theo tàu
 function projectRev(pid){return allTx().filter(t=>t.projectId===pid&&t.type==='REV').reduce((s,t)=>s+txAmt(t),0);}
 function projectCost(pid){return allTx().filter(t=>t.projectId===pid&&t.type==='COST'&&t.inPL!==false).reduce((s,t)=>s+txAmt(t),0);}
+/* v3.06.54 — Giá trị HĐ THỰC HIỆN (đã phát hóa đơn) của 1 dự án = tổng AR đã DUYỆT (approved =
+   đã xuất HĐ) gắn projectId đó. Trả về số ở displayCcy (quy đổi như KPI). */
+function _projectIssuedValue(projectId){
+  if(!projectId) return 0;
+  let sum=0;
+  (S.receivables||[]).forEach(r=>{
+    if(r.projectId!==projectId) return;
+    if((typeof wfStatus==='function'?wfStatus(r):r.status)!=='approved') return;  // chỉ HĐ đã xuất
+    const g=+r.amountGross||+r.amount||0;
+    sum+=toDisplay(g, r.ccy||'USD');
+  });
+  return sum;
+}
 function renderProjects(){
   const tbl=document.getElementById('prj-table');
   if(!S.projects.length){tbl.innerHTML='<tr><td class="empty">Chưa có dự án</td></tr>';return;}
@@ -17704,11 +17718,18 @@ function renderProjects(){
   else if(_prjFilterVessel) list=list.filter(p=>p.vesselId===_prjFilterVessel);
   // v3.06.23: BẢNG RÚT GỌN ở tab 02 (Dự án) — chỉ Tên · Đơn giá · Giá trị HĐ.
   //   NV phân quyền tab Dự án CHỈ thấy mức này — KHÔNG thấy DT/CP/Margin (chuyển sang tab 01 Báo cáo định kỳ).
-  let html=`<thead><tr><th>Mã</th><th>Tên / Khách hàng</th><th>Tàu</th><th class="r">Đơn giá <span style="font-weight:400;text-transform:none">(đ/ngày)</span></th><th class="r">Giá trị HĐ (dự kiến)</th><th></th></tr></thead><tbody>`;
-  if(!list.length){ html+='<tr><td class="empty" colspan="6">Không có dự án khớp bộ lọc</td></tr></tbody>'; tbl.innerHTML=html; return; }
-  let tValue=0;
+  let html=`<thead><tr><th>Mã</th><th>Tên / Khách hàng</th><th>Tàu</th><th class="r">Đơn giá <span style="font-weight:400;text-transform:none">(đ/ngày)</span></th><th class="r">Giá trị HĐ (dự kiến)</th><th class="r">Thực hiện <span style="font-weight:400;text-transform:none">(đã phát HĐ)</span></th><th class="r">% TH</th><th></th></tr></thead><tbody>`;
+  if(!list.length){ html+='<tr><td class="empty" colspan="8">Không có dự án khớp bộ lọc</td></tr></tbody>'; tbl.innerHTML=html; return; }
+  let tValue=0, tIssued=0;
   list.forEach(p=>{
     tValue+=(+p.value||0);
+    const issued=_projectIssuedValue(p.id);
+    tIssued+=issued;
+    // % thực hiện = thực hiện / dự kiến (quy dự kiến về displayCcy để cùng đơn vị với issued)
+    const valDisp=toDisplay(+p.value||0, p.ccy||'USD');
+    const pct = valDisp>0.01 ? (issued/valDisp*100) : (issued>0.01?null:0);  // null = có TH nhưng dự kiến 0
+    const pctColor = pct==null?'var(--accent)':(pct>=100?'var(--good)':(pct>=50?'var(--warn)':'var(--muted)'));
+    const pctTxt = pct==null?'—' : (issued<0.01?'<span style="color:var(--muted)">0%</span>':`<b style="color:${pctColor}">${pct.toFixed(0)}%</b>`);
     const v=p.vesselId?S.vessels.find(v=>v.id===p.vesselId):null;
     const archiveBtn = canArchive
       ? (p.archived
@@ -17721,6 +17742,8 @@ function renderProjects(){
       <td>${v?'<b>'+v.name+'</b>':'<span style="color:var(--muted)">—</span>'}</td>
       <td class="r num">${p.unitPrice?fmt(p.unitPrice,p.ccy):'<span style="color:var(--muted)">—</span>'}</td>
       <td class="r num">${fmt(p.value,p.ccy)}</td>
+      <td class="r num">${issued>0.01?fmt(issued):'<span style="color:var(--muted)">—</span>'}</td>
+      <td class="r">${pctTxt}</td>
       <td><div class="row-actions">
         ${archiveBtn}
         <button class="icon-btn" title="Sửa" onclick="editProject('${p.id}')">✎</button>
@@ -17728,9 +17751,13 @@ function renderProjects(){
       </div></td>
     </tr>`;
   });
+  const tValDisp=list.reduce((s,p)=>s+toDisplay(+p.value||0,p.ccy||'USD'),0);
+  const tPct = tValDisp>0.01 ? (tIssued/tValDisp*100) : 0;
   html+=`<tr style="border-top:2px solid var(--ink);font-weight:700;background:var(--paper-2,rgba(0,0,0,.03))">
     <td colspan="4" class="r">TỔNG (${list.length} dự án${_prjFilterVessel&&_prjFilterVessel!=='__none__'?' · '+esc((S.vessels.find(x=>x.id===_prjFilterVessel)||{}).name||''):''})</td>
     <td class="r num">${fmt(tValue)}</td>
+    <td class="r num">${fmt(tIssued)}</td>
+    <td class="r"><b style="color:${tPct>=100?'var(--good)':'var(--warn)'}">${tPct.toFixed(0)}%</b></td>
     <td></td></tr>`;
   html+='</tbody>';
   tbl.innerHTML=html;
