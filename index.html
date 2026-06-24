@@ -3142,6 +3142,8 @@ body.readonly-mode::before{
         <button class="btn-ghost" id="hrm-tab-dash" onclick="hrmSwitchView('dash')">📊 Dashboard</button>
         <button class="btn-ghost" id="hrm-tab-list" onclick="hrmSwitchView('list')">📋 Danh sách</button>
         <button class="btn-ghost" id="hrm-tab-att" onclick="hrmSwitchView('att')">🗓️ Chấm công</button>
+        <input type="file" id="hrm-import-file" accept=".xlsx,.xls" style="display:none" onchange="hrmImportEmployees(this)">
+        <button class="btn-ghost" onclick="document.getElementById('hrm-import-file').click()" title="Import danh sách nhân viên từ Excel (mã SME đã có sẽ được cập nhật)">📥 Import DS (Excel)</button>
         <button class="btn-primary" onclick="hrmEditEmployee(null)">+ Thêm nhân sự</button>
       </div>
     </div>
@@ -3232,7 +3234,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.06.93';            // bumped on each release
+const APP_VERSION='3.06.96';            // bumped on each release
 
 /* v2.62.0: Token xác thực backend — PHẢI khớp API_TOKEN trong Apps Script (Code.gs).
    Mọi request tới Apps Script tự động được gắn token qua lớp bọc fetch bên dưới.
@@ -20484,6 +20486,26 @@ function renderPostAudit(){
       </div>
     </div>`;
 }
+/* v3.06.96: tập id ứng viên HỢP LỆ ở cấp duyệt hiện tại, BỎ QUA mọi lọc phụ.
+   Dùng để giữ tích khi user đổi lọc — chỉ gỡ tích id đã rời cấp duyệt (đã duyệt/từ chối/xóa). */
+function _apprValidIdsAtLevel(){
+  const ids=new Set();
+  try{
+    const lvl=(document.getElementById('appr-level')||{}).value||'pending_l1';
+    const arSource=(typeof filterBODRecords==='function')?filterBODRecords(S.receivables||[]):(S.receivables||[]);
+    const apSource=(typeof filterBODRecords==='function')?filterBODRecords(S.payables||[]):(S.payables||[]);
+    arSource.forEach(r=>{ if(wfStatus(r)===lvl) ids.add(r.id); });
+    apSource.forEach(r=>{
+      if(wfStatus(r)===lvl) ids.add(r.id);
+      // lệnh chi đợt (apo) ở pending_l1/l2
+      if(lvl==='pending_l1'||lvl==='pending_l2'){
+        (r.paymentOrders||[]).forEach(o=>{ if(o.status===lvl) ids.add('apo:'+r.id+':'+o.id); });
+      }
+    });
+  }catch(e){}
+  return ids;
+}
+
 function renderApprovalList(){
   try{ renderApprPitSection(); }catch(e){}
   if(!document.getElementById('page-approval')) return;
@@ -20509,11 +20531,18 @@ function renderApprovalList(){
     candidates.forEach(c=>APPROVAL_SELECTED.add(c.id));
   }
   _apprInitialized = true;
-  // Remove IDs from SELECTED that are no longer in candidates
-  const candidateIds=new Set(candidates.map(c=>c.id));
-  [...APPROVAL_SELECTED].forEach(id=>{
-    if(!candidateIds.has(id)) APPROVAL_SELECTED.delete(id);
-  });
+  // v3.06.96: GIỮ TÍCH khi đổi LỌC PHỤ (cấp duyệt/người lập/NCC/ngày...).
+  //   Trước đây xóa mọi id không nằm trong candidates ĐÃ LỌC → đổi lọc là mất tích, phải làm lại.
+  //   Nay chỉ xóa id KHÔNG CÒN hợp lệ ở cấp duyệt hiện tại (đã duyệt/từ chối/xóa khỏi hệ thống).
+  //   Id chỉ tạm ẩn do lọc phụ vẫn được GIỮ tích để nối tiếp qua các lần lọc.
+  try{
+    const validIds=_apprValidIdsAtLevel();
+    [...APPROVAL_SELECTED].forEach(id=>{
+      if(!validIds.has(id)) APPROVAL_SELECTED.delete(id);
+    });
+  }catch(e){
+    // fallback an toàn: nếu helper lỗi, KHÔNG xóa gì (thà giữ thừa còn hơn mất tích của user)
+  }
 
   // KPI
   const kEl=document.getElementById('appr-kpi');
@@ -50216,6 +50245,134 @@ const HRM_DEPTS=['Ban Giám đốc','Kế toán','Nhân sự','Khai thác','Kỹ
 const HRM_CREW_TITLES=['Thuyền trưởng','Máy trưởng','Đại phó','Máy hai','Máy ba','Phó hai','Phó ba','Thủy thủ trưởng','Thủy thủ','Thợ máy','Bếp','Khác'];
 const HRM_CONTRACT_TYPES=['Thử việc','Xác định thời hạn','Không xác định thời hạn','Thời vụ','Khoán việc','Cộng tác viên'];
 
+/* ============================================================
+   v3.06.95 — IMPORT DANH SÁCH NHÂN VIÊN TỪ EXCEL
+   Đọc file DS nhân viên (header tự dò: hàng có 'MSNV' + 'Họ và tên').
+   Map: MSNV→smartId, Họ và tên→fullName, Ngày sinh→dob, Giới tính→gender,
+        Bộ phận→dept, Chức danh→title, Ngày nhận việc→startDate, Nơi làm việc→note phụ.
+   Mã SME đã có → CẬP NHẬT; chưa có → THÊM. Preview trước, không tự ghi.
+   ============================================================ */
+let _hrmImportRows=null;  // giữ tạm dữ liệu đã parse để apply sau preview
+
+function hrmImportEmployees(inputEl){
+  const file=inputEl&&inputEl.files&&inputEl.files[0]; if(!file) return;
+  const reader=new FileReader();
+  reader.onload=(ev)=>{
+    try{
+      const wb=XLSX.read(new Uint8Array(ev.target.result),{type:'array'});
+      const ws=wb.Sheets[wb.SheetNames[0]];
+      const aoa=XLSX.utils.sheet_to_json(ws,{header:1,raw:false,defval:''});
+      // dò hàng header: chứa cả 'MSNV' và 'Họ và tên'
+      let hr=-1;
+      for(let i=0;i<Math.min(aoa.length,20);i++){
+        const line=(aoa[i]||[]).map(x=>String(x||'').toLowerCase());
+        if(line.some(c=>c.includes('msnv')) && line.some(c=>c.includes('họ và tên')||c.includes('ho va ten'))){ hr=i; break; }
+      }
+      if(hr<0){ toast('Không tìm thấy hàng tiêu đề (cần cột MSNV + Họ và tên)','bad'); return; }
+      const head=(aoa[hr]||[]).map(x=>String(x||'').trim().toLowerCase());
+      const col=(...keys)=>{ for(const k of keys){ const idx=head.findIndex(h=>h.includes(k)); if(idx>=0) return idx; } return -1; };
+      const cMsnv=col('msnv'), cName=col('họ và tên','ho va ten'),
+            cDob=col('ngày tháng năm sinh','ngày sinh','ngay sinh'),
+            cGender=col('giới tính','gioi tinh'), cWork=col('nơi làm việc','noi lam viec'),
+            cDept=col('bộ phận','bo phan'), cTitle=col('chức danh','chuc danh'),
+            cStart=col('ngày nhận việc','ngay nhan viec');
+      const _s=(row,i)=> i>=0 ? String(row[i]==null?'':row[i]).trim() : '';
+      const _date=(v)=>{ // chuẩn hóa về YYYY-MM-DD nếu nhận diện được
+        if(!v) return '';
+        const s=String(v).trim();
+        let m=s.match(/^(\d{4})-(\d{2})-(\d{2})/); if(m) return m[1]+'-'+m[2]+'-'+m[3];
+        m=s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/); if(m) return m[3]+'-'+String(m[2]).padStart(2,'0')+'-'+String(m[1]).padStart(2,'0');
+        return '';
+      };
+      const rows=[];
+      for(let r=hr+1;r<aoa.length;r++){
+        const row=aoa[r]||[];
+        const msnv=_s(row,cMsnv), name=_s(row,cName);
+        if(!msnv && !name) continue;
+        if(/^(tổng|tong|total)/i.test((name||msnv))) continue;
+        // bỏ dòng rác: mã & tên đều chỉ là số (vd hàng đánh số cột 1,2,3…)
+        if(/^\d+$/.test(msnv) && /^\d+$/.test(name)) continue;
+        if(!name || !/\s/.test(name)) { if(!/[A-Za-zÀ-ỹ]/.test(name||'')) continue; }
+        const g=_s(row,cGender);
+        rows.push({
+          smartId:msnv, fullName:name,
+          dob:_date(_s(row,cDob)),
+          gender: /nữ|nu|female|f/i.test(g)?'Nữ':(/nam|male|m/i.test(g)?'Nam':''),
+          dept:_s(row,cDept), title:_s(row,cTitle),
+          startDate:_date(_s(row,cStart)),
+          workplace:_s(row,cWork)
+        });
+      }
+      if(!rows.length){ toast('Không đọc được dòng nhân viên nào','bad'); return; }
+      _hrmImportRows=rows;
+      hrmImportPreview(rows);
+    }catch(err){
+      toast('Lỗi đọc Excel: '+(err&&err.message||err),'bad');
+    }
+    if(inputEl) inputEl.value='';
+  };
+  reader.readAsArrayBuffer(file);
+}
+
+function hrmImportPreview(rows){
+  const existing=new Set((S.hrEmployees||[]).map(e=>String(e.smartId||'').trim().toUpperCase()));
+  let nNew=0,nUpd=0;
+  const body=rows.map(r=>{
+    const up=r.smartId && existing.has(r.smartId.toUpperCase());
+    if(up) nUpd++; else nNew++;
+    return `<tr style="border-bottom:1px solid var(--rule)">
+      <td class="mono" style="font-size:11px">${esc(r.smartId)}</td>
+      <td style="font-size:12px"><b>${esc(r.fullName)}</b></td>
+      <td style="font-size:11px">${esc(r.title)}</td>
+      <td style="font-size:11px">${esc(r.dept)}</td>
+      <td class="mono" style="font-size:11px">${esc(r.dob||'—')}</td>
+      <td class="c">${up?'<span class="chip" style="background:rgba(214,158,46,.18);color:#8a6d00;font-size:10px">cập nhật</span>':'<span class="chip" style="background:rgba(74,107,44,.18);color:#3a5520;font-size:10px">mới</span>'}</td></tr>`;
+  }).join('');
+  const html=`<div style="font-size:12px;color:var(--muted);margin-bottom:8px">Đọc được <b>${rows.length}</b> nhân viên: <b style="color:#3a5520">${nNew} mới</b>, <b style="color:#8a6d00">${nUpd} cập nhật</b> (mã SME đã có). Bấm <b>Nạp</b> để áp dụng — mã đã có sẽ được cập nhật thông tin từ Excel, KHÔNG tạo trùng.</div>
+    <div class="tbl-scroll" style="max-height:420px"><table class="tbl" style="font-size:12px">
+      <thead><tr><th>Mã SME</th><th>Họ tên</th><th>Chức danh</th><th>Bộ phận</th><th>Ngày sinh</th><th class="c">TT</th></tr></thead>
+      <tbody>${body}</tbody></table></div>`;
+  openModal('📥 Xem trước import danh sách nhân viên', html,
+    `<button class="btn-ghost" onclick="closeModal()">Hủy</button><button class="btn-primary" onclick="hrmImportApply()">✓ Nạp ${rows.length} nhân viên</button>`);
+}
+
+function hrmImportApply(){
+  const rows=_hrmImportRows; if(!rows||!rows.length){ closeModal(); return; }
+  if(!Array.isArray(S.hrEmployees)) S.hrEmployees=[];
+  let nNew=0,nUpd=0;
+  rows.forEach(r=>{
+    if(!r.smartId && !r.fullName) return;
+    const fields={
+      fullName:r.fullName, gender:r.gender, dob:r.dob,
+      dept:r.dept, title:r.title, startDate:r.startDate,
+      note:r.workplace?('Nơi làm việc: '+r.workplace):''
+    };
+    const ex=(S.hrEmployees||[]).find(e=>String(e.smartId||'').trim().toUpperCase()===String(r.smartId||'').trim().toUpperCase() && r.smartId);
+    if(ex){
+      // cập nhật — chỉ ghi đè field có giá trị trong Excel (không xoá dữ liệu cũ bằng ô trống)
+      Object.keys(fields).forEach(k=>{ if(fields[k]) ex[k]=fields[k]; });
+      if(typeof touchRecord==='function') touchRecord(ex);
+      hrmLogHistory(ex.id,'edit','Import Excel','',r.smartId,'Cập nhật từ import danh sách');
+      nUpd++;
+    } else {
+      const newEmp=Object.assign({
+        id:'emp_'+Date.now()+'_'+Math.random().toString(36).slice(2,7),
+        smartId:r.smartId||hrmGenSmartId(), type:'office', status:'active', projectIds:[],
+        createdAt:new Date().toISOString(),
+        createdBy:(CURRENT_USER&&CURRENT_USER.name)||(isAdmin()?'admin':'?')
+      }, fields);
+      S.hrEmployees.push(newEmp);
+      hrmLogHistory(newEmp.id,'create','','',newEmp.smartId,'Tạo từ import danh sách');
+      nNew++;
+    }
+  });
+  _hrmImportRows=null;
+  saveState();
+  closeModal();
+  renderHRM();
+  toast(`Đã import: ${nNew} mới, ${nUpd} cập nhật ✓`,'good');
+}
+
 let _hrmView='dash';
 
 /* ---- Mã NV: dùng mã SME công ty (SME0001…). App gợi ý mã kế tiếp, HR sửa được ---- */
@@ -50603,11 +50760,12 @@ function hrmEditEmployee(id){
     ${rowWrap(fld('Ghi chú','hrm-f-note',e.note))}
   `;
   openModal(isEdit?`Sửa hồ sơ — ${e.fullName}`:'Thêm nhân sự mới', body,
-    `<button class="btn-ghost" onclick="closeModal()">Hủy</button><button class="btn-primary" onclick="hrmSaveEmployee('${id||''}')">💾 Lưu</button>`);
+    `<button class="btn-ghost" onclick="closeModal()">Hủy</button><button class="btn-sec" onclick="hrmSaveEmployee('${id||''}',{thenDocs:true})" title="Lưu hồ sơ rồi mở ngay phần Hồ sơ điện tử để tải hợp đồng/giấy tờ lên">💾 Lưu & tải tài liệu</button><button class="btn-primary" onclick="hrmSaveEmployee('${id||''}')">💾 Lưu</button>`);
 }
 
 /* ---- LƯU HỒ SƠ + ghi lịch sử thay đổi ---- */
-function hrmSaveEmployee(id){
+function hrmSaveEmployee(id, opts){
+  opts = opts || {};
   const g=fid=>{ const el=document.getElementById(fid); return el?el.value.trim():''; };
   const fullName=g('hrm-f-fullName');
   if(!fullName){ toast('Phải nhập họ tên','bad'); return; }
@@ -50654,6 +50812,7 @@ function hrmSaveEmployee(id){
     });
     Object.assign(e, newData, {smartId});
     toast('Đã cập nhật hồ sơ ✓','good');
+    opts._savedId = e.id;
   } else {
     const newEmp=Object.assign({
       id:'emp_'+Date.now()+'_'+Math.random().toString(36).slice(2,7),
@@ -50664,10 +50823,15 @@ function hrmSaveEmployee(id){
     S.hrEmployees.push(newEmp);
     hrmLogHistory(newEmp.id, 'create', '', '', smartId, 'Tạo hồ sơ nhân sự');
     toast('Đã tạo hồ sơ '+smartId+' ✓','good');
+    opts._savedId = newEmp.id;
   }
   saveState();
   closeModal();
   renderHRM();
+  // v3.06.94: "Lưu & tải tài liệu" → mở ngay hồ sơ (có khối Hồ sơ điện tử để upload)
+  if(opts.thenDocs && opts._savedId){
+    setTimeout(()=>{ try{ hrmViewEmployee(opts._savedId); }catch(e){} }, 80);
+  }
 }
 
 
