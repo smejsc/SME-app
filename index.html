@@ -3106,7 +3106,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.06.44';            // bumped on each release
+const APP_VERSION='3.06.45';            // bumped on each release
 
 /* v2.62.0: Token xác thực backend — PHẢI khớp API_TOKEN trong Apps Script (Code.gs).
    Mọi request tới Apps Script tự động được gắn token qua lớp bọc fetch bên dưới.
@@ -3248,9 +3248,9 @@ async function checkForUpdate(){
   try{
     // Fetch with cache-bust query param to bypass GitHub Pages CDN cache
     const res=await fetch('./version.json?_='+Date.now(),{cache:'no-store'});
-    if(!res.ok) return;
+    if(!res.ok) return true;
     const data=await res.json();
-    if(!data || !data.version) return;
+    if(!data || !data.version) return true;
     if(versionGT(data.version, APP_VERSION)){
       // v3.06.00: CHẶN VÒNG LẶP RELOAD — nếu vừa reload để lên đúng version này <45s trước
       //   mà vẫn thấy bản cũ (SW chưa kịp phục vụ bản mới), KHÔNG reload lại để tránh loop trắng.
@@ -3258,7 +3258,7 @@ async function checkForUpdate(){
         const guard=JSON.parse(sessionStorage.getItem('_updateReloadGuard')||'null');
         if(guard && guard.v===data.version && (Date.now()-guard.t)<45000){
           console.log('[update] bỏ qua reload lặp cho v'+data.version+' (vừa thử '+Math.round((Date.now()-guard.t)/1000)+'s trước)');
-          return;
+          return true;   // không reload nữa → cho phép chào
         }
       }catch(e){}
       // New version available — reload nhẹ nhàng (SW tự cập nhật cache)
@@ -3273,7 +3273,7 @@ async function checkForUpdate(){
           window._pendingUpdateVersion = data.version;
           console.log('[update] HOÃN cập nhật v'+data.version+' — đang mở modal nhập liệu. Sẽ cập nhật khi đóng.');
           toast('🔄 Có bản mới v'+data.version+' — sẽ tự cập nhật sau khi bạn đóng cửa sổ đang nhập.','good');
-          return;
+          return false;   // sẽ cập nhật sau → KHÔNG chào ngay
         }
       }catch(e){}
       toast('🔄 Phát hiện bản mới v' + data.version + ' — đang lưu & đồng bộ trước khi cập nhật...', 'good');
@@ -3332,9 +3332,12 @@ async function checkForUpdate(){
       setTimeout(() => {
         window.location.reload();
       }, _swReady ? 300 : 800);   // SW mới sẵn sàng → reload nhanh; chưa → chờ thêm chút
+      return false;   // sắp reload → KHÔNG chào
     }
+    return true;   // không có bản mới → an toàn để hiện popup chào
   }catch(e){
     console.log('[update] check skipped:',e.message);
+    return true;   // lỗi kiểm tra → vẫn cho chào (không chặn trải nghiệm)
   }
 }
 
@@ -5348,11 +5351,14 @@ async function authAction(){
         }catch(e){ console.warn('[presenceStart fallback]', e&&e.message); }
       }, 2000);
     }
-    // v3.06.14: POPUP lời chào (bấm mới tắt) → đóng xong mới tới popup dịp/lễ.
-    //   ĐỒNG NHẤT với đường login 2FA.
-    try{ _postLoginGreet(); }catch(e){ try{ toast(_greetingMessage(),'good'); }catch(_){ toast('✓ Đăng nhập thành công','good'); } }
-    // Check for app update silently — auto-reload if new version available
-    setTimeout(()=>checkForUpdate(),1500);
+    // v3.06.45: CHÀO SAU khi kiểm tra cập nhật — nếu có bản mới, app sẽ reload nên KHÔNG hiện
+    //   popup chào (tránh hiện thoáng rồi bị reload cuốn đi → "không thấy màn chào"). Chỉ chào
+    //   khi đã ở bản mới nhất. checkForUpdate trả về true nếu KHÔNG reload (đã mới nhất).
+    setTimeout(()=>{
+      checkForUpdate().then(noReload=>{
+        if(noReload!==false){ try{ _postLoginGreet(); }catch(e){ try{ toast(_greetingMessage(),'good'); }catch(_){ toast('✓ Đăng nhập thành công','good'); } } }
+      }).catch(()=>{ try{ _postLoginGreet(); }catch(e){} });
+    }, 800);
     startAutoUpdateChecks();
     startNetworkAutoSync();
     try{ startDevToolsMonitor(); }catch(e){}  // v2.99.47: răn đe + ghi vết mở DevTools
@@ -6771,8 +6777,12 @@ async function _complete2FALogin(){
       try{ autoExportWeeklyBackup(); }catch(e){}
     }, 2500);
   }
-  // v3.06.14: POPUP lời chào (bấm mới tắt) → đóng xong mới tới popup dịp/lễ.
-  try{ _postLoginGreet(); }catch(e){ try{ toast(_greetingMessage(),'good'); }catch(_){ toast('✓ Đăng nhập thành công','good'); } }
+  // v3.06.45: chào SAU khi kiểm tra cập nhật (xem giải thích ở luồng login thường).
+  setTimeout(()=>{
+    checkForUpdate().then(noReload=>{
+      if(noReload!==false){ try{ _postLoginGreet(); }catch(e){ try{ toast(_greetingMessage(),'good'); }catch(_){ toast('✓ Đăng nhập thành công','good'); } } }
+    }).catch(()=>{ try{ _postLoginGreet(); }catch(e){} });
+  }, 800);
 }
 /* Ghép lời chúc lễ theo giới tính (thay anh/chị) */
 function _holSub(h){
