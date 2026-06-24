@@ -719,6 +719,7 @@ body.readonly-mode::before{
   <button class="nav-item" data-page="periodic" id="nav-periodic"><span class="num">01</span>Báo cáo định kỳ</button>
   <button class="nav-item" data-page="projects"><span class="num">02</span>Dự án</button>
   <button class="nav-item" data-page="vessels"><span class="num">03</span>ON-OFFHIRE</button>
+  <button class="nav-item" data-page="fin_accounting" id="nav-fin-accounting"><span class="num">TK</span>Tài chính Kế toán</button>
   <div class="nav-group">
     <button class="nav-item nav-group-btn" data-group="receivables_payables"><span class="num">04</span>Công nợ <span class="caret">▾</span></button>
     <div class="nav-submenu" id="submenu-receivables_payables">
@@ -1979,6 +1980,30 @@ body.readonly-mode::before{
   </div>
 </section>
 
+<!-- ============ TÀI CHÍNH KẾ TOÁN (khung gom — v3.06.93) ============ -->
+<section class="page" id="page-fin_accounting">
+  <div style="max-width:1200px">
+    <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:16px;flex-wrap:wrap;margin-bottom:14px">
+      <div>
+        <h2 style="margin:0 0 4px 0">💼 Tài chính Kế toán</h2>
+        <div style="color:var(--muted);font-size:12px;max-width:720px;line-height:1.5">Trung tâm tài chính — kế toán của công ty. Tổng quan công nợ, ngân quỹ, phê duyệt thanh toán và nghĩa vụ ngân sách nhà nước ở một nơi. <i>Bấm các mục bên dưới để mở từng phần nghiệp vụ.</i></div>
+      </div>
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <button class="btn-primary" id="fin-tab-dash" onclick="finSwitchView('dash')">📊 Dashboard</button>
+      </div>
+    </div>
+
+    <!-- hàng nút mở các phần (gọi sang tab nghiệp vụ hiện có) -->
+    <div id="fin-quick-nav" style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:18px"></div>
+
+    <!-- View: Dashboard -->
+    <div id="fin-view-dash">
+      <div id="fin-dash-cards" class="kpi-row" style="margin-bottom:16px"></div>
+      <div id="fin-dash-detail"></div>
+    </div>
+  </div>
+</section>
+
 <!-- ============ OPERATIONS (Thu/Chi hộ) ============ -->
 <!-- ============ 02 · BÁO CÁO ĐỊNH KỲ (v3.03.14) ============ -->
 <section class="page" id="page-periodic">
@@ -3207,7 +3232,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.06.92';            // bumped on each release
+const APP_VERSION='3.06.93';            // bumped on each release
 
 /* v2.62.0: Token xác thực backend — PHẢI khớp API_TOKEN trong Apps Script (Code.gs).
    Mọi request tới Apps Script tự động được gắn token qua lớp bọc fetch bên dưới.
@@ -5760,6 +5785,7 @@ const TAB_TO_FIELDS={
   hrm:            ['hrEmployees','hrHistory','hrAttendance','vessels','opVessels','projects'],
   receivables:    ['receivables','projects','vessels','opVessels'],
   periodic:       ['receivables','payables','opVessels','opTransactions','opMgmtFees','ownerReportLocks','qnExpenseCats','projects','vessels'],
+  fin_accounting: ['receivables','payables','cashFunds','cashTxns','bankAccounts','bankSnapshots','loans','opVessels','opTransactions','projects','vessels','advances','taxes'],
   payables:       ['payables','projects','vessels','opVessels'],
   vessel_expense: ['vessels','projects','opVessels','payables','vesselExpenseCats','omProjectExpenseCats'],
   hr_expense:     ['payables','hrExpenseCats','projects','vessels','opVessels'],
@@ -46293,6 +46319,89 @@ function openOpPnlDetail(vid){
   openModal('📊 Chi tiết P/L — 🚢 '+esc(v.name), html, `<button class="btn-ghost" onclick="closeModal()">Đóng</button>`);
 }
 
+/* ============================================================
+   v3.06.93 — TÀI CHÍNH KẾ TOÁN (khung gom kiểu HRM, giai đoạn khung+dashboard).
+   Quick-nav: nút mở các tab nghiệp vụ hiện có (gọi navigateToPage — KHÔNG đụng code tab cũ).
+   Dashboard: tổng hợp công nợ AR/AP, đề xuất chờ duyệt, quỹ/ngân hàng.
+   ============================================================ */
+const FIN_SECTIONS=[
+  {page:'receivables', icon:'📥', label:'Phải thu'},
+  {page:'payables',    icon:'📤', label:'Phải trả'},
+  {page:'op_input',    icon:'🔁', label:'Thu-Chi hộ'},
+  {page:'advances',    icon:'💸', label:'Tạm ứng NV'},
+  {page:'cashfund',    icon:'💵', label:'Quỹ tiền mặt'},
+  {page:'banking',     icon:'🏦', label:'Tài khoản · Vốn vay'},
+  {page:'cashflow',    icon:'📈', label:'Cash flow'},
+  {page:'operations',  icon:'🚢', label:'QL vận hành tàu'},
+  {page:'approval',    icon:'✅', label:'Phê duyệt'},
+  {page:'nsnn',        icon:'🏛️', label:'NSNN'}
+];
+
+function finSwitchView(v){
+  // hiện tại chỉ có view 'dash'; để mở rộng về sau.
+  const dash=document.getElementById('fin-view-dash');
+  if(dash) dash.style.display = (v==='dash')?'':'none';
+  if(v==='dash') finRenderDash();
+}
+
+function renderFinAccounting(){
+  if(!document.getElementById('page-fin_accounting')) return;
+  // Quick-nav: chỉ hiện mục user có quyền
+  const qn=document.getElementById('fin-quick-nav');
+  if(qn){
+    qn.innerHTML=FIN_SECTIONS
+      .filter(s=>{ try{ return (typeof canAccessTab==='function')?canAccessTab(s.page):true; }catch(e){ return true; } })
+      .map(s=>`<button class="btn-ghost" style="font-size:12px;padding:7px 13px" onclick="navigateToPage('${s.page}')">${s.icon} ${esc(s.label)}</button>`)
+      .join('') || '<span style="color:var(--muted);font-size:12px">Bạn chưa được cấp quyền phần nào trong nhóm này.</span>';
+  }
+  finRenderDash();
+}
+
+function finRenderDash(){
+  const cards=document.getElementById('fin-dash-cards');
+  const detail=document.getElementById('fin-dash-detail');
+  if(!cards) return;
+  const _fmt=(n)=>{ try{ return fmt(n); }catch(e){ return String(n); } };
+  // Công nợ AR/AP còn lại (quy hiển thị)
+  let arRem=0, arCount=0, apRem=0, apCount=0;
+  (S.receivables||[]).forEach(r=>{ const x=(typeof arRemaining==='function')?arRemaining(r):0; if(x>0.5){ arRem+=toDisplay(x, r.ccy||'USD'); arCount++; } });
+  (S.payables||[]).forEach(r=>{ if(r._origin==='qn_expense'||r._origin==='vessel_expense'||r._origin==='hr_expense'){} const x=(typeof arRemaining==='function')?arRemaining(r):0; if(x>0.5){ apRem+=toDisplay(x, r.ccy||'USD'); apCount++; } });
+  // Đề xuất chờ duyệt (số đề xuất TT đợt này)
+  let pendDue=0, pendCount=0;
+  try{
+    (S.payables||[]).forEach(r=>{
+      const st=(typeof wfStatus==='function')?wfStatus(r):(r.status||'');
+      if(st==='pending_l1'||st==='pending_l2'||st==='pending_acc'){
+        pendDue+=toDisplay((typeof apDueThisAmount==='function')?apDueThisAmount(r):(+r.amountGross||+r.amount||0), r.ccy||'USD');
+        pendCount++;
+      }
+    });
+  }catch(e){}
+  // Quỹ tiền mặt + số dư ngân hàng (quy hiển thị)
+  let cashTot=0;
+  (S.cashFunds||[]).forEach(f=>{ const bal=(+f.balance||0); cashTot+=toDisplay(bal, f.ccy||'VND'); });
+  let bankTot=0;
+  (S.bankAccounts||[]).forEach(a=>{ if(a.isActive===false) return; const bal=(+a.balance||0); bankTot+=toDisplay(bal, a.ccy||'VND'); });
+
+  const _card=(icon,label,val,color,sub)=>`
+    <div class="kpi-card" style="border-left:3px solid ${color}">
+      <div class="kpi-label">${icon} ${esc(label)}</div>
+      <div class="kpi-value" style="color:${color}">${_fmt(val)}</div>
+      ${sub?`<div style="font-size:11px;color:var(--muted);margin-top:2px">${esc(sub)}</div>`:''}
+    </div>`;
+  cards.innerHTML=
+    _card('📥','Phải thu còn lại', arRem, 'var(--accent)', arCount+' khoản')+
+    _card('📤','Phải trả còn lại', apRem, 'var(--bad)', apCount+' khoản')+
+    _card('✅','Đề xuất chờ duyệt', pendDue, 'var(--warn)', pendCount+' phiếu')+
+    _card('💵','Quỹ tiền mặt', cashTot, 'var(--good)', (S.cashFunds||[]).length+' quỹ')+
+    _card('🏦','Số dư ngân hàng', bankTot, 'var(--good)', '');
+
+  if(detail){
+    detail.innerHTML=`<div class="help-callout info" style="margin-top:4px">
+      <b>Đang ở giai đoạn khung.</b> Các con số trên tổng hợp nhanh từ dữ liệu hiện có (quy về đơn vị hiển thị). Bấm các mục phía trên để vào từng phần nghiệp vụ chi tiết. Các tính năng tổng hợp sâu hơn sẽ bổ sung dần.</div>`;
+  }
+}
+
 function renderPeriodic(){
   if(!document.getElementById('page-periodic')) return;
   // v3.06.59: chip tổng ở header (kiểu chip viền mảnh — chấm tròn + nhãn + số).
@@ -50004,6 +50113,7 @@ function canAccessTab(tabId){
   //   periodic (01) + projects (02): KTT (canManageUsers) HOẶC BOD.
   //   plan (Kế hoạch) + rates (Đơn giá): thuộc nhóm NOTE → CHỈ BOD (KTT không thấy). Tab 07 giữ nguyên.
   const _isKTTorBOD = !!(CURRENT_USER.canManageUsers || CURRENT_USER.isBOD);
+  if(tabId==='fin_accounting') return _isKTTorBOD;  // v3.06.93: trung tâm tài chính kế toán
   if(tabId==='periodic') return _isKTTorBOD;
   if(tabId==='projects') return _isKTTorBOD;
   if(tabId==='plan') return !!CURRENT_USER.isBOD;
@@ -50800,6 +50910,7 @@ function hrmAttDelete(id){
 function renderAll(opts){
   try{ _applyOpTabLabel(); }catch(e){}  // v3.06.00 nhãn tab Thu-Chi hộ động
   try{ if(document.getElementById('page-periodic') && document.getElementById('page-periodic').classList.contains('active')) renderPeriodic(); }catch(e){}
+  try{ if(document.getElementById('page-fin_accounting') && document.getElementById('page-fin_accounting').classList.contains('active')) renderFinAccounting(); }catch(e){}
   opts = opts || {};
 
   // GUARD 1: If user is actively interacting AND this is background sync → SKIP entirely
