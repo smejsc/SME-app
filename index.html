@@ -3112,7 +3112,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.06.65';            // bumped on each release
+const APP_VERSION='3.06.67';            // bumped on each release
 
 /* v2.62.0: Token xác thực backend — PHẢI khớp API_TOKEN trong Apps Script (Code.gs).
    Mọi request tới Apps Script tự động được gắn token qua lớp bọc fetch bên dưới.
@@ -5293,7 +5293,9 @@ async function authAction(){
         try{
           const isNarrow = window.innerWidth <= 900;
           if(isNarrow && cfg.mobileAutoQuickView!==false && canViewQuickOverview()){
-            if(typeof openQuickView==='function') openQuickView();
+            // v3.06.66: KHÔNG tự mở Quick View ở đây (đè lên popup chào → "không thấy màn chào").
+            //   Đặt cờ để mở SAU khi popup chào đóng (nối trong _postLoginGreet → onClose chain).
+            window._pendingQuickView = true;
           }
         }catch(e){ console.warn('[mobile-auto-quickview]', e&&e.message); }
       },3500);
@@ -5361,8 +5363,10 @@ async function authAction(){
     //   popup chào (tránh hiện thoáng rồi bị reload cuốn đi → "không thấy màn chào"). Chỉ chào
     //   khi đã ở bản mới nhất. checkForUpdate trả về true nếu KHÔNG reload (đã mới nhất).
     setTimeout(()=>{
+      console.log('[greet-debug] checkForUpdate bắt đầu (login thường)');
       checkForUpdate().then(noReload=>{
-        if(noReload!==false){ try{ _postLoginGreet(); }catch(e){ try{ toast(_greetingMessage(),'good'); }catch(_){ toast('✓ Đăng nhập thành công','good'); } } }
+        console.log('[greet-debug] checkForUpdate xong, noReload=', noReload, '→ sẽ chào:', noReload!==false);
+        if(noReload!==false){ try{ _postLoginGreet(); }catch(e){ console.warn('[greet-debug] _postLoginGreet lỗi:',e); try{ toast(_greetingMessage(),'good'); }catch(_){ toast('✓ Đăng nhập thành công','good'); } } }
       }).catch(()=>{ try{ _postLoginGreet(); }catch(e){} });
     }, 800);
     startAutoUpdateChecks();
@@ -9496,6 +9500,7 @@ function _showOccasionPopup(list){
    Dùng chung tông modal với _showOccasionPopup. onClose: callback chạy sau khi đóng
    (để nối tiếp popup dịp/lễ — không để 2 modal đè nhau). */
 function _showGreetingPopup(onClose, _retry){
+  console.log('[greet-debug] _showGreetingPopup gọi, retry=', _retry||0);
   const _cb = (typeof onClose==='function') ? onClose : function(){};
   // v3.06.22: nếu đang có modal mở → hoãn rồi thử lại, NHƯNG tối đa 3 lần (tránh hoãn vô hạn
   //   khi một modal khác kẹt mở → popup chào không bao giờ hiện). Hết 3 lần → cứ hiện đè lên.
@@ -9505,6 +9510,7 @@ function _showGreetingPopup(onClose, _retry){
     // v3.06.22: chỉ hoãn nếu modal đang mở KHÔNG PHẢI chính popup chào (tránh tự đè/tự đóng mình).
     //   Dùng cờ _greetingOpen thay vì kiểm tra .show (vì popup chào cũng là #modal).
     if(m && m.classList.contains('show') && !window._greetingOpen && _r<3){
+      console.log('[greet-debug] HOÃN popup chào — có modal khác đang mở (retry '+_r+')');
       setTimeout(()=>_showGreetingPopup(onClose, _r+1), 1000); return;
     }
   }catch(e){}
@@ -9534,6 +9540,7 @@ function _showGreetingPopup(onClose, _retry){
       body,
       `<button class="btn-primary" onclick="_dismissGreeting()">${_fam?'❤️ Cảm ơn bố mẹ':'Cảm ơn'}</button>`);
     window._greetingOpen=true;  // v3.06.22: đánh dấu chính popup chào đang mở (để guard không tự hoãn)
+    console.log('[greet-debug] popup chào ĐÃ MỞ (openModal thành công)');
     window._greetOnClose=_cb;
   }catch(e){ console.warn('[greeting popup]',e&&e.message); try{ _cb(); }catch(_){} }
 }
@@ -9550,6 +9557,7 @@ function _dismissGreeting(){
    lễ nhỏ) → KHÔNG hiện popup chào bình thường; chỉ dùng lời chúc/cảm ơn riêng cho ngày đó.
    Popup chào thường CHỈ hiện vào ngày hoàn toàn bình thường. */
 function _postLoginGreet(){
+  console.log('[greet-debug] _postLoginGreet chạy');
   window._greetingOpen=false;  // v3.06.22: reset cờ trước mỗi lần chào
   let _fam=null,_occ=[],_hol=[];
   try{
@@ -9559,6 +9567,7 @@ function _postLoginGreet(){
   }catch(e){ console.warn('[postLoginGreet detect]',e&&e.message); }
   // Hôm nay có dịp/lễ đặc biệt? (sinh nhật/dịp cá nhân HOẶC bất kỳ ngày lễ nào — lớn lẫn nhỏ)
   const _hasSpecialDay = (_occ.length>0) || (_hol.length>0);
+  console.log('[greet-debug] hasSpecialDay=', _hasSpecialDay, 'occ=', _occ.length, 'hol=', _hol.length, 'fam=', !!_fam);
   if(_hasSpecialDay){
     // ƯU TIÊN ngày lễ/dịp → bỏ popup chào thường, chỉ chạy lời chúc/cảm ơn riêng.
     // Welcome onboarding nhường: chạy sau (nếu chưa xem) để không đè popup dịp/lễ.
@@ -9595,10 +9604,20 @@ function checkWelcomePopup(){
 }
 /* v3.06.16: hiện welcome onboarding NGAY (không setTimeout) — chỉ khi chưa xem VÀ
    không có modal nào đang mở (tránh đè popup chào/dịp-lễ). Gọi từ callback đóng popup chào. */
+function _maybeOpenPendingQuickView(){
+  // v3.06.66: mở Quick View (mobile) SAU khi popup chào + welcome đã xong — không đè màn chào.
+  if(!window._pendingQuickView) return;
+  window._pendingQuickView=false;
+  try{
+    const m=document.getElementById('modal');
+    if(m && m.classList.contains('show')){ window._pendingQuickView=true; setTimeout(_maybeOpenPendingQuickView, 1000); return; }
+  }catch(e){}
+  try{ if(typeof openQuickView==='function' && typeof canViewQuickOverview==='function' && canViewQuickOverview()) openQuickView(); }catch(e){}
+}
 function _checkWelcomeNow(){
   const userKey = isAdmin() ? 'admin' : (CURRENT_USER && CURRENT_USER.name) || 'unknown';
   const flag = 'seahorse_welcome_seen_' + userKey;
-  try{ if(localStorage.getItem(flag)) return; }catch(e){ return; }
+  try{ if(localStorage.getItem(flag)){ _maybeOpenPendingQuickView(); return; } }catch(e){ _maybeOpenPendingQuickView(); return; }
   // Nếu đang có modal mở (vd popup dịp/lễ) → hoãn, thử lại sau khi đóng.
   try{
     const m=document.getElementById('modal');
@@ -9657,6 +9676,7 @@ function showWelcomeModal(userKey, flag){
 function _dismissWelcome(flag){
   try{ localStorage.setItem(flag, '1'); }catch(e){}
   closeModal();
+  setTimeout(()=>{ try{ _maybeOpenPendingQuickView(); }catch(e){} }, 300);  // v3.06.66
 }
 
 /* HELP MODAL — full guide, with TOC + sections, optionally jumping to active role */
