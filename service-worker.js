@@ -6,7 +6,7 @@
    để force trình duyệt invalidate cache cũ.
 */
 
-const SW_VERSION = 'v3.06.89';
+const SW_VERSION = 'v3.06.92';
 const CACHE_NAME = `seahorse-${SW_VERSION}`;
 
 // Pre-cache critical files on install
