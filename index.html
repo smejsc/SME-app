@@ -3235,7 +3235,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.07.15';            // bumped on each release
+const APP_VERSION='3.07.23';            // bumped on each release
 
 /* v2.62.0: Token xác thực backend — PHẢI khớp API_TOKEN trong Apps Script (Code.gs).
    Mọi request tới Apps Script tự động được gắn token qua lớp bọc fetch bên dưới.
@@ -12799,17 +12799,13 @@ function mergeByID(cloudArr, localArr, idField, skipTombstone, fieldName){
     // v3.04.34: CHẶN THEO NỘI DUNG — loại bản ghi khớp khóa đã purge (bất kể ID).
     //   Chỉ áp cho payables / opTransactions (bút toán tiền). Danh mục nền không đụng.
     if(fieldName==='payables' || fieldName==='opTransactions'){
-      // v3.04.39: KHÔNG áp INVRULE/purgedContent TỰ ĐỘNG khi merge nữa (rủi ro xóa nhầm).
+      // v3.04.39: KHÔNG áp INVRULE/purgedContent TỰ ĐỘNG khi merge (rủi ro xóa nhầm).
       //   Việc dọn trùng theo nội dung chỉ chạy khi người dùng bấm nút (applyContentPurgeManual).
-      // v3.07.14: NHƯNG áp purgedContent (khóa nội dung ĐÍCH DANH do admin xóa vĩnh viễn) —
-      //   khóa rất cụ thể (vesselId|type|inv|amount|date|ccy|desc) nên an toàn, chỉ diệt đúng phiếu
-      //   admin đã chủ động purge. Chống phiếu sống lại từ cloud/bản cũ dù id khác.
-      try{
-        const pcSet=_purgedContentSet(fieldName);
-        if(pcSet && pcSet.size>0){
-          merged=merged.filter(r=>!pcSet.has(_contentKey(r)));
-        }
-      }catch(e){}
+      // v3.07.21: GỠ BỎ purgedContent tự động (đã thêm nhầm ở v3.07.14). LÝ DO: 2 khoản thu/chi hộ
+      //   HỢP LỆ giống hệt nhau (cùng tàu/ngày/số tiền/diễn giải — vd chủ tàu chuyển 2 lần 500k)
+      //   bị coi là trùng → app XÓA MẤT 1 khoản. Khóa nội dung KHÔNG phân biệt được "2 khoản thật"
+      //   với "1 khoản nhân đôi do sync". Chống sống lại CHỈ dùng tombstone theo ID (an toàn, mỗi
+      //   phiếu 1 ID riêng, không đụng phiếu khác cùng nội dung).
     }
   }
   return {merged, conflicts};
@@ -33789,6 +33785,7 @@ function opBalanceBreakdown(vid){
     const amtUsd=opTxUsd(t);
     // v3.03.40: dòng 'chi' của khoán không trừ số dư chủ tàu (theo dõi riêng để đối chiếu).
     if(t.khoanRole==='chi'){ khoanChiThuc+=amtUsd; return; }
+    if(t.seahorseOwn) return;   // v3.07.17: CP Seahorse tự chịu — không tính vào chi hộ chủ tàu/số dư
     if(t.type==='IN') thu+=amtUsd;
     else {
       chi+=amtUsd; if(t._isBudget) chiBudget+=amtUsd;
@@ -33823,6 +33820,7 @@ function opBalance(vid){
     // v3.03.40: KHOÁN — dòng 'chi' (thực chi cho khoán) KHÔNG trừ số dư chủ tàu (đã trừ bằng số khoán
     //   ở dòng 'doi'). Chỉ dòng 'doi' + chi hộ thường mới trừ. Tránh trừ TRÙNG số dư chủ tàu.
     if(t.khoanRole==='chi') return s;
+    if(t.seahorseOwn) return s;   // v3.07.17: CP Seahorse tự chịu — KHÔNG trừ số dư chủ tàu
     const amtUsd = opTxUsd(t);
     const delta = t.type==='IN' ? amtUsd : -amtUsd;
     const fees = opTxFeesUsd(t);
@@ -35793,24 +35791,15 @@ function purgeOpTxForever(id){
   if(!isAdmin()){ toast('Chỉ admin được xóa vĩnh viễn','bad'); return; }
   if(t._locked && !t._isBudget){ toast('🔒 Phiếu đã khóa — không xóa được','bad'); return; }
   const v=(S.opVessels||[]).find(x=>x.id===t.vesselId);
-  confirmDelete('XÓA VĨNH VIỄN bút toán chi hộ (chặn sống lại qua đồng bộ)',
-    `${t.date} · ${v?v.name:'?'} · ${t.type==='IN'?'Thu hộ':'Chi hộ'}<br>${esc(t.desc)||'—'}<br><b>${fmtFull(t.amount,v?v.ccy:'VND')}</b><br><span style="color:var(--bad);font-size:11px">Phiếu này sẽ bị chặn theo NỘI DUNG — không thể sống lại qua sync, kể cả từ máy/bản cũ.</span>`,
+  confirmDelete('XÓA bút toán chi hộ (ghi bia mộ chống sống lại)',
+    `${t.date} · ${v?v.name:'?'} · ${t.type==='IN'?'Thu hộ':'Chi hộ'}<br>${esc(t.desc)||'—'}<br><b>${fmtFull(t.amount,v?v.ccy:'VND')}</b><br><span style="color:var(--muted);font-size:11px">Xóa ĐÚNG phiếu này + ghi bia mộ theo ID để không sống lại qua đồng bộ. KHÔNG đụng phiếu khác (kể cả phiếu cùng số tiền/nội dung).</span>`,
     ()=>{
-      const key=_contentKey(t);
-      // 1) chặn theo nội dung (purgedContent) — diệt mọi bản cùng nội dung dù id khác
-      try{
-        const pc=_purgedContent();
-        if(key && !pc.some(p=>p.key===key && p.field==='opTransactions')){
-          pc.push({key, field:'opTransactions', at:new Date().toISOString(), note:'purge chi hộ '+(t.desc||'').slice(0,40)});
-        }
-      }catch(e){}
-      // 2) xóa MỌI bản cùng nội dung hiện có + ghi tombstone từng id
-      const victims=(S.opTransactions||[]).filter(x=>_contentKey(x)===key);
-      const ids=victims.map(x=>x.id);
-      S.opTransactions=(S.opTransactions||[]).filter(x=>_contentKey(x)!==key);
-      try{ markDeleted(ids, 'opTransactions'); }catch(e){ try{ markDeleted(ids); }catch(_){} }
-      try{ logAuditEvent('purge_optx_forever',{ids, key, vesselId:t.vesselId, desc:(t.desc||'').slice(0,60)}); }catch(e){}
-      saveState(); toast('Đã xóa vĩnh viễn ('+ids.length+' bản) — chặn sống lại','good'); renderAll();
+      // v3.07.21: CHỈ xóa ĐÚNG phiếu theo ID + ghi tombstone ID. KHÔNG dùng purgedContent
+      //   (chặn theo nội dung gây xóa nhầm 2 khoản hợp lệ giống nhau — vd 2 lần thu hộ 500k).
+      S.opTransactions=(S.opTransactions||[]).filter(x=>x.id!==id);
+      try{ markDeleted([id], 'opTransactions'); }catch(e){ try{ markDeleted(id); }catch(_){} }
+      try{ logAuditEvent('purge_optx_forever',{id, vesselId:t.vesselId, desc:(t.desc||'').slice(0,60)}); }catch(e){}
+      saveState(); toast('Đã xóa phiếu — ghi bia mộ chống sống lại','good'); renderAll();
     });
 }
 
@@ -36867,7 +36856,7 @@ function renderOpInputRecent(){
       const docBtn=`<button class="icon-btn" title="${_locked?'Kỳ đã khóa — chỉ bổ sung chứng từ':'Chứng từ đính kèm'}" onclick="openOpTxDocsAfterLock('${t.id}')" style="${_nAtt>0?'color:var(--accent)':''}">📎${_nAtt>0?`<span style="font-size:9px">${_nAtt}</span>`:''}</button>`;
       const _fromAp=!!t._fromAp;   // v3.06.00: bút toán ảo từ phiếu AP gắn tàu
       const actCell = _fromAp
-        ? `<button class="icon-btn" title="Phiếu AP gắn tàu — mở để xem/sửa ở tab Công nợ" onclick="${t._apId?`openPayableModal('${t._apId}')`:''}" style="color:var(--accent)">↗</button>${(Array.isArray(t.attachments)&&t.attachments.length)?`<span class="mono" style="font-size:9px;color:var(--accent)" title="${t.attachments.length} chứng từ (ở phiếu AP)">📎${t.attachments.length}</span>`:''}`
+        ? `<button class="icon-btn" title="Phiếu AP gắn tàu — mở để xem/sửa ở tab Công nợ" onclick="${t._apId?`openPayableModal('${t._apId}')`:''}" style="color:var(--accent)">↗</button>${isAdmin()&&t._apId?`<button class="icon-btn" title="Chủ tàu KHÔNG đồng ý trả → chuyển thành CHI PHÍ SEAHORSE TỰ CHỊU (không lên báo cáo chủ tàu, vào P&L mảng QL vận hành)" onclick="toggleSeahorseOwn('${t._apId}')" style="color:#8a5a1e">⇄🏢</button>`:''}${(Array.isArray(t.attachments)&&t.attachments.length)?`<span class="mono" style="font-size:9px;color:var(--accent)" title="${t.attachments.length} chứng từ (ở phiếu AP)">📎${t.attachments.length}</span>`:''}`
         : (_locked
         ? `${docBtn}<span class="mono" style="font-size:9px;color:var(--bad)" title="Kỳ đã ký gửi chủ tàu">🔒</span>`
         : (isBudget
@@ -36970,6 +36959,26 @@ function opFeeCcyChanged(){
 
 /* v3.01.04: biến AP gắn tàu QL thành "chi hộ ảo" (OUT) để tab 06 hiển thị đủ + khớp opBalance.
    Read-only: không sửa/xóa như opTransaction; hàng có nút mở AP gốc. */
+/* v3.07.16: ADMIN chuyển 1 khoản AP gắn tàu QL: chi hộ chủ tàu ↔ CP Seahorse TỰ CHỊU.
+   Dùng khi chủ tàu KHÔNG đồng ý trả → Seahorse gánh (không lên báo cáo chủ tàu, không trừ số dư chủ tàu, vào P&L mảng QL vận hành). */
+function toggleSeahorseOwn(apId){
+  if(!isAdmin()){ toast('Chỉ admin được chuyển khoản này','bad'); return; }
+  const r=(S.payables||[]).find(x=>x.id===apId);
+  if(!r){ toast('Không tìm thấy phiếu AP','bad'); return; }
+  const turningOn = !r.seahorseOwn;   // bật = chuyển sang Seahorse tự chịu
+  const v=(S.opVessels||[]).find(x=>x.id===r.vesselId);
+  const msg = turningOn
+    ? `Chuyển khoản này thành <b>CHI PHÍ SEAHORSE TỰ CHỊU</b>?<br><br>${esc(r.partner||'')} · ${esc(r.desc||'')}<br><b>${fmtFull(r.amountGross||r.amount||0, r.ccy||'VND')}</b> · ${v?esc(v.name):''}<br><br><span style="color:var(--accent);font-size:11px">→ KHÔNG đòi chủ tàu, KHÔNG lên báo cáo chủ tàu, KHÔNG trừ số dư chủ tàu. Ghi vào P&L mảng QL vận hành (Seahorse gánh).</span>`
+    : `Chuyển NGƯỢC lại thành <b>CHI HỘ CHỦ TÀU</b>?<br><br>${esc(r.partner||'')} · ${esc(r.desc||'')}<br><b>${fmtFull(r.amountGross||r.amount||0, r.ccy||'VND')}</b><br><br><span style="color:var(--muted);font-size:11px">→ Quay lại đòi chủ tàu, lên báo cáo chủ tàu, trừ số dư chủ tàu như cũ.</span>`;
+  confirmDialog(turningOn?'Chuyển sang Seahorse tự chịu?':'Chuyển lại Chi hộ chủ tàu?', msg, '', ()=>{
+    r.seahorseOwn = turningOn;
+    try{ touchRecord(r); }catch(e){ r.updatedAt=new Date().toISOString(); }
+    try{ logAuditEvent('toggle_seahorse_own',{apId:r.id, seahorseOwn:turningOn, vesselId:r.vesselId, partner:r.partner||'', amount:r.amountGross||r.amount||0, by:actorName()}); }catch(e){}
+    saveState(); renderAll();
+    toast(turningOn?'Đã chuyển sang CP Seahorse tự chịu ✓':'Đã chuyển lại Chi hộ chủ tàu ✓','good');
+  });
+}
+
 function _opApVirtualTx(){
   const opIds=new Set((S.opVessels||[]).map(v=>v.id));
   // v3.06.05: BỎ dòng seahorseOwn (Seahorse tự chịu) khỏi sổ chi hộ ảo — không phải chi hộ chủ tàu.
@@ -37057,8 +37066,32 @@ function showOpTxDetail(id){
   }
   // v3.06.32: nút Cập nhật hồ sơ (chứng từ + giải trình) — luôn có, kể cả khi đã khóa/đã TT
   foot+=`<button class="btn-sec" onclick="closeModal();openOpTxDocsAfterLock('${t.id}')" title="Bổ sung chứng từ / giải trình — không đổi nội dung phiếu" style="border-color:var(--good);color:var(--good)">📎 Cập nhật hồ sơ</button>`;
+  // v3.07.17: ADMIN — chuyển chi hộ trực tiếp (opTx) ↔ CP Seahorse tự chịu (chủ tàu không đồng ý trả).
+  //   Chỉ áp cho dòng CHI HỘ THẬT (OUT, không phải khoán/dự kiến/phí QL/AP ảo).
+  if(isAdmin() && isOut && !t._fromAp && t.khoanRole!=='chi' && !t._isBudget && !t._mgmtFeeId){
+    foot+=`<button class="btn-sec" onclick="toggleOpTxSeahorseOwn('${t.id}')" title="${t.seahorseOwn?'Chuyển LẠI thành chi hộ chủ tàu (đòi chủ tàu, lên báo cáo)':'Chủ tàu KHÔNG đồng ý trả → chuyển thành CHI PHÍ SEAHORSE TỰ CHỊU (không đòi chủ tàu, không lên báo cáo, không trừ số dư)'}" style="border-color:#8a5a1e;color:#8a5a1e">${t.seahorseOwn?'⇄ Trả lại chi hộ chủ tàu':'⇄🏢 Seahorse tự chịu'}</button>`;
+  }
   foot+=`<button class="btn-sec" onclick="closeModal()">Đóng</button>`;
   openModal('👁 Chi tiết phiếu '+(isOut?'Chi hộ':'Thu hộ'), body, foot);
+}
+
+/* v3.07.17: đảo cờ seahorseOwn cho opTransaction (chi hộ trực tiếp). */
+function toggleOpTxSeahorseOwn(id){
+  if(!isAdmin()){ toast('Chỉ admin','bad'); return; }
+  const t=(S.opTransactions||[]).find(x=>x.id===id);
+  if(!t){ toast('Không tìm thấy phiếu','bad'); return; }
+  const turningOn=!t.seahorseOwn;
+  const v=(S.opVessels||[]).find(x=>x.id===t.vesselId);
+  const msg = turningOn
+    ? `Chuyển khoản này thành <b>CHI PHÍ SEAHORSE TỰ CHỊU</b>?<br><br>${esc(t.desc||'')}<br><b>${fmtFull(t.amount,v?v.ccy:'VND')}</b> · ${v?esc(v.name):''}<br><br><span style="color:#8a5a1e;font-size:11px">→ KHÔNG đòi chủ tàu, KHÔNG lên báo cáo chủ tàu, KHÔNG trừ số dư chủ tàu. Seahorse gánh chi phí này.</span>`
+    : `Chuyển NGƯỢC lại thành <b>CHI HỘ CHỦ TÀU</b>?<br><br>${esc(t.desc||'')}<br><b>${fmtFull(t.amount,v?v.ccy:'VND')}</b><br><br><span style="color:var(--muted);font-size:11px">→ Quay lại đòi chủ tàu, lên báo cáo, trừ số dư chủ tàu như cũ.</span>`;
+  confirmDialog(turningOn?'Chuyển sang Seahorse tự chịu?':'Chuyển lại Chi hộ chủ tàu?', msg, '', ()=>{
+    t.seahorseOwn=turningOn;
+    try{ touchRecord(t); }catch(e){ t.updatedAt=new Date().toISOString(); }
+    try{ logAuditEvent('toggle_optx_seahorse_own',{id:t.id, seahorseOwn:turningOn, vesselId:t.vesselId, desc:(t.desc||'').slice(0,60), amount:t.amount, by:actorName()}); }catch(e){}
+    saveState(); closeModal(); renderAll();
+    toast(turningOn?'Đã chuyển sang CP Seahorse tự chịu ✓':'Đã chuyển lại Chi hộ chủ tàu ✓','good');
+  });
 }
 
 function _opClearFilters(){
@@ -37113,6 +37146,7 @@ function opExportExcel(){
     // v3.06.00: Excel GỬI CHỦ TÀU — đồng bộ với PDF: GIẤU thực chi khoán (khoanRole='chi', bí mật KD)
     //   và bỏ dòng KHÔNG đưa vào báo cáo chủ tàu (reportToOwner===false). Giữ khớp số dư.
     if(t.khoanRole==='chi') return false;
+    if(t.seahorseOwn) return false;   // v3.07.17: CP Seahorse tự chịu — không lên báo cáo chủ tàu
     if(t.reportToOwner===false) return false;
     if(fV && t.vesselId!==fV) return false;
     if(fM && !(t.date||'').startsWith(fM)) return false;
@@ -37277,12 +37311,15 @@ function renderOpTxList(){
     const rows=filtered.filter(t=>t.type===type).sort((a,b)=>b.date.localeCompare(a.date));
     // v1.89.0: Quản lý vận hành tàu — đồng chuẩn là USD. Tổng cộng theo USD.
     let totAll=0, totPaid=0, totUnpaid=0, totFees=0, totVatUsd=0;
-    let totBudget=0, totReal=0, totKhoanChi=0;   // v3.06.00: totKhoanChi = thực chi khoán (KHÔNG vào tổng chi, chỉ ở sổ khoán)
+    let totBudget=0, totReal=0, totKhoanChi=0, totSeaOwn=0;   // v3.06.00: totKhoanChi = thực chi khoán (KHÔNG vào tổng chi); v3.07.22: totSeaOwn = CP Seahorse tự chịu (KHÔNG vào tổng chi hộ chủ tàu)
     rows.forEach(t=>{
       const amtUsd=opTxUsd(t);
       // v3.06.00: THỰC CHI KHOÁN (khoanRole='chi') chỉ tính ở Sổ theo dõi Khoán —
       //   KHÔNG cộng vào tổng chi hộ (khớp opBalanceBreakdown + báo cáo tóm tắt).
       if(t.khoanRole==='chi'){ totKhoanChi+=amtUsd; return; }
+      // v3.07.22: CP Seahorse TỰ CHỊU — KHÔNG vào tổng chi hộ chủ tàu (khớp opBalance + báo cáo).
+      //   Theo dõi riêng để hiển thị tách.
+      if(t.seahorseOwn){ totSeaOwn+=amtUsd; return; }
       totAll+=amtUsd;
       if(t._isBudget) totBudget+=amtUsd; else totReal+=amtUsd;
       if(t.paid){totPaid+=amtUsd;}else{totUnpaid+=amtUsd;}
@@ -37296,7 +37333,7 @@ function renderOpTxList(){
     const _grandUsd = (type==='OUT') ? (totAll + totFees) : totAll;
     const _hdrTot = (type==='OUT')
       ? `<span style="font-family:var(--font-mono);font-weight:700;color:var(--bad)">${fmtCcy(_grandUsd,'USD')}</span>`
-        + `<span style="font-size:10px;color:var(--muted);margin-left:8px">thực ${fmtCcy(totReal,'USD')}${totBudget>0?` · <span style="color:#8a5a1e">dự kiến ${fmtCcy(totBudget,'USD')}</span>`:''}${totFees>0?` · phí ${fmtCcy(totFees,'USD')}`:''}</span>`
+        + `<span style="font-size:10px;color:var(--muted);margin-left:8px">thực ${fmtCcy(totReal,'USD')}${totBudget>0?` · <span style="color:#8a5a1e">dự kiến ${fmtCcy(totBudget,'USD')}</span>`:''}${totFees>0?` · phí ${fmtCcy(totFees,'USD')}`:''}${totSeaOwn>0?` · <span style="color:#8a5a1e">🏢 Seahorse chịu ${fmtCcy(totSeaOwn,'USD')}</span>`:''}</span>`
       : `<span style="font-family:var(--font-mono);font-weight:700;color:#2d6a6a">${fmtCcy(_grandUsd,'USD')}</span>`;
     // v3.06.00: dạng <details> đẹp giống tab 4 — viền màu, summary nền nhạt, MẶC ĐỊNH ĐÓNG (thu gọn).
     //   v3.06.00: khi ĐANG LỌC (NCC/diễn giải) → tự MỞ section để thấy kết quả khớp ngay.
@@ -37341,6 +37378,7 @@ function renderOpTxList(){
         const ncc = type==='OUT' ? `<b>${esc(t.vendor||'—')}</b><br>` : '';
         // v3.04.12: nhãn phân loại rõ ràng — đòi / không đòi chủ tàu
         let kindChip='';
+        if(t.seahorseOwn) kindChip=` <span class="chip" style="font-size:9px;background:rgba(138,90,30,.14);color:#8a5a1e" title="CP Seahorse TỰ CHỊU — chủ tàu không đồng ý trả. KHÔNG đòi chủ tàu, không lên báo cáo, không trừ số dư. Vào P&L mảng QL vận hành.">🏢 Seahorse tự chịu</span>`;
         if(t.khoanRole==='doi') kindChip=` <span class="chip" style="font-size:9px;background:rgba(45,106,106,.15);color:#2d6a6a" title="Khoán — ĐÒI chủ tàu theo số khoán (trừ số dư chủ tàu)">📦 Khoán·Đòi</span>`;
         else if(t.khoanRole==='chi') kindChip=` <span class="chip" style="font-size:9px;background:rgba(184,71,46,.12);color:#b8472e" title="Thực chi khoán — KHÔNG đòi chủ tàu, không trừ số dư. Chỉ để đối chiếu chênh (công ty chịu/ăn chênh).">🔻 Chi thực·Không đòi</span>`;
         else if(type==='OUT' && t.opCat==='CREW_SALARY') kindChip=` <span class="chip" style="font-size:9px;background:rgba(83,74,183,.12);color:#534ab7" title="Lương thuyền viên">💵 Lương TV</span>`;
@@ -37923,7 +37961,7 @@ function generateOpReport(){
     });
     // Filter period
     // v3.01.77: số liệu kỳ = MỌI bút toán theo NGÀY trong kỳ, không phân biệt đã/chưa TT.
-    const period=all.filter(x=>x.date>=from && x.date<=to && x.reportToOwner!==false);  // v3.04.73: bỏ dòng chi hộ KHÔNG đưa vào báo cáo chủ tàu
+    const period=all.filter(x=>x.date>=from && x.date<=to && x.reportToOwner!==false && !x.seahorseOwn);  // v3.04.73: bỏ dòng chi hộ KHÔNG đưa vào báo cáo chủ tàu; v3.07.17: bỏ CP Seahorse tự chịu
     const inRows=period.filter(x=>x.type==='IN');
     // v3.03.52: KHOÁN — báo cáo CHỦ TÀU chỉ hiện SỐ ĐÒI (khoanRole='doi'); GIẤU dòng thực chi
     //   (khoanRole='chi') và phần chênh (bí mật KD). Dòng 'chi' không trừ số dư chủ tàu (opBalance đã skip),
@@ -50620,6 +50658,27 @@ function hrmImportEmployees(inputEl){
             cGender=col('giới tính','gioi tinh'), cWork=col('nơi làm việc','noi lam viec'),
             cDept=col('bộ phận','bo phan'), cTitle=col('chức danh','chuc danh'),
             cStart=col('ngày nhận việc','ngay nhan viec');
+      // v3.07.18: map ĐẦY ĐỦ các cột còn lại (file DS chi tiết 36 cột)
+      const cId=col('cccd','passport','cmnd'),
+            cIdDate=col('ngày cấp'),
+            cIdPlace=col('nơi cấp'),
+            cNation=col('quốc tịch','quoc tich'),
+            cAddr=col('địa chỉ cư trú','dia chi cu tru','địa chỉ thường','nơi ở'),
+            cEdu=col('trình độ','trinh do'),
+            cSchool=col('trường đào tạo','truong dao tao'),
+            cMajor=col('ngành đào tạo','nganh dao tao'),
+            cContractSign=col('ngày ký hợp đồng','ngay ky hop dong','ngày ký hđ'),
+            cContractEnd=col('ngày kết thúc hợp đồng','ngày kết thúc hđ','ngay ket thuc'),
+            cContractTerm=col('thời hạn hợp đồng','thoi han hop dong','thời hạn hđ'),
+            cContractNo=col('số hợp đồng','so hop dong','số hđ'),
+            cBhxh=col('mã số bhxh','ma so bhxh','bhxh'),
+            cPhone=col('số điện thoại','dien thoai','sđt'),
+            cEmailP=col('mail cá nhân','email cá nhân','mail ca nhan'),
+            cEmailW=col('mail công ty','email công ty','mail cong ty'),
+            cBankNo=col('số tài khoản','so tai khoan','tài khoản ngân'),
+            cBankName=col('tên ngân hàng','ten ngan hang','ngân hàng - chi'),
+            cQuit=col('ngày nghỉ việc','ngay nghi viec'),
+            cNote=col('ghi chú','ghi chu');
       const _s=(row,i)=> i>=0 ? String(row[i]==null?'':row[i]).trim() : '';
       const _date=(v)=>{ // chuẩn hóa về YYYY-MM-DD nếu nhận diện được
         if(!v) return '';
@@ -50638,13 +50697,38 @@ function hrmImportEmployees(inputEl){
         if(/^\d+$/.test(msnv) && /^\d+$/.test(name)) continue;
         if(!name || !/\s/.test(name)) { if(!/[A-Za-zÀ-ỹ]/.test(name||'')) continue; }
         const g=_s(row,cGender);
+        // v3.07.18: gộp học vấn + số HĐ + ngày nghỉ vào ghi chú nếu có
+        const _eduParts=[_s(row,cEdu),_s(row,cSchool),_s(row,cMajor)].filter(Boolean);
+        const _noteParts=[];
+        if(_s(row,cNote)) _noteParts.push(_s(row,cNote));
+        if(_eduParts.length) _noteParts.push('Học vấn: '+_eduParts.join(' · '));
+        if(_s(row,cContractNo)) _noteParts.push('Số HĐ: '+_s(row,cContractNo));
+        if(_s(row,cContractEnd)) _noteParts.push('Kết thúc HĐ: '+_date(_s(row,cContractEnd)));
+        if(_s(row,cQuit)) _noteParts.push('Nghỉ việc: '+_date(_s(row,cQuit)));
+        if(_s(row,cWork)) _noteParts.push('Nơi làm việc: '+_s(row,cWork));
+        if(_s(row,cBhxh)) _noteParts.push('Mã BHXH: '+_s(row,cBhxh));
+        if(_s(row,cEmailW)) _noteParts.push('Email công ty: '+_s(row,cEmailW));
         rows.push({
           smartId:msnv, fullName:name,
           dob:_date(_s(row,cDob)),
           gender: /nữ|nu|female|f/i.test(g)?'Nữ':(/nam|male|m/i.test(g)?'Nam':''),
           dept:_s(row,cDept), title:_s(row,cTitle),
           startDate:_date(_s(row,cStart)),
-          workplace:_s(row,cWork)
+          workplace:_s(row,cWork),
+          // v3.07.18: các trường mới
+          idNo:_s(row,cId),
+          idIssueDate:_date(_s(row,cIdDate)),
+          idIssuePlace:_s(row,cIdPlace),
+          nationality:_s(row,cNation),
+          addrCurrent:_s(row,cAddr),
+          phone:_s(row,cPhone),
+          email:_s(row,cEmailP) || _s(row,cEmailW),
+          contractSignDate:_date(_s(row,cContractSign)),
+          contractType:_s(row,cContractTerm),
+          bankAccNo:_s(row,cBankNo),
+          bankName:_s(row,cBankName),
+          _bankRaw:_s(row,cBankName),   // v3.07.20: giữ chuỗi gốc AG để tách chủ TK ở apply (theo tên NV)
+          noteFull:_noteParts.join(' | ')
         });
       }
       if(!rows.length){ toast('Không đọc được dòng nhân viên nào','bad'); return; }
@@ -50670,14 +50754,72 @@ function hrmImportPreview(rows){
       <td style="font-size:11px">${esc(r.title)}</td>
       <td style="font-size:11px">${esc(r.dept)}</td>
       <td class="mono" style="font-size:11px">${esc(r.dob||'—')}</td>
+      <td class="mono" style="font-size:10px">${esc(r.idNo||'—')}</td>
+      <td class="mono" style="font-size:10px">${esc(r.phone||'—')}</td>
+      <td style="font-size:10px" title="${esc((r.bankAccNo||'')+' · '+(r.bankName||''))}">${r.bankAccNo?('<b>'+esc(r.bankAccNo)+'</b><br><span style="color:var(--muted)">'+esc(_bankShort(r.bankName))+'</span>'+(()=>{const o=_bankAccOwner(r._bankRaw,r.fullName);return o&&o!==r.fullName?'<br><span style="color:#8a5a1e">CTK: '+esc(o)+'</span>':'';})()):'<span style="color:var(--bad)">⚠ thiếu</span>'}</td>
       <td class="c">${up?'<span class="chip" style="background:rgba(214,158,46,.18);color:#8a6d00;font-size:10px">cập nhật</span>':'<span class="chip" style="background:rgba(74,107,44,.18);color:#3a5520;font-size:10px">mới</span>'}</td></tr>`;
   }).join('');
-  const html=`<div style="font-size:12px;color:var(--muted);margin-bottom:8px">Đọc được <b>${rows.length}</b> nhân viên: <b style="color:#3a5520">${nNew} mới</b>, <b style="color:#8a6d00">${nUpd} cập nhật</b> (mã SME đã có). Bấm <b>Nạp</b> để áp dụng — mã đã có sẽ được cập nhật thông tin từ Excel, KHÔNG tạo trùng.</div>
+  const html=`<div style="font-size:12px;color:var(--muted);margin-bottom:8px">Đọc được <b>${rows.length}</b> nhân viên: <b style="color:#3a5520">${nNew} mới</b>, <b style="color:#8a6d00">${nUpd} cập nhật</b> (mã SME đã có). Bấm <b>Nạp</b> để áp dụng — mã đã có sẽ được cập nhật thông tin từ Excel, KHÔNG tạo trùng.<br><span style="font-size:11px">Các cột đọc được: họ tên, ngày sinh, giới tính, CCCD + ngày/nơi cấp, quốc tịch, địa chỉ, SĐT, email, ngày ký HĐ, loại HĐ, số TK + tên ngân hàng, học vấn/số HĐ/BHXH (gộp ghi chú).</span></div>
     <div class="tbl-scroll" style="max-height:420px"><table class="tbl" style="font-size:12px">
-      <thead><tr><th>Mã SME</th><th>Họ tên</th><th>Chức danh</th><th>Bộ phận</th><th>Ngày sinh</th><th class="c">TT</th></tr></thead>
+      <thead><tr><th>Mã SME</th><th>Họ tên</th><th>Chức danh</th><th>Bộ phận</th><th>Ngày sinh</th><th>CCCD</th><th>SĐT</th><th>NH</th><th class="c">TT</th></tr></thead>
       <tbody>${body}</tbody></table></div>`;
   openModal('📥 Xem trước import danh sách nhân viên', html,
     `<button class="btn-ghost" onclick="closeModal()">Hủy</button><button class="btn-primary" onclick="hrmImportApply()">✓ Nạp ${rows.length} nhân viên</button>`);
+}
+
+/* v3.07.18b: tách chuỗi "Tên NH - Chi nhánh - [chủ TK]" thành tên NH và chi nhánh.
+   File DS ghi gộp (vd "Vietcombank - CN Trần Hưng Đạo Vũng Tàu"). Lấy phần trước dấu '-' đầu = tên NH,
+   phần sau = chi nhánh (giữ nguyên các đoạn còn lại). An toàn: chuỗi không có '-' → toàn bộ là tên NH. */
+/* v3.07.23: GỘP ghi chú HRM khi import — giữ ghi chú cũ (admin nhập tay) + thêm phần import CHƯA có.
+   Tránh trùng lặp khi import lại nhiều lần: tách theo ' | ', chỉ thêm đoạn chưa tồn tại trong note cũ. */
+function _mergeHrNote(oldNote, importNote){
+  const oldN=String(oldNote||'').trim();
+  const impN=String(importNote||'').trim();
+  if(!impN) return oldN;            // không có gì để thêm → giữ cũ
+  if(!oldN) return impN;            // chưa có note cũ → dùng import
+  // tách đoạn import, chỉ thêm đoạn nào CHƯA nằm trong note cũ (so không phân biệt hoa thường + bỏ khoảng trắng thừa)
+  const norm=s=>String(s||'').replace(/\s+/g,' ').trim().toLowerCase();
+  const oldNorm=norm(oldN);
+  const parts=impN.split('|').map(p=>p.trim()).filter(Boolean);
+  const toAdd=parts.filter(p=>!oldNorm.includes(norm(p)));
+  if(!toAdd.length) return oldN;    // import không có gì mới → giữ nguyên cũ
+  return oldN + ' | ' + toAdd.join(' | ');
+}
+
+function _bankShort(s){
+  s=String(s||'').trim(); if(!s) return '';
+  const i=s.indexOf('-'); return i>=0 ? s.slice(0,i).trim() : s;
+}
+function _bankBranch(s){
+  s=String(s||'').trim(); if(!s) return '';
+  const i=s.indexOf('-'); return i>=0 ? s.slice(i+1).trim() : '';
+}
+/* v3.07.20: xác định CHỦ TÀI KHOẢN.
+   Quy tắc (theo yêu cầu): để trống → tên NV; nếu file ghi tên chủ TK KHÁC → dùng tên đó.
+   File DS không có cột chủ TK riêng — đôi khi tên chủ TK nằm ở ĐOẠN CUỐI cột "NH - chi nhánh - [chủ TK]".
+   Lấy đoạn cuối; nếu trông giống TÊN NGƯỜI (không phải chi nhánh/địa danh) thì coi là chủ TK:
+   - khớp tên NV (không dấu) → chính NV (trả tên NV).
+   - khác NV nhưng vẫn là tên người → chủ TK khác (trả đoạn đó).
+   - là chi nhánh/địa danh (cn, chi nhánh, branch, pgd, tỉnh/tp...) → KHÔNG phải chủ TK → trả tên NV. */
+function _stripAccentLower(s){ return String(s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/đ/gi,'d').toLowerCase().trim(); }
+function _bankAccOwner(rawAG, fullName){
+  const nv=String(fullName||'').trim();
+  const raw=String(rawAG||'').trim();
+  if(!raw) return nv;
+  const parts=raw.split('-').map(p=>p.trim()).filter(Boolean);
+  if(parts.length<2) return nv;            // chỉ có tên NH → chủ TK = NV
+  const last=parts[parts.length-1];
+  const lastL=_stripAccentLower(last);
+  // từ khóa nhận diện CHI NHÁNH/ĐỊA DANH → không phải chủ TK
+  const branchKw=['cn','chi nhanh','branch','pgd','phong giao dich','vung tau','tp','tphcm','quan','phuong','tinh','ha noi','sai gon','ba ria','cho lon','tran hung dao','duyen hai'];
+  if(branchKw.some(k=>lastL.includes(k))) return nv;
+  // đoạn cuối khớp tên NV (không dấu) → chính NV
+  const nvL=_stripAccentLower(nv).replace(/\s+/g,'');
+  const lastNoSpace=lastL.replace(/\s+/g,'');
+  if(lastNoSpace && (lastNoSpace===nvL || nvL.includes(lastNoSpace) || lastNoSpace.includes(nvL))) return nv;
+  // còn lại: trông giống tên người (>=2 chữ, chỉ chữ cái/space) và KHÁC NV → chủ TK khác
+  if(/^[\p{L}\s.]+$/u.test(last) && last.split(/\s+/).length>=2) return last;
+  return nv;   // không chắc → an toàn dùng tên NV
 }
 
 function hrmImportApply(){
@@ -50689,12 +50831,20 @@ function hrmImportApply(){
     const fields={
       fullName:r.fullName, gender:r.gender, dob:r.dob,
       dept:r.dept, title:r.title, startDate:r.startDate,
-      note:r.workplace?('Nơi làm việc: '+r.workplace):''
+      // v3.07.18: các trường chi tiết
+      idNo:r.idNo, idIssueDate:r.idIssueDate, idIssuePlace:r.idIssuePlace,
+      nationality:r.nationality, addrCurrent:r.addrCurrent,
+      phone:r.phone, email:r.email,
+      contractSignDate:r.contractSignDate, contractType:r.contractType,
+      bankAccNo:r.bankAccNo, bankName:_bankShort(r.bankName), bankBranch:_bankBranch(r.bankName), bankAccName:_bankAccOwner(r._bankRaw, r.fullName)
     };
+    const _importNote = r.noteFull || (r.workplace?('Nơi làm việc: '+r.workplace):'');   // v3.07.23: note từ import (gộp, không đè)
     const ex=(S.hrEmployees||[]).find(e=>String(e.smartId||'').trim().toUpperCase()===String(r.smartId||'').trim().toUpperCase() && r.smartId);
     if(ex){
       // cập nhật — chỉ ghi đè field có giá trị trong Excel (không xoá dữ liệu cũ bằng ô trống)
       Object.keys(fields).forEach(k=>{ if(fields[k]) ex[k]=fields[k]; });
+      // v3.07.23: GỘP ghi chú (giữ ghi chú cũ admin nhập tay + thêm phần import nếu CHƯA có)
+      ex.note = _mergeHrNote(ex.note, _importNote);
       if(typeof touchRecord==='function') touchRecord(ex);
       hrmLogHistory(ex.id,'edit','Import Excel','',r.smartId,'Cập nhật từ import danh sách');
       nUpd++;
@@ -50705,6 +50855,7 @@ function hrmImportApply(){
         createdAt:new Date().toISOString(),
         createdBy:(CURRENT_USER&&CURRENT_USER.name)||(isAdmin()?'admin':'?')
       }, fields);
+      newEmp.note=_importNote;   // v3.07.23: NV mới — note từ import (không có note cũ để gộp)
       S.hrEmployees.push(newEmp);
       hrmLogHistory(newEmp.id,'create','','',newEmp.smartId,'Tạo từ import danh sách');
       nNew++;
