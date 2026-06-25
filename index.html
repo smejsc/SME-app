@@ -3235,7 +3235,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.07.13';            // bumped on each release
+const APP_VERSION='3.07.15';            // bumped on each release
 
 /* v2.62.0: Token xác thực backend — PHẢI khớp API_TOKEN trong Apps Script (Code.gs).
    Mọi request tới Apps Script tự động được gắn token qua lớp bọc fetch bên dưới.
@@ -10505,9 +10505,9 @@ function _helpSection_op(){
     <ul>
       <li><strong>Trang 1 — Tổng hợp (Statement):</strong> Tồn đầu kỳ, Tổng thu hộ, Tổng chi hộ, Dự kiến chi (dòng riêng), Phí quản lý, Tồn cuối kỳ.</li>
       <li><strong>Trang 2 — Chi tiết:</strong> từng bút toán có NCC, số HĐ, số HD; chi thực và dự kiến chi tách thành 2 bảng riêng.</li>
-      <li><strong>Trang 3 — Commercial Invoice (tiếng Anh):</strong> hóa đơn thương mại = chi hộ thực tế + phí quản lý (KHÔNG gồm dự kiến chi).</li>
+      <li><strong>Trang 3 — Commercial Invoice (tiếng Anh):</strong> hóa đơn thương mại = chi hộ thực tế + phí quản lý + dự kiến chi (chủ tàu đồng ý ứng trước — dòng riêng).</li>
     </ul>
-    <div class="help-callout info"><strong>Chi dự kiến &amp; Phí quản lý</strong><br>Chi dự kiến hiển thị thành dòng/bảng riêng, ghi chú "sẽ tính theo thực tế phát sinh", <strong>trừ vào số dư</strong> (thận trọng) nhưng KHÔNG vào Commercial Invoice. Phí quản lý tính tròn tháng theo ngày neo (vd 15/4 → 14/5 = 1 tháng), note chỉ ghi "Đã xuất HĐ" / "Dự kiến".</div>
+    <div class="help-callout info"><strong>Chi dự kiến &amp; Phí quản lý</strong><br>Chi dự kiến hiển thị thành dòng/bảng riêng (chủ tàu đồng ý ứng trước), <strong>trừ vào số dư</strong> và <strong>đã tính vào Commercial Invoice</strong> (dòng riêng), sẽ đối chiếu theo thực tế khi phát sinh. Phí quản lý tính tròn tháng theo ngày neo (vd 15/4 → 14/5 = 1 tháng), note chỉ ghi "Đã xuất HĐ" / "Dự kiến".</div>
 
     <h4>2.4. Excel đối chiếu chủ tàu</h4>
     <p>Xuất Excel để chủ tàu đối chiếu chứng từ, chia 2 mục: <strong>I. Các khoản đã phát sinh</strong> (đã chi thực / thu thực) và <strong>II. Các khoản dự kiến chi</strong> — khớp với các dòng tổng ở Trang 1 Statement của PDF.</p>
@@ -12801,6 +12801,15 @@ function mergeByID(cloudArr, localArr, idField, skipTombstone, fieldName){
     if(fieldName==='payables' || fieldName==='opTransactions'){
       // v3.04.39: KHÔNG áp INVRULE/purgedContent TỰ ĐỘNG khi merge nữa (rủi ro xóa nhầm).
       //   Việc dọn trùng theo nội dung chỉ chạy khi người dùng bấm nút (applyContentPurgeManual).
+      // v3.07.14: NHƯNG áp purgedContent (khóa nội dung ĐÍCH DANH do admin xóa vĩnh viễn) —
+      //   khóa rất cụ thể (vesselId|type|inv|amount|date|ccy|desc) nên an toàn, chỉ diệt đúng phiếu
+      //   admin đã chủ động purge. Chống phiếu sống lại từ cloud/bản cũ dù id khác.
+      try{
+        const pcSet=_purgedContentSet(fieldName);
+        if(pcSet && pcSet.size>0){
+          merged=merged.filter(r=>!pcSet.has(_contentKey(r)));
+        }
+      }catch(e){}
     }
   }
   return {merged, conflicts};
@@ -13535,11 +13544,16 @@ function mergeStateByFields(cloudFull, localFull, fields){
   //   KHẮC PHỤC: gộp deletedIds (local ∪ cloud) NGAY TỪ ĐẦU vào S.deletedIds tạm, để mọi field sau
   //   lọc tombstone với danh sách ĐẦY ĐỦ. Không đổi dữ liệu cloud; chỉ ảnh hưởng bộ lọc trong lần merge này.
   try{
-    if(fields.includes('deletedIds') && Array.isArray(cloudFull.deletedIds)){
+    if(fields.includes('deletedIds')){
+      // v3.07.14 FIX: gộp deletedIds từ CẢ 3 nguồn — S hiện tại, localFull (bản local trước merge,
+      //   CHỨA tombstone vừa tạo CHƯA push), và cloudFull. Trước đây bỏ sót localFull → tombstone
+      //   vừa xóa (chưa kịp đẩy cloud) KHÔNG vào union → opTransactions/AP sống lại sau pull/F5.
       const cur=Array.isArray(S.deletedIds)?S.deletedIds:[];
-      const seen=new Set(cur.map(d=>String(d&&d.id)+'|'+(d&&d.field||'')));
-      const union=cur.slice();
-      cloudFull.deletedIds.forEach(d=>{
+      const loc=Array.isArray(localFull.deletedIds)?localFull.deletedIds:[];
+      const cld=Array.isArray(cloudFull.deletedIds)?cloudFull.deletedIds:[];
+      const seen=new Set();
+      const union=[];
+      [...cur, ...loc, ...cld].forEach(d=>{
         if(!d||d.id==null) return;
         const k=String(d.id)+'|'+(d.field||'');
         if(!seen.has(k)){ seen.add(k); union.push(d); }
@@ -35771,6 +35785,35 @@ function _removeOpTxOnce(id){
   if(!stillExists) markDeleted(id);           // chỉ bia-mộ khi không còn bản nào cùng id
   return true;
 }
+/* v3.07.14: XÓA VĨNH VIỄN chi hộ — chặn sống lại theo CẢ id (tombstone) LẪN nội dung (purgedContent).
+   Dùng khi phiếu cứ hồi sinh qua sync. Diệt tận gốc dù bản trên cloud có id khác. */
+function purgeOpTxForever(id){
+  const t=(S.opTransactions||[]).find(x=>x.id===id);
+  if(!t){ toast('Không tìm thấy phiếu','bad'); return; }
+  if(!isAdmin()){ toast('Chỉ admin được xóa vĩnh viễn','bad'); return; }
+  if(t._locked && !t._isBudget){ toast('🔒 Phiếu đã khóa — không xóa được','bad'); return; }
+  const v=(S.opVessels||[]).find(x=>x.id===t.vesselId);
+  confirmDelete('XÓA VĨNH VIỄN bút toán chi hộ (chặn sống lại qua đồng bộ)',
+    `${t.date} · ${v?v.name:'?'} · ${t.type==='IN'?'Thu hộ':'Chi hộ'}<br>${esc(t.desc)||'—'}<br><b>${fmtFull(t.amount,v?v.ccy:'VND')}</b><br><span style="color:var(--bad);font-size:11px">Phiếu này sẽ bị chặn theo NỘI DUNG — không thể sống lại qua sync, kể cả từ máy/bản cũ.</span>`,
+    ()=>{
+      const key=_contentKey(t);
+      // 1) chặn theo nội dung (purgedContent) — diệt mọi bản cùng nội dung dù id khác
+      try{
+        const pc=_purgedContent();
+        if(key && !pc.some(p=>p.key===key && p.field==='opTransactions')){
+          pc.push({key, field:'opTransactions', at:new Date().toISOString(), note:'purge chi hộ '+(t.desc||'').slice(0,40)});
+        }
+      }catch(e){}
+      // 2) xóa MỌI bản cùng nội dung hiện có + ghi tombstone từng id
+      const victims=(S.opTransactions||[]).filter(x=>_contentKey(x)===key);
+      const ids=victims.map(x=>x.id);
+      S.opTransactions=(S.opTransactions||[]).filter(x=>_contentKey(x)!==key);
+      try{ markDeleted(ids, 'opTransactions'); }catch(e){ try{ markDeleted(ids); }catch(_){} }
+      try{ logAuditEvent('purge_optx_forever',{ids, key, vesselId:t.vesselId, desc:(t.desc||'').slice(0,60)}); }catch(e){}
+      saveState(); toast('Đã xóa vĩnh viễn ('+ids.length+' bản) — chặn sống lại','good'); renderAll();
+    });
+}
+
 function delOpTx(id){
   const t=S.opTransactions.find(x=>x.id===id);if(!t)return;
   // v3.06.31: KHÓA ĐÍCH DANH — chặn xóa nếu chính phiếu này đã bị khóa. Chi dự kiến không bị khóa.
@@ -36831,7 +36874,7 @@ function renderOpInputRecent(){
           ? `<button class="icon-btn" title="Đã thực hiện → chi thực" onclick="opMarkActual('${t.id}')" style="color:var(--good)">✓</button><button class="icon-btn" title="Sửa" onclick="editOpTx('${t.id}')">✎</button>${docBtn}<button class="icon-btn danger" title="Hủy dự kiến" onclick="opDeleteBudget('${t.id}')">✕</button>`
           : (t.paid
             ? (_canConfirmOpTT()?`<button class="icon-btn" title="Sửa (đã TT)" onclick="editOpFees('${t.id}')">✎</button>${docBtn}`:`<span class="mono" style="font-size:9px;color:var(--muted)" title="Đã TT">🔒</span>${docBtn}`)
-            : `<button class="icon-btn" title="Sửa" onclick="editOpTx('${t.id}')">✎</button>${docBtn}<button class="icon-btn danger" title="Xóa" onclick="delOpTx('${t.id}')">✕</button>`)));
+            : `<button class="icon-btn" title="Sửa" onclick="editOpTx('${t.id}')">✎</button>${docBtn}<button class="icon-btn danger" title="Xóa" onclick="delOpTx('${t.id}')">✕</button>${isAdmin()?`<button class="icon-btn danger" title="Xóa VĨNH VIỄN — chặn sống lại qua đồng bộ (dùng khi phiếu cứ hồi sinh)" onclick="purgeOpTxForever('${t.id}')" style="opacity:.7">⛔</button>`:''}`)));
       const _rowStyle = _locked
         ? ' style="background:rgba(120,120,120,.07);border-left:3px solid var(--bad)"'
         : (isBudget ? ' style="background:rgba(214,158,46,.06);border-left:3px solid var(--warn)"' : '');
@@ -37772,7 +37815,7 @@ function generateOpReport(){
     sumOut:'Total disbursements',
     sumBudget:'Committed costs (not yet incurred)',
     expenseBudget:'COMMITTED COSTS',
-    budgetNote:'Estimated costs for the period — not yet incurred. Shown for the Owners’ information and charged on an actual-incurred basis; deducted from the available balance for planning only and NOT included in the commercial invoice.',
+    budgetNote:'Committed costs for the period, advanced on the Owners’ account with the Owners’ agreement. Included in the commercial invoice and reconciled against the actual figures when incurred.',
     sumFee:'Bank & remittance charges',
     mgmtFee:'Management fee',
     sigOwner:'For and on behalf of the Owners',
@@ -37796,7 +37839,7 @@ function generateOpReport(){
     sumOut:'Tổng chi hộ · Total disbursements',
     sumBudget:'Dự kiến chi (chưa phát sinh) · Estimated costs (not yet incurred)',
     expenseBudget:'BẢNG DỰ KIẾN CHI · ESTIMATED COSTS',
-    budgetNote:'Khoản dự kiến chi trong kỳ — sẽ tính theo thực tế phát sinh; chỉ trừ vào ngân sách còn lại để chủ tàu chủ động nguồn, KHÔNG tính vào Commercial Invoice · Estimated costs — charged on an actual-incurred basis; for planning only, NOT included in the commercial invoice.',
+    budgetNote:'Khoản dự kiến chi trong kỳ — chủ tàu đồng ý ứng trước, đã tính vào Commercial Invoice; sẽ đối chiếu theo thực tế khi phát sinh · Committed costs for the period, advanced with the Owners’ agreement — included in the commercial invoice and reconciled against the actual figures when incurred.',
     sumFee:'Tổng phí · Total fees',
     mgmtFee:'Phí quản lý · Management fee',
     sigOwner:'Chủ tàu · Vessel Owner',
@@ -37819,7 +37862,7 @@ function generateOpReport(){
     sumIn:'Tổng thu hộ', sumOut:'Tổng chi hộ', sumFee:'Tổng phí',
     sumBudget:'Dự kiến chi (chưa phát sinh)',
     expenseBudget:'BẢNG DỰ KIẾN CHI',
-    budgetNote:'Khoản dự kiến chi trong kỳ — sẽ tính theo thực tế phát sinh; chỉ trừ vào ngân sách còn lại để chủ tàu chủ động nguồn, KHÔNG tính vào Commercial Invoice.',
+    budgetNote:'Khoản dự kiến chi trong kỳ — chủ tàu đồng ý ứng trước, đã tính vào Commercial Invoice; sẽ đối chiếu theo thực tế khi phát sinh.',
     mgmtFee:'Phí quản lý',
     sigOwner:'Chủ tàu', sigCo:'Đại diện công ty',
     signDate:'Ngày ký',
@@ -38030,7 +38073,7 @@ function generateOpReport(){
           <tr><td class="lbl" style="padding:8pt 12pt">${t.openBal}</td><td class="r" style="padding:8pt 12pt;font-size:13pt">${fmtMoney(openBal,'USD')}</td></tr>
           <tr style="background:rgba(45,106,106,.04)"><td class="lbl" style="padding:8pt 12pt"><b>(+) ${t.sumIn}</b><br><span style="font-size:9pt;color:#666">${inRows.length} ${en?"entries":"bút toán"}</span></td><td class="r" style="padding:8pt 12pt;font-size:13pt;color:#2d6a6a"><b>${fmtMoney(sumIn,'USD')}</b></td></tr>
           <tr style="background:rgba(184,71,46,.04)"><td class="lbl" style="padding:8pt 12pt"><b>(−) ${t.sumOut}</b><br><span style="font-size:9pt;color:#666">${outRows.length} ${en?"entries":"bút toán"}</span></td><td class="r" style="padding:8pt 12pt;font-size:13pt;color:#a8362b"><b>${fmtMoney(sumOut,'USD')}</b></td></tr>
-          ${budgetRows.length?`<tr style="background:rgba(196,138,57,.05)"><td class="lbl" style="padding:8pt 12pt"><b>(−) ${t.sumBudget}</b><br><span style="font-size:9pt;color:#666">${budgetRows.length} ${en?'item(s)':'khoản'} · ${en?'charged on actual basis — not in invoice':enOrBi?'sẽ tính theo thực tế · không vào invoice':'sẽ tính theo thực tế phát sinh · không vào invoice'}</span></td><td class="r" style="padding:8pt 12pt;font-size:12pt;color:#8a5a1e"><span style="font-size:9pt;font-style:italic">~ </span>${fmtMoney(sumBudget,'USD')}</td></tr>`:''}
+          ${budgetRows.length?`<tr style="background:rgba(196,138,57,.05)"><td class="lbl" style="padding:8pt 12pt"><b>(−) ${t.sumBudget}</b><br><span style="font-size:9pt;color:#666">${budgetRows.length} ${en?'item(s)':'khoản'} · ${en?'advanced by Owners’ agreement — included in invoice, reconciled on actual':enOrBi?'chủ tàu đồng ý ứng trước · đã vào invoice, đối chiếu theo thực tế':'chủ tàu đồng ý ứng trước · đã tính vào invoice, đối chiếu theo thực tế'}</span></td><td class="r" style="padding:8pt 12pt;font-size:12pt;color:#8a5a1e"><span style="font-size:9pt;font-style:italic">~ </span>${fmtMoney(sumBudget,'USD')}</td></tr>`:''}
           <tr><td class="lbl" style="padding:8pt 12pt">(−) ${t.sumFee}<br><span style="font-size:9pt;color:#666">${en?"Bank &amp; other fees":"Phí NH + phí khác"}</span></td><td class="r" style="padding:8pt 12pt">${fmtMoney(sumFee,'USD')}</td></tr>
           <tr style="background:rgba(196,138,57,.06)"><td class="lbl" style="padding:8pt 12pt"><b>${mgmtFeeDeducted>0?'(−) ':''}${t.mgmtFee}</b><br><span style="font-size:9pt;color:#666">${mgmtFeeInfo.has?(en?'Invoiced':'Đã xuất HĐ'):(en?'Estimated':'Dự kiến')}</span></td><td class="r" style="padding:8pt 12pt;font-size:12pt;color:#a8362b">${mgmtFeeDeducted>0?'':'<span style="font-size:9pt;font-style:italic">~ </span>'}${mgmtFeeDeducted>0?'−':''}${fmtMoney(mgmtFeeInfo.amountUsd, 'USD')}</td></tr>
           <tr class="grand" style="background:rgba(28,58,92,.08);border-top:2pt solid #1c3a5c"><td class="lbl" style="padding:12pt;font-size:14pt"><b>${t.closeBal}</b></td><td class="r" style="padding:12pt;font-size:16pt;color:${closeBal<0?'#a8362b':'#2d6a6a'}"><b>${fmtMoney(closeBal,'USD')}</b></td></tr>
