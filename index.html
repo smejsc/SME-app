@@ -3235,7 +3235,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.07.23';            // bumped on each release
+const APP_VERSION='3.07.24';            // bumped on each release
 
 /* v2.62.0: Token xác thực backend — PHẢI khớp API_TOKEN trong Apps Script (Code.gs).
    Mọi request tới Apps Script tự động được gắn token qua lớp bọc fetch bên dưới.
@@ -3392,19 +3392,43 @@ async function checkForUpdate(){
       }catch(e){}
       // New version available — reload nhẹ nhàng (SW tự cập nhật cache)
       console.log('[update] new version '+data.version+' > '+APP_VERSION+', updating...');
-      // v3.06.44: NẾU đang mở modal nhập liệu (có thể NV đang gõ dở) → HOÃN cập nhật,
-      //   không reload thẳng để tránh mất dữ liệu chưa lưu. Sẽ tự thử lại khi đóng modal.
+      // v3.06.44 / v3.07.24: NẾU NV đang gõ dở (modal HOẶC form trực tiếp trên trang) → HOÃN cập nhật,
+      //   không reload để tránh mất dữ liệu chưa lưu. Sẽ tự thử lại khi NV rời ô nhập / đóng modal.
       try{
         const _m=document.getElementById('modal');
         const _modalOpen = _m && _m.classList.contains('show');
-        const _hasInputs = _modalOpen && _m.querySelector('input,textarea,select');
-        if(_modalOpen && _hasInputs){
+        const _modalHasInputs = _modalOpen && _m.querySelector('input,textarea,select');
+        // v3.07.24: phát hiện ô đang FOCUS là ô nhập liệu (kể cả form trực tiếp ngoài modal)
+        const _ae=document.activeElement;
+        const _isTypingNow = _ae && /^(INPUT|TEXTAREA|SELECT)$/.test(_ae.tagName)
+          && !_ae.readOnly && !_ae.disabled
+          && !/^(button|submit|checkbox|radio|file)$/i.test(_ae.type||'');
+        // chống hoãn VÔ HẠN: tối đa ~3 lần hoãn (mỗi 20 phút) → sau đó vẫn lưu an toàn rồi cập nhật.
+        let _deferCount=0;
+        try{ _deferCount=parseInt(sessionStorage.getItem('_updateDeferCount')||'0',10)||0; }catch(e){}
+        if((( _modalOpen && _modalHasInputs) || _isTypingNow) && _deferCount<3){
           window._pendingUpdateVersion = data.version;
-          console.log('[update] HOÃN cập nhật v'+data.version+' — đang mở modal nhập liệu. Sẽ cập nhật khi đóng.');
-          toast('🔄 Có bản mới v'+data.version+' — sẽ tự cập nhật sau khi bạn đóng cửa sổ đang nhập.','good');
+          try{ sessionStorage.setItem('_updateDeferCount', String(_deferCount+1)); }catch(e){}
+          // gắn 1 lần: khi NV rời ô nhập (blur) → thử cập nhật lại (cho form trực tiếp, không có "đóng modal")
+          try{
+            if(_isTypingNow && !window._updateBlurHooked){
+              window._updateBlurHooked=true;
+              const _retry=()=>{
+                window._updateBlurHooked=false;
+                if(window._pendingUpdateVersion){
+                  setTimeout(()=>{ try{ checkForUpdate(); }catch(e){} }, 600);
+                }
+              };
+              _ae.addEventListener('blur', _retry, {once:true});
+            }
+          }catch(e){}
+          console.log('[update] HOÃN cập nhật v'+data.version+' — NV đang nhập liệu ('+(_modalOpen?'modal':'form trực tiếp')+'). Lần hoãn '+(_deferCount+1)+'/3.');
+          toast('🔄 Có bản mới v'+data.version+' — vui lòng LƯU phần đang nhập. App sẽ tự cập nhật khi bạn xong (hoặc lưu rồi rời ô nhập).','good');
           return false;   // sẽ cập nhật sau → KHÔNG chào ngay
         }
+        if(_deferCount>=3){ try{ sessionStorage.removeItem('_updateDeferCount'); }catch(e){} }
       }catch(e){}
+      try{ sessionStorage.removeItem('_updateDeferCount'); }catch(e){}
       toast('🔄 Phát hiện bản mới v' + data.version + ' — đang lưu & đồng bộ trước khi cập nhật...', 'good');
       // v3.01.83: LƯU + ĐẨY SYNC TRƯỚC KHI RELOAD để không mất dữ liệu NV đang nhập.
       // Step 0a: lưu state hiện tại xuống localStorage (đồng bộ, chờ xong).
