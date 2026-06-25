@@ -3235,7 +3235,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.07.27';            // bumped on each release
+const APP_VERSION='3.07.28';            // bumped on each release
 
 /* v2.62.0: Token xác thực backend — PHẢI khớp API_TOKEN trong Apps Script (Code.gs).
    Mọi request tới Apps Script tự động được gắn token qua lớp bọc fetch bên dưới.
@@ -36992,9 +36992,11 @@ function toggleSeahorseOwn(apId){
   if(!r){ toast('Không tìm thấy phiếu AP','bad'); return; }
   const turningOn = !r.seahorseOwn;   // bật = chuyển sang Seahorse tự chịu
   const v=(S.opVessels||[]).find(x=>x.id===r.vesselId);
+  const _apCcy=r.ccy||'VND';
+  const _apAmt=fmtCcy(+r.amountGross||+r.amount||0, _apCcy);   // v3.07.28: nguyên tệ phiếu, không quy đổi
   const msg = turningOn
-    ? `Chuyển khoản này thành <b>CHI PHÍ SEAHORSE TỰ CHỊU</b>?<br><br>${esc(r.partner||'')} · ${esc(r.desc||'')}<br><b>${fmtFull(r.amountGross||r.amount||0, r.ccy||'VND')}</b> · ${v?esc(v.name):''}<br><br><span style="color:var(--accent);font-size:11px">→ KHÔNG đòi chủ tàu, KHÔNG lên báo cáo chủ tàu, KHÔNG trừ số dư chủ tàu. Ghi vào P&L mảng QL vận hành (Seahorse gánh).</span>`
-    : `Chuyển NGƯỢC lại thành <b>CHI HỘ CHỦ TÀU</b>?<br><br>${esc(r.partner||'')} · ${esc(r.desc||'')}<br><b>${fmtFull(r.amountGross||r.amount||0, r.ccy||'VND')}</b><br><br><span style="color:var(--muted);font-size:11px">→ Quay lại đòi chủ tàu, lên báo cáo chủ tàu, trừ số dư chủ tàu như cũ.</span>`;
+    ? `Chuyển khoản này thành <b>CHI PHÍ SEAHORSE TỰ CHỊU</b>?<br><br>${esc(r.partner||'')} · ${esc(r.desc||'')}<br><b>${_apAmt}</b> · ${v?esc(v.name):''}<br><br><span style="color:var(--accent);font-size:11px">→ KHÔNG đòi chủ tàu, KHÔNG lên báo cáo chủ tàu, KHÔNG trừ số dư chủ tàu. Ghi vào P&L mảng QL vận hành (Seahorse gánh).</span>`
+    : `Chuyển NGƯỢC lại thành <b>CHI HỘ CHỦ TÀU</b>?<br><br>${esc(r.partner||'')} · ${esc(r.desc||'')}<br><b>${_apAmt}</b><br><br><span style="color:var(--muted);font-size:11px">→ Quay lại đòi chủ tàu, lên báo cáo chủ tàu, trừ số dư chủ tàu như cũ.</span>`;
   confirmDialog(turningOn?'Chuyển sang Seahorse tự chịu?':'Chuyển lại Chi hộ chủ tàu?', msg, '', ()=>{
     r.seahorseOwn = turningOn;
     try{ touchRecord(r); }catch(e){ r.updatedAt=new Date().toISOString(); }
@@ -37045,7 +37047,14 @@ function _opApVirtualTx(){
    người duyệt lệnh, người xác nhận TT. Chưa xác nhận TT → cho SỬA tại chỗ (mở form sửa). */
 function showOpTxDetail(id){
   const t=(S.opTransactions||[]).find(x=>x.id===id);
-  if(!t){ toast('Không tìm thấy bút toán','bad'); return; }
+  if(!t){
+    // v3.07.28: phiếu không còn trong dữ liệu (đã xóa tại máy này/máy khác rồi sync về) nhưng
+    //   danh sách trên màn hình là bản CŨ chưa refresh → dòng "ma". Tự render lại để dọn dòng ma.
+    toast('Phiếu này đã bị xóa — đang làm mới danh sách','warn');
+    try{ if(typeof renderOpTxList==='function') renderOpTxList(); }catch(e){}
+    try{ if(typeof renderAll==='function') renderAll(); }catch(e){}
+    return;
+  }
   const v=(S.opVessels||[]).find(x=>x.id===t.vesselId);
   const ccy=t.ccy||(v?v.ccy:'VND')||'VND';
   const isOut=t.type==='OUT';
@@ -37104,12 +37113,23 @@ function showOpTxDetail(id){
 function toggleOpTxSeahorseOwn(id){
   if(!isAdmin()){ toast('Chỉ admin','bad'); return; }
   const t=(S.opTransactions||[]).find(x=>x.id===id);
-  if(!t){ toast('Không tìm thấy phiếu','bad'); return; }
+  if(!t){
+    // v3.07.28: phiếu đã bị xóa (sync về) nhưng màn hình còn dòng cũ → dọn dòng ma.
+    toast('Phiếu này đã bị xóa — đang làm mới danh sách','warn');
+    try{ if(typeof renderOpTxList==='function') renderOpTxList(); }catch(e){}
+    try{ if(typeof renderAll==='function') renderAll(); }catch(e){}
+    return;
+  }
   const turningOn=!t.seahorseOwn;
   const v=(S.opVessels||[]).find(x=>x.id===t.vesselId);
+  // v3.07.28 FIX: dùng ĐÚNG tiền tệ của PHIẾU (t.ccy), KHÔNG dùng v.ccy của tàu; và fmtCcy (nguyên tệ,
+  //   KHÔNG quy đổi theo đơn vị hiển thị) — giống dòng danh sách. Trước đây fmtFull(t.amount, v.ccy)
+  //   quy đổi 2 lần → số phình sai (vd 2,3 triệu VND hiện thành 62 tỷ).
+  const _txCcy=t.ccy||(v?v.ccy:'VND')||'VND';
+  const _amtStr=fmtCcy((+t.amount||0)+((t.type==='OUT')?(+t.vatAmount||0):0), _txCcy);
   const msg = turningOn
-    ? `Chuyển khoản này thành <b>CHI PHÍ SEAHORSE TỰ CHỊU</b>?<br><br>${esc(t.desc||'')}<br><b>${fmtFull(t.amount,v?v.ccy:'VND')}</b> · ${v?esc(v.name):''}<br><br><span style="color:#8a5a1e;font-size:11px">→ KHÔNG đòi chủ tàu, KHÔNG lên báo cáo chủ tàu, KHÔNG trừ số dư chủ tàu. Seahorse gánh chi phí này.</span>`
-    : `Chuyển NGƯỢC lại thành <b>CHI HỘ CHỦ TÀU</b>?<br><br>${esc(t.desc||'')}<br><b>${fmtFull(t.amount,v?v.ccy:'VND')}</b><br><br><span style="color:var(--muted);font-size:11px">→ Quay lại đòi chủ tàu, lên báo cáo, trừ số dư chủ tàu như cũ.</span>`;
+    ? `Chuyển khoản này thành <b>CHI PHÍ SEAHORSE TỰ CHỊU</b>?<br><br>${esc(t.desc||'')}<br><b>${_amtStr}</b> · ${v?esc(v.name):''}<br><br><span style="color:#8a5a1e;font-size:11px">→ KHÔNG đòi chủ tàu, KHÔNG lên báo cáo chủ tàu, KHÔNG trừ số dư chủ tàu. Seahorse gánh chi phí này.</span>`
+    : `Chuyển NGƯỢC lại thành <b>CHI HỘ CHỦ TÀU</b>?<br><br>${esc(t.desc||'')}<br><b>${_amtStr}</b><br><br><span style="color:var(--muted);font-size:11px">→ Quay lại đòi chủ tàu, lên báo cáo, trừ số dư chủ tàu như cũ.</span>`;
   confirmDialog(turningOn?'Chuyển sang Seahorse tự chịu?':'Chuyển lại Chi hộ chủ tàu?', msg, '', ()=>{
     t.seahorseOwn=turningOn;
     try{ touchRecord(t); }catch(e){ t.updatedAt=new Date().toISOString(); }
