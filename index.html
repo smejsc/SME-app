@@ -3393,7 +3393,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.07.59';            // bumped on each release
+const APP_VERSION='3.07.61';            // bumped on each release
 
 /* v2.62.0: Token xác thực backend — PHẢI khớp API_TOKEN trong Apps Script (Code.gs).
    Mọi request tới Apps Script tự động được gắn token qua lớp bọc fetch bên dưới.
@@ -5612,6 +5612,8 @@ async function authAction(){
       }catch(e){console.warn('[migrate v1.89.0 opTx] failed:',e);}
       // v3.07.49: workflow NCC + chốt giá trị báo cáo chủ tàu
       try{ const _r=_migrateOpWorkflow(); if(_r.n||_r.b||_r.ap) saveState(); }catch(e){console.warn('[migrate v3.07.49 op-workflow] failed:',e);}
+      // v3.07.60: gắn lô duyệt chi (_payBatchId) cho phiếu AP đã duyệt CŨ (trước 3.07.54) để hiện ở Thư viện hồ sơ chờ chi.
+      try{ const _rb=_migratePayBatch(); if(_rb>0){ saveState(); console.log('[migrate v3.07.60] gắn lô duyệt chi cho '+_rb+' phiếu approved cũ'); } }catch(e){console.warn('[migrate v3.07.60 payBatch] failed:',e);}
       const lastBak=cfg.lastBackup?new Date(cfg.lastBackup).getTime():0;
       const daysSinceBak=lastBak?Math.floor((Date.now()-lastBak)/86400000):999;
       // v1.55.0: Show persistent banner + auto-trigger weekly backup
@@ -8911,6 +8913,27 @@ function _migrateOpWorkflow(){
   return {n,b,ap};
 }
 
+/* v3.07.60: gắn lô duyệt chi (_payBatchId) cho phiếu AP đã duyệt CŨ (approved) chưa có lô —
+   để Thư viện hồ sơ chờ chi gom được cả phiếu duyệt trước 3.07.54. Gom theo NGÀY L2 duyệt. */
+function _migratePayBatch(){
+  const need=(S.payables||[]).filter(r=> r && wfStatus(r)==='approved' && !r._payBatchId);
+  if(!need.length) return 0;
+  // gom theo ngày L2 duyệt (approvedL2At), thiếu thì theo issueDate
+  const byDay={};
+  need.forEach(r=>{
+    const d=String(r.approvedL2At||r.approvedAt||r.issueDate||'').slice(0,10)||'(cũ)';
+    (byDay[d]=byDay[d]||[]).push(r);
+  });
+  let cnt=0;
+  Object.entries(byDay).forEach(([d,rs])=>{
+    const batchId='PBOLD'+d.replace(/-/g,'')+Math.random().toString(36).slice(2,5);
+    const at=rs[0].approvedL2At||rs[0].approvedAt||(d!=='(cũ)'?d+'T00:00:00.000Z':'');
+    const by=rs[0].approvedL2By||rs[0].approvedBy||'(hồ sơ cũ)';
+    rs.forEach(r=>{ r._payBatchId=batchId; r._payBatchAt=at; r._payBatchBy=by; cnt++; });
+  });
+  return cnt;
+}
+
 /* True if current session is allowed to manage users (CRUD users + push auth to cloud).
    Admin: always yes. User: must have canManageUsers flag.
    v1.40.0: NEW — delegated user management (HR-admin pattern). */
@@ -11425,8 +11448,8 @@ function applyRoleUI(){
       const canApprove=isAdmin()||canCheckAcc()||canApproveL1()||canApproveL2();
       b.style.display = canApprove ? '' : 'none';
     } else if(page==='fin_accounting'){
-      // v3.07.04: Tài chính Kế toán (khung gom) — CHỈ admin (nghiên cứu). Mọi người khác dùng giao diện cũ.
-      b.style.display = isAdmin() ? '' : 'none';
+      // v3.07.61: Tài chính Kế toán — admin + KT viên (canCheckAcc) + KTT (canManageUsers). Người khác dùng giao diện cũ.
+      b.style.display = (isAdmin() || (CURRENT_USER && (CURRENT_USER.canCheckAcc || CURRENT_USER.canManageUsers))) ? '' : 'none';
     } else if(page==='nsnn'){
       // v3.07.46: NSNN (thuế/NSNN) = SỔ TỔNG HỢP chung → chỉ KT/KTT/L1/L2/admin/BOD. NV thường KHÔNG thấy.
       const canLedger = canSeeAllRecords() || (CURRENT_USER && CURRENT_USER.isBOD);
@@ -21421,10 +21444,18 @@ function renderApprBatches(){
   const body=document.getElementById('appr-batch-body');
   if(!sec||!body) return;
   if(!(isAdmin()||canConfirmPayment()||canCheckAcc()||canApproveL1())){ sec.style.display='none'; body.innerHTML=''; return; }
+  const html=_apprBatchesHtml();
+  if(!html){ sec.style.display='none'; body.innerHTML=''; return; }
+  body.innerHTML=html;
+  sec.style.display='';
+}
+/* v3.07.60: tạo HTML thư viện hồ sơ chờ chi — dùng chung cho tab Phê duyệt VÀ màn Tài chính Kế toán.
+   Trả '' nếu không có dữ liệu. */
+function _apprBatchesHtml(){
   // v3.07.55: thư viện gồm CẢ đợt còn nợ VÀ đợt đã chi xong (để theo dõi lịch sử chi theo ngày).
   const all=(S.payables||[]).filter(r=>r._payBatchId && (wfStatus(r)==='approved'||arRemaining(r)<=0.001) && r._payBatchId);
   const recs=(S.payables||[]).filter(r=>r._payBatchId && (wfStatus(r)==='approved'));
-  if(!recs.length){ sec.style.display='none'; body.innerHTML=''; return; }
+  if(!recs.length){ return ''; }
   const _toDisp=(r)=>toDisplay((+r.amountGross||+r.amount||0), r.ccy||'VND');
   const _paidDisp=(r)=>toDisplay(((+r.amountGross||+r.amount||0)-arRemaining(r)), r.ccy||'VND');
   const _remDisp=(r)=>toDisplay(arRemaining(r), r.ccy||'VND');
@@ -21489,8 +21520,7 @@ function renderApprBatches(){
       </details>`;
     });
   });
-  body.innerHTML=html;
-  sec.style.display='';
+  return html;
 }
 /* v3.07.54: in PDF 1 phiếu hồ sơ GĐ đã duyệt thanh toán (1 lô). */
 function apprBatchPdf(batchId){
@@ -48452,8 +48482,13 @@ function finRenderDash(){
     _card('🏦','Số dư ngân hàng', bankTot, 'var(--good)', '');
 
   if(detail){
+    let _libHtml='';
+    try{ _libHtml=(typeof _apprBatchesHtml==='function')?_apprBatchesHtml():''; }catch(e){ _libHtml=''; }
+    const _libBlock = _libHtml ? `<div class="section" style="margin-top:8px">
+      <div class="section-head"><div class="section-title"><span class="tag">🧾</span>Thư viện hồ sơ thanh toán <span style="font-weight:400;color:var(--muted);font-size:11px;text-transform:none">(GĐ đã duyệt — theo dõi đã chi / chưa chi)</span></div></div>
+      ${_libHtml}</div>` : '';
     detail.innerHTML=`<div class="help-callout info" style="margin-top:4px">
-      <b>Đang ở giai đoạn khung.</b> Các con số trên tổng hợp nhanh từ dữ liệu hiện có (quy về đơn vị hiển thị). Bấm các mục phía trên để vào từng phần nghiệp vụ chi tiết. Các tính năng tổng hợp sâu hơn sẽ bổ sung dần.</div>`;
+      <b>Đang ở giai đoạn khung.</b> Các con số trên tổng hợp nhanh từ dữ liệu hiện có (quy về đơn vị hiển thị). Bấm các mục phía trên để vào từng phần nghiệp vụ chi tiết. Các tính năng tổng hợp sâu hơn sẽ bổ sung dần.</div>${_libBlock}`;
   }
 }
 
@@ -52205,7 +52240,7 @@ function canAccessTab(tabId){
   //   periodic (01) + projects (02): KTT (canManageUsers) HOẶC BOD.
   //   plan (Kế hoạch) + rates (Đơn giá): thuộc nhóm NOTE → CHỈ BOD (KTT không thấy). Tab 07 giữ nguyên.
   const _isKTTorBOD = !!(CURRENT_USER.canManageUsers || CURRENT_USER.isBOD);
-  if(tabId==='fin_accounting') return false;  // v3.07.04: chỉ admin (đã return true ở đầu hàm); người khác dùng giao diện cũ
+  if(tabId==='fin_accounting') return !!(CURRENT_USER.canCheckAcc || CURRENT_USER.canManageUsers);  // v3.07.61: admin (return true ở đầu) + KT + KTT
   if(tabId==='periodic') return _isKTTorBOD;
   if(tabId==='projects') return _isKTTorBOD;
   if(tabId==='plan') return !!CURRENT_USER.isBOD;
