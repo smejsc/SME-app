@@ -3393,7 +3393,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.07.56';            // bumped on each release
+const APP_VERSION='3.07.59';            // bumped on each release
 
 /* v2.62.0: Token xác thực backend — PHẢI khớp API_TOKEN trong Apps Script (Code.gs).
    Mọi request tới Apps Script tự động được gắn token qua lớp bọc fetch bên dưới.
@@ -12856,7 +12856,7 @@ function openDockLinkTool(){
   const rows=aps.map((r,i)=>{
     const guess=r.vesselId?_resolveDockAssetFromVessel(r.vesselId):'';
     const vName=r.vesselId?(anyVesselName(r.vesselId)||'(tàu?)'):'(không gắn tàu)';
-    const amt=fmt(r.amount, r.ccy||'USD');
+    const amt=fmt(r.amount, r.ccy||'USD',r.fxToUsd);
     return `<tr>
       <td style="font-size:11px;color:var(--muted)">${esc((r.issueDate||'').slice(0,10))}</td>
       <td>${esc(r.partner||'')}<div style="font-size:11px;color:var(--muted)">${esc(r.desc||'')}</div></td>
@@ -17347,7 +17347,7 @@ function setupFxControls(){
 const OP_CURRENCIES = ['USD','VND','SGD','EUR','CNY','JPY','THB','MYR','AUD','GBP'];
 function fxRate(){return Math.max(1,+S.fxRate||25000);}
 function displayCcy(){return S.displayCcy==='VND'?'VND':'USD';}
-function toDisplay(amount,sourceCcy){
+function toDisplay(amount,sourceCcy,fxToUsd){
   // Convert any amount from its source currency into the currently selected display currency
   if(amount==null||isNaN(amount)) return 0;
   const src=(sourceCcy||'USD').toUpperCase();
@@ -17355,6 +17355,18 @@ function toDisplay(amount,sourceCcy){
   if(src===dst) return amount;
   if(src==='USD'&&dst==='VND') return amount*fxRate();
   if(src==='VND'&&dst==='USD') return amount/fxRate();
+  // v3.07.58: ngoại tệ khác USD/VND (EUR/SGD/GBP...) — dùng fxToUsd của bản ghi nếu có,
+  //   để KHÔNG cộng nhầm số gốc ngoại tệ vào tổng VND/USD (lỗi gộp tỷ giá).
+  if(src!=='USD' && src!=='VND'){
+    const fx=+fxToUsd||0;
+    if(fx>0){
+      const usd=amount/fx;                 // amount (ccy) ÷ (ccy/USD) = USD
+      return dst==='USD' ? usd : usd*fxRate();
+    }
+    // không có tỷ giá → KHÔNG quy đổi được. Trả 0 để không cộng nhầm số gốc ngoại tệ
+    // vào tổng (thà thiếu còn hơn sai lệch lớn). Các sổ tách-ccy (vd công nợ NCC) không dùng hàm này.
+    return 0;
+  }
   return amount;
 }
 /* v2.75.2: Quy đổi CỨNG về USD — không phụ thuộc displayCcy (nút USD/VND).
@@ -17679,7 +17691,7 @@ function fmtVndWithNote(n, sourceCcy){
 function pct(n){if(n==null||isNaN(n)) return '—';return (n*100).toFixed(1)+'%';}
 
 // Normalize any transaction amount to display ccy (for summing mixed-ccy txs)
-function txAmt(t){return toDisplay(t.amount,t.ccy||'USD');}
+function txAmt(t){return toDisplay(t.amount,t.ccy||'USD',t.fxToUsd);}
 
 /* Returns approved transactions for BI reporting.
    Sources: APPROVED receivables (as REV) + APPROVED payables (as COST).
@@ -18197,7 +18209,7 @@ function showDockSpentDetail(planId){
       <td style="font-size:11px">${esc((r.issueDate||'').slice(0,10))}</td>
       <td>${esc(r.partner||'')}<div style="font-size:11px;color:var(--muted)">${esc(r.desc||'')}</div></td>
       <td style="font-size:11px">${esc(r.invoiceNo||'')}</td>
-      <td class="r" style="font-family:var(--font-mono);white-space:nowrap">${fmt(r.amount,r.ccy||'USD')}</td>
+      <td class="r" style="font-family:var(--font-mono);white-space:nowrap">${fmt(r.amount,r.ccy||'USD',r.fxToUsd)}</td>
     </tr>`).join('');
     body=`<div style="font-size:12.5px">
       <div style="margin:0 0 10px;color:var(--muted)">Tài sản: <b>${esc(p.assetName)}</b> · Năm ${yf===yt?yf:yf+'–'+yt} · ${items.length} phiếu</div>
@@ -18862,7 +18874,7 @@ function _projectIssuedValue(projectId){
     if(r.projectId!==projectId) return;
     if((typeof wfStatus==='function'?wfStatus(r):r.status)!=='approved') return;  // chỉ HĐ đã xuất
     const g=+r.amountGross||+r.amount||0;
-    sum+=toDisplay(g, r.ccy||'USD');
+    sum+=toDisplay(g, r.ccy||'USD',r.fxToUsd);
   });
   return sum;
 }
@@ -20960,10 +20972,10 @@ function renderDeptExpense(prefix, origin, pageId){
 
   const kEl=document.getElementById(prefix+'-kpi');
   if(kEl){
-    const totalApproved=approvedMine.reduce((s,r)=>s+toDisplay(+r.amountNet||+r.amount||0,r.ccy||'USD'),0);
+    const totalApproved=approvedMine.reduce((s,r)=>s+toDisplay(+r.amountNet||+r.amount||0,r.ccy||'USD',r.fxToUsd),0);
     const pendingCount=allMine.filter(r=>wfStatus(r)==='pending_l1'||wfStatus(r)==='pending_l2').length;
     const draftCount=allMine.filter(r=>wfStatus(r)==='draft'||wfStatus(r)==='rejected').length;
-    const totalRem=approvedMine.reduce((s,r)=>s+toDisplay(arRemaining(r),r.ccy||'USD'),0);
+    const totalRem=approvedMine.reduce((s,r)=>s+toDisplay(arRemaining(r),r.ccy||'USD',r.fxToUsd),0);
     kEl.innerHTML=`
       <div class="kpi">
         <div class="kpi-label">Chi phí đã duyệt</div>
@@ -21031,10 +21043,10 @@ function renderDeptExpense(prefix, origin, pageId){
     const wfS=wfStatus(r);
     const proj=r.projectId?S.projects.find(p=>p.id===r.projectId):null;
     if(wfS==='approved'){
-      sumNet+=toDisplay(net,r.ccy||'USD');
-      sumVat+=toDisplay(vat,r.ccy||'USD');
-      sumTot+=toDisplay(tot,r.ccy||'USD');
-      sumRem+=toDisplay(rem,r.ccy||'USD');
+      sumNet+=toDisplay(net,r.ccy||'USD',r.fxToUsd);
+      sumVat+=toDisplay(vat,r.ccy||'USD',r.fxToUsd);
+      sumTot+=toDisplay(tot,r.ccy||'USD',r.fxToUsd);
+      sumRem+=toDisplay(rem,r.ccy||'USD',r.fxToUsd);
     }
     const actionBtns=[];
     if(wfS==='draft' || wfS==='rejected'){
@@ -21130,7 +21142,7 @@ function approvalGetCandidates(){
       if(!hay.includes(partnerFilter)) return false;
     }
     if(amtTarget!=null && !isNaN(amtTarget) && amtTarget>0){
-      const disp=toDisplay(+r.amountGross||+r.amount||0, r.ccy||'USD');
+      const disp=toDisplay(+r.amountGross||+r.amount||0, r.ccy||'USD',r.fxToUsd);
       const diff=Math.abs(disp-amtTarget);
       const tol=Math.max(1, amtTarget*0.005);
       if(diff>tol) return false;
@@ -22028,7 +22040,7 @@ function approvalBulkApprove(){
     const r=c.record;
     const remNow=(typeof arRemaining==='function') ? arRemaining(r) : (+r.amountGross||+r.amount||0);
     const after = remNow - apDueThisAmount(r);
-    return s+toDisplay(after, r.ccy||'USD');
+    return s+toDisplay(after, r.ccy||'USD',r.fxToUsd);
   },0);
   const total=remainTotal;  // fallback cho các chỗ khác dùng biến total
 
@@ -23088,10 +23100,10 @@ function renderVesselExpense(){
   const kEl=document.getElementById('vex-kpi');
   if(kEl){
     const approvedMine=allMine.filter(r=>wfStatus(r)==='approved');
-    const totalApproved=approvedMine.reduce((s,r)=>s+toDisplay(+r.amountNet||+r.amount||0,r.ccy||'USD'),0);
+    const totalApproved=approvedMine.reduce((s,r)=>s+toDisplay(+r.amountNet||+r.amount||0,r.ccy||'USD',r.fxToUsd),0);
     const pendingCount=allMine.filter(r=>wfStatus(r)==='pending_l1'||wfStatus(r)==='pending_l2').length;
     const draftCount=allMine.filter(r=>wfStatus(r)==='draft'||wfStatus(r)==='rejected').length;
-    const totalRem=approvedMine.reduce((s,r)=>s+toDisplay(arRemaining(r),r.ccy||'USD'),0);
+    const totalRem=approvedMine.reduce((s,r)=>s+toDisplay(arRemaining(r),r.ccy||'USD',r.fxToUsd),0);
     const entityCount=allowedVessels.length+allowedProjects.length;
     kEl.innerHTML=`
       <div class="kpi">
@@ -23173,10 +23185,10 @@ function renderVesselExpense(){
     const rem=arRemaining(r);
     const wfS=wfStatus(r);
     if(wfS==='approved'){
-      sumNet+=toDisplay(net,r.ccy||'USD');
-      sumVat+=toDisplay(vat,r.ccy||'USD');
-      sumTot+=toDisplay(tot,r.ccy||'USD');
-      sumRem+=toDisplay(rem,r.ccy||'USD');
+      sumNet+=toDisplay(net,r.ccy||'USD',r.fxToUsd);
+      sumVat+=toDisplay(vat,r.ccy||'USD',r.fxToUsd);
+      sumTot+=toDisplay(tot,r.ccy||'USD',r.fxToUsd);
+      sumRem+=toDisplay(rem,r.ccy||'USD',r.fxToUsd);
     }
     const actionBtns=[];
     if(wfS==='draft' || wfS==='rejected'){
@@ -28092,18 +28104,18 @@ function renderAR(){
   const payApproved=payAll.filter(r=>wfStatus(r)==='approved');
   const recOpen=recApproved.filter(r=>arRemaining(r)>0.0001);
   const payOpen=payApproved.filter(r=>arRemaining(r)>0.0001);
-  const totRecRem=recOpen.reduce((s,r)=>s+toDisplay(arRemaining(r),r.ccy||'USD'),0);
-  const totPayRem=payOpen.reduce((s,r)=>s+toDisplay(arRemaining(r),r.ccy||'USD'),0);
-  const recOverdue=recOpen.filter(r=>arStatus(r).key==='overdue').reduce((s,r)=>s+toDisplay(arRemaining(r),r.ccy||'USD'),0);
-  const payOverdue=payOpen.filter(r=>arStatus(r).key==='overdue').reduce((s,r)=>s+toDisplay(arRemaining(r),r.ccy||'USD'),0);
+  const totRecRem=recOpen.reduce((s,r)=>s+toDisplay(arRemaining(r),r.ccy||'USD',r.fxToUsd),0);
+  const totPayRem=payOpen.reduce((s,r)=>s+toDisplay(arRemaining(r),r.ccy||'USD',r.fxToUsd),0);
+  const recOverdue=recOpen.filter(r=>arStatus(r).key==='overdue').reduce((s,r)=>s+toDisplay(arRemaining(r),r.ccy||'USD',r.fxToUsd),0);
+  const payOverdue=payOpen.filter(r=>arStatus(r).key==='overdue').reduce((s,r)=>s+toDisplay(arRemaining(r),r.ccy||'USD',r.fxToUsd),0);
   const thisMonth=todayISO().slice(0,7);
   const payDueThisMonth=payOpen.filter(r=>r.dueMonth===thisMonth).reduce((s,r)=>{
     const useAmt=(+r.dueAmount||0)>0?+r.dueAmount:arRemaining(r);
-    return s+toDisplay(useAmt,r.ccy||'USD');
+    return s+toDisplay(useAmt,r.ccy||'USD',r.fxToUsd);
   },0);
   // v3.01.44: GIÁ TRỊ các khoản đang chờ duyệt L2 (Chờ TT) — sắp phải thanh toán sau khi duyệt.
   const payPendingL2List=payAll.filter(r=>wfStatus(r)==='pending_l2');
-  const payPendingL2Value=payPendingL2List.reduce((s,r)=>s+toDisplay(arRemaining(r),r.ccy||'USD'),0);
+  const payPendingL2Value=payPendingL2List.reduce((s,r)=>s+toDisplay(arRemaining(r),r.ccy||'USD',r.fxToUsd),0);
   const recPendingL1=recAll.filter(r=>wfStatus(r)==='pending_l1').length;
   const recPendingL2=recAll.filter(r=>wfStatus(r)==='pending_l2').length;
   const payPendingL1=payAll.filter(r=>wfStatus(r)==='pending_l1').length;
@@ -28117,21 +28129,21 @@ function renderAR(){
   // Loại trừ khoản đã từ chối (rejected) vì không còn là nghĩa vụ. Tách riêng phần LƯƠNG
   // (bản ghi thuộc phiếu lương — cờ _payroll, v2.99.62) để ghi chú.
   const payAllOpen=payAll.filter(r=>wfStatus(r)!=='rejected' && arRemaining(r)>0.0001);
-  const totPayRemAll=payAllOpen.reduce((s,r)=>s+toDisplay(arRemaining(r),r.ccy||'USD'),0);
-  const totPayRemSalary=payAllOpen.filter(r=>r._payroll).reduce((s,r)=>s+toDisplay(arRemaining(r),r.ccy||'USD'),0);
+  const totPayRemAll=payAllOpen.reduce((s,r)=>s+toDisplay(arRemaining(r),r.ccy||'USD',r.fxToUsd),0);
+  const totPayRemSalary=payAllOpen.filter(r=>r._payroll).reduce((s,r)=>s+toDisplay(arRemaining(r),r.ccy||'USD',r.fxToUsd),0);
   const totPayRemOther=totPayRemAll-totPayRemSalary;
   const payAllOpenCount=payAllOpen.length;
   const paySalaryCount=payAllOpen.filter(r=>r._payroll).length;
-  const payOverdueAll=payAllOpen.filter(r=>arStatus(r).key==='overdue').reduce((s,r)=>s+toDisplay(arRemaining(r),r.ccy||'USD'),0);
+  const payOverdueAll=payAllOpen.filter(r=>arStatus(r).key==='overdue').reduce((s,r)=>s+toDisplay(arRemaining(r),r.ccy||'USD',r.fxToUsd),0);
   // Revenue/Cost approved totals
-  const totRev=recApproved.reduce((s,r)=>s+toDisplay(+r.amountNet||+r.amount||0,r.ccy||'USD'),0);
-  const totCost=payApproved.reduce((s,r)=>s+toDisplay(+r.amountNet||+r.amount||0,r.ccy||'USD'),0);
+  const totRev=recApproved.reduce((s,r)=>s+toDisplay(+r.amountNet||+r.amount||0,r.ccy||'USD',r.fxToUsd),0);
+  const totCost=payApproved.reduce((s,r)=>s+toDisplay(+r.amountNet||+r.amount||0,r.ccy||'USD',r.fxToUsd),0);
   // v2.99.94: TIỀN THỰC THU — tổng các khoản thanh toán đã ghi nhận trên mọi phải thu (quy đổi).
   let _collectedCount=0;
   const totCollected=recAll.reduce((s,r)=>{
     const paid=(r.payments||[]).reduce((a,p)=>a+(+p.amount||0),0);
     if(paid>0.0001) _collectedCount++;
-    return s+toDisplay(paid, r.ccy||'USD');
+    return s+toDisplay(paid, r.ccy||'USD',r.fxToUsd);
   },0);
   // v3.01.86: tách tiền ĐÃ THU theo NĂM HÓA ĐƠN (issueDate). Năm nay = năm dương lịch hiện tại.
   const _curYear=new Date().getFullYear();
@@ -28139,7 +28151,7 @@ function renderAR(){
   recAll.forEach(r=>{
     const paid=(r.payments||[]).reduce((a,p)=>a+(+p.amount||0),0);
     if(paid<=0.0001) return;
-    const usd=toDisplay(paid, r.ccy||'USD');
+    const usd=toDisplay(paid, r.ccy||'USD',r.fxToUsd);
     const yr=parseInt(String(r.issueDate||r.date||'').slice(0,4),10);
     if(yr && yr<_curYear) collectedPrevYear+=usd;
     else collectedThisYear+=usd;   // năm nay hoặc không rõ năm → coi là năm nay
@@ -28150,22 +28162,22 @@ function renderAR(){
   if(arK){
     // v3.01.27: DT dự kiến = AR chưa xuất HĐ (draft/rejected, chưa từ chối hẳn vẫn coi là dự kiến)
     const recExpected=recAll.filter(r=>{const s=wfStatus(r); return s!=='approved' && s!=='rejected';});
-    const totExpected=recExpected.reduce((s,r)=>s+toDisplay(+r.amountNet||+r.amount||0,r.ccy||'USD'),0);
+    const totExpected=recExpected.reduce((s,r)=>s+toDisplay(+r.amountNet||+r.amount||0,r.ccy||'USD',r.fxToUsd),0);
     // v3.01.81: TỔNG PHẢI THU LŨY KẾ = tổng GIÁ TRỊ ghi nhận (mọi năm, mọi trạng thái thu):
     //   = giá trị HĐ đã xuất (approved, gồm đã thu + chưa thu) + DT dự kiến (chưa xuất HĐ).
-    const totApprovedFull=recApproved.reduce((s,r)=>s+toDisplay(+r.amountNet||+r.amount||0,r.ccy||'USD'),0);
+    const totApprovedFull=recApproved.reduce((s,r)=>s+toDisplay(+r.amountNet||+r.amount||0,r.ccy||'USD',r.fxToUsd),0);
     const totCumulative=totApprovedFull+totExpected;
     // v3.01.87: tách giá trị HĐ đã xuất theo NĂM HÓA ĐƠN (issueDate)
     let approvedPrevYear=0, approvedThisYear=0;
     recApproved.forEach(r=>{
-      const usd=toDisplay(+r.amountNet||+r.amount||0, r.ccy||'USD');
+      const usd=toDisplay(+r.amountNet||+r.amount||0, r.ccy||'USD',r.fxToUsd);
       const yr=parseInt(String(r.issueDate||r.date||'').slice(0,4),10);
       if(yr && yr<_curYear) approvedPrevYear+=usd; else approvedThisYear+=usd;
     });
     // v3.06.27: tách CÒN PHẢI THU (dư nợ HĐ đã xuất) theo năm hóa đơn → Ô 3
     let remPrevYear=0, remThisYear=0;
     recOpen.forEach(r=>{
-      const usd=toDisplay(arRemaining(r), r.ccy||'USD');
+      const usd=toDisplay(arRemaining(r), r.ccy||'USD',r.fxToUsd);
       const yr=parseInt(String(r.issueDate||r.date||'').slice(0,4),10);
       if(yr && yr<_curYear) remPrevYear+=usd; else remThisYear+=usd;
     });
@@ -28197,11 +28209,11 @@ function renderAR(){
   //   3 thẻ (Tổng phải trả / Đã trả / Còn lại) đều tính trên cùng tập này cho nhất quán.
   const payActive=payAll.filter(r=>wfStatus(r)!=='rejected');
   let payApprovedPrev=0, payApprovedThis=0;
-  payActive.forEach(r=>{ const v=toDisplay(+r.amountGross||+r.amount||0, r.ccy||'USD'); if(_yPay(r)) payApprovedPrev+=v; else payApprovedThis+=v; });
+  payActive.forEach(r=>{ const v=toDisplay(+r.amountGross||+r.amount||0, r.ccy||'USD',r.fxToUsd); if(_yPay(r)) payApprovedPrev+=v; else payApprovedThis+=v; });
   const payApprovedTotal=payApprovedPrev+payApprovedThis;
   // Đã trả theo năm (payments đã ghi nhận) — trên cùng tập payActive
   let paidPrev=0, paidThis=0, _paidCount=0;
-  payActive.forEach(r=>{ const paid=(r.payments||[]).reduce((a,p)=>a+(+p.amount||0),0); if(paid<=0.0001) return; _paidCount++; const v=toDisplay(paid,r.ccy||'USD'); if(_yPay(r)) paidPrev+=v; else paidThis+=v; });
+  payActive.forEach(r=>{ const paid=(r.payments||[]).reduce((a,p)=>a+(+p.amount||0),0); if(paid<=0.0001) return; _paidCount++; const v=toDisplay(paid,r.ccy||'USD',r.fxToUsd); if(_yPay(r)) paidPrev+=v; else paidThis+=v; });
   const paidTotalAp=paidPrev+paidThis;
   // Còn lại theo năm — v3.03.38: = Tổng phải trả (đã duyệt) − Đã trả, theo từng năm (khớp công thức tổng).
   const remPrev = payApprovedPrev - paidPrev;
@@ -28210,7 +28222,7 @@ function renderAR(){
   // Tuổi nợ (aging) trên các khoản còn nợ
   const _agBuckets=[0,0,0,0,0]; const _today=todayISO();
   payAllOpen.forEach(r=>{
-    const d=r.dueDate||r.issueDate||''; const v=toDisplay(arRemaining(r),r.ccy||'USD');
+    const d=r.dueDate||r.issueDate||''; const v=toDisplay(arRemaining(r),r.ccy||'USD',r.fxToUsd);
     let b=0; if(d){ const days=Math.floor((Date.now()-new Date(d+'T00:00:00').getTime())/86400000); b=days<=0?0:days<=30?1:days<=60?2:days<=90?3:4; }
     _agBuckets[b]+=v;
   });
@@ -28723,12 +28735,12 @@ function renderArAp(kind){
     const rem=arRemaining(r), pd=arPaidTotal(r), wfS=wfStatus(r);
     const net=+r.amountNet||+r.amount||0, vat=+r.vatAmount||0, tot=+r.amountGross||+r.amount||0;
     if(isAp){
-      fNet+=toDisplay(net,r.ccy||'USD'); fVat+=toDisplay(vat,r.ccy||'USD'); fTot+=toDisplay(tot,r.ccy||'USD'); fPaid+=toDisplay(pd,r.ccy||'USD'); fRem+=toDisplay(rem,r.ccy||'USD');
+      fNet+=toDisplay(net,r.ccy||'USD',r.fxToUsd); fVat+=toDisplay(vat,r.ccy||'USD',r.fxToUsd); fTot+=toDisplay(tot,r.ccy||'USD',r.fxToUsd); fPaid+=toDisplay(pd,r.ccy||'USD',r.fxToUsd); fRem+=toDisplay(rem,r.ccy||'USD',r.fxToUsd);
     } else {
       fNet+=_toVndFixed(net,r.ccy||'VND'); fVat+=_toVndFixed(vat,r.ccy||'VND'); fTot+=_toVndFixed(tot,r.ccy||'VND'); fPaid+=_toVndFixed(pd,r.ccy||'VND'); fRem+=_toVndFixed(rem,r.ccy||'VND');
     }
     if(wfS==='approved'){
-      if(isAp){ sumNet+=toDisplay(net,r.ccy||'USD'); sumVat+=toDisplay(vat,r.ccy||'USD'); sumTot+=toDisplay(tot,r.ccy||'USD'); sumPaid+=toDisplay(pd,r.ccy||'USD'); sumRem+=toDisplay(rem,r.ccy||'USD'); }
+      if(isAp){ sumNet+=toDisplay(net,r.ccy||'USD',r.fxToUsd); sumVat+=toDisplay(vat,r.ccy||'USD',r.fxToUsd); sumTot+=toDisplay(tot,r.ccy||'USD',r.fxToUsd); sumPaid+=toDisplay(pd,r.ccy||'USD',r.fxToUsd); sumRem+=toDisplay(rem,r.ccy||'USD',r.fxToUsd); }
       else { sumNet+=_toVndFixed(net,r.ccy||'VND'); sumVat+=_toVndFixed(vat,r.ccy||'VND'); sumTot+=_toVndFixed(tot,r.ccy||'VND'); sumPaid+=_toVndFixed(pd,r.ccy||'VND'); sumRem+=_toVndFixed(rem,r.ccy||'VND'); }
     }
   });
@@ -28941,7 +28953,7 @@ function renderArAp(kind){
       <td colspan="2"></td></tr>`;
     // v3.01.103: dòng TỔNG bút toán nội bộ BOD — chỉ admin/người có cờ BOD thấy
     if(_bodRows.length && canSeeBODRecords()){
-      let bodTot=0; _bodRows.forEach(r=>{ bodTot+=toDisplay(+r.amountGross||+r.amount||0, r.ccy||'USD'); });
+      let bodTot=0; _bodRows.forEach(r=>{ bodTot+=toDisplay(+r.amountGross||+r.amount||0, r.ccy||'USD',r.fxToUsd); });
       h+=`<tr class="total" style="background:rgba(28,58,92,.10);cursor:pointer" onclick="showBodApDetail()" title="Bấm xem chi tiết / sửa / xóa các bút toán nội bộ BOD">
         <td colspan="3"><b>🔒 BÚT TOÁN NỘI BỘ BOD</b> <span style="font-size:10px;color:var(--muted)">${_bodRows.length} bút toán · không hiện ở sổ thường · đã vào P&L · bấm để xem chi tiết</span></td>
         <td class="r"><b>${fmt(bodTot)}</b></td>
@@ -28963,7 +28975,7 @@ function showBodApDetail(){
   const _isBod=(r)=> r && (r.isBODOnly || isExpenseBODOnly(r.expenseType));
   const items=scopedRecords(S.payables||[]).filter(r=>!r._isBudget && _isBod(r))
     .sort((a,b)=>(b.issueDate||'').localeCompare(a.issueDate||''));
-  let total=0; items.forEach(r=>{ total+=toDisplay(+r.amountGross||+r.amount||0, r.ccy||'USD'); });
+  let total=0; items.forEach(r=>{ total+=toDisplay(+r.amountGross||+r.amount||0, r.ccy||'USD',r.fxToUsd); });
   const stMap={draft:'Nháp',pending_acc:'Chờ KT',pending_l1:'Trình ký',pending_l2:'Chờ L2',approved:'Đã duyệt',rejected:'Từ chối'};
   let body;
   if(!items.length){
@@ -28980,7 +28992,7 @@ function showBodApDetail(){
         <td>${esc(r.partner||'')}<div style="font-size:11px;color:var(--muted)">${esc(r.desc||'')}</div></td>
         <td style="font-size:11px">${esc(obj)}</td>
         <td style="font-size:10px"><span style="color:${r.status==='rejected'?'var(--bad)':(r.status==='approved'?'var(--good)':'var(--muted)')}">${esc(stMap[r.status||'draft']||r.status)}</span></td>
-        <td class="r" style="font-family:var(--font-mono);white-space:nowrap">${fmt(toDisplay(+r.amountGross||+r.amount||0, r.ccy||'USD'))}</td>
+        <td class="r" style="font-family:var(--font-mono);white-space:nowrap">${fmt(toDisplay(+r.amountGross||+r.amount||0, r.ccy||'USD',r.fxToUsd))}</td>
         <td class="c" style="white-space:nowrap">
           <button class="icon-btn" title="Sửa" onclick="closeModal();openPayableModal('${r.id}')">✎</button>
           ${canDel?`<button class="icon-btn danger" title="Xóa" onclick="_bodApDelete('${r.id}')">✕</button>`:''}
@@ -30101,7 +30113,7 @@ function _arEditorBody(r,isPayable){
           const ordered=['USD','VND'].concat(list.filter(c=>c!=='USD'&&c!=='VND'));
           return ordered.map(c=>`<option value="${c}" ${cur===c?'selected':''}>${c}</option>`).join('');
         })()}</select></div>
-        <div class="field" id="ar-fx-wrap" style="${(r.ccy&&r.ccy!=='USD'&&r.ccy!=='VND')?'':'display:none'}"><label>Tỷ giá → VND <span style="font-weight:400;color:var(--muted);font-size:10px;text-transform:none">(1 ${esc(r.ccy||'')} = ? VND · app tự quy USD)</span></label><input type="number" id="ar-fx-usd" value="${r.fxToVnd || ((+r.fxToUsd>0&&+S.fxRate>0)?Math.round((+S.fxRate)/(+r.fxToUsd)):0) || 0}" step="any" placeholder="VD: 1 ${esc(r.ccy||'EUR')} ≈ 27000 VND" oninput="arFxPreview()" ${lockedAttr}><div id="ar-fx-preview" style="font-size:10px;color:var(--accent);margin-top:3px;font-family:var(--font-mono)"></div></div>
+        <div class="field" id="ar-fx-wrap" style="${(r.ccy&&r.ccy!=='USD'&&r.ccy!=='VND')?'':'display:none'}"><label>Tỷ giá → VND <span style="font-weight:400;color:var(--muted);font-size:10px;text-transform:none">(1 ${esc(r.ccy||'')} = ? VND · app tự quy USD)</span></label><input type="number" id="ar-fx-usd" value="${(+r.fxToVnd>0)?(+r.fxToVnd):''}" step="any" placeholder="Bắt buộc nhập: 1 ${esc(r.ccy||'EUR')} = ? VND" oninput="arFxPreview()" ${lockedAttr}><div id="ar-fx-preview" style="font-size:10px;color:var(--accent);margin-top:3px;font-family:var(--font-mono)"></div></div>
         <div class="field"><label>% VAT</label><select id="ar-vat-percent" onchange="arRecalcVat()" ${lockedAttr}>
           ${(()=>{
             // v2.99.86: nếu vatPercent là mức lẻ KHÔNG thuộc {0,5,8,10} (vd 0.1% từ import)
@@ -31991,7 +32003,7 @@ function _renderMultiRowModal(){
         </div>
         <div class="field" id="mr-fx-wrap" style="margin:0;${(s.ccy&&s.ccy!=='USD'&&s.ccy!=='VND')?'':'display:none'}">
           <label style="font-size:10px">Tỷ giá → VND <span style="font-weight:400;color:var(--muted);font-size:9px;text-transform:none">(1 ${esc(s.ccy||'')} = ? VND · app tự quy USD)</span></label>
-          <input type="number" id="mr-fx" value="${s.fxToVnd||0}" step="any" placeholder="VD: 27000" oninput="_mrFieldChange('fxToVnd', parseFloat(this.value)||0)">
+          <input type="number" id="mr-fx" value="${(+s.fxToVnd>0)?(+s.fxToVnd):''}" step="any" placeholder="Bắt buộc: 1 ${esc(s.ccy||'')} = ? VND" oninput="_mrFieldChange('fxToVnd', parseFloat(this.value)||0)">
         </div>
       </div>
       <div class="field" style="margin:8px 0 0 0">
@@ -33873,7 +33885,7 @@ function migrateArToApproved(){
     toast('Không có AR nào cần nâng — tất cả đã ở trạng thái Đã duyệt/Bị từ chối','good');
     return;
   }
-  const list = needFix.slice(0,10).map((r,i)=>`${i+1}. ${esc(r.partner||'?')} · HĐ ${esc(r.invoiceNo||'—')} · ${fmtCcy(+r.amount||0, r.ccy||'USD')} · trạng thái: ${wfStatus(r)}`).join('\n');
+  const list = needFix.slice(0,10).map((r,i)=>`${i+1}. ${esc(r.partner||'?')} · HĐ ${esc(r.invoiceNo||'—')} · ${fmtCcy(+r.amount||0, r.ccy||'USD',r.fxToUsd)} · trạng thái: ${wfStatus(r)}`).join('\n');
   const moreTxt = needFix.length>10 ? `\n... và ${needFix.length-10} bản ghi khác` : '';
   const msg = '⚙ NÂNG TRẠNG THÁI AR (PHẢI THU) SANG "ĐÃ DUYỆT"\n\n'
     + 'App sẽ nâng '+needFix.length+' bản ghi Phải thu (đang Nháp/chờ duyệt) sang "Đã duyệt".\n'
@@ -38979,29 +38991,45 @@ function renderNccDebt(){
   else if(fStatus) rows=rows.filter(t=>opWfStatus(t)===fStatus);
   if(fVendor) rows=rows.filter(t=>String(t.vendor||'').toLowerCase().includes(fVendor));
   if(!rows.length){ block.innerHTML='<div class="empty">Không có công nợ NCC khớp bộ lọc</div>'; return; }
-  // Gộp theo vendor
+  // v3.07.57: gom theo vendor; TRONG mỗi vendor tách theo NGOẠI TỆ GỐC (không quy đổi).
+  const _locN=(n,c)=>(+n||0).toLocaleString('vi-VN');
+  const ccyOrder=(c)=>({VND:0,USD:1,EUR:2,SGD:3,GBP:4}[c]!=null?{VND:0,USD:1,EUR:2,SGD:3,GBP:4}[c]:9);
   const grp=new Map();
   rows.forEach(t=>{
     const key=(t.vendor||'(không tên)').trim()||'(không tên)';
-    if(!grp.has(key)) grp.set(key, {vendor:key, items:[], total:0, paid:0, remain:0});
+    if(!grp.has(key)) grp.set(key, {vendor:key, items:[], byCcy:{}});
     const g=grp.get(key);
     g.items.push(t);
-    g.total+=toDisplay(opNccTotal(t), t.ccy||'VND');
-    g.paid +=toDisplay(opPaidTotal(t), t.ccy||'VND');
-    g.remain+=toDisplay(opNccRemaining(t), t.ccy||'VND');
+    const c=t.ccy||'VND';
+    if(!g.byCcy[c]) g.byCcy[c]={total:0, paid:0, remain:0};
+    g.byCcy[c].total += opNccTotal(t);
+    g.byCcy[c].paid  += opPaidTotal(t);
+    g.byCcy[c].remain+= opNccRemaining(t);
   });
-  const groups=Array.from(grp.values()).sort((a,b)=>b.remain-a.remain);
-  let gTot=0,gPaid=0,gRem=0;
-  groups.forEach(g=>{ gTot+=g.total; gPaid+=g.paid; gRem+=g.remain; });
+  // tổng toàn sổ theo từng ccy
+  const allByCcy={};
+  grp.forEach(g=>{ Object.entries(g.byCcy).forEach(([c,v])=>{ if(!allByCcy[c])allByCcy[c]={total:0,paid:0,remain:0}; allByCcy[c].total+=v.total; allByCcy[c].paid+=v.paid; allByCcy[c].remain+=v.remain; }); });
+  const allCcys=Object.keys(allByCcy).sort((a,b)=>ccyOrder(a)-ccyOrder(b));
+  // sắp NCC theo còn nợ lớn nhất (ưu tiên ccy nhiều giá trị nhất của NCC đó)
+  const groups=Array.from(grp.values()).sort((a,b)=>{
+    const ra=Math.max(...Object.values(a.byCcy).map(v=>v.remain),0);
+    const rb=Math.max(...Object.values(b.byCcy).map(v=>v.remain),0);
+    return rb-ra;
+  });
   const vName=(id)=>{ const v=(S.opVessels||[]).find(x=>x.id===id); return v?v.name:''; };
+  // KPI: tách theo từng loại tiền (giống số dư ngân hàng), KHÔNG quy đổi
+  const kpiCards=allCcys.map(c=>{
+    const v=allByCcy[c];
+    return `<div class="kpi"><div class="kpi-label">Còn nợ · ${c}</div><div class="kpi-value" style="color:${v.remain>0.001?'var(--bad)':'var(--good)'}">${_locN(v.remain,c)} <span style="font-size:11px;color:var(--muted)">${c}</span></div></div>`;
+  }).join('');
   let html=`<div style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:12px">
-    <div class="kpi"><div class="kpi-label">Tổng phải trả NCC</div><div class="kpi-value">${fmt(gTot)}</div></div>
-    <div class="kpi"><div class="kpi-label">Đã trả</div><div class="kpi-value" style="color:var(--good)">${fmt(gPaid)}</div></div>
-    <div class="kpi"><div class="kpi-label">Còn nợ</div><div class="kpi-value" style="color:${gRem>0.001?'var(--bad)':'var(--good)'}">${fmt(gRem)}</div></div>
+    ${kpiCards}
     <div class="kpi"><div class="kpi-label">Số NCC</div><div class="kpi-value">${groups.length}</div></div>
   </div>`;
   groups.forEach(g=>{
-    const itemRows=g.items.sort((a,b)=>String(b.date||'').localeCompare(String(a.date||''))).map(t=>{
+    const gCcys=Object.keys(g.byCcy).sort((a,b)=>ccyOrder(a)-ccyOrder(b));
+    const remStr=gCcys.filter(c=>Math.abs(g.byCcy[c].remain)>0.001).map(c=>`<b style="color:${g.byCcy[c].remain>0.001?'var(--bad)':'var(--good)'};font-family:var(--font-mono)">${_locN(g.byCcy[c].remain,c)} ${c}</b>`).join(' · ')||'<b style="color:var(--good)">0</b>';
+    const itemRows=g.items.sort((a,b)=>{ const ca=ccyOrder(a.ccy||'VND'), cb=ccyOrder(b.ccy||'VND'); if(ca!==cb)return ca-cb; return String(b.date||'').localeCompare(String(a.date||'')); }).map(t=>{
       const ccy=t.ccy||'VND';
       const st=opWfState(t);
       const rem=opNccRemaining(t);
@@ -39012,7 +39040,7 @@ function renderNccDebt(){
         <td style="font-size:11px">${esc(t.desc||'')}${t.invoiceNo?` · <span style="color:var(--muted)">HĐ ${esc(t.invoiceNo)}</span>`:''}</td>
         <td class="r num" style="font-size:11px">${opNccTotal(t).toLocaleString('vi-VN')} ${ccy}</td>
         <td class="r num" style="font-size:11px;color:var(--good)">${opPaidTotal(t).toLocaleString('vi-VN')}</td>
-        <td class="r num" style="font-size:11px;font-weight:600;color:${rem>0.001?'var(--bad)':'var(--good)'}">${rem.toLocaleString('vi-VN')}</td>
+        <td class="r num" style="font-size:11px;font-weight:600;color:${rem>0.001?'var(--bad)':'var(--good)'}">${rem.toLocaleString('vi-VN')} ${ccy}</td>
         <td class="c">${stChip}</td>
         <td class="c"><button class="icon-btn" title="Mở hồ sơ phiếu" onclick="showOpTxDetail('${t.id}')">👁</button></td>
       </tr>`;
@@ -39020,14 +39048,14 @@ function renderNccDebt(){
     html+=`<details style="margin-bottom:8px;border:1px solid var(--rule);border-radius:8px;overflow:hidden">
       <summary style="cursor:pointer;list-style:none;padding:9px 13px;background:rgba(28,58,92,.04);display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
         <span style="font-weight:600;font-size:13px">🏢 ${esc(g.vendor)} <span style="font-weight:400;color:var(--muted);font-size:11px">(${g.items.length} phiếu)</span></span>
-        <span style="font-size:12px">Còn nợ <b style="color:${g.remain>0.001?'var(--bad)':'var(--good)'};font-family:var(--font-mono)">${fmt(g.remain)}</b> <span style="color:var(--muted)">/ ${fmt(g.total)}</span></span>
+        <span style="font-size:12px">Còn nợ ${remStr}</span>
       </summary>
       <div class="tbl-scroll"><table class="tbl" style="font-size:12px"><thead><tr>
         <th>Ngày</th><th>Tàu</th><th>Diễn giải</th><th class="r">Phải trả</th><th class="r">Đã trả</th><th class="r">Còn nợ</th><th class="c">Hồ sơ</th><th></th>
       </tr></thead><tbody>${itemRows}</tbody></table></div>
     </details>`;
   });
-  html+=`<div style="font-size:11px;color:var(--muted);font-style:italic;margin-top:6px">💡 Đây là công nợ phải trả NCC từ chi hộ — TÁCH biệt báo cáo chủ tàu (giá trị báo cáo đã chốt khi ký kỳ, không đổi theo thanh toán NCC). Quy về ${displayCcy()}.</div>`;
+  html+=`<div style="font-size:11px;color:var(--muted);font-style:italic;margin-top:6px">💡 Công nợ phải trả NCC từ chi hộ — tách theo NGOẠI TỆ GỐC (không quy đổi), sắp theo loại tiền như số dư ngân hàng. Tách biệt báo cáo chủ tàu (giá trị báo cáo đã chốt khi ký kỳ).</div>`;
   block.innerHTML=html;
 }
 /* v3.07.49: xuất Excel Sổ công nợ NCC theo bộ lọc. */
@@ -39953,8 +39981,8 @@ function renderExecDashboard(){
     // ---- TÀI CHÍNH ----
     const recOpen=(S.receivables||[]).filter(r=>arRemaining(r)>0.01);
     const payOpen=(S.payables||[]).filter(r=>arRemaining(r)>0.01);
-    const arUnpaid=recOpen.reduce((s,r)=>s+toDisplay(arRemaining(r),r.ccy||'USD'),0);
-    const apUnpaid=payOpen.reduce((s,r)=>s+toDisplay(arRemaining(r),r.ccy||'USD'),0);
+    const arUnpaid=recOpen.reduce((s,r)=>s+toDisplay(arRemaining(r),r.ccy||'USD',r.fxToUsd),0);
+    const apUnpaid=payOpen.reduce((s,r)=>s+toDisplay(arRemaining(r),r.ccy||'USD',r.fxToUsd),0);
     let bankDisp=0; try{ bankDisp=(typeof totalBankInDisplay==='function')?totalBankInDisplay():toDisplay(+S.bankBalance||0,S.bankBalanceCcy||'USD'); }catch(e){}
     // ---- DỰ ÁN ----
     const projects=(S.projects||[]).filter(p=>!p.archived);
@@ -40163,15 +40191,15 @@ function renderDashboard(){
   // Now sourced from manual receivables/payables (not from transactions)
   const recOpen=(S.receivables||[]).filter(r=>arRemaining(r)>0.0001);
   const payOpen=(S.payables||[]).filter(r=>arRemaining(r)>0.0001);
-  const arUnpaid=recOpen.reduce((s,r)=>s+toDisplay(arRemaining(r),r.ccy||'USD'),0);
-  const apUnpaid=payOpen.reduce((s,r)=>s+toDisplay(arRemaining(r),r.ccy||'USD'),0);
+  const arUnpaid=recOpen.reduce((s,r)=>s+toDisplay(arRemaining(r),r.ccy||'USD',r.fxToUsd),0);
+  const apUnpaid=payOpen.reduce((s,r)=>s+toDisplay(arRemaining(r),r.ccy||'USD',r.fxToUsd),0);
   const arCount=recOpen.length;
   const apCount=payOpen.length;
   // Payable due this month — explicit dueAmount preferred, fallback to remaining
   const thisMonth=todayISO().slice(0,7);
   const payDueThisMonth=payOpen.filter(r=>r.dueMonth===thisMonth).reduce((s,r)=>{
     const useAmt=(+r.dueAmount||0)>0?+r.dueAmount:arRemaining(r);
-    return s+toDisplay(useAmt,r.ccy||'USD');
+    return s+toDisplay(useAmt,r.ccy||'USD',r.fxToUsd);
   },0);
 
   // v2.50.0: Dư nợ vay ngân hàng + dự kiến trả nợ vay tháng này.
@@ -42746,7 +42774,7 @@ function _vesselExpectedRev(vid){
     const viaProject = r.projectId && projIds.has(r.projectId);
     const viaVessel  = r.vesselId === vid;
     if(!(viaProject||viaVessel)) return;
-    sum += toDisplay(+r.amountNet||+r.amount||0, r.ccy||'USD');
+    sum += toDisplay(+r.amountNet||+r.amount||0, r.ccy||'USD',r.fxToUsd);
     n++;
   });
   return {expected:sum, count:n};
@@ -42763,7 +42791,7 @@ function _vesselExpectedCost(vid){
     const viaProject = r.projectId && projIds.has(r.projectId);
     const viaVessel  = r.vesselId === vid;
     if(!(viaProject||viaVessel)) return;
-    sum += toDisplay(+r.amountNet||+r.amount||0, r.ccy||'USD');
+    sum += toDisplay(+r.amountNet||+r.amount||0, r.ccy||'USD',r.fxToUsd);
     n++;
   });
   return {expected:sum, count:n};
@@ -43229,7 +43257,7 @@ function renderProjectPnL(){
   (S.payables||[]).forEach(r=>{
     if(r.projectId!==pid || wfStatus(r)==='rejected') return;
     // v3.02.01: quy đổi về đơn vị hiển thị (toDisplay) — tránh cộng lẫn nhiều loại tiền + double-convert khi fmt
-    supplierMap[r.partner]=(supplierMap[r.partner]||0)+toDisplay(+r.amountNet||+r.amount||0, r.ccy||'USD');
+    supplierMap[r.partner]=(supplierMap[r.partner]||0)+toDisplay(+r.amountNet||+r.amount||0, r.ccy||'USD',r.fxToUsd);
   });
   const topSuppliers=Object.entries(supplierMap).sort((a,b)=>b[1]-a[1]).slice(0,5);
 
@@ -43561,7 +43589,7 @@ function renderMMR(){
                   if(wfStatus(r)==='rejected') return;
                   if(!r.issueDate || !r.issueDate.startsWith(ym)) return;
                   if(isViewer() && !viewerCanSeeSegment(r.segment)) return;
-                  byCust[r.partner]=(byCust[r.partner]||0)+toDisplay(+r.amountNet||+r.amount||0, r.ccy||'USD');
+                  byCust[r.partner]=(byCust[r.partner]||0)+toDisplay(+r.amountNet||+r.amount||0, r.ccy||'USD',r.fxToUsd);
                 });
                 const sorted=Object.entries(byCust).sort((a,b)=>b[1]-a[1]).slice(0,5);
                 if(!sorted.length) return '<tr><td class="empty" colspan="2">Không có doanh thu</td></tr>';
@@ -43582,7 +43610,7 @@ function renderMMR(){
                   if(!r.issueDate || !r.issueDate.startsWith(ym)) return;
                   if(isViewer() && !viewerCanSeeSegment(r.segment)) return;
                   if(!apCountsInPL(r)) return;  // v3.01.39: bỏ PO/CapEx — đồng nhất P&L
-                  bySup[r.partner]=(bySup[r.partner]||0)+toDisplay(+r.amountNet||+r.amount||0, r.ccy||'USD');
+                  bySup[r.partner]=(bySup[r.partner]||0)+toDisplay(+r.amountNet||+r.amount||0, r.ccy||'USD',r.fxToUsd);
                 });
                 const sorted=Object.entries(bySup).sort((a,b)=>b[1]-a[1]).slice(0,5);
                 if(!sorted.length) return '<tr><td class="empty" colspan="2">Không có chi phí</td></tr>';
@@ -43608,18 +43636,18 @@ function renderMMR(){
             if(!r.issueDate || r.issueDate>monthEnd) return false;
             return arRemaining(r)>0.01;
           });
-          const arTot=arOutstanding.reduce((s,r)=>s+toDisplay(arRemaining(r), r.ccy||'USD'),0);
-          const apTot=apOutstanding.reduce((s,r)=>s+toDisplay(arRemaining(r), r.ccy||'USD'),0);
+          const arTot=arOutstanding.reduce((s,r)=>s+toDisplay(arRemaining(r), r.ccy||'USD',r.fxToUsd),0);
+          const apTot=apOutstanding.reduce((s,r)=>s+toDisplay(arRemaining(r), r.ccy||'USD',r.fxToUsd),0);
           // v3.01.41: tách rõ thành phần để giải thích chênh lệch với "chi phí kỳ"
           const _yr=y;  // năm báo cáo
           // AP — Đầu tư TSCĐ (CapEx: dock/SCL/mua tài sản) còn nợ
-          const apCapex=apOutstanding.filter(r=>isExpenseCapEx(r.expenseType)).reduce((s,r)=>s+toDisplay(arRemaining(r), r.ccy||'USD'),0);
+          const apCapex=apOutstanding.filter(r=>isExpenseCapEx(r.expenseType)).reduce((s,r)=>s+toDisplay(arRemaining(r), r.ccy||'USD',r.fxToUsd),0);
           const apCapexCount=apOutstanding.filter(r=>isExpenseCapEx(r.expenseType)).length;
           // AP — nợ cũ (hóa đơn năm trước năm báo cáo) còn nợ
-          const apOld=apOutstanding.filter(r=>+(r.issueDate||'').slice(0,4)<_yr).reduce((s,r)=>s+toDisplay(arRemaining(r), r.ccy||'USD'),0);
+          const apOld=apOutstanding.filter(r=>+(r.issueDate||'').slice(0,4)<_yr).reduce((s,r)=>s+toDisplay(arRemaining(r), r.ccy||'USD',r.fxToUsd),0);
           const apOldCount=apOutstanding.filter(r=>+(r.issueDate||'').slice(0,4)<_yr).length;
           // AR — phải thu của năm cũ còn lại
-          const arOld=arOutstanding.filter(r=>+(r.issueDate||'').slice(0,4)<_yr).reduce((s,r)=>s+toDisplay(arRemaining(r), r.ccy||'USD'),0);
+          const arOld=arOutstanding.filter(r=>+(r.issueDate||'').slice(0,4)<_yr).reduce((s,r)=>s+toDisplay(arRemaining(r), r.ccy||'USD',r.fxToUsd),0);
           const arOldCount=arOutstanding.filter(r=>+(r.issueDate||'').slice(0,4)<_yr).length;
           return `<div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
             <div style="background:rgba(76,154,68,.05);padding:14px;border-left:3px solid var(--good)">
@@ -44861,7 +44889,7 @@ function _nsnnComputeAuto(period){
     const d = r.issueDate || r.invoiceDate || '';
     if(!matchPeriod(d)) return;
     const vat = +r.vatAmount || 0;
-    vatOut += toDisplay(vat, r.ccy||'USD');
+    vatOut += toDisplay(vat, r.ccy||'USD',r.fxToUsd);
   });
 
   ap.forEach(r=>{
@@ -45669,7 +45697,7 @@ function _cfInflowsInWindow(start, end){
           date: ev.date,
           kind: 'AR',
           record: r,
-          amount: toDisplay(ev.amount, r.ccy||'USD'),
+          amount: toDisplay(ev.amount, r.ccy||'USD',r.fxToUsd),
           isExpected: ev.isExpected,
           isFinal: ev.isFinal
         });
@@ -45680,7 +45708,7 @@ function _cfInflowsInWindow(start, end){
     const d=_cfPickDate(r);
     if(!d) return;
     if(d>=start && d<end){
-      out.push({date:d, kind:'AR', record:r, amount:toDisplay(rem, r.ccy||'USD')});
+      out.push({date:d, kind:'AR', record:r, amount:toDisplay(rem, r.ccy||'USD',r.fxToUsd)});
     }
   });
   return out;
@@ -45698,7 +45726,7 @@ function _cfOutflowsInWindow(start, end){
     const d=_cfPickDate(r);
     if(!d) return;
     if(d>=start && d<end){
-      out.push({date:d, kind:'AP', record:r, amount:toDisplay(rem, r.ccy||'USD')});
+      out.push({date:d, kind:'AP', record:r, amount:toDisplay(rem, r.ccy||'USD',r.fxToUsd)});
     }
   });
   // Loan payment schedule
@@ -48391,15 +48419,15 @@ function finRenderDash(){
   const _fmt=(n)=>{ try{ return fmt(n); }catch(e){ return String(n); } };
   // Công nợ AR/AP còn lại (quy hiển thị)
   let arRem=0, arCount=0, apRem=0, apCount=0;
-  (S.receivables||[]).forEach(r=>{ const x=(typeof arRemaining==='function')?arRemaining(r):0; if(x>0.5){ arRem+=toDisplay(x, r.ccy||'USD'); arCount++; } });
-  (S.payables||[]).forEach(r=>{ if(r._origin==='qn_expense'||r._origin==='vessel_expense'||r._origin==='hr_expense'){} const x=(typeof arRemaining==='function')?arRemaining(r):0; if(x>0.5){ apRem+=toDisplay(x, r.ccy||'USD'); apCount++; } });
+  (S.receivables||[]).forEach(r=>{ const x=(typeof arRemaining==='function')?arRemaining(r):0; if(x>0.5){ arRem+=toDisplay(x, r.ccy||'USD',r.fxToUsd); arCount++; } });
+  (S.payables||[]).forEach(r=>{ if(r._origin==='qn_expense'||r._origin==='vessel_expense'||r._origin==='hr_expense'){} const x=(typeof arRemaining==='function')?arRemaining(r):0; if(x>0.5){ apRem+=toDisplay(x, r.ccy||'USD',r.fxToUsd); apCount++; } });
   // Đề xuất chờ duyệt (số đề xuất TT đợt này)
   let pendDue=0, pendCount=0;
   try{
     (S.payables||[]).forEach(r=>{
       const st=(typeof wfStatus==='function')?wfStatus(r):(r.status||'');
       if(st==='pending_l1'||st==='pending_l2'||st==='pending_acc'){
-        pendDue+=toDisplay((typeof apDueThisAmount==='function')?apDueThisAmount(r):(+r.amountGross||+r.amount||0), r.ccy||'USD');
+        pendDue+=toDisplay((typeof apDueThisAmount==='function')?apDueThisAmount(r):(+r.amountGross||+r.amount||0), r.ccy||'USD',r.fxToUsd);
         pendCount++;
       }
     });
