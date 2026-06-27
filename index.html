@@ -3408,7 +3408,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.08.15';            // bumped on each release
+const APP_VERSION='3.08.18';            // bumped on each release
 
 /* v2.62.0: Token xác thực backend — PHẢI khớp API_TOKEN trong Apps Script (Code.gs).
    Mọi request tới Apps Script tự động được gắn token qua lớp bọc fetch bên dưới.
@@ -5507,6 +5507,13 @@ async function authAction(){
       selfWrapInCloudCfg(name, pw).catch(e=>console.warn('[self-wrap]', e.message));
     }
     await loadEncryptedLocal();
+    // v3.08.16: KIỂM TRA CỜ APP USER — đăng nhập đúng mật khẩu chưa đủ, hồ sơ NV phải được cấp quyền App User
+    if(CURRENT_ROLE==='user' && typeof isAppUserAllowed==='function' && !isAppUserAllowed(CURRENT_USER)){
+      try{ logAuditEvent('login_denied_appuser',{user:(CURRENT_USER&&CURRENT_USER.name)||name}); }catch(e){}
+      CURRENT_USER=null; CRYPTO_KEY=null;
+      err.innerHTML='Tài khoản của bạn <b>chưa được cấp quyền sử dụng App</b>.<br><span style="color:var(--muted)">Vui lòng liên hệ quản trị viên (admin) để được cấp quyền App User.</span>';
+      return;
+    }
     document.getElementById('auth-overlay').classList.add('hide');
     try{ applyRoleUI(); } catch(e){ console.error('[login] applyRoleUI error:',e); err.textContent='Lỗi UI: '+e.message; return; }
     try{ setupFxControls(); } catch(e){ console.error('[login] setupFxControls error:',e); }
@@ -5598,6 +5605,34 @@ async function authAction(){
           }
         }
       }catch(e){console.warn('[migrate v1.85.0 vessel-asset] failed:',e);}
+      // v3.08.16: Migrate cờ App User — NV đang dùng app (có liên kết tài khoản + active) → ON; còn lại để undefined (form mặc định OFF cho NV mới)
+      try{
+        if(Array.isArray(S.hrEmployees) && !S._appUserMigrated){
+          let granted=0;
+          S.hrEmployees.forEach(e=>{
+            if(e.appUser!==undefined) return;  // đã đặt rõ thì giữ
+            if(e.linkUserId && e.status!=='inactive'){ e.appUser=true; granted++; }
+          });
+          S._appUserMigrated=true;
+          saveState();
+          console.log(`[migrate v3.08.16] Đã cấp App User=ON cho ${granted} NV đang dùng app (có tài khoản đăng nhập)`);
+          if(granted>0) setTimeout(()=>toast(`🔑 v3.08.16: Đã cấp quyền App User cho ${granted} NV đang dùng app. NV tạo mới sẽ mặc định TẮT.`,'good'),3000);
+        }
+      }catch(e){console.warn('[migrate v3.08.16 appUser] failed:',e);}
+      // v3.08.17: Phân loại lại type — NV phòng "Đội tàu"/"thuyền viên" đang để type='office' → 'crew' (sửa thống kê dashboard sai)
+      try{
+        if(Array.isArray(S.hrEmployees) && !S._crewTypeMigrated){
+          let fixed=0;
+          const isCrewDept=d=>{ const s=String(d||'').toLowerCase(); return s.indexOf('đội tàu')>=0||s.indexOf('doi tau')>=0||s.indexOf('thuyền viên')>=0||s.indexOf('thuyen vien')>=0; };
+          S.hrEmployees.forEach(e=>{
+            if(isCrewDept(e.dept) && (!e.type || e.type==='office')){ e.type='crew'; fixed++; }
+          });
+          S._crewTypeMigrated=true;
+          if(fixed>0){ saveState(); console.log(`[migrate v3.08.17] Phân loại lại ${fixed} NV phòng Đội tàu → Thuyền viên (type=crew)`);
+            setTimeout(()=>toast(`🔧 v3.08.17: Đã phân loại lại ${fixed} NV phòng Đội tàu thành Thuyền viên. Dashboard nhân sự nay thống kê đúng.`,'good'),3200);
+          } else { saveState(); }
+        }
+      }catch(e){console.warn('[migrate v3.08.17 crewType] failed:',e);}
       // v1.89.0: opTransactions cũ — chuẩn hóa ccy/fxToUsd/amountUsd (đồng chuẩn USD)
       try{
         if(Array.isArray(S.opTransactions)){
@@ -7179,8 +7214,14 @@ async function _complete2FALogin(){
     selfWrapInCloudCfg(pending.name, pending.pw).catch(e => console.warn('[self-wrap]', e.message));
   }
   await loadEncryptedLocal();
+  // v3.08.16: kiểm App User cho cả luồng 2FA
+  if(CURRENT_ROLE==='user' && typeof isAppUserAllowed==='function' && !isAppUserAllowed(CURRENT_USER)){
+    try{ logAuditEvent('login_denied_appuser',{user:(CURRENT_USER&&CURRENT_USER.name)||pending.name, via:'2fa'}); }catch(e){}
+    CURRENT_USER=null; CRYPTO_KEY=null;
+    const err2=document.getElementById('auth-err'); if(err2) err2.innerHTML='Tài khoản của bạn <b>chưa được cấp quyền sử dụng App</b>.<br><span style="color:var(--muted)">Vui lòng liên hệ quản trị viên (admin).</span>';
+    return;
+  }
   document.getElementById('auth-overlay').classList.add('hide');
-  try{ applyRoleUI(); } catch(e){ console.error('[2fa-login] applyRoleUI:',e); }
   try{ setupFxControls(); } catch(e){}
   try{ renderAll(); } catch(e){ console.error('[2fa-login] renderAll:',e); }
   try{ logAuditEvent('login', {role:CURRENT_ROLE, with2FA:true}); }catch(e){}
@@ -8418,7 +8459,8 @@ Trân trọng.`;
   const foot=`
     <button class="btn-sec" onclick="closeModal();openSettings()">Đóng</button>
     <button class="btn-sec" onclick="closeModal();openCfgSyncDialog()" title="Đẩy wrap NV lên cloud để NV đăng nhập được ở máy khác">☁ Đẩy lên cloud</button>
-    ${_toEmail?`<button class="btn-sec" style="border-color:#2a5a8c;color:#2a5a8c;font-weight:600" onclick="_openInviteEmail()" title="Mở ứng dụng email gửi ${esc(_toEmail)} với nội dung soạn sẵn">📧 Mở email soạn sẵn</button>`:''}
+    ${_toEmail?`<button class="btn-sec" style="border-color:#2a5a8c;color:#2a5a8c;font-weight:600" onclick="_openInviteEmail()" title="Mở ứng dụng email gửi ${esc(_toEmail)} với nội dung soạn sẵn">📧 Mở email ngoài</button>`:''}
+    ${_toEmail?`<button class="btn-primary" onclick="_sendInviteViaSystem()" title="Gửi qua Email Service nội bộ (có xem trước, ghi lịch sử)">📤 Gửi qua hệ thống</button>`:''}
     <button class="btn-primary" onclick="navigator.clipboard.writeText(document.getElementById('invite-zalo').value);toast('✓ Đã copy tin nhắn — dán vào Zalo','good')">📋 Copy Zalo</button>
   `;
   openModal('📨 Mời nhân viên '+esc(username), body, foot);
@@ -8444,6 +8486,28 @@ function _openInviteEmail(){
   }catch(e){
     try{ navigator.clipboard.writeText(to+'\n\n'+subject+'\n\n'+body); toast('Không mở được app email — đã COPY toàn bộ, dán vào email thủ công','bad'); }catch(_){ toast('Không mở được app email','bad'); }
   }
+}
+
+/* v3.08.18: Gửi email kích hoạt tài khoản qua Email Service nội bộ (Composer Preview / Auto Send).
+ * Tái dùng Email Composer dùng chung — KHÔNG tự viết gửi email. Ghi audit (không lưu mật khẩu). */
+function _sendInviteViaSystem(){
+  const info = window._inviteMailInfo || {};
+  const ta = document.getElementById('invite-email');
+  const body = (ta && ta.value) ? ta.value : (info.fallbackBody||'');
+  const to = info.to || '';
+  const subject = info.subject || 'Tài khoản phần mềm Seahorse Manager';
+  if(!to){ toast('Tài khoản chưa có email công ty để gửi','bad'); return; }
+  const cfg=emailConfig();
+  const autoSend = !!(cfg && cfg.accountEmailAutoSend);
+  // audit — KHÔNG lưu mật khẩu
+  try{ logAuditEvent('account_email_sent',{to, kind:'account_activation', mode:autoSend?'auto':'preview', by:(typeof actorName==='function'?actorName():'')}); }catch(e){}
+  if(typeof Notify==='undefined' || !Notify.compose){ toast('Email Composer chưa sẵn sàng','bad'); return; }
+  Notify.compose({
+    to:[to], subject, body, module:'account', event:'account_activation',
+    mode: autoSend?'auto':'preview', title:'✉️ Email kích hoạt tài khoản',
+    meta:{kind:'account_activation'}
+  });
+  if(autoSend){ toast('Đã gửi email kích hoạt (Auto Send) ✓','good'); closeModal(); }
 }
 
 /* Send email invite via mailto:
@@ -8923,6 +8987,26 @@ function canOperatePayroll(){
   if(CURRENT_USER && (CURRENT_USER.isBOD || CURRENT_USER.isCEO || CURRENT_USER.canSignHr || CURRENT_USER.isNVNS)) return true;
   return false;
 }
+
+/* ============================================================
+ * APP USER (v3.08.16) — cấp quyền sử dụng App ở tầng hồ sơ NV.
+ * Đăng nhập đúng mật khẩu / SSO chưa đủ: hồ sơ NV liên kết phải có appUser=ON.
+ * - Admin: luôn được vào (không phụ thuộc cờ).
+ * - Tài khoản KHÔNG liên kết hồ sơ NV: cho vào (vd tài khoản hệ thống thuần).
+ * - Có liên kết hồ sơ NV và hồ sơ đặt RÕ appUser=false → TỪ CHỐI.
+ * - appUser chưa đặt (undefined) → coi như cho phép (tránh khóa nhầm dữ liệu cũ chưa migrate).
+ * ============================================================ */
+function isAppUserAllowed(user){
+  if(!user) return false;
+  if(CURRENT_ROLE==='admin' || user.role==='admin') return true;
+  // tìm hồ sơ NV liên kết với tài khoản này
+  const emp=(S.hrEmployees||[]).find(e=> e.linkUserId && (e.linkUserId===user.id || e.linkUserId===user.name));
+  if(!emp) return true;            // không gắn hồ sơ NV → không áp cờ
+  if(emp.appUser===false) return false;  // bị tắt rõ ràng → chặn
+  return true;                     // ON hoặc chưa đặt → cho phép
+}
+/* Chỉ Admin được bật/tắt cờ App User (theo quyết định nghiệp vụ). */
+function canManageAppUser(){ return isAdmin(); }
 
 /* ============================================================
  * PAYROLL SECURITY — MỨC 1 (Default Deny + Field-Level Security)
@@ -16582,7 +16666,7 @@ const SHARED_AUDIT_ACTIONS=['login','logout','auto_logout','session_expired','lo
   'save_ap','save_ar','submit_for_approval','kt_check','kt_assign_cost_center',
   'payroll_config_change','payroll_config_approved','payroll_config_rejected',
   'paf_create','paf_update','paf_assign',
-  'payroll_access','vessel_email_change'];
+  'payroll_access','vessel_email_change','login_denied_appuser','account_email_sent'];
 /* ============================================================
  * EMAIL SERVICE — DỊCH VỤ GỬI EMAIL DÙNG CHUNG (v3.07.99, Đợt A)
  * Mọi module GỌI SendEmail(); KHÔNG tự viết mã gửi email.
@@ -17205,6 +17289,10 @@ function openEmailSettings(){
         <input type="checkbox" id="es-enabled" ${cfg.enabled!==false?'checked':''}> Bật gửi email toàn hệ thống
       </label>
       <div style="font-size:11px;color:var(--muted)">Tắt ô này thì mọi email ngừng gửi (kể cả đã xếp hàng đợi). Người nhận mặc định theo từng loại sự kiện cấu hình ở tab Mẫu email.</div>
+      <label style="display:flex;align-items:center;gap:8px;cursor:pointer;margin-top:4px">
+        <input type="checkbox" id="es-account-autosend" ${cfg.accountEmailAutoSend?'checked':''}> Tự gửi ngay email kích hoạt tài khoản (Auto Send)
+      </label>
+      <div style="font-size:11px;color:var(--muted)">BẬT: email kích hoạt/cấp tài khoản gửi ngay không cần xem trước. TẮT (khuyến nghị): hiện xem trước để IT kiểm rồi mới gửi.</div>
       <div style="border-top:1px solid var(--rule);margin-top:6px;padding-top:10px">
         <div style="font-weight:600;font-size:12.5px;color:#1c3a5c;margin-bottom:2px">📨 Email nhóm phòng (Communication Profile)</div>
         <div style="font-size:11px;color:var(--muted);margin-bottom:8px">Cấu hình 1 lần, dùng chung cho mọi tàu. Chứng từ phát sinh từ tàu sẽ tự gửi tới Vessel Email + nhóm phòng tương ứng (Daily Report→Operations; Chấm công→HR; Đề nghị mua→Purchasing+Warehouse; Xuất kho→Warehouse; On/Off-Hire→Operations+Accounting...). Có thể nhập nhiều email cách nhau dấu phẩy.</div>
@@ -17244,6 +17332,7 @@ function _emailSaveConfig(){
   cfg.signature=(document.getElementById('es-sign')||{}).value||'';
   cfg.logoUrl=(document.getElementById('es-logo')||{}).value||'';
   cfg.enabled=(document.getElementById('es-enabled')||{}).checked!==false;
+  cfg.accountEmailAutoSend=!!(document.getElementById('es-account-autosend')||{}).checked;  // v3.08.18
   // v3.08.13: lưu email nhóm phòng (Communication Profile)
   if(!cfg.deptEmails) cfg.deptEmails={};
   ['operations','hr','purchasing','warehouse','accounting','project'].forEach(k=>{ cfg.deptEmails[k]=(document.getElementById('es-dept-'+k)||{}).value||''; });
@@ -56709,6 +56798,16 @@ function hrmEditEmployee(id){
     ${rowWrap(sel('Tàu công tác','hrm-f-vessel',vesselOpt)+sel('Quản lý trực tiếp','hrm-f-manager',managerOpt))}
     ${rowWrap(fld('Ngày vào làm','hrm-f-startDate',e.startDate,'date')+fld('Ngày thử việc','hrm-f-probationDate',e.probationDate,'date')+fld('Ngày ký HĐ','hrm-f-contractSignDate',e.contractSignDate,'date'))}
     ${rowWrap(sel('Loại hợp đồng','hrm-f-contractType',opt([''].concat(HRM_CONTRACT_TYPES),e.contractType))+fld('Ngày hết hạn HĐLĐ','hrm-f-contractEndDate',e.contractEndDate,'date')+sel('Liên kết tài khoản đăng nhập','hrm-f-linkUser',userOpt))}
+    ${(()=>{ const allowed=(typeof canManageAppUser==='function')?canManageAppUser():false; const on=(e.appUser!==false); 
+      if(allowed){ return `<div style="margin:6px 0;padding:8px 10px;border:1px solid var(--rule);border-radius:8px;background:#f7faf7">
+        <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:12.5px;font-weight:600">
+          <input type="checkbox" id="hrm-f-appUser" ${on?'checked':''}> 🔑 Cho phép sử dụng App (App User)
+        </label>
+        <div style="font-size:11px;color:var(--muted);margin-top:3px">BẬT = được đăng nhập và dùng app. TẮT = dù có email công ty và đăng nhập thành công vẫn bị từ chối. Chỉ Admin chỉnh được.</div>
+      </div>`; }
+      // không phải admin: chỉ hiển thị trạng thái, không sửa
+      return `<div style="margin:6px 0;font-size:12px;color:var(--muted)">🔑 App User: <b style="color:${on?'#1e7d44':'#c0392b'}">${on?'BẬT':'TẮT'}</b> (chỉ Admin thay đổi)</div>`;
+    })()}
     ${rowWrap(fld('Hết hạn Visa','hrm-f-visaExpiry',e.visaExpiry,'date')+fld('Hết hạn Work Permit','hrm-f-wpExpiry',e.wpExpiry,'date')+fld('Hết hạn Chứng chỉ','hrm-f-certExpiry',e.certExpiry,'date'))}
     ${rowWrap(fld('Hết hạn Hộ chiếu','hrm-f-passportExpiry',e.passportExpiry,'date'))}
     ${rowWrap(fld('Phép đã dùng (năm nay)','hrm-f-leaveUsed',e.leaveUsed||0,'number')+fld('Phép tồn năm trước','hrm-f-leaveCarryOver',e.leaveCarryOver||0,'number')+`<div style="flex:1;min-width:160px;align-self:flex-end;font-size:11px;color:var(--muted);padding-bottom:8px">Phép năm = 12 + thâm niên (5 năm/ngày), tính tự động theo ngày vào làm.</div>`)}
@@ -56776,6 +56875,11 @@ function hrmSaveEmployee(id, opts){
       }
     });
     Object.assign(e, newData, {smartId});
+    // v3.08.16: cờ App User — chỉ Admin đổi; người khác giữ nguyên giá trị cũ
+    if(typeof canManageAppUser==='function' && canManageAppUser()){
+      const cb=document.getElementById('hrm-f-appUser');
+      if(cb) e.appUser=!!cb.checked;
+    }
     try{ _hrmApplyPositionChange(e); }catch(_e){}  // v3.08.06: gán vị trí + lịch sử kế nhiệm (sau assign để không bị ghi đè)
     toast('Đã cập nhật hồ sơ ✓','good');
     opts._savedId = e.id;
@@ -56786,6 +56890,12 @@ function hrmSaveEmployee(id, opts){
       createdAt:new Date().toISOString(),
       createdBy:(CURRENT_USER&&CURRENT_USER.name)||(isAdmin()?'admin':'?')
     }, newData);
+    // v3.08.16: NV tạo mới mặc định App User = OFF (phải Admin cấp quyền). Nếu admin tạo và tick sẵn thì bật.
+    newEmp.appUser=false;
+    if(typeof canManageAppUser==='function' && canManageAppUser()){
+      const cb=document.getElementById('hrm-f-appUser');
+      if(cb) newEmp.appUser=!!cb.checked;
+    }
     S.hrEmployees.push(newEmp);
     try{ _hrmApplyPositionChange(newEmp); }catch(_e){}  // v3.08.06: gán vị trí + lịch sử kế nhiệm
     hrmLogHistory(newEmp.id, 'create', '', '', smartId, 'Tạo hồ sơ nhân sự');
