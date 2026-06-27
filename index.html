@@ -716,6 +716,7 @@ body.readonly-mode::before{
         <button class="payroll-operate-item" onclick="closeAdminMenu();openPayrollPeriods()" title="Kỳ lương — tạo bảng lương theo tháng, tính cả bảng (preview), khóa kỳ, nhật ký thao tác."><span class="ico">📅</span>Kỳ lương</button>
         <button class="bod-payroll-item" onclick="closeAdminMenu();openPayChangeRequests()" title="Duyệt thay đổi cấu hình lương (quy tắc 4 mắt) — chỉ BOD/Admin."><span class="ico">🔐</span>Duyệt thay đổi lương <span id="pay-change-badge" style="display:none;background:#c0392b;color:#fff;border-radius:10px;padding:0 6px;font-size:10px;margin-left:4px"></span></button>
         <button class="admin-only-item" onclick="closeAdminMenu();openEmailHistory()" title="Lịch sử email hệ thống đã gửi — tìm kiếm, xem lại nội dung, trạng thái."><span class="ico">📧</span>Lịch sử Email</button>
+        <button class="admin-only-item" onclick="closeAdminMenu();openEmailDrafts()" title="Bản nháp email đã lưu — mở để sửa và gửi sau."><span class="ico">📝</span>Bản nháp Email</button>
         <button class="admin-only-item" onclick="closeAdminMenu();openEmailSettings()" title="Cài đặt Email Service — tên người gửi, chữ ký, bật/tắt, mẫu email + biến."><span class="ico">⚙️</span>Cài đặt Email</button>
         <button class="admin-only-item" onclick="closeAdminMenu();openHistoricalData()"><span class="ico">📊</span>Số liệu lịch sử (năm cũ)</button>
         <button class="admin-only-item" onclick="closeAdminMenu();seedDemo()"><span class="ico">▤</span>Nạp Demo Data</button>
@@ -3407,7 +3408,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.08.14';            // bumped on each release
+const APP_VERSION='3.08.15';            // bumped on each release
 
 /* v2.62.0: Token xác thực backend — PHẢI khớp API_TOKEN trong Apps Script (Code.gs).
    Mọi request tới Apps Script tự động được gắn token qua lớp bọc fetch bên dưới.
@@ -6058,7 +6059,7 @@ const ALL_DATA_FIELDS=[
   'hrEmployees','hrHistory','hrAttendance','payrollConfig','payrollEngine','payrollPeriods',  // v3.07.05 FIX: HRM + tham số lương — TRƯỚC ĐÂY KHÔNG SYNC → import xong sync là mất sạch
   'positions',  // v3.08.05: Position Management (PAF) — định biên theo vị trí
   'payChangeRequests','bodNotifs',  // v3.07.95: yêu cầu thay đổi cấu hình lương (4 mắt) + thông báo BOD — PHẢI sync
-  'emailQueue','emailLog','emailSettings','emailTemplates',  // v3.07.99/3.08.01: Email Service — hàng đợi + lịch sử + cấu hình + mẫu
+  'emailQueue','emailLog','emailSettings','emailTemplates','emailDrafts',  // v3.07.99/3.08.01/3.08.15: Email Service — hàng đợi + lịch sử + cấu hình + mẫu + nháp
   'crewAssignments','crewTimesheets',  // v3.07.38: Quyết định điều động + bảng chấm công tàu — PHẢI sync
   'crewChangePlans','crewManning','crewRotationConfig',  // v3.07.39: kế hoạch thay ca + định biên + ngưỡng — PHẢI sync
   'historicalData','lockedHistYears','deletedIds',
@@ -15308,6 +15309,7 @@ function defaultState(){
     bodNotifs: [],  // v3.07.95: thông báo BOD — [{id,type,reqId,title,body,createdAt,read,resolved}]
     emailQueue: [],  // v3.07.99: hàng đợi gửi email — [{id,to,subject,body,status,attempts,...}]
     emailLog: [],  // v3.07.99: lịch sử email đã gửi/thất bại
+    emailDrafts: [],  // v3.08.15: bản nháp email (Smart Email Composer) — gửi sau
     emailSettings: null,  // v3.07.99: cấu hình email (fromName, enabled, eventToggles, defaultRecipients)
     emailTemplates: [],  // v3.08.01: mẫu email (subject/body có biến {{}})
     bankAccounts:[],     // [{id, bankName, branch, accountNo, accountName, ccy, isActive, note, createdAt}]
@@ -16931,9 +16933,219 @@ const Notify = (function(){
       return r;
     },
     /* Danh sách kênh đang sẵn sàng (cho UI/kiểm tra). */
-    availableChannels: function(){ return Object.keys(CHANNELS).filter(k=>CHANNELS[k].ready); }
+    availableChannels: function(){ return Object.keys(CHANNELS).filter(k=>CHANNELS[k].ready); },
+    /* Smart Email Composer — cửa chung cho mọi module. mode: 'auto'|'preview'(mặc định)|'draft'. */
+    compose: function(opts){ return EmailComposerOpen(opts||{}); }
   };
 })();
+
+/* ============================================================
+ * SMART EMAIL COMPOSER (v3.08.15) — component soạn/preview email dùng chung.
+ * Mọi module gọi Notify.compose({...}); KHÔNG tự viết gửi email.
+ * mode:
+ *   'auto'    — gửi ngay không hỏi (thông báo nội bộ/cảnh báo)
+ *   'preview' — (MẶC ĐỊNH) tạo nháp → người dùng xem/sửa → bấm Gửi
+ *   'draft'   — chỉ lưu nháp, gửi sau
+ * opts: {to[],cc[],bcc[],subject,body,attachments[],module,event,meta,mode,title}
+ * ============================================================ */
+let _composerState=null;  // trạng thái cửa sổ đang mở
+function EmailComposerOpen(opts){
+  opts=opts||{};
+  const cfg=emailConfig();
+  if(cfg.enabled===false){ toast('Gửi email đang TẮT trong Cài đặt Email','warn'); return null; }
+  const mode=opts.mode||'preview';
+  // chế độ auto: gửi luôn, không mở cửa sổ
+  if(mode==='auto'){
+    return SendEmail({ to:opts.to, cc:opts.cc, bcc:opts.bcc, subject:opts.subject, body:opts.body,
+      attachments:opts.attachments, module:opts.module, event:opts.event, meta:opts.meta });
+  }
+  // chuẩn hóa
+  _composerState={
+    to:[].concat(opts.to||[]).filter(Boolean),
+    cc:[].concat(opts.cc||[]).filter(Boolean),
+    bcc:[].concat(opts.bcc||[]).filter(Boolean),
+    subject:opts.subject||'',
+    body:opts.body||'',
+    note:'',
+    attachments:Array.isArray(opts.attachments)?opts.attachments.slice():[],
+    module:opts.module||'', event:opts.event||'', meta:opts.meta||null,
+    draftId:opts.draftId||null
+  };
+  _emailComposerRender(opts.title||'✉️ Soạn email', mode==='draft');
+  return true;
+}
+function _ecChips(list, kind){
+  if(!list.length) return '<span style="color:var(--muted);font-size:11px">— trống —</span>';
+  return list.map((e,i)=>`<span style="display:inline-block;background:#eef2f7;border-radius:10px;padding:2px 8px;margin:2px;font-size:11px">${esc(e)} <span style="cursor:pointer;color:#c0392b;font-weight:700" onclick="_ecRemove('${kind}',${i})">×</span></span>`).join('');
+}
+function _emailComposerRender(title, draftMode){
+  const s=_composerState; if(!s) return;
+  const cfg=emailConfig();
+  const sig = cfg.signature?('<div style="margin-top:10px;padding-top:8px;border-top:1px solid #ddd;color:#555;font-size:11px;white-space:pre-wrap">'+esc(cfg.signature)+'</div>'):'';
+  const atts = s.attachments.length
+    ? s.attachments.map((a,i)=>`<div style="font-size:11px;padding:2px 0">📎 ${esc(a.fileName||a.name||'file')} <span style="color:var(--muted)">(${Math.round((a.size||(a.base64?a.base64.length*0.75:0))/1024)}KB)</span> <span style="cursor:pointer;color:#c0392b" onclick="_ecRemoveAtt(${i})">× gỡ</span></div>`).join('')
+    : '<div style="font-size:11px;color:var(--muted)">Chưa có tệp đính kèm.</div>';
+  const inputStyle='width:100%;padding:6px 9px;border:1px solid var(--rule);border-radius:6px;font-size:12px;margin-top:3px';
+  const body=`<div style="display:flex;flex-direction:column;gap:8px;max-width:640px">
+    <div style="border:1px solid var(--rule);border-radius:8px;padding:10px;background:#fafbfc">
+      <div style="font-size:11px;color:var(--muted);margin-bottom:4px">Người nhận (To) — tự động theo loại chứng từ:</div>
+      <div>${_ecChips(s.to,'to')}</div>
+      <input id="ec-add-to" placeholder="+ thêm người nhận, Enter" style="${inputStyle}" onkeydown="if(event.key==='Enter'){_ecAdd('to');event.preventDefault();}">
+      <div style="display:flex;gap:10px;margin-top:8px">
+        <div style="flex:1"><div style="font-size:11px;color:var(--muted)">CC:</div>${_ecChips(s.cc,'cc')}<input id="ec-add-cc" placeholder="+ CC, Enter" style="${inputStyle}" onkeydown="if(event.key==='Enter'){_ecAdd('cc');event.preventDefault();}"></div>
+        <div style="flex:1"><div style="font-size:11px;color:var(--muted)">BCC:</div>${_ecChips(s.bcc,'bcc')}<input id="ec-add-bcc" placeholder="+ BCC, Enter" style="${inputStyle}" onkeydown="if(event.key==='Enter'){_ecAdd('bcc');event.preventDefault();}"></div>
+      </div>
+    </div>
+    <label style="font-size:12px;font-weight:600">Tiêu đề<input id="ec-subject" value="${esc(s.subject)}" style="${inputStyle}"></label>
+    <label style="font-size:12px;font-weight:600">Nội dung<textarea id="ec-body" rows="7" style="${inputStyle};font-family:inherit">${esc(s.body)}</textarea></label>
+    <label style="font-size:12px;font-weight:600">Ghi chú cá nhân (thêm vào đầu email)<textarea id="ec-note" rows="2" placeholder="Tùy chọn..." style="${inputStyle};font-family:inherit">${esc(s.note)}</textarea></label>
+    <div style="border:1px solid var(--rule);border-radius:8px;padding:8px 10px">
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <span style="font-size:12px;font-weight:600">📎 Tệp đính kèm</span>
+        <button class="btn-sec" style="font-size:11px" onclick="document.getElementById('ec-file').click()">+ Chọn tệp (PDF/Excel...)</button>
+        <input type="file" id="ec-file" style="display:none" multiple accept=".pdf,.xlsx,.xls,.png,.jpg,.jpeg,.doc,.docx" onchange="_ecPickFiles(this)">
+      </div>
+      <div style="margin-top:6px">${atts}</div>
+    </div>
+    <div style="border:1px dashed var(--rule);border-radius:8px;padding:8px 10px;background:#fff">
+      <div style="font-size:11px;color:var(--muted);margin-bottom:4px">👁 Xem trước (giống email thật):</div>
+      <div style="font-size:12px"><b>Đến:</b> ${esc(s.to.join(', ')||'(chưa có)')}</div>
+      ${s.cc.length?`<div style="font-size:12px"><b>CC:</b> ${esc(s.cc.join(', '))}</div>`:''}
+      ${s.bcc.length?`<div style="font-size:12px"><b>BCC:</b> ${esc(s.bcc.join(', '))}</div>`:''}
+      <div style="font-size:12px"><b>Tiêu đề:</b> ${esc(s.subject||'(trống)')}</div>
+      <div style="margin-top:6px;font-size:12px;white-space:pre-wrap;color:#333">${esc(s.body||'')}</div>
+      ${sig}
+    </div>
+  </div>`;
+  const foot=`<button class="btn-ghost" onclick="_ecCancel()">Hủy</button>
+    <button class="btn-sec" onclick="_ecSaveDraft()">💾 Lưu nháp</button>
+    <button class="btn-ghost" onclick="_ecSyncFields();_emailComposerRender('${esc(title)}',${draftMode})">🔄 Cập nhật xem trước</button>
+    <button class="btn-primary" onclick="_ecSend()">📤 Gửi</button>`;
+  openModal(title, body, foot);
+}
+/* đồng bộ ô nhập vào state (gọi trước khi render lại / gửi / lưu) */
+function _ecSyncFields(){
+  const s=_composerState; if(!s) return;
+  const g=id=>(document.getElementById(id)||{}).value;
+  if(g('ec-subject')!==undefined) s.subject=g('ec-subject')||'';
+  if(g('ec-body')!==undefined) s.body=g('ec-body')||'';
+  if(g('ec-note')!==undefined) s.note=g('ec-note')||'';
+}
+function _ecAdd(kind){
+  const s=_composerState; if(!s) return;
+  const el=document.getElementById('ec-add-'+kind); if(!el) return;
+  const v=(el.value||'').trim();
+  if(v && v.indexOf('@')>0 && s[kind].indexOf(v)<0){ s[kind].push(v); }
+  else if(v){ toast('Email không hợp lệ','bad'); return; }
+  _ecSyncFields(); _emailComposerRender(document.querySelector('.modal-title')?.textContent||'✉️ Soạn email', false);
+}
+function _ecRemove(kind,i){ const s=_composerState; if(!s)return; _ecSyncFields(); s[kind].splice(i,1); _emailComposerRender(document.querySelector('.modal-title')?.textContent||'✉️ Soạn email', false); }
+function _ecRemoveAtt(i){ const s=_composerState; if(!s)return; _ecSyncFields(); s.attachments.splice(i,1); _emailComposerRender(document.querySelector('.modal-title')?.textContent||'✉️ Soạn email', false); }
+function _ecPickFiles(input){
+  const s=_composerState; if(!s||!input.files) return;
+  const files=Array.from(input.files);
+  let pending=files.length;
+  files.forEach(f=>{
+    if(f.size>5*1024*1024){ toast('Tệp "'+f.name+'" >5MB, bỏ qua','warn'); if(--pending===0)_afterPick(); return; }
+    const rd=new FileReader();
+    rd.onload=()=>{ s.attachments.push({ fileName:f.name, name:f.name, size:f.size, mimeType:f.type, base64:String(rd.result).split(',')[1]||'' }); if(--pending===0)_afterPick(); };
+    rd.onerror=()=>{ toast('Lỗi đọc tệp '+f.name,'bad'); if(--pending===0)_afterPick(); };
+    rd.readAsDataURL(f);
+  });
+  function _afterPick(){ _ecSyncFields(); _emailComposerRender(document.querySelector('.modal-title')?.textContent||'✉️ Soạn email', false); }
+}
+/* gộp ghi chú cá nhân vào đầu nội dung khi gửi */
+function _ecFinalBody(s){ return (s.note?(s.note.trim()+'\n\n'):'')+s.body; }
+function _ecSend(){
+  const s=_composerState; if(!s) return; _ecSyncFields();
+  if(!s.to.length){ toast('Chưa có người nhận','bad'); return; }
+  const r=SendEmail({ to:s.to, cc:s.cc, bcc:s.bcc, subject:s.subject, body:_ecFinalBody(s),
+    attachments:s.attachments, module:s.module, event:s.event, meta:s.meta });
+  if(s.draftId){ S.emailDrafts=(S.emailDrafts||[]).filter(d=>d.id!==s.draftId); }  // gửi nháp → xóa khỏi nháp
+  saveState();
+  if(r){ toast('Đã đưa email vào hàng đợi gửi ✓','good'); } else { toast('Không gửi được (kiểm tra người nhận/cài đặt)','bad'); }
+  _composerState=null; closeModal();
+}
+function _ecSaveDraft(){
+  const s=_composerState; if(!s) return; _ecSyncFields();
+  if(!S.emailDrafts) S.emailDrafts=[];
+  if(s.draftId){
+    const d=S.emailDrafts.find(x=>x.id===s.draftId);
+    if(d){ Object.assign(d,{to:s.to,cc:s.cc,bcc:s.bcc,subject:s.subject,body:s.body,note:s.note,attachments:s.attachments,updatedAt:new Date().toISOString()}); }
+  } else {
+    s.draftId='draft_'+Date.now().toString(36);
+    S.emailDrafts.push({ id:s.draftId, to:s.to,cc:s.cc,bcc:s.bcc,subject:s.subject,body:s.body,note:s.note,
+      attachments:s.attachments, module:s.module,event:s.event,meta:s.meta,
+      createdBy:(typeof actorName==='function'?actorName():''), createdAt:new Date().toISOString() });
+  }
+  saveState(); toast('Đã lưu nháp ✓','good'); _composerState=null; closeModal();
+}
+function _ecCancel(){
+  const s=_composerState; if(!s){ closeModal(); return; }
+  _ecSyncFields();
+  // nếu có nội dung thì hỏi lưu nháp
+  if(s.subject||s.body||s.note){
+    if(confirm('Lưu bản nháp để gửi sau?')){ _ecSaveDraft(); return; }
+  }
+  _composerState=null; closeModal();
+}
+/* Màn quản lý NHÁP — xem lại / gửi / xóa */
+function openEmailDrafts(){
+  const list=(S.emailDrafts||[]).slice().reverse();
+  const rows=list.length? list.map(d=>`<tr style="border-bottom:1px solid var(--rule)">
+    <td style="padding:5px 8px;font-size:12px">${esc(d.subject||'(không tiêu đề)')}<div style="font-size:10px;color:var(--muted)">→ ${esc((d.to||[]).join(', ')||'(chưa có người nhận)')}</div></td>
+    <td style="padding:5px 8px;font-size:11px;color:var(--muted)">${esc((d.createdAt||'').slice(0,16).replace('T',' '))}</td>
+    <td style="padding:5px 8px;white-space:nowrap">
+      <button class="btn-ghost" style="font-size:11px" onclick="_openDraft('${d.id}')">✏️ Mở</button>
+      <button class="btn-ghost" style="font-size:11px;color:#c0392b" onclick="_deleteDraft('${d.id}')">🗑</button>
+    </td></tr>`).join('')
+    : '<tr><td colspan="3" style="padding:14px;text-align:center;color:var(--muted)">Chưa có bản nháp.</td></tr>';
+  openModal('📝 Bản nháp email', `<table style="width:100%;border-collapse:collapse;font-size:12px;border:1px solid var(--rule)">
+    <thead><tr style="background:var(--rule);text-align:left"><th style="padding:6px 8px">Tiêu đề / Người nhận</th><th style="padding:6px 8px">Tạo lúc</th><th style="padding:6px 8px"></th></tr></thead>
+    <tbody>${rows}</tbody></table>`, `<button class="btn-ghost" onclick="closeModal()">Đóng</button>`);
+}
+function _openDraft(id){
+  const d=(S.emailDrafts||[]).find(x=>x.id===id); if(!d){ toast('Không tìm thấy nháp','bad'); return; }
+  EmailComposerOpen({ to:d.to,cc:d.cc,bcc:d.bcc,subject:d.subject,body:d.body,attachments:d.attachments,
+    module:d.module,event:d.event,meta:d.meta,draftId:d.id, title:'✏️ Sửa nháp email' });
+  if(_composerState) _composerState.note=d.note||'';
+}
+function _deleteDraft(id){
+  if(!confirm('Xóa bản nháp này?')) return;
+  S.emailDrafts=(S.emailDrafts||[]).filter(x=>x.id!==id); saveState(); openEmailDrafts();
+}
+/* Mở hộp chọn loại chứng từ của tàu rồi mở Email Composer (Preview Before Send).
+ * Dùng chung cho mọi nơi có vesselId. */
+function sendVesselDocEmail(vesselId){
+  const v=(S.vessels||[]).find(x=>x.id===vesselId);
+  if(!v){ toast('Không tìm thấy tàu','bad'); return; }
+  const cfg=emailConfig();
+  // các loại chứng từ tàu + kho (theo VESSEL_DOC_ROUTING)
+  const types=[
+    ['daily_report','📋 Daily Report'],['onhire','⚓ On-Hire Report'],['offhire','🔌 Off-Hire Report'],
+    ['incident','⚠️ Incident Report'],['maintenance','🔧 Maintenance Report'],
+    ['crew_list','👥 Danh sách thuyền viên'],['crew_assign','📄 Quyết định điều động'],['timesheet','🗓 Bảng chấm công'],
+    ['purchase_req','🛒 Đề nghị mua vật tư'],['wh_pending_in','📦 Phiếu chờ nhập kho'],['wh_out','📤 Phiếu xuất kho'],['wh_transfer','🔄 Phiếu điều chuyển vật tư']
+  ];
+  const opts=types.map(([k,lbl])=>{
+    const rcpt=vesselRecipientsFor(vesselId,k);
+    return `<button class="btn-sec" style="text-align:left;font-size:12px;margin:3px 0;width:100%" onclick="_sendVesselDocPick('${vesselId}','${k}')">${lbl} <span style="color:var(--muted);font-size:10px">→ ${rcpt.length?esc(rcpt.join(', ')):'(chưa cấu hình người nhận)'}</span></button>`;
+  }).join('');
+  openModal('📧 Gửi email — tàu '+esc(v.name), `<div style="font-size:12px;color:var(--muted);margin-bottom:8px">Chọn loại chứng từ. Người nhận tự lấy theo Vessel Email + nhóm phòng; bạn xem trước và sửa được trước khi gửi.</div>${opts}`, `<button class="btn-ghost" onclick="closeModal()">Đóng</button>`);
+}
+function _sendVesselDocPick(vesselId, docType){
+  const v=(S.vessels||[]).find(x=>x.id===vesselId);
+  const to=vesselRecipientsFor(vesselId, docType);
+  if(!to.length){ toast('Chưa cấu hình người nhận cho loại này (đặt Vessel Email + email nhóm phòng)','warn'); return; }
+  const label=(VESSEL_DOC_ROUTING[docType]&&VESSEL_DOC_ROUTING[docType].label)||docType;
+  const co=(S.companyInfo&&S.companyInfo.name)||'Seahorse';
+  Notify.compose({
+    to, module:'vessel', event:docType, meta:{vesselId, docType},
+    subject:`[${co}] ${label} — ${v?v.name:''}`,
+    body:`Kính gửi,\n\nĐính kèm/Thông tin ${label} của tàu ${v?v.name:''}.\n\nTrân trọng,`,
+    mode:'preview', title:'✉️ '+label+' — '+(v?v.name:'')
+  });
+}
 
 /* Bộ đếm giờ chạy nền — quét hàng đợi mỗi 2 phút (đóng vai Background Service
  * phía client; backend cũng nên có Time Trigger riêng để gửi khi không ai mở app). */
@@ -21672,6 +21884,7 @@ function renderVessels(){
       <td class="r num">${v.dwt.toLocaleString()}</td>
       <td class="r mono">${v.year}</td>
       <td><div class="row-actions">
+        <button class="icon-btn" title="📧 Gửi email chứng từ tàu" onclick="sendVesselDocEmail('${v.id}')">📧</button>
         <button class="icon-btn" title="Sửa" onclick="editVessel('${v.id}')">✎</button>
         <button class="icon-btn danger" title="Xóa" onclick="delVessel('${v.id}')">✕</button>
       </div></td>
