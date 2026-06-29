@@ -3469,7 +3469,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.09.58';            // bumped on each release
+const APP_VERSION='3.09.59';            // bumped on each release
 /* Debug logging: dlog() chỉ in khi DEBUG_MODE bật (mặc định TẮT ở production để
    tránh nhiễu/lộ cấu trúc nội bộ qua DevTools). Bật bằng: localStorage.DEBUG_MODE='1'.
    console.warn/error GIỮ NGUYÊN (cảnh báo & lỗi vận hành luôn hiện). */
@@ -4683,6 +4683,32 @@ function buildCfgToSync(localCfg){
    - Sub-admin: verifies adminPassword against their own user record (used to unwrap master key)
    Optionally pass userWraps={name → plaintextPw} to wrap additional users.
 */
+/* v3.09.59 (ADR-009) — HÀM MERGE USERS DÙNG CHUNG cho cả push/pull/selfWrap.
+   Nguyên tắc: KHÔNG replace — MERGE theo (name+email). Union 2 bên; trùng → giữ updatedAt mới hơn;
+   chỉ LOẠI user bị xóa CÓ CHỦ Ý (có trong deletedNames). Giống mergeByID của State.
+   Trả về mảng users đã gộp. Không mutate tham số đầu vào. */
+function mergeCfgUsers(localUsers, cloudUsers, deletedNames){
+  const L=Array.isArray(localUsers)?localUsers:[];
+  const C=Array.isArray(cloudUsers)?cloudUsers:[];
+  const delSet=new Set((Array.isArray(deletedNames)?deletedNames:[]).map(x=>String(x||'').toLowerCase()));
+  const keyOf=(u)=>((u&&(u.name||'')).toLowerCase())+'|'+((u&&(u.email||'')).toLowerCase());
+  const out=[]; const seen=new Map();
+  // nền: local trước (ưu tiên giữ bản đang có trên máy)
+  L.forEach(u=>{ if(!u) return; const k=keyOf(u); if(seen.has(k)) return; seen.set(k, out.length); out.push(u); });
+  // gộp cloud: chưa có → thêm; trùng → giữ updatedAt mới hơn
+  C.forEach(cu=>{
+    if(!cu) return; const k=keyOf(cu);
+    if(!seen.has(k)){ seen.set(k, out.length); out.push(cu); }
+    else {
+      const idx=seen.get(k); const lu=out[idx];
+      const lt=Date.parse(lu&&lu.updatedAt||'')||0;
+      const ct=Date.parse(cu.updatedAt||'')||0;
+      if(ct>lt) out[idx]=cu;   // cloud mới hơn → thay
+    }
+  });
+  // loại user bị xóa CÓ CHỦ Ý (theo name)
+  return out.filter(u=>!delSet.has(String((u&&u.name)||'').toLowerCase()));
+}
 async function pushCfgToCloud(adminPassword, extraUserPasswords){
   const cfg=getAuthConfig();
   if(!cfg||!cfg.scriptUrl) throw new Error('Chưa cấu hình Apps Script URL');
@@ -4990,6 +5016,16 @@ async function pullCfgFromCloud(scriptUrl, userName, password){
     console.warn('[pullCfg] bỏ qua ghi đè local — đang khóa sau reset MK');
     return getAuthConfig() || cfg;
   }
+  // v3.09.59 (ADR-009): MERGE users cloud↔local TRƯỚC khi ghi đè — KHÔNG để cfg cloud
+  //   xóa mất NV mới tạo trên máy này nhưng chưa kịp push lên cloud.
+  try{
+    const _local=getAuthConfig();
+    if(_local && Array.isArray(_local.users)){
+      const _del=[].concat(Array.isArray(_local._deletedUserNames)?_local._deletedUserNames:[],
+                           Array.isArray(window._deletedUserNames)?window._deletedUserNames:[]);
+      cfg.users=mergeCfgUsers(_local.users, cfg.users, _del);
+    }
+  }catch(e){ console.warn('[pullCfg] merge users lỗi (giữ cfg cloud):', e&&e.message); }
   setAuthConfig(cfg);
   return cfg;
 }
@@ -5057,11 +5093,23 @@ async function selfWrapInCloudCfg(userName, password){
     // Update wraps array
     let wraps=payload.wraps.filter(w=>w.name.toLowerCase()!==userName.toLowerCase());
     wraps.push(newWrap);
+    // v3.09.59 (ADR-009): MERGE user-record local vào payload cloud → NV mới (tạo local, chưa push)
+    //   được đẩy lên cloud CÙNG wrap. Sửa lỗi "đăng nhập được (có wrap) nhưng mất khỏi danh sách
+    //   (user-record không lên cloud)". Trước đây chỉ push wraps, giữ payload.users cloud cũ.
+    let _mergedUsers=payload.users;
+    try{
+      const _localCfg=getAuthConfig();
+      if(_localCfg && Array.isArray(_localCfg.users)){
+        const _del=[].concat(Array.isArray(_localCfg._deletedUserNames)?_localCfg._deletedUserNames:[],
+                             Array.isArray(window._deletedUserNames)?window._deletedUserNames:[]);
+        _mergedUsers=mergeCfgUsers(Array.isArray(payload.users)?payload.users:[], _localCfg.users, _del);
+      }
+    }catch(e){ console.warn('[selfWrap] merge users lỗi (giữ users cloud):', e&&e.message); _mergedUsers=payload.users; }
     // Push back (v3.03.100: retry 1 lần nếu lỗi mạng để wrap chắc chắn lên cloud)
     const _pushWrap=async()=>fetch(cfg.scriptUrl, {
       method:'POST',
       headers:{'Content-Type':'text/plain'},
-      body:JSON.stringify({action:'save', key:'auth', payload:{...payload, wraps}})
+      body:JSON.stringify({action:'save', key:'auth', payload:{...payload, users:_mergedUsers, wraps}})
     });
     try{
       await _pushWrap();
