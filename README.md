@@ -1,33 +1,43 @@
-# Seahorse Manager ERP
+# Hướng dẫn đẩy lên GitHub (repo PUBLIC)
 
-Hệ thống ERP nội bộ quản lý vận hành tàu, kế toán, nhân sự, kho và tài chính — đóng gói dưới dạng ứng dụng web single-file (PWA, hoạt động offline).
+## ✅ Đã dọn (an toàn public)
+- Endpoint Apps Script thật → đã xóa (`COMPANY_SCRIPT_URL=''`).
+- Email + biệt danh cá nhân (FAMILY) → đã xóa.
+- Email NV thật dùng làm ví dụ → đổi sang `@example.com`.
+- `.gitignore` loại `snapshots/`, `*.bak`, file dữ liệu/backup thật.
 
-## ⚠️ Lưu ý triển khai
-Mã nguồn công khai này **KHÔNG chứa** cấu hình kết nối thật (endpoint đồng bộ, email nội bộ). Trước khi dùng nội bộ, cần cấu hình:
-- `COMPANY_SCRIPT_URL` — URL Google Apps Script của tổ chức (để trống → app hỏi khi setup).
-- Các tài khoản/phân quyền tạo qua giao diện admin.
+## ⚠️ KHÔNG bao giờ đưa lên repo public
+- Thư mục `snapshots/` và mọi file `.bak` (chứa bản cũ CÓ endpoint/dữ liệu thật).
+- File export dữ liệu thật (.json/.xlsx danh sách NV, thuyền viên, lương).
+- URL Apps Script, mật khẩu, token.
 
-Bảo mật dựa trên: mật khẩu + mã hóa AES-GCM client-side + 2FA TOTP. Không nhúng bí mật trong mã nguồn.
-
-## Cấu trúc
-- `index.html` — toàn bộ ứng dụng (UI + logic + 6 Service).
-- `service-worker.js` — PWA/offline.
-- `version.json` — kênh cập nhật.
-- `docs/` — tài liệu chuẩn (kiến trúc, RC-1, coding/security/RBAC/data-protection standard, business rules, workflow).
-- `tests/` — bộ kiểm thử tự động (chạy bằng Node).
-- `adr/` — Architecture Decision Records.
-
-## Tài liệu
-Đọc `docs/README.md` trước khi phát triển. Quy trình bắt buộc trong `docs/DEVELOPMENT_WORKFLOW.md`.
-
-## Nguyên tắc cao nhất
-**Data First** — không lỗi phần mềm nào được làm mất dữ liệu nghiệp vụ. Xem `docs/DATA_PROTECTION_STANDARD.md`.
-
-## Kiểm thử
+## Các bước push (chạy tại thư mục repo, KHÔNG chứa snapshots/)
 ```bash
-for t in tests/*.test.js; do node "$t"; done
-```
-Gate trước release: `node tests/data-protection-check.test.js` phải PASS.
+# 1. Khởi tạo (nếu repo mới)
+git init
+git branch -M main
 
-## Giấy phép
-Phần mềm nội bộ. Bản quyền thuộc Seahorse Marine & Energy JSC. Không có giấy phép sử dụng lại trừ khi được cấp phép.
+# 2. Kiểm tra .gitignore đã loại file nhạy cảm
+cat .gitignore
+
+# 3. Add + kiểm tra KHÔNG có file nhạy cảm trong danh sách
+git add .
+git status            # ← xem kỹ, KHÔNG được có *.bak, snapshots/, file dữ liệu thật
+
+# 4. Quét secret lần cuối TRƯỚC khi commit
+node tests/no-secrets.test.js    # phải PASS
+
+# 5. Commit + push
+git commit -m "Seahorse Manager ERP v3.09.54"
+git remote add origin https://github.com/<tài-khoản>/<repo>.git
+git push -u origin main
+```
+
+## Quan trọng về LỊCH SỬ Git
+Nếu đã LỠ commit file có secret trước đó: xóa file ở commit mới **KHÔNG đủ** — secret vẫn nằm trong lịch sử. Phải:
+- Tạo repo MỚI và chỉ commit bản đã dọn (khuyến nghị — đơn giản nhất), HOẶC
+- Dùng `git filter-repo`/BFG để xóa khỏi lịch sử, rồi **đổi endpoint Apps Script** (coi như đã lộ).
+
+## Sau khi public
+- Endpoint Apps Script cũ (đã từng nhúng) nên coi là đã lộ → tạo deployment Apps Script mới, cập nhật URL khi triển khai nội bộ.
+- Mã nguồn public an toàn vì bảo mật nằm ở mật khẩu + mã hóa AES + 2FA (Kerckhoffs).

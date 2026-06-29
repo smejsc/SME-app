@@ -1,0 +1,17 @@
+const fs=require('fs'),vm=require('vm');
+const code=fs.readFileSync('index.html','utf8').match(/<script(?![^>]*\bsrc=)[^>]*>([\s\S]*?)<\/script>/)[1];
+const noop=()=>{};const el={style:{},classList:{add:noop,remove:noop,toggle:noop,contains:()=>false},addEventListener:noop,removeEventListener:noop,appendChild:noop,querySelector:()=>null,querySelectorAll:()=>[],innerHTML:'',value:'',setAttribute:noop,getAttribute:()=>null,focus:noop,click:noop,closest:()=>null,dataset:{}};
+const doc={getElementById:()=>el,querySelector:()=>el,querySelectorAll:()=>[],createElement:()=>el,addEventListener:noop,body:el,head:el,documentElement:el,cookie:''};
+const ctx={console,document:doc,localStorage:{getItem:()=>null,setItem:noop,removeItem:noop},navigator:{userAgent:'n'},location:{href:'',hostname:'',pathname:'/'},setTimeout:noop,setInterval:noop,clearTimeout:noop,fetch:()=>Promise.resolve({ok:true,json:()=>Promise.resolve({})}),alert:noop,confirm:()=>true,prompt:()=>'',crypto:{getRandomValues:a=>a},URLSearchParams,TextEncoder,TextDecoder,Intl,matchMedia:()=>({matches:false,addListener:noop,addEventListener:noop}),IntersectionObserver:function(){return{observe:noop,disconnect:noop}},MutationObserver:function(){return{observe:noop,disconnect:noop}},ResizeObserver:function(){return{observe:noop,disconnect:noop}},getComputedStyle:()=>({getPropertyValue:()=>''}),history:{},performance:{now:()=>0},addEventListener:noop,removeEventListener:noop};
+ctx.window=ctx;ctx.self=ctx;ctx.globalThis=ctx;vm.createContext(ctx);
+vm.runInContext(code,ctx,{filename:'i',timeout:8000});
+let pass=0,fail=0;const eq=(n,g,e)=>{if(g===e)pass++;else{fail++;console.log('x',n,'got',JSON.stringify(g),'exp',JSON.stringify(e));}};
+eq('Ban Giám Đốc → chuẩn', ctx._hrmCanonDept('Ban Giám Đốc'),'Ban Giám đốc');
+eq('Ban Giám đốc → chuẩn', ctx._hrmCanonDept('Ban Giám đốc'),'Ban Giám đốc');
+eq('BAN GIAM DOC → chuẩn', ctx._hrmCanonDept('BAN GIAM DOC'),'Ban Giám đốc');
+eq('Ban Giám Đốc - BOD → chuẩn', ctx._hrmCanonDept('Ban Giám Đốc - BOD'),'Ban Giám đốc');
+eq('  Kế  toán  → chuẩn', ctx._hrmCanonDept('  Kế  toán  '),'Kế toán');
+eq('Phòng lạ giữ nguyên', ctx._hrmCanonDept('Phòng Hàng Hải'),'Phòng Hàng Hải');
+eq('rỗng', ctx._hrmCanonDept(''),'');
+console.log('canon-dept: '+pass+' pass, '+fail+' fail');
+process.exit(fail?1:0);
