@@ -3456,7 +3456,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.09.29';            // bumped on each release
+const APP_VERSION='3.09.30';            // bumped on each release
 /* Debug logging: dlog() chỉ in khi DEBUG_MODE bật (mặc định TẮT ở production để
    tránh nhiễu/lộ cấu trúc nội bộ qua DevTools). Bật bằng: localStorage.DEBUG_MODE='1'.
    console.warn/error GIỮ NGUYÊN (cảnh báo & lỗi vận hành luôn hiện). */
@@ -10877,7 +10877,9 @@ function wfSubmit(r, kind){
     try{ logAuditEvent('fast_track_ar',{recordId:r.id,partner:r.partner||'',amount:r.amount||0,ccy:r.ccy||'',actor:actorName()}); }catch(e){}
   } else {
     r.status='pending_acc';
-    if(r._isProvisional){ r._isProvisional=false; }  // v3.04.47: gửi duyệt = đã hoàn thiện (có hóa đơn) → hết 'dự kiến'
+    // v3.09.30: KHÔNG xóa _isProvisional khi gửi duyệt. Theo nghiệp vụ: chi dự kiến VẪN
+    //   trình ký/duyệt thanh toán trước như AP thường; hóa đơn/hồ sơ bổ sung SAU. Cờ
+    //   _isProvisional chỉ hết khi thực sự có đủ hóa đơn (cập nhật ở phiếu), không phải lúc gửi.
   }
   touchRecord(r);  // v2.61.0: timestamp cho sync
 }
@@ -35349,8 +35351,10 @@ function _paymentProgressBlock(r, isPayable){
   const _isAcc = (typeof canCheckAcc==='function'&&canCheckAcc()) || (typeof canApproveL1==='function'&&canApproveL1()) || isAdmin();
   let actionBtns='';
   if(isPayable && !locked){
-    if(_st==='draft' && !r._isProvisional){
+    if(_st==='draft'){
       // NHÁP → nút chuyển kế toán (gửi duyệt). Ai cũng thấy (NV là chính).
+      // v3.09.30: phiếu CHI DỰ KIẾN (provisional) cũng là draft → PHẢI gửi duyệt được như AP
+      //   thường (hóa đơn/hồ sơ bổ sung SAU, không bắt buộc trước khi trình ký).
       actionBtns = `<div style="display:flex;gap:6px;margin-top:10px;justify-content:flex-end;align-items:center">
         <span style="font-size:10px;color:var(--muted);font-style:italic">Hồ sơ đang Nháp — gửi để KT kiểm trước khi chi</span>
         <button type="button" class="btn-primary" style="font-size:11px;padding:5px 14px" onclick="arSubmit('ap','${r.id}')" title="Chuyển hồ sơ đến kế toán — trạng thái sang 'Chờ KT kiểm'">→ Gửi duyệt (chuyển KT kiểm)</button>
@@ -38512,6 +38516,10 @@ function saveAr(kind,id){
       r.payments.forEach(p=>{ if(p) p.ccy=ccy; });
     }
     Object.assign(r, updates);
+    // v3.09.30: cờ "dự kiến" (_isProvisional) chỉ HẾT khi thực sự CÓ HÓA ĐƠN — đây là định nghĩa
+    //   đúng của "đã đủ hồ sơ" (KHÔNG phải lúc gửi duyệt). Hóa đơn bổ sung sau, khi nhập số HĐ
+    //   thì khoản hết trạng thái dự kiến, thành chi phí thực có chứng từ.
+    if(acProvisionalShouldClear(r)){ r._isProvisional=false; }
     if(Array.isArray(window._curAttachments)) r.attachments = JSON.parse(JSON.stringify(window._curAttachments));  // v3.04.51: chứng từ đính kèm
     touchRecord(r);  // v1.38.4: track for concurrency merge
   } else {
@@ -38807,6 +38815,11 @@ function acCanApproveOrder(o, ctx){
   if(!canApprove) return {ok:false, reason:'Cần Admin / KTT / Duyệt L2'};
   if(!ctx.isAdmin && o && o.proposedBy===ctx.actor) return {ok:false, reason:'🔒 SOD: không tự duyệt lệnh mình đề xuất'};
   return {ok:true};
+}
+// Logic thuần: cờ "dự kiến" (_isProvisional) NÊN hết khi nào? → khi thực sự có hóa đơn.
+// Đây là định nghĩa đúng của "đã đủ hồ sơ" (KHÔNG phải lúc gửi duyệt). Test được độc lập.
+function acProvisionalShouldClear(r){
+  return !!(r && r._isProvisional && r.invoiceNo && String(r.invoiceNo).trim());
 }
 // SOD L1 thuần (duyệt cấp 1 batch): NV thường KHÔNG tự duyệt lệnh mình đề xuất; KTT/admin ĐƯỢC.
 function acCanApproveOrderL1(o, ctx){
