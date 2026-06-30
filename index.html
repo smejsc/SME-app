@@ -733,6 +733,7 @@ body.readonly-mode::before{
         <button class="admin-only-item" onclick="closeAdminMenu();openSnapshotRestore()" title="Khôi phục từ snapshot tự động trên Drive (GỘP, giữ bản mới) — bản mới nhất, không cần file"><span class="ico">☁</span>Khôi phục từ snapshot (Drive)</button>
         <button class="admin-only-item" onclick="closeAdminMenu();openLocalSnapshotModal()" title="Khôi phục nhanh từ snapshot tự động lưu trên MÁY NÀY (phao cứu sinh khi mất/sai dữ liệu) — giữ 8 bản gần nhất"><span class="ico">⏱</span>Khôi phục nhanh (máy này)</button>
         <button class="admin-only-item" onclick="closeAdminMenu();openRecycleBinModal()" title="Thùng rác — khôi phục bản ghi tài chính (Phải thu/Phải trả/Giao dịch quỹ) đã xóa"><span class="ico">🗑</span>Thùng rác (khôi phục đã xóa)</button>
+        <button class="admin-only-item" onclick="closeAdminMenu();openStorageHealthModal()" title="Storage Health Monitor — theo dõi dung lượng localStorage theo nhóm dữ liệu, cảnh báo sớm, xuất báo cáo. CHỈ phân tích/đề xuất, KHÔNG tự xóa."><span class="ico">💾</span>Storage Health (dung lượng máy)</button>
         <div class="divider admin-only-item"></div>
         <button class="danger admin-only-item" onclick="closeAdminMenu();clearAllData()"><span class="ico">✕</span>Xóa toàn bộ dữ liệu</button>
       </div>
@@ -3349,6 +3350,7 @@ body.readonly-mode::before{
           <option value="office">Văn phòng</option>
           <option value="crew">Thuyền viên</option>
           <option value="expert">Chuyên gia</option>
+          <option value="expert_om">Chuyên gia O&M</option>
         </select>
         <select id="hrm-filter-status" onchange="hrmRenderList()" style="font-size:12px;padding:6px 8px;border:1px solid var(--rule);border-radius:8px">
           <option value="active">Đang làm việc</option>
@@ -3469,7 +3471,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.09.59';            // bumped on each release
+const APP_VERSION='3.09.68';            // bumped on each release
 /* Debug logging: dlog() chỉ in khi DEBUG_MODE bật (mặc định TẮT ở production để
    tránh nhiễu/lộ cấu trúc nội bộ qua DevTools). Bật bằng: localStorage.DEBUG_MODE='1'.
    console.warn/error GIỮ NGUYÊN (cảnh báo & lỗi vận hành luôn hiện). */
@@ -5546,7 +5548,7 @@ async function authAction(){
       }
       // v3.03.30: ID đăng nhập NV — hành xử theo cờ ENFORCE_EMAIL_LOGIN.
       // (admin dùng tên 'admin' — nhánh trên, không vào đây.)
-      let _emailLoginReminder=null; // nếu set, hiện toast nhắc sau khi login xong (chế độ song song)
+      window._emailLoginReminder=null; // v3.09.64 FIX: dùng window (tránh block-scope khiến chỗ dùng sau login không thấy biến → ReferenceError chặn NV login)
       {
         const _idIsCompanyEmail = name.toLowerCase().endsWith('@'+COMPANY_EMAIL_DOMAIN.toLowerCase());
         const _hasCompanyEmail = matched.email && matched.email.toLowerCase().endsWith('@'+COMPANY_EMAIL_DOMAIN.toLowerCase());
@@ -5567,7 +5569,7 @@ async function authAction(){
           } else {
             // SONG SONG: vẫn cho vào bằng tên cũ; nếu đã có email công ty thì nhắc nhẹ sau khi login
             if(_hasCompanyEmail){
-              _emailLoginReminder=matched.email;
+              window._emailLoginReminder=matched.email;
             }
           }
         }
@@ -5644,10 +5646,12 @@ async function authAction(){
     try{ logAuditEvent('login',{role:CURRENT_ROLE}); }catch(e){}
     resetIdleTimer();
     startMaxSessionTimer();
+    // v3.09.63 (ADR-010 Bước 1): cảnh báo sớm dung lượng localStorage sau khi đăng nhập (chỉ cảnh báo, không xóa)
+    try{ setTimeout(()=>{ try{ storageHealthAutoCheck(); }catch(_){} }, 1500); }catch(e){}
     // v3.03.30: chế độ song song — NV vừa đăng nhập bằng tên cũ nhưng đã có email công ty → nhắc nhẹ
-    if(_emailLoginReminder){
+    if(window._emailLoginReminder){
       setTimeout(()=>{
-        try{ toast('💡 Lần sau nên đăng nhập bằng email công ty: '+_emailLoginReminder); }
+        try{ toast('💡 Lần sau nên đăng nhập bằng email công ty: '+window._emailLoginReminder); }
         catch(e){ console.warn('[login] reminder toast fail:',e&&e.message); }
       }, 1200);
     }
@@ -9953,7 +9957,7 @@ function vesselCrewMerged(vid, atDate){
     if(!e || seen[e.id]) return;
     if(e.linkVesselId!==vid) return;
     if(e.status==='inactive') return;
-    if(!(e.type==='crew'||e.type==='expert')) return;
+    if(!(e.type==='crew'||e.type==='expert'||e.type==='expert_om')) return;
     seen[e.id]=1;
     out.push({ empId:e.id, rank:e.title||'', rankKey:'zz', onboardDate:'', signoffDate:'', status:'onboard', src:'hr' });
   });
@@ -10657,7 +10661,7 @@ function openCrewAssignModal(id){
   if(isEdit&&!a){ toast('Không tìm thấy QĐ','bad'); return; }
   const readOnly=!canManageCrewAssign();
   // danh sách thuyền viên (type=crew) để chọn — KHÔNG tạo mới
-  const crews=HRService.employees().filter(e=>e && (e.type==='crew'||e.type==='expert')).sort((x,y)=>String(x.fullName||x.name||'').localeCompare(String(y.fullName||y.name||'')));
+  const crews=HRService.employees().filter(e=>e && (e.type==='crew'||e.type==='expert'||e.type==='expert_om')).sort((x,y)=>String(x.fullName||x.name||'').localeCompare(String(y.fullName||y.name||'')));
   const empOpts=['<option value="">— Chọn thuyền viên (từ hồ sơ) —</option>']
     .concat(crews.map(e=>`<option value="${e.id}" ${a.empId===e.id?'selected':''}>${esc((e.fullName||e.name||'')+' · '+(e.smartId||'')+(e.title?' · '+e.title:''))}</option>`)).join('');
   // tàu: gộp 2 nguồn
@@ -10986,7 +10990,7 @@ function openCrewPlanModal(id, presetEmp, presetVessel){
   if(!canManageCrewChange()){ toast('Không có quyền','bad'); return; }
   let curA=null;
   if(p.empId && p.vesselId) curA=HRService.crewAssignments().find(x=>x.empId===p.empId&&x.vesselId===p.vesselId&&!x.actualSignoffDate);
-  const crews=HRService.employees().filter(e=>e&&(e.type==='crew'||e.type==='expert')).sort((x,y)=>String(x.fullName||x.name||'').localeCompare(String(y.fullName||y.name||'')));
+  const crews=HRService.employees().filter(e=>e&&(e.type==='crew'||e.type==='expert'||e.type==='expert_om')).sort((x,y)=>String(x.fullName||x.name||'').localeCompare(String(y.fullName||y.name||'')));
   const empOpts=cur=>['<option value="">— Chọn —</option>'].concat(crews.map(e=>`<option value="${e.id}" ${cur===e.id?'selected':''}>${esc((e.fullName||e.name||'')+' · '+(e.smartId||''))}</option>`)).join('');
   const vOpts=['<option value="">— Chọn tàu —</option>'].concat(fleetVessels().map(v=>`<option value="${v.id}" ${p.vesselId===v.id?'selected':''}>${esc(v.name)}</option>`)).join('');
   const statusOpts=Object.keys(CREW_PLAN_STATUS).map(k=>`<option value="${k}" ${p.status===k?'selected':''}>${CREW_PLAN_STATUS[k].step}. ${CREW_PLAN_STATUS[k].label}</option>`).join('');
@@ -13099,12 +13103,19 @@ async function saveStateEncrypted(){
     const payload=await encryptJSON(S);
     const _serialized=JSON.stringify(payload);
     const _key=_storeKeyForUser();
+    // v3.09.60 (GĐ6): lưu giá trị CŨ trước khi ghi → rollback nếu verify thất bại.
+    const _prevValue=localStorage.getItem(_key);
     localStorage.setItem(_key,_serialized);  // v2.99.52: key riêng theo user
     // v3.09.49 RUNTIME AUDIT — VERIFY sau khi ghi (save→đọc lại→xác nhận): đọc lại key vừa ghi,
     //   xác nhận tồn tại + đúng nội dung. Nếu lệch → coi như LƯU THẤT BẠI (không báo thành công giả).
     const _readback=localStorage.getItem(_key);
     if(_readback===null || _readback.length!==_serialized.length){
-      throw new Error('Verify thất bại: dữ liệu đọc lại không khớp dữ liệu vừa ghi (có thể bộ nhớ đầy).');
+      // v3.09.60: ROLLBACK — khôi phục giá trị cũ để KHÔNG để lại bản ghi hỏng/nửa vời.
+      try{
+        if(_prevValue!==null && _prevValue!==undefined){ localStorage.setItem(_key,_prevValue); }
+        console.warn('[saveStateEncrypted] verify thất bại → đã ROLLBACK về bản trước đó.');
+      }catch(_rb){ console.error('[saveStateEncrypted] rollback lỗi:', _rb&&_rb.message); }
+      throw new Error('Verify thất bại: dữ liệu đọc lại không khớp dữ liệu vừa ghi (có thể bộ nhớ đầy). Đã khôi phục bản trước.');
     }
     window._lastSaveVerifiedAt=Date.now();  // mốc xác nhận đã ghi thành công
   }catch(e){
@@ -17454,6 +17465,121 @@ function openRecycleBinModal(){
   }
   openModal('🗑 Thùng rác — khôi phục bản ghi đã xóa', body, `<button class="btn-sec" onclick="closeModal()">Đóng</button>`);
 }
+
+/* ============================================================================
+   STORAGE HEALTH MONITOR (ADR-010 Bước 1) — CHỈ ĐỌC + CẢNH BÁO + BÁO CÁO.
+   TUYỆT ĐỐI KHÔNG tự xóa dữ liệu. Không đổi cơ chế lưu hiện tại.
+   ============================================================================ */
+const STORAGE_GROUPS={
+  'A. Master Data':['materials','vendors','hrEmployees','vessels','departments','expenseTypes','revenueTypes','positions','companies','warehouses','invGroups','vesselExpenseCats','omProjectExpenseCats','hrExpenseCats','qnExpenseCats','fixedAssets','tools','projects','plans','dockPlans'],
+  'B. Transaction':['opTransactions','cashTxns','receivables','payables','invMovements','stockDocs','stockCounts','dailyReports','loans','creditFacilities','loanAutoCollect','advances','payrollPeriods','payChangeRequests','crewTimesheets','crewAssignments','crewChangePlans','hrAttendance','transactions','opMgmtFees','onhires','events','bankAccounts','bankSnapshots','cashFunds','salaryFund','taxes','hrHistory'],
+  'C. Audit/Log':['auditLog','auditLogShared','emailLog','emailQueue','bodNotifs'],
+  'D. Cache/Config':['fxRate','fxRateAt','displayCcy','companyInfo','cashflowConfig','payrollConfig','payrollEngine','historicalData','lockedHistYears','archiveLibrary','adminChecklist','ownerReportLocks','crewManning','crewRotationConfig','deletedIds','purgedBatches','purgedContent','_recycleBin','meta','presence'],
+  'E. Email/Tmpl':['emailSettings','emailTemplates','emailDrafts']
+};
+function _fmtKB(bytes){ const kb=bytes/1024; return kb>=1024 ? (kb/1024).toFixed(2)+' MB' : kb.toFixed(0)+' KB'; }
+function _byteLen(str){ try{ return new Blob([str]).size; }catch(e){ return (str||'').length; } }
+function storageHealthScan(){
+  const keys=Object.keys(localStorage);
+  let totalBytes=0; const byKey=[];
+  keys.forEach(k=>{ const sz=_byteLen(localStorage.getItem(k)||''); totalBytes+=sz; byKey.push({key:k,bytes:sz}); });
+  byKey.sort((a,b)=>b.bytes-a.bytes);
+  const groupBytes={}; let stateBytes=0;
+  try{
+    Object.keys(STORAGE_GROUPS).forEach(g=>{ groupBytes[g]=0; STORAGE_GROUPS[g].forEach(f=>{ if(S[f]!==undefined){ const b=_byteLen(JSON.stringify(S[f])); groupBytes[g]+=b; stateBytes+=b; } }); });
+    const mapped=new Set([].concat.apply([],Object.values(STORAGE_GROUPS)));
+    let other=0; Object.keys(S).forEach(f=>{ if(!mapped.has(f) && !f.startsWith('_')){ other+=_byteLen(JSON.stringify(S[f])); } });
+    if(other>0){ groupBytes['(Khác)']=other; stateBytes+=other; }
+  }catch(e){ console.warn('[storageHealth] scan State lỗi:', e&&e.message); }
+  let snapCount=0; try{ const sn=JSON.parse(localStorage.getItem(_SNAP_KEY)||'[]'); snapCount=Array.isArray(sn)?sn.length:0; }catch(e){}
+  const rescueKeys=keys.filter(k=>k.indexOf('seahorse_rescue_')===0);
+  const nvKeys=keys.filter(k=>k.indexOf('seahorse_v1__nv_')===0);
+  let offlineQueue=0; try{ const oq=JSON.parse(localStorage.getItem('seahorse_offline_queue')||'[]'); offlineQueue=Array.isArray(oq)?oq.length:0; }catch(e){}
+  const QUOTA=5*1024*1024;
+  const pct=totalBytes/QUOTA*100;
+  return { totalBytes, byKey, groupBytes, stateBytes, snapCount, rescueCount:rescueKeys.length, rescueKeys, nvKeys, offlineQueue, quota:QUOTA, pct };
+}
+function storageHealthLevel(pct){
+  if(pct>=95) return {level:'critical-max', color:'#b8472e', icon:'⛔', msg:'≥95% — CHỈ admin được thực hiện thao tác tăng dữ liệu lớn (import hàng loạt). Cần dọn dẹp/Archive ngay.'};
+  if(pct>=90) return {level:'critical', color:'#b8472e', icon:'🔴', msg:'≥90% — Cảnh báo NGHIÊM TRỌNG. Sắp đầy, nguy cơ chặn lưu. Archive/dọn dẹp gấp.'};
+  if(pct>=80) return {level:'warning', color:'#d9822b', icon:'🟠', msg:'≥80% — Cảnh báo. Nên kiểm tra + lên kế hoạch Archive.'};
+  if(pct>=70) return {level:'notice', color:'#d9a441', icon:'🟡', msg:'≥70% — Khuyến nghị kiểm tra dung lượng.'};
+  if(pct>=50) return {level:'info', color:'#5b8def', icon:'🔵', msg:'≥50% — Thông tin: dung lượng đã quá nửa.'};
+  return {level:'ok', color:'#2e9b5b', icon:'🟢', msg:'Dung lượng ổn định.'};
+}
+function openStorageHealthModal(){
+  const h=storageHealthScan(); const lv=storageHealthLevel(h.pct);
+  const bar=(label,bytes,total)=>{ const p=total>0?(bytes/total*100):0; return `<div style="margin:6px 0"><div style="display:flex;justify-content:space-between;font-size:12px"><span>${esc(label)}</span><b>${_fmtKB(bytes)}</b></div><div style="height:7px;background:#eee;border-radius:4px;overflow:hidden"><div style="height:100%;width:${p.toFixed(1)}%;background:${lv.color}"></div></div></div>`; };
+  const groups=Object.entries(h.groupBytes).sort((a,b)=>b[1]-a[1]);
+  const topKeys=h.byKey.slice(0,8);
+  let body=`
+  <div style="font-size:13px">
+    <div style="padding:12px;border-radius:8px;background:${lv.color}1a;border:1px solid ${lv.color};margin-bottom:14px">
+      <div style="font-size:15px;font-weight:600;color:${lv.color}">${lv.icon} ${_fmtKB(h.totalBytes)} / ${_fmtKB(h.quota)} (${h.pct.toFixed(1)}%)</div>
+      <div style="margin-top:4px;color:var(--muted)">${esc(lv.msg)}</div>
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
+      <div>
+        <div style="font-weight:600;margin-bottom:6px">📊 Theo nhóm dữ liệu (State)</div>
+        ${groups.map(g=>bar(g[0],g[1],h.stateBytes)).join('')}
+      </div>
+      <div>
+        <div style="font-weight:600;margin-bottom:6px">🔑 Theo key localStorage (lớn nhất)</div>
+        ${topKeys.map(k=>bar(k.key,k.bytes,h.totalBytes)).join('')}
+      </div>
+    </div>
+    <div style="margin-top:14px;display:flex;gap:18px;flex-wrap:wrap;font-size:12px;color:var(--muted)">
+      <span>⏱ Snapshot: <b>${h.snapCount}</b></span>
+      <span>🆘 Rescue keys: <b>${h.rescueCount}</b></span>
+      <span>👤 Bản State NV thừa trên máy: <b>${h.nvKeys.length}</b></span>
+      <span>📤 Offline Queue: <b>${h.offlineQueue}</b></span>
+    </div>
+    ${h.nvKeys.length>0?`<div style="margin-top:10px;padding:8px;background:#d9822b1a;border-radius:6px;font-size:12px">⚠ Có ${h.nvKeys.length} bản dữ liệu NV (<code>__nv_</code>) lưu trên máy này, chiếm dung lượng. Đây là bản cục bộ của NV từng đăng nhập — admin có thể dọn (cần xác nhận thủ công, hệ thống KHÔNG tự xóa).</div>`:''}
+    <div style="margin-top:8px;font-size:11px;color:var(--muted)">ℹ Storage Health chỉ <b>theo dõi, phân tích, đề xuất</b> — KHÔNG bao giờ tự xóa dữ liệu. Mọi dọn dẹp/Archive cần admin xác nhận.</div>
+  </div>`;
+  const foot=`<button class="btn-sec" onclick="closeModal()">Đóng</button><button class="btn-sec" onclick="exportStorageReport('health')">📄 Health Report</button><button class="btn-sec" onclick="exportStorageReport('quota')">📊 Quota Report</button><button class="btn-primary" onclick="exportStorageReport('growth')">📈 Growth Trend</button>`;
+  openModal('💾 Storage Health Monitor', body, foot);
+  try{ _recordStorageTrend(h); }catch(e){}
+}
+function _recordStorageTrend(h){
+  let trend=[]; try{ trend=JSON.parse(localStorage.getItem('seahorse_storage_trend')||'[]'); }catch(e){}
+  trend.push({ at:new Date().toISOString(), total:h.totalBytes, pct:Math.round(h.pct*10)/10 });
+  if(trend.length>60) trend=trend.slice(-60);
+  try{ localStorage.setItem('seahorse_storage_trend', JSON.stringify(trend)); }catch(e){}
+}
+function exportStorageReport(kind){
+  const h=storageHealthScan(); const lv=storageHealthLevel(h.pct);
+  const now=new Date().toISOString();
+  let md='';
+  if(kind==='quota'){
+    md=`# Quota Report — Seahorse Manager\nThời gian: ${now}\n\nTổng: ${_fmtKB(h.totalBytes)} / ${_fmtKB(h.quota)} (${h.pct.toFixed(1)}%)\nMức: ${lv.icon} ${lv.level}\n\n## Theo key localStorage\n${h.byKey.map(k=>'- '+k.key+': '+_fmtKB(k.bytes)).join('\n')}\n`;
+  } else if(kind==='growth'){
+    let trend=[]; try{ trend=JSON.parse(localStorage.getItem('seahorse_storage_trend')||'[]'); }catch(e){}
+    md=`# Storage Growth Trend — Seahorse Manager\nThời gian: ${now}\nSố mốc: ${trend.length}\n\n| Thời điểm | Tổng | % quota |\n|---|---|---|\n${trend.map(t=>'| '+t.at+' | '+_fmtKB(t.total)+' | '+t.pct+'% |').join('\n')}\n`;
+  } else {
+    const groups=Object.entries(h.groupBytes).sort((a,b)=>b[1]-a[1]);
+    md=`# Storage Health Report — Seahorse Manager\nThời gian: ${now}\n\n## Tổng quan\nTổng: ${_fmtKB(h.totalBytes)} / ${_fmtKB(h.quota)} (${h.pct.toFixed(1)}%) — ${lv.icon} ${lv.msg}\n\n## Theo nhóm dữ liệu\n${groups.map(g=>'- '+g[0]+': '+_fmtKB(g[1])).join('\n')}\n\n## Theo key localStorage\n${h.byKey.map(k=>'- '+k.key+': '+_fmtKB(k.bytes)).join('\n')}\n\n## Chỉ số\n- Snapshot: ${h.snapCount}\n- Rescue keys: ${h.rescueCount}\n- Bản State NV thừa (__nv_): ${h.nvKeys.length}\n- Offline Queue: ${h.offlineQueue}\n\n_Báo cáo chỉ theo dõi/đề xuất — hệ thống KHÔNG tự xóa dữ liệu._\n`;
+  }
+  try{
+    const blob=new Blob([md],{type:'text/markdown'});
+    const a=document.createElement('a'); a.href=URL.createObjectURL(blob);
+    a.download='storage-'+kind+'-'+now.slice(0,10)+'.md'; a.click();
+    setTimeout(()=>URL.revokeObjectURL(a.href),2000);
+    toast('✓ Đã xuất '+kind+' report','good');
+  }catch(e){ toast('Lỗi xuất báo cáo: '+(e.message||e),'bad'); }
+}
+function storageHealthAutoCheck(){
+  try{
+    const h=storageHealthScan(); const lv=storageHealthLevel(h.pct);
+    if(lv.level==='ok' || lv.level==='info') return;
+    window._storageWarned=window._storageWarned||{};
+    if(window._storageWarned[lv.level]) return;
+    window._storageWarned[lv.level]=true;
+    const isAdmin_=typeof isAdmin==='function' && isAdmin();
+    if(typeof toast==='function') toast(lv.icon+' Dung lượng máy: '+h.pct.toFixed(0)+'% — '+lv.msg+(isAdmin_?' (mở Storage Health để xem)':''), lv.level==='notice'?'warn':'bad');
+  }catch(e){ console.warn('[storageHealthAutoCheck]', e&&e.message); }
+}
+
 function markDeleted(ids, field){
   const arr=Array.isArray(ids)?ids:[ids];
   const list=_deletedIds();
@@ -24522,6 +24648,192 @@ function _onhireImportCommit(){
   renderAll();
 }
 
+/* ============================================================
+   v3.09.68 — ON/OFF HIRE IMPORT WIZARD (ADR-013)
+   PDF scan / bóc thất bại → Wizard: PDF preview + form prefill + confirm.
+   Kiến trúc tách lớp TRÍCH XUẤT (_onhireExtract) để gắn OCR/AI sau này
+   mà KHÔNG đổi giao diện/quy trình.
+   ============================================================ */
+
+/* Lớp TRÍCH XUẤT — trả {vessel,type,startAt,fuel,_method,_conf}.
+   method hiện có: 'text' (đã thử ở _parseOnhirePdf, vào đây là fail) → 'filename'.
+   TƯƠNG LAI: thêm nhánh 'ocr'/'ai' tại đây, cùng cấu trúc trả về. */
+function _onhireExtract(item){
+  const fname=item&&item.name||'';
+  const text=item&&item.text||'';
+  // 1) thử lại text (phòng trường hợp text có ít chữ)
+  if(text && text.replace(/\s+/g,'').length>40){
+    const rec=_parseOnhirePdf(text, fname);
+    if(rec) return {vessel:rec.vessel,type:rec.type,startAt:rec.startAt,fuel:rec.fuel||{},fuelUnit:rec.fuelUnit||{},charterer:rec.charterer||'',_method:'text',_conf:'cao'};
+  }
+  // 2) đoán từ TÊN FILE (vessel + ngày + loại)
+  const _n=s=>_ohNorm(s||'');
+  let vessel='';
+  (typeof fleetVessels==='function'?fleetVessels():VesselService.vessels()).forEach(v=>{
+    const vn=_n(v.name).replace(/\s+/g,''); const vn2=_n(v.name.replace(/^mv\s+|^m\.?v\.?\s*/i,'')).replace(/\s+/g,'');
+    if(vn && _n(fname).replace(/\s+/g,'').includes(vn)) vessel=v.name;
+    else if(vn2 && _n(fname).replace(/\s+/g,'').includes(vn2)) vessel=v.name;
+  });
+  // ngày từ tên file: DD_MM_YYYY | DD-MM-YYYY | YYYYMMDD | DDMMYYYY
+  let startAt='';
+  let dm=fname.match(/(\d{1,2})[._-](\d{1,2})[._-](20\d{2})/);
+  if(dm) startAt=`${dm[3]}-${dm[2].padStart(2,'0')}-${dm[1].padStart(2,'0')}T00:00`;
+  if(!startAt){ dm=fname.match(/(20\d{2})(\d{2})(\d{2})/); if(dm) startAt=`${dm[1]}-${dm[2]}-${dm[3]}T00:00`; }
+  // loại từ tên file/nội dung
+  let type='onhire';
+  const big=(fname+' '+text).toLowerCase();
+  if(/off[\s_-]?hire|redeliver/.test(big)) type='offjob';
+  else if(/\bmob\b|mobiliz/.test(big)) type='mob';
+  else if(/on[\s_-]?hire|onhire/.test(big)) type='onhire';
+  return {vessel:vessel||'', type, startAt, fuel:{}, fuelUnit:{}, charterer:'', _method:'filename', _conf: (vessel&&startAt)?'trung bình':'thấp'};
+}
+
+/* Khởi động Wizard cho danh sách file [{name,file,text}] */
+function onhireWizardStart(items){
+  window._ohwQueue=items||[]; window._ohwIndex=0;
+  if(!window._ohwQueue.length){ toast('Không có file để nhập','warn'); return; }
+  onhireWizardStep1();
+}
+
+/* BƯỚC 1 — Nhập liệu: PDF preview (trái) + form prefill (phải) */
+async function onhireWizardStep1(){
+  const item=window._ohwQueue[window._ohwIndex]; if(!item){ closeModal(); return; }
+  const ex=_onhireExtract(item);
+  window._ohwExtract=ex;
+  const vessels=(typeof fleetVessels==='function'?fleetVessels():VesselService.vessels());
+  const vOpts=['<option value="">— Chọn tàu —</option>'].concat(vessels.map(v=>{
+    const sel=(ex.vessel && _ohNorm(v.name)===_ohNorm(ex.vessel))?' selected':'';
+    return `<option value="${v.id}"${sel}>${esc(v.name)}${v.src==='own'?' (Hải Mã)':v.src==='op'?' (QL hộ)':''}</option>`;
+  })).join('');
+  const d=(ex.startAt||'').slice(0,10), t=(ex.startAt||'').slice(11,16)||'00:00';
+  const badge=m=>`<span style="font-size:10px;padding:1px 6px;border-radius:8px;background:${m==='text'?'#e2efda':m==='filename'?'#fff2cc':m==='ocr'||m==='ai'?'#dCE7f5':'#eee'};color:#555">ERP đoán: ${m==='text'?'từ chữ PDF':m==='filename'?'từ tên file':m}</span>`;
+  const total=window._ohwQueue.length, cur=window._ohwIndex+1;
+  const body=`
+  <div style="font-size:11px;color:var(--muted);margin-bottom:8px">📄 ${esc(item.name)} · File ${cur}/${total} · Bước 1/2: Nhập liệu · ${badge(ex._method)} <span style="color:#999">(độ tin cậy: ${ex._conf})</span></div>
+  <div style="display:flex;gap:14px;flex-wrap:wrap">
+    <div style="flex:1;min-width:300px">
+      <div style="font-size:11px;color:var(--muted);margin-bottom:4px">Bản gốc (PDF)</div>
+      <div id="ohw-pdf" style="border:1px solid var(--rule);border-radius:8px;background:#f7f5f0;min-height:360px;max-height:480px;overflow:auto;text-align:center;padding:6px">
+        <div style="color:var(--muted);font-size:12px;padding:40px">⏳ Đang hiển thị PDF…</div></div>
+      <div style="font-size:10px;color:var(--muted);margin-top:4px;text-align:center">Cuộn để xem các trang. Nhìn bản gốc để đối chiếu số liệu.</div>
+    </div>
+    <div style="flex:1;min-width:280px;display:grid;gap:9px;align-content:start">
+      <div style="font-size:11px;color:var(--muted)">Thông tin biên bản (sửa/bổ sung nếu cần)</div>
+      <div class="field"><label>Tàu *</label><select id="ohw-vessel">${vOpts}</select></div>
+      <div class="field"><label>Loại chứng từ *</label><select id="ohw-type">
+        <option value="onhire"${ex.type==='onhire'?' selected':''}>ON-HIRE (vào thuê)</option>
+        <option value="offjob"${ex.type==='offjob'?' selected':''}>OFF-HIRE (kết thúc thuê)</option>
+        <option value="mob"${ex.type==='mob'?' selected':''}>MOB (huy động)</option></select></div>
+      <div style="display:flex;gap:8px">
+        <div class="field" style="flex:1"><label>Ngày *</label><input type="date" id="ohw-date" value="${d}"></div>
+        <div class="field" style="width:104px"><label>Giờ</label><input type="time" id="ohw-time" value="${t}"></div></div>
+      <div style="font-size:11px;color:var(--muted);border-top:1px dashed var(--rule);padding-top:8px">Nhiên liệu / nước còn trên tàu (ROB) — nhìn PDF điền:</div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <div class="field" style="flex:1;min-width:110px"><label>MGO (DO)</label><div style="display:flex;gap:4px"><input type="number" id="ohw-do" class="num" placeholder="số"><select id="ohw-do-u" style="width:54px"><option value="liter">L</option><option value="m3">m³</option></select></div></div>
+        <div class="field" style="flex:1;min-width:100px"><label>Nhớt (LO)</label><input type="number" id="ohw-lo" class="num" placeholder="lít"></div>
+        <div class="field" style="flex:1;min-width:110px"><label>Nước (FW)</label><div style="display:flex;gap:4px"><input type="number" id="ohw-fw" class="num" placeholder="số"><select id="ohw-fw-u" style="width:54px"><option value="m3">m³</option><option value="liter">L</option></select></div></div>
+      </div>
+      <div class="field"><label>Ghi chú</label><input type="text" id="ohw-note" placeholder="Charterer, cảng, drill water…" value="${ex.charterer?('Charterer: '+esc(ex.charterer)):''}"></div>
+    </div>
+  </div>`;
+  const foot=`<button class="btn-sec" onclick="onhireWizardSkip()">Bỏ qua file này</button><button class="btn-primary" onclick="onhireWizardStep2()" style="background:var(--accent);border-color:var(--accent)">Tiếp → Xem lại</button>`;
+  openModal('🧭 On/Off Hire Import Wizard', body, foot);
+  try{ if(typeof setModalWide==='function') setModalWide(true); else { const m=document.getElementById('modal'); if(m) m.classList.add('modal-wide'); } }catch(e){}
+  // render PDF preview (canvas) — KHÔNG chặn form nếu lỗi
+  _onhireWizardRenderPdf(item.file);
+}
+
+/* render PDF ra canvas trong #ohw-pdf */
+async function _onhireWizardRenderPdf(file){
+  const box=document.getElementById('ohw-pdf'); if(!box||!file) return;
+  try{
+    if(!window.pdfjsLib){
+      await _loadScriptOnce('https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js','pdfjsLib');
+      if(window.pdfjsLib) pdfjsLib.GlobalWorkerOptions.workerSrc='https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+    }
+    const buf=new Uint8Array(await file.arrayBuffer());
+    const pdf=await pdfjsLib.getDocument({data:buf}).promise;
+    box.innerHTML='';
+    for(let p=1;p<=Math.min(pdf.numPages,5);p++){
+      const page=await pdf.getPage(p);
+      const vp=page.getViewport({scale:1.1});
+      const cv=document.createElement('canvas'); cv.width=vp.width; cv.height=vp.height;
+      cv.style.cssText='max-width:100%;height:auto;margin-bottom:8px;border:1px solid #e0dccd;border-radius:4px';
+      box.appendChild(cv);
+      await page.render({canvasContext:cv.getContext('2d'),viewport:vp}).promise;
+    }
+  }catch(e){ box.innerHTML='<div style="color:var(--muted);font-size:12px;padding:30px">Không hiển thị được PDF ('+esc(e&&e.message||'lỗi')+'). Vẫn có thể nhập tay bên phải.</div>'; }
+}
+
+/* gom dữ liệu form bước 1 → object draft */
+function _onhireWizardCollect(){
+  const g=id=>{ const e=document.getElementById(id); return e?e.value:''; };
+  const vid=g('ohw-vessel'), type=g('ohw-type'), date=g('ohw-date'), time=g('ohw-time')||'00:00';
+  if(!vid) return {err:'Chưa chọn tàu'};
+  if(!date) return {err:'Chưa nhập ngày'};
+  const allowed=new Set((typeof userAssignedVesselIds==='function')?userAssignedVesselIds():VesselService.vessels().map(v=>v.id));
+  if(!allowed.has(vid)) return {err:'Bạn không có quyền với tàu này'};
+  const fuelStart={};
+  const _do=parseFloat(g('ohw-do')), _lo=parseFloat(g('ohw-lo')), _fw=parseFloat(g('ohw-fw'));
+  if(_do>0) fuelStart.do={qty:_do,unit:g('ohw-do-u')||'liter',phuyLiters:200,unitPrice:0,priceCcy:'USD'};
+  if(_lo>0) fuelStart.lo={qty:_lo,unit:'liter',phuyLiters:200,unitPrice:0,priceCcy:'USD'};
+  if(_fw>0) fuelStart.fw={qty:_fw,unit:g('ohw-fw-u')||'m3',phuyLiters:200,unitPrice:0,priceCcy:'USD'};
+  return {vid, type, startAt:date+'T'+time, fuelStart, note:g('ohw-note')};
+}
+
+/* BƯỚC 2 — Preview & Confirm */
+function onhireWizardStep2(){
+  const d=_onhireWizardCollect();
+  if(d.err){ toast(d.err,'bad'); return; }
+  window._ohwDraft=d;
+  const item=window._ohwQueue[window._ohwIndex];
+  const v=VesselService.vessels().find(x=>x.id===d.vid);
+  const _fuel=Object.keys(d.fuelStart).map(k=>k.toUpperCase()+': '+fmtQty(d.fuelStart[k].qty)+(d.fuelStart[k].unit==='m3'?' m³':' L')).join(' · ')||'(không nhập)';
+  const row=(k,val)=>`<tr><td style="padding:5px 12px;border:1px solid var(--rule);color:var(--muted)">${k}</td><td style="padding:5px 12px;border:1px solid var(--rule);font-weight:600">${esc(val)}</td></tr>`;
+  const body=`
+  <div style="font-size:11px;color:var(--muted);margin-bottom:8px">📄 ${esc(item.name)} · Bước 2/2: Xem lại & Xác nhận</div>
+  <div style="font-size:12.5px;margin-bottom:10px">Kiểm tra thông tin trước khi lưu. Đây là <b>Nhập tay (Manual Import)</b> — sẽ ghi nhận trong nhật ký.</div>
+  <table style="border-collapse:collapse;font-size:13px;width:100%">
+    ${row('Tàu', (v?v.name:'?'))}
+    ${row('Loại chứng từ', evtType(d.type).label||d.type)}
+    ${row('Thời điểm', d.startAt.replace('T',' '))}
+    ${row('Nhiên liệu/nước (ROB đầu)', _fuel)}
+    ${row('Ghi chú', d.note||'—')}
+  </table>
+  <div style="font-size:10.5px;color:var(--muted);font-style:italic;margin-top:10px">💡 Đoạn lưu với mốc bắt đầu; giờ kết thúc + nhiên liệu cuối bổ sung sau khi có biên bản đối ứng.</div>`;
+  const foot=`<button class="btn-sec" onclick="onhireWizardStep1()">← Sửa lại</button><button class="btn-primary" onclick="onhireWizardSave()" style="background:var(--good);border-color:var(--good)">✓ Lưu đoạn (Manual)</button>`;
+  openModal('🧭 Wizard — Xem lại & Xác nhận', body, foot);
+}
+
+/* BƯỚC 3 — Lưu + Audit (Manual Import) */
+function onhireWizardSave(){
+  const d=window._ohwDraft; if(!d){ toast('Thiếu dữ liệu','bad'); return; }
+  const item=window._ohwQueue[window._ohwIndex];
+  const ex=window._ohwExtract||{};
+  const ev={ id:uid(), vesselId:d.vid, type:d.type, startAt:d.startAt, endAt:'', projectId:'', portFrom:'', portTo:'',
+    notes:('Manual Import (Wizard) từ: '+(item?item.name:'')+(d.note?(' · '+d.note):'')).slice(0,200),
+    fuelStart:d.fuelStart, fuelEnd:{}, fuelPumped:{},
+    createdAt:new Date().toISOString(), createdBy:(typeof actorName==='function'?actorName():''),
+    _imported:true, _importMode:'manual_wizard', _extractMethod:(ex._method||'manual'), _fromPdf:(item?item.name:'') };
+  VesselService.addEvent(ev);
+  try{ if(typeof syncEventsToOnhires==='function') syncEventsToOnhires(); }catch(e){}
+  // AUDIT: ghi rõ Manual Import (KHÁC auto)
+  try{ logAuditEvent('onhire_manual_import', {file:(item?item.name:''), vesselId:d.vid, type:d.type, startAt:d.startAt, extractMethod:(ex._method||'manual'), eventId:ev.id}); }catch(e){}
+  saveState();
+  toast('✓ Đã lưu (Manual) đoạn '+(evtType(d.type).short||d.type),'good');
+  renderAll();
+  _onhireWizardNext();
+}
+
+function onhireWizardSkip(){ _onhireWizardNext(); }
+function _onhireWizardNext(){
+  window._ohwIndex=(window._ohwIndex||0)+1;
+  window._ohwDraft=null; window._ohwExtract=null;
+  if(window._ohwIndex < (window._ohwQueue||[]).length){ onhireWizardStep1(); }
+  else { window._ohwQueue=null; closeModal();
+    try{ if(typeof setModalWide==='function') setModalWide(false); }catch(e){} }
+}
+
 /* v3.07.66: IMPORT PDF biên bản On/Off-hire — trích text bằng pdf.js + parse mẫu PTSC/Statement.
    Mỗi PDF → 1 đoạn event: loại On/Off + ngày giờ (startAt) + nhiên liệu (fuelStart), endAt để trống chờ bổ sung. */
 async function onhirePdfImport(input){
@@ -24545,16 +24857,19 @@ async function onhirePdfImport(input){
         text+=' '+tc.items.map(it=>it.str).join(' ');
       }
       const rec=_parseOnhirePdf(text, f.name);
-      if(rec) parsed.push(rec); else failed.push(f.name+' (không bóc được tàu/ngày)');
-    }catch(e){ failed.push(f.name+' ('+(e&&e.message||'lỗi đọc')+')'); }
+      if(rec) parsed.push(rec); else failed.push({name:f.name, file:f, text:text||''});
+    }catch(e){ failed.push({name:f.name, file:f, text:'', err:(e&&e.message||'lỗi đọc')}); }
   }
   input.value='';
-  if(!parsed.length){ toast('Không đọc được biên bản nào — file scan mờ, hãy nhập tay','warn'); 
-    if(failed.length) openModal('📄 Import PDF — không đọc được', '<div style="font-size:12px;color:var(--muted)">'+failed.map(esc).join('<br>')+'</div>', '<button class="btn-sec" onclick="closeModal()">Đóng</button>'); return; }
+  if(!parsed.length){
+    // v3.09.68: PDF scan / bóc thất bại → mở On/Off Hire Import WIZARD (PDF preview + form prefill)
+    if(failed.length){ onhireWizardStart(failed); }
+    else toast('Không đọc được biên bản nào','warn');
+    return; }
   // map sang event, kiểm tàu/quyền/chồng lấn
   const vByName={}; VesselService.vessels().forEach(v=>{ vByName[_ohNorm(v.name)]=v.id; vByName[_ohNorm(v.name.replace(/^mv\s+|^sv\s+|^m\.?v\.?\s*/i,''))]=v.id; });
   const allowed=new Set((typeof userAssignedVesselIds==='function')?userAssignedVesselIds():VesselService.vessels().map(v=>v.id));
-  const ok=[], warn=[...failed];
+  const ok=[], warn=failed.map(f=>(f&&f.name?f.name:String(f))+' (scan — dùng Wizard nhập tay)');
   parsed.forEach(r=>{
     const vid=vByName[_ohNorm(r.vessel)]||vByName[_ohNorm((r.vessel||'').replace(/^(mv|sv|m\.?v\.?|s\.?v\.?)\s*/i,''))];
     if(!vid){ warn.push(`${r._file}: không khớp tàu "${r.vessel}" trong danh mục`); return; }
@@ -59502,7 +59817,7 @@ function _stateFingerprint(){
    Khóa liên kết: linkUserId (↔ tài khoản), linkVesselId (↔ tàu), projectIds (↔ dự án).
    ============================================================ */
 
-const HRM_TYPE_LABEL={office:'Văn phòng', crew:'Thuyền viên', expert:'Chuyên gia'};
+const HRM_TYPE_LABEL={office:'Văn phòng', crew:'Thuyền viên', expert:'Chuyên gia', expert_om:'Chuyên gia O&M'};
 const HRM_DEPTS=['Ban Giám đốc','Kế toán','Nhân sự','Khai thác','Kỹ thuật','Mua hàng','Điều động tàu','Khác'];
 /* v3.09.44: chuẩn hóa tên phòng ban khi IMPORT → khớp về HRM_DEPTS nếu trùng (bỏ dấu/hoa-thường/
    khoảng trắng + bỏ phần sau gạch nối như "- BOD"). KHÔNG ép nếu không khớp (giữ tên phòng thật). */
@@ -59702,7 +60017,11 @@ function _hrmGuessType(dept, title){
   const _norm=s=>_stripAccentLower(s||'').replace(/đ/g,'d');
   const d=_norm(dept);
   const t=_norm(title);
-  // Chuyên gia (expert): phòng/chức danh chứa từ khóa chuyên gia/expat/dự án chuyên môn
+  // Chuyên gia O&M (expert_om): chuyên gia thuộc dự án O&M — phải kiểm TRƯỚC 'expert'
+  //   nhận diện qua phòng ban/chức danh chứa 'o&m' / 'o m' / 'o and m' / 'om project'
+  const isOM=x=>/\bo\s*&\s*m\b|\bo\s*and\s*m\b|\bom\b|o&m|o and m/.test(x);
+  if(isOM(d)||isOM(t)){ return 'expert_om'; }
+  // Chuyên gia (expert) làm việc TẠI CÔNG TY: phòng/chức danh chứa từ khóa chuyên gia/expat
   const expertKw=['chuyen gia','expert','expatriate','expat','co van','consultant','specialist'];
   if(expertKw.some(k=>d.includes(k)||t.includes(k))) return 'expert';
   // Thuyền viên (crew): phòng Đội tàu hoặc chức danh đi biển
@@ -59782,7 +60101,9 @@ function hrmImportApply(){
       // v3.09.42 FIX: tương tự cho CHUYÊN GIA — trước đây thiếu nhánh expert nên hồ sơ cũ (office)
       //   import lại với bộ phận 'Chuyên gia' KHÔNG được nâng → dashboard đếm Chuyên gia = 0.
       //   Chỉ nâng lên expert (không hạ expert→office). crew giữ ưu tiên (đang đi biển).
-      if(r.empType==='expert' && ex.type!=='expert' && ex.type!=='crew') ex.type='expert';
+      if(r.empType==='expert' && ex.type!=='expert' && ex.type!=='crew' && ex.type!=='expert_om') ex.type='expert';
+      // v3.09.66: Chuyên gia O&M — nâng lên expert_om (ưu tiên cao hơn expert, không hạ crew)
+      if(r.empType==='expert_om' && ex.type!=='expert_om' && ex.type!=='crew') ex.type='expert_om';
       if(typeof touchRecord==='function') touchRecord(ex);
       hrmLogHistory(ex.id,'edit','Import Excel','',r.smartId,'Cập nhật từ import danh sách');
       nUpd++;
@@ -59898,6 +60219,13 @@ function hrmContractWarn(e){
 function hrmVesselName(vid){ const v=VesselService.vessels().find(x=>x.id===vid)||VesselService.opVessels().find(x=>x.id===vid); return v?(v.name||v.code||vid):''; }
 function hrmEsc(s){ return (s==null?'':String(s)).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
 
+/* ---- v3.09.66: click ô KPI dashboard → nhảy sang Danh sách đã lọc theo nhóm ---- */
+function hrmDashCardClick(filterType){
+  hrmSwitchView('list');
+  const sel=document.getElementById('hrm-filter-type');
+  if(sel){ sel.value=filterType||''; }
+  if(typeof hrmRenderList==='function') hrmRenderList();
+}
 /* ---- chuyển view dash/list ---- */
 function hrmSwitchView(v){
   _hrmView=v;
@@ -60573,14 +60901,16 @@ function hrmRenderDash(){
   const nOffice=emps.filter(e=>e.type==='office').length;
   const nCrew=emps.filter(e=>e.type==='crew').length;
   const nExpert=emps.filter(e=>e.type==='expert').length;
-  const card=(label,val,dot)=>`<div class="kpi-card" style="background:#fffdf8;border:1px solid var(--rule);border-radius:12px;padding:14px 16px;min-width:130px">
+  const nExpertOM=emps.filter(e=>e.type==='expert_om').length;
+  const card=(label,val,dot,filterType)=>`<div class="kpi-card" onclick="hrmDashCardClick('${filterType||''}')" style="background:#fffdf8;border:1px solid var(--rule);border-radius:12px;padding:14px 16px;min-width:130px;cursor:pointer" title="Bấm để xem danh sách">
     <div style="display:flex;align-items:center;gap:6px;color:var(--muted);font-size:11px;margin-bottom:6px"><span style="width:9px;height:9px;border-radius:50%;background:${dot};display:inline-block"></span>${label}</div>
     <div style="font-size:24px;font-weight:700;white-space:nowrap">${val}</div></div>`;
   box.innerHTML =
-    card('Tổng nhân sự (đang làm)', total, '#3a7bd5') +
-    card('Văn phòng', nOffice, '#27ae60') +
-    card('Thuyền viên', nCrew, '#e67e22') +
-    card('Chuyên gia', nExpert, '#8e44ad');
+    card('Tổng nhân sự (đang làm)', total, '#3a7bd5', '') +
+    card('Văn phòng', nOffice, '#27ae60', 'office') +
+    card('Thuyền viên', nCrew, '#e67e22', 'crew') +
+    card('Chuyên gia', nExpert, '#8e44ad', 'expert') +
+    card('Chuyên gia O&M', nExpertOM, '#16a085', 'expert_om');
 
   // v3.08.38: nút phân loại lại — hữu ích khi dữ liệu import chưa phân nhóm đúng
   //   (vd tất cả đang là 'Văn phòng'). Đoán lại theo phòng ban + chức danh.
@@ -61143,7 +61473,7 @@ function hrmEditEmployee(id){
       <div style="font-weight:600;margin-bottom:4px">Mã nhân viên</div>${idBlock}</div>
     <h4 style="font-size:13px;margin:0 0 6px">Phân loại</h4>
     ${rowWrap(
-      sel('Nhóm nhân sự','hrm-f-type', `<option value="office"${e.type==='office'?' selected':''}>Văn phòng</option><option value="crew"${e.type==='crew'?' selected':''}>Thuyền viên</option><option value="expert"${e.type==='expert'?' selected':''}>Chuyên gia</option>`)+
+      sel('Nhóm nhân sự','hrm-f-type', `<option value="office"${e.type==='office'?' selected':''}>Văn phòng</option><option value="crew"${e.type==='crew'?' selected':''}>Thuyền viên</option><option value="expert"${e.type==='expert'?' selected':''}>Chuyên gia</option><option value="expert_om"${e.type==='expert_om'?' selected':''}>Chuyên gia O&M</option>`)+
       sel('Trạng thái','hrm-f-status', `<option value="active"${e.status!=='inactive'?' selected':''}>Đang làm việc</option><option value="inactive"${e.status==='inactive'?' selected':''}>Đã nghỉ</option>`)
     )}
     <h4 style="font-size:13px;margin:10px 0 6px">Thông tin cơ bản</h4>
