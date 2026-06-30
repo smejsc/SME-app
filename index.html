@@ -731,7 +731,7 @@ body.readonly-mode::before{
         <button class="admin-only-item" onclick="closeAdminMenu();document.getElementById('importFile').click()"><span class="ico">⤒</span>Import backup (.json)</button>
         <button class="admin-only-item" onclick="closeAdminMenu();document.getElementById('importMergeFile').click()" title="Gộp data từ backup vào dữ liệu hiện tại — KHÔNG ghi đè, không mất bản ghi mới"><span class="ico">⤓</span>Khôi phục &amp; GỘP từ backup (.json)</button>
         <button class="admin-only-item" onclick="closeAdminMenu();openSnapshotRestore()" title="Khôi phục từ snapshot tự động trên Drive (GỘP, giữ bản mới) — bản mới nhất, không cần file"><span class="ico">☁</span>Khôi phục từ snapshot (Drive)</button>
-        <button class="admin-only-item" onclick="closeAdminMenu();openLocalSnapshotModal()" title="Khôi phục nhanh từ snapshot tự động lưu trên MÁY NÀY (phao cứu sinh khi mất/sai dữ liệu) — giữ 8 bản gần nhất"><span class="ico">⏱</span>Khôi phục nhanh (máy này)</button>
+        <button class="admin-only-item" onclick="closeAdminMenu();openLocalSnapshotModal()" title="Khôi phục nhanh từ snapshot tự động lưu trên MÁY NÀY (phao cứu sinh khi mất/sai dữ liệu) — giữ 3 bản gần nhất"><span class="ico">⏱</span>Khôi phục nhanh (máy này)</button>
         <button class="admin-only-item" onclick="closeAdminMenu();openRecycleBinModal()" title="Thùng rác — khôi phục bản ghi tài chính (Phải thu/Phải trả/Giao dịch quỹ) đã xóa"><span class="ico">🗑</span>Thùng rác (khôi phục đã xóa)</button>
         <button class="admin-only-item" onclick="closeAdminMenu();openStorageHealthModal()" title="Storage Health Monitor — theo dõi dung lượng localStorage theo nhóm dữ liệu, cảnh báo sớm, xuất báo cáo. CHỈ phân tích/đề xuất, KHÔNG tự xóa."><span class="ico">💾</span>Storage Health (dung lượng máy)</button>
         <div class="divider admin-only-item"></div>
@@ -3471,7 +3471,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.09.71';            // bumped on each release
+const APP_VERSION='3.09.73';            // bumped on each release
 /* Debug logging: dlog() chỉ in khi DEBUG_MODE bật (mặc định TẮT ở production để
    tránh nhiễu/lộ cấu trúc nội bộ qua DevTools). Bật bằng: localStorage.DEBUG_MODE='1'.
    console.warn/error GIỮ NGUYÊN (cảnh báo & lỗi vận hành luôn hiện). */
@@ -5788,6 +5788,8 @@ async function authAction(){
       try{ const _rc=_migrateContractValue(); if(_rc.c) saveState(); }catch(e){console.warn('[migrate v3.09.32 contract-value] failed:',e);}
       // v3.07.60: gắn lô duyệt chi (_payBatchId) cho phiếu AP đã duyệt CŨ (trước 3.07.54) để hiện ở Thư viện hồ sơ chờ chi.
       try{ const _rb=_migratePayBatch(); if(_rb>0){ saveState(); dlog('[migrate v3.07.60] gắn lô duyệt chi cho '+_rb+' phiếu approved cũ'); } }catch(e){console.warn('[migrate v3.07.60 payBatch] failed:',e);}
+      // v3.09.73: dọn snapshot dư cũ về 3 bản (giảm từ 8) — giải phóng localStorage. KHÔNG đụng dữ liệu nghiệp vụ.
+      try{ const _rs=(typeof pruneLocalSnapshots==='function')?pruneLocalSnapshots():0; if(_rs>0) dlog('[snapshot prune] bỏ '+_rs+' bản cũ, giữ '+_SNAP_MAX); }catch(e){console.warn('[snapshot prune] failed:',e);}
       const lastBak=cfg.lastBackup?new Date(cfg.lastBackup).getTime():0;
       const daysSinceBak=lastBak?Math.floor((Date.now()-lastBak)/86400000):999;
       // v1.55.0: Show persistent banner + auto-trigger weekly backup
@@ -14723,7 +14725,7 @@ let S = loadState();
    không phụ thuộc cloud. Không thay thế backup Drive — đây là phao cứu sinh cục bộ.
    ============================================================ */
 const _SNAP_KEY='seahorse_local_snapshots';
-const _SNAP_MAX=8;   // giữ 8 bản gần nhất
+const _SNAP_MAX=3;   // v3.09.73: giữ 3 bản gần nhất (giảm từ 8 → tiết kiệm ~1MB localStorage)
 let _snapLastAt=0;
 async function pushLocalSnapshot(label){
   try{
@@ -14756,6 +14758,21 @@ function listLocalSnapshots(){
   try{ const ex=localStorage.getItem(_SNAP_KEY); const arr=ex?JSON.parse(ex):[]; return Array.isArray(arr)?arr.slice().reverse():[]; }
   catch(e){ return []; }
 }
+/* v3.09.73: DỌN snapshot dư cũ về đúng _SNAP_MAX (chạy lúc khởi động).
+   An toàn: chỉ giữ N bản MỚI NHẤT (cuối mảng), bỏ bản cũ. KHÔNG đụng dữ liệu nghiệp vụ. */
+function pruneLocalSnapshots(){
+  try{
+    const ex=localStorage.getItem(_SNAP_KEY); if(!ex) return 0;
+    let arr=JSON.parse(ex); if(!Array.isArray(arr)) return 0;
+    if(arr.length<=_SNAP_MAX) return 0;
+    const before=arr.length;
+    arr=arr.slice(arr.length-_SNAP_MAX);   // giữ N bản mới nhất (cuối mảng)
+    localStorage.setItem(_SNAP_KEY, JSON.stringify(arr));
+    const removed=before-arr.length;
+    try{ logAuditEvent('snapshot_prune',{from:before, to:arr.length, removed, max:_SNAP_MAX}); }catch(_){}
+    return removed;
+  }catch(e){ console.warn('[snapshot] prune lỗi:', e&&e.message); return 0; }
+}
 async function restoreLocalSnapshot(id){
   try{
     const arr=listLocalSnapshots();
@@ -14779,7 +14796,7 @@ function openLocalSnapshotModal(){
   const arr=listLocalSnapshots();
   let body;
   if(!arr.length){
-    body='<div style="color:var(--muted);font-size:13px;padding:18px;text-align:center">Chưa có snapshot nào trên máy này.<br><span style="font-size:11px">Snapshot tự lưu mỗi khi có thay đổi dữ liệu (tối đa 8 bản gần nhất).</span></div>';
+    body='<div style="color:var(--muted);font-size:13px;padding:18px;text-align:center">Chưa có snapshot nào trên máy này.<br><span style="font-size:11px">Snapshot tự lưu mỗi khi có thay đổi dữ liệu (tối đa 3 bản gần nhất).</span></div>';
   } else {
     const rows=arr.map(e=>{
       const kb=(e.size/1024).toFixed(0);
@@ -17499,6 +17516,25 @@ function storageHealthScan(){
   const pct=totalBytes/QUOTA*100;
   return { totalBytes, byKey, groupBytes, stateBytes, snapCount, rescueCount:rescueKeys.length, rescueKeys, nvKeys, offlineQueue, quota:QUOTA, pct };
 }
+/* v3.09.73 — DỌN bản State NV thừa (seahorse_v1__nv_*) trên máy admin.
+   An toàn: chỉ admin; có xác nhận; KHÔNG đụng key chung 'seahorse_v1' (state admin đầy đủ);
+   KHÔNG đụng dữ liệu nghiệp vụ. Mỗi bản __nv_ là cache cục bộ của 1 NV từng đăng nhập máy này —
+   dọn xong NV đó đăng nhập lại sẽ tự tải state mới từ cloud. */
+function cleanupNvStateKeys(){
+  if(!(typeof isAdmin==='function' && isAdmin())){ toast('Chỉ admin được dọn','bad'); return; }
+  let nvKeys=[];
+  try{ nvKeys=Object.keys(localStorage).filter(k=>k.indexOf(STORE_KEY+'__nv_')===0); }catch(_){}
+  if(!nvKeys.length){ toast('Không có bản State NV thừa','info'); return; }
+  let totalBytes=0; nvKeys.forEach(k=>{ try{ totalBytes+=(localStorage.getItem(k)||'').length; }catch(_){} });
+  const kb=(totalBytes/1024).toFixed(0);
+  if(!confirm(`Dọn ${nvKeys.length} bản State NV thừa (~${kb} KB) trên máy này?\n\nĐây là cache cục bộ của NV từng đăng nhập — KHÔNG phải dữ liệu nghiệp vụ. NV đăng nhập lại sẽ tự tải state mới từ cloud.\n\nKey chung (state admin) KHÔNG bị đụng tới.`)) return;
+  let removed=0;
+  nvKeys.forEach(k=>{ try{ localStorage.removeItem(k); removed++; }catch(_){} });
+  try{ logAuditEvent('cleanup_nv_state',{removed, bytesFreed:totalBytes, keys:nvKeys.slice(0,20)}); }catch(_){}
+  toast(`✓ Đã dọn ${removed} bản State NV thừa (~${kb} KB)`,'good');
+  closeModal();
+  setTimeout(()=>{ try{ openStorageHealthModal(); }catch(_){} }, 300);
+}
 function storageHealthLevel(pct){
   if(pct>=95) return {level:'critical-max', color:'#b8472e', icon:'⛔', msg:'≥95% — CHỈ admin được thực hiện thao tác tăng dữ liệu lớn (import hàng loạt). Cần dọn dẹp/Archive ngay.'};
   if(pct>=90) return {level:'critical', color:'#b8472e', icon:'🔴', msg:'≥90% — Cảnh báo NGHIÊM TRỌNG. Sắp đầy, nguy cơ chặn lưu. Archive/dọn dẹp gấp.'};
@@ -17534,7 +17570,7 @@ function openStorageHealthModal(){
       <span>👤 Bản State NV thừa trên máy: <b>${h.nvKeys.length}</b></span>
       <span>📤 Offline Queue: <b>${h.offlineQueue}</b></span>
     </div>
-    ${h.nvKeys.length>0?`<div style="margin-top:10px;padding:8px;background:#d9822b1a;border-radius:6px;font-size:12px">⚠ Có ${h.nvKeys.length} bản dữ liệu NV (<code>__nv_</code>) lưu trên máy này, chiếm dung lượng. Đây là bản cục bộ của NV từng đăng nhập — admin có thể dọn (cần xác nhận thủ công, hệ thống KHÔNG tự xóa).</div>`:''}
+    ${h.nvKeys.length>0?`<div style="margin-top:10px;padding:8px;background:#d9822b1a;border-radius:6px;font-size:12px">⚠ Có ${h.nvKeys.length} bản dữ liệu NV (<code>__nv_</code>) lưu trên máy này, chiếm dung lượng. Đây là bản cục bộ của NV từng đăng nhập — admin có thể dọn (cần xác nhận thủ công, hệ thống KHÔNG tự xóa).${(typeof isAdmin==='function'&&isAdmin())?`<div style="margin-top:6px"><button class="btn-sec" style="font-size:11px;border-color:#d9822b;color:#b8472e" onclick="cleanupNvStateKeys()">🧹 Dọn ${h.nvKeys.length} bản State NV thừa</button></div>`:''}</div>`:''}
     <div style="margin-top:8px;font-size:11px;color:var(--muted)">ℹ Storage Health chỉ <b>theo dõi, phân tích, đề xuất</b> — KHÔNG bao giờ tự xóa dữ liệu. Mọi dọn dẹp/Archive cần admin xác nhận.</div>
   </div>`;
   const foot=`<button class="btn-sec" onclick="closeModal()">Đóng</button><button class="btn-sec" onclick="exportStorageReport('health')">📄 Health Report</button><button class="btn-sec" onclick="exportStorageReport('quota')">📊 Quota Report</button><button class="btn-primary" onclick="exportStorageReport('growth')">📈 Growth Trend</button>`;
@@ -35687,11 +35723,17 @@ function _arEditorBody(r,isPayable){
   // v3.09.71: KHÓA khi ĐÃ NHẬN THANH TOÁN (thu đủ). Bản ghi đã tất toán → không sửa số liệu/không xóa.
   //   NGOẠI LỆ: vẫn cho bổ sung/điều chỉnh thông tin DỰ ÁN (phân loại quản trị, không đổi số tiền).
   const _paidFull = isEdit && !isPayable && (typeof arRemaining==='function') && (arRemaining(r) <= 0.001) && (+r.amount||0) > 0;
-  const lockedAll = locked || _paidFull;
+  // v3.09.72: KTT (canCheckAcc) + admin được SỬA số liệu kể cả khi đã tất toán (override khóa, có audit).
+  //   NV thường vẫn khóa số liệu (chỉ sửa dự án).
+  const _canEditPaid = (typeof isAdmin==='function' && isAdmin()) || (typeof canCheckAcc==='function' && canCheckAcc());
+  const _paidLockData = _paidFull && !_canEditPaid;
+  const lockedAll = locked || _paidLockData;
   const lockedAttr = lockedAll ? 'disabled' : '';
   // field DỰ ÁN: chỉ disabled khi khóa workflow; KHÔNG disabled nếu chỉ vì đã thanh toán
   const projLockedAttr = locked ? 'disabled' : '';
-  const lockedNote = _paidFull && !locked
+  const lockedNote = _paidFull && _canEditPaid && !locked
+    ? `<div style="font-size:12px;background:rgba(39,174,96,.08);border-left:3px solid var(--good);padding:8px 10px;margin-bottom:10px"><b>💰 Đã nhận thanh toán</b> · Khoản này đã tất toán. Bạn (KTT/Admin) <b>vẫn sửa được số liệu</b> — mọi thay đổi sẽ được ghi nhật ký.</div>`
+    : _paidFull && !locked
     ? `<div style="font-size:12px;background:rgba(39,174,96,.1);border-left:3px solid var(--good);padding:8px 10px;margin-bottom:10px"><b>🔒 Đã nhận thanh toán</b> · Khoản phải thu đã thu đủ — số liệu được <b>khóa, không sửa/xóa</b>. Vẫn có thể bổ sung/điều chỉnh <b>thông tin dự án</b> bên dưới.</div>`
     : locked
     ? `<div style="font-size:12px;background:rgba(196,138,57,.1);border-left:3px solid var(--warn);padding:8px 10px;margin-bottom:10px"><b>⚠ Khóa sửa</b> · Bản ghi đang ở trạng thái <b>${wfState(r).label}</b>. ${r.status==='approved'?'Đã duyệt — cần "Trả về Nháp" mới sửa được.':'Đang chờ duyệt — cần được "Từ chối" để chuyển về Nháp.'}</div>`
@@ -36667,10 +36709,12 @@ function openReceivableModal(id){
   // v3.06.13: NV xem được ở mọi trạng thái. Đã trình ký/đã duyệt (!wfCanEdit) → CHẾ ĐỘ XEM.
   const _viewOnly = isEdit && !wfCanEdit(r);
   const _canDocs = isEdit && _viewOnly && wfCanUpdateDocs(r);  // v3.06.19: vẫn bổ sung hồ sơ
-  // v3.09.71: đã NHẬN THANH TOÁN (thu đủ) → khóa số liệu, KHÔNG xóa; chỉ cho lưu thông tin DỰ ÁN
+  // v3.09.71/72: đã NHẬN THANH TOÁN (thu đủ) → NV thường khóa số liệu (chỉ sửa dự án);
+  //   KTT (canCheckAcc) + admin vẫn sửa số liệu bình thường (override, có audit).
   const _paidFull = isEdit && (typeof arRemaining==='function') && (arRemaining(r) <= 0.001) && (+r.amount||0) > 0;
+  const _canEditPaid = isAdmin() || (typeof canCheckAcc==='function' && canCheckAcc());
   let foot;
-  if(_paidFull && !_viewOnly){
+  if(_paidFull && !_canEditPaid && !_viewOnly){
     foot=`<button class="btn-sec" onclick="closeModal()">Đóng</button>`
       + `<button class="btn-primary" onclick="saveArProjectOnly('ar','${id}')" title="Lưu thông tin dự án — không đổi số liệu đã tất toán" style="background:var(--good);border-color:var(--good)">💾 Lưu dự án</button>`;
   } else if(_viewOnly){
@@ -36685,8 +36729,10 @@ function openReceivableModal(id){
         if(_n>1){ _delLabel=`🗑 Xóa cả phiếu (${_n} dòng)`; _delTitle='Phiếu này có nhiều dòng — sẽ hỏi xóa cả phiếu hay chỉ dòng này'; }
       }catch(e){}
     }
+    // v3.09.72: phải thu đã tất toán → chỉ ADMIN được xóa (KTT sửa được nhưng KHÔNG xóa).
+    const _canDelHere = wfCanDelete(r) && !(_paidFull && !isAdmin());
     foot=`<button class="btn-sec" onclick="closeModal()">Hủy</button>
-          ${wfCanDelete(r)?`<button class="btn-sec" style="border-color:#b8472e;color:#b8472e;font-weight:600" onclick="closeModal();deleteAr('ar','${id}')" title="${_delTitle}">${_delLabel}</button>`:''}
+          ${_canDelHere?`<button class="btn-sec" style="border-color:#b8472e;color:#b8472e;font-weight:600" onclick="closeModal();deleteAr('ar','${id}')" title="${_delTitle}">${_delLabel}</button>`:''}
           <button class="btn-primary" onclick="saveAr('ar','${id}')">Cập nhật</button>`;
   } else {
     foot=`<button class="btn-sec" onclick="closeModal()">Hủy</button>
@@ -39482,8 +39528,13 @@ function saveAr(kind,id){
   //   (UI đã thay nút bằng "Lưu dự án"; chốt này phòng gọi trực tiếp.)
   if(kind==='ar' && id){
     const _r=(S[list]||[]).find(x=>x.id===id);
-    if(_r && typeof arRemaining==='function' && arRemaining(_r)<=0.001 && (+_r.amount||0)>0 && !isAdmin()){
+    const _canEditPaid=isAdmin()||(typeof canCheckAcc==='function' && canCheckAcc());
+    if(_r && typeof arRemaining==='function' && arRemaining(_r)<=0.001 && (+_r.amount||0)>0 && !_canEditPaid){
       toast('🔒 Khoản phải thu đã tất toán — số liệu khóa. Chỉ sửa được thông tin dự án.','bad'); return;
+    }
+    // KTT/admin sửa AR đã tất toán → ghi audit (truy vết override khóa)
+    if(_r && typeof arRemaining==='function' && arRemaining(_r)<=0.001 && (+_r.amount||0)>0 && _canEditPaid && !isAdmin()){
+      try{ logAuditEvent('ar_edit_after_paid_ktt',{id, amount:_r.amount, ccy:_r.ccy, by:actorName()}); }catch(e){}
     }
   }
   const err=document.getElementById('ar-err');
@@ -40719,9 +40770,9 @@ function fixFxApply(src,id,i){
 function deleteAr(kind,id){
   const list=kind==='ap'?'payables':'receivables';
   const r=S[list].find(x=>x.id===id);if(!r)return;
-  // v3.09.71: AR đã NHẬN THANH TOÁN (thu đủ) → KHÓA, không cho xóa (bảo toàn số liệu đã tất toán).
+  // v3.09.71/72: AR đã NHẬN THANH TOÁN (thu đủ) → KHÓA xóa. CHỈ admin xóa được (KTT sửa được nhưng không xóa).
   if(kind==='ar' && typeof arRemaining==='function' && arRemaining(r)<=0.001 && (+r.amount||0)>0 && !isAdmin()){
-    toast('🔒 Khoản phải thu đã tất toán — không thể xóa. Số liệu đã khóa.','bad');
+    toast('🔒 Khoản phải thu đã tất toán — không thể xóa (kể cả KTT). Chỉ Admin được xóa.','bad');
     return;
   }
   // v1.34: Block direct delete of AP auto-created from loan
