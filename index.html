@@ -3471,7 +3471,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.09.68';            // bumped on each release
+const APP_VERSION='3.09.71';            // bumped on each release
 /* Debug logging: dlog() chỉ in khi DEBUG_MODE bật (mặc định TẮT ở production để
    tránh nhiễu/lộ cấu trúc nội bộ qua DevTools). Bật bằng: localStorage.DEBUG_MODE='1'.
    console.warn/error GIỮ NGUYÊN (cảnh báo & lỗi vận hành luôn hiện). */
@@ -21393,6 +21393,9 @@ function upgradeNumericInputs(rootSelector){
   const root=rootSelector?document.querySelector(rootSelector):document;
   if(!root) return;
   root.querySelectorAll('input[type="number"], input[data-format-thousands]').forEach(inp=>{
+    // v3.09.70: ô dữ liệu kỹ thuật (số lượng nhiên liệu/nước…) KHÔNG phải tiền tệ →
+    //   loại khỏi cơ chế format nghìn + hint "đọc thành tiền/chữ". Tránh diễn giải sai bản chất.
+    if(inp.hasAttribute('data-no-money-hint')) return;
     if(inp.dataset.formatThousands && inp.dataset._hintAttached) return;
     if(inp.dataset.skipFormat){
       // v2.99.24: skipFormat → KHÔNG gắn hint (FX rate, mã số, percent...)
@@ -24706,6 +24709,10 @@ async function onhireWizardStep1(){
     return `<option value="${v.id}"${sel}>${esc(v.name)}${v.src==='own'?' (Hải Mã)':v.src==='op'?' (QL hộ)':''}</option>`;
   })).join('');
   const d=(ex.startAt||'').slice(0,10), t=(ex.startAt||'').slice(11,16)||'00:00';
+  // v3.09.70: nếu extract (text) bóc được nhiên liệu → prefill ĐÚNG ô tương ứng theo Dictionary Mapping
+  //   (do→MGO, lo→Nhớt, fw→Nước). KHÔNG đổi loại, KHÔNG diễn giải. Ô trống nếu không chắc.
+  const fdo=(ex.fuel&&ex.fuel.do!=null)?ex.fuel.do:'', flo=(ex.fuel&&ex.fuel.lo!=null)?ex.fuel.lo:'', ffw=(ex.fuel&&ex.fuel.fw!=null)?ex.fuel.fw:'';
+  const udo=(ex.fuelUnit&&ex.fuelUnit.do)||'liter', ufw=(ex.fuelUnit&&ex.fuelUnit.fw)||'m3';
   const badge=m=>`<span style="font-size:10px;padding:1px 6px;border-radius:8px;background:${m==='text'?'#e2efda':m==='filename'?'#fff2cc':m==='ocr'||m==='ai'?'#dCE7f5':'#eee'};color:#555">ERP đoán: ${m==='text'?'từ chữ PDF':m==='filename'?'từ tên file':m}</span>`;
   const total=window._ohwQueue.length, cur=window._ohwIndex+1;
   const body=`
@@ -24729,9 +24736,9 @@ async function onhireWizardStep1(){
         <div class="field" style="width:104px"><label>Giờ</label><input type="time" id="ohw-time" value="${t}"></div></div>
       <div style="font-size:11px;color:var(--muted);border-top:1px dashed var(--rule);padding-top:8px">Nhiên liệu / nước còn trên tàu (ROB) — nhìn PDF điền:</div>
       <div style="display:flex;gap:8px;flex-wrap:wrap">
-        <div class="field" style="flex:1;min-width:110px"><label>MGO (DO)</label><div style="display:flex;gap:4px"><input type="number" id="ohw-do" class="num" placeholder="số"><select id="ohw-do-u" style="width:54px"><option value="liter">L</option><option value="m3">m³</option></select></div></div>
-        <div class="field" style="flex:1;min-width:100px"><label>Nhớt (LO)</label><input type="number" id="ohw-lo" class="num" placeholder="lít"></div>
-        <div class="field" style="flex:1;min-width:110px"><label>Nước (FW)</label><div style="display:flex;gap:4px"><input type="number" id="ohw-fw" class="num" placeholder="số"><select id="ohw-fw-u" style="width:54px"><option value="m3">m³</option><option value="liter">L</option></select></div></div>
+        <div class="field" style="flex:1;min-width:110px"><label>MGO (DO)</label><div style="display:flex;gap:4px"><input type="number" inputmode="decimal" step="any" data-no-money-hint id="ohw-do" placeholder="số lượng" style="text-align:right" value="${fdo}"><select id="ohw-do-u" style="width:54px"><option value="liter"${udo==='liter'?' selected':''}>L</option><option value="m3"${udo==='m3'?' selected':''}>m³</option></select></div></div>
+        <div class="field" style="flex:1;min-width:100px"><label>Nhớt (LO)</label><input type="number" inputmode="decimal" step="any" data-no-money-hint id="ohw-lo" placeholder="lít" style="text-align:right" value="${flo}"></div>
+        <div class="field" style="flex:1;min-width:110px"><label>Nước (FW)</label><div style="display:flex;gap:4px"><input type="number" inputmode="decimal" step="any" data-no-money-hint id="ohw-fw" placeholder="số lượng" style="text-align:right" value="${ffw}"><select id="ohw-fw-u" style="width:54px"><option value="m3"${ufw==='m3'?' selected':''}>m³</option><option value="liter"${ufw==='liter'?' selected':''}>L</option></select></div></div>
       </div>
       <div class="field"><label>Ghi chú</label><input type="text" id="ohw-note" placeholder="Charterer, cảng, drill water…" value="${ex.charterer?('Charterer: '+esc(ex.charterer)):''}"></div>
     </div>
@@ -24924,16 +24931,16 @@ function _parseOnhirePdf(text, fname){
   let fm=T.match(/MARINE GAS OIL\s*:?\s*([\d.,]+)\s*(CU\.?METER|M3|M³|LITT?ERS?|LTS|LITERS?|LITRES?)/i)
       || T.match(/Fuel Oil\s*\(MGO\)\s*=?\s*([\d.,]+)\s*(Ltrs|Liters|M3|M³)/i)
       || T.match(/\bMGO\b\s*:?\s*([\d.,]+)\s*(CU\.?METER|M3|M³|Ltrs|Liters|LITT?ERS?)/i);
-  if(fm){ const u=_fuelUnit(fm[2]); fuel.do=_num(fm[1]); fuelUnit.do=u; }
+  if(fm){ const u=_fuelUnit(fm[2]); fuel.do=_ohNum(fm[1]); fuelUnit.do=u; }  // MGO→do (Dictionary Mapping cố định)
   // LO / LUBRICATING OIL
   let lm=T.match(/LUBRICATING OIL\s*:?\s*([\d.,]+)\s*(LITT?ERS?|LTS|LITERS?|M3|M³)/i)
       || T.match(/\bLUB\.?\s*OIL\b[^:]*:?\s*([\d.,]+)\s*(Ltrs|Liters)/i);
-  if(lm){ fuel.lo=_num(lm[1]); fuelUnit.lo=_fuelUnit(lm[2]); }
+  if(lm){ fuel.lo=_ohNum(lm[1]); fuelUnit.lo=_fuelUnit(lm[2]); }  // LUB OIL→lo
   // FW / FRESH WATER
   let wm=T.match(/FRESH\s*\/?\s*DRILL?\s*WATER|FRESH WATER\s*:?\s*([\d.,]+)\s*(CU\.?METER|M3|M³|MT|cbm|CBM)/i)
       || T.match(/FRESH WATER\s*:?\s*([\d.,]+)\s*(CU\.?METER|M3|M³|MT|cbm|CBM)/i)
       || T.match(/Fresh water\s*:?\s*([\d.,]+)\s*(cbm|CBM|M3|m³)/i);
-  if(wm && wm[1]){ fuel.fw=_num(wm[1]); fuelUnit.fw=_fuelUnit(wm[2]); }
+  if(wm && wm[1]){ fuel.fw=_ohNum(wm[1]); fuelUnit.fw=_fuelUnit(wm[2]); }  // FRESH WATER→fw
   // charterer
   let cm=T.match(/Charterer\s*:?\s*([A-Z][A-Za-z0-9 .\-&()]{2,40}?)(?:\s+Name of vessel|\s+Ship|\s{2,}|\s+Representative)/i);
   const charterer=cm?cm[1].trim():'';
@@ -24943,6 +24950,15 @@ function _parseOnhirePdf(text, fname){
   return { vessel: vessel||'(không rõ)', type, startAt, fuel, fuelUnit, charterer, _file:_f };
 }
 function _num(s){ return parseFloat(String(s||'').replace(/\./g,'X').replace(/,/g,'.').replace(/X/g, m=>'')) || parseFloat(String(s||'').replace(/,/g,''))||0; }
+/* v3.09.70: parse số trong BIÊN BẢN ON/OFF-HIRE — ĐỊNH DẠNG ANH (phẩy = phân nghìn, chấm = thập phân).
+   Biên bản hàng hải (PTSC/Statement of Fact) dùng "39,945 Ltrs" = 39945 lít (KHÔNG phải 39.945).
+   Tách riêng khỏi _num (vốn cho tiền VN) để KHÔNG diễn giải sai bản chất số lượng nhiên liệu. */
+function _ohNum(s){
+  const raw=String(s||'').trim(); if(!raw) return 0;
+  // bỏ dấu phẩy phân nghìn, giữ chấm thập phân
+  const n=parseFloat(raw.replace(/,/g,''));
+  return isFinite(n)?n:0;
+}
 function _fuelUnit(u){ u=String(u||'').toUpperCase(); if(/CU\.?METER|M3|M³|MT|CBM/.test(u)) return 'm3'; return 'liter'; }
 function _extractDateTime(T){
   // pattern 1: "HHMM Hrs DD/MM/YYYY" hoặc "HH:MM Hrs DD/MM/YYYY"
@@ -35668,8 +35684,16 @@ function _arEditorBody(r,isPayable){
 
   // Determine locked state from workflow
   const locked = !isAdmin() && !wfCanEdit(r) && (r.status==='approved' || r.status==='pending_l1' || r.status==='pending_l2');
-  const lockedAttr = locked ? 'disabled' : '';
-  const lockedNote = locked
+  // v3.09.71: KHÓA khi ĐÃ NHẬN THANH TOÁN (thu đủ). Bản ghi đã tất toán → không sửa số liệu/không xóa.
+  //   NGOẠI LỆ: vẫn cho bổ sung/điều chỉnh thông tin DỰ ÁN (phân loại quản trị, không đổi số tiền).
+  const _paidFull = isEdit && !isPayable && (typeof arRemaining==='function') && (arRemaining(r) <= 0.001) && (+r.amount||0) > 0;
+  const lockedAll = locked || _paidFull;
+  const lockedAttr = lockedAll ? 'disabled' : '';
+  // field DỰ ÁN: chỉ disabled khi khóa workflow; KHÔNG disabled nếu chỉ vì đã thanh toán
+  const projLockedAttr = locked ? 'disabled' : '';
+  const lockedNote = _paidFull && !locked
+    ? `<div style="font-size:12px;background:rgba(39,174,96,.1);border-left:3px solid var(--good);padding:8px 10px;margin-bottom:10px"><b>🔒 Đã nhận thanh toán</b> · Khoản phải thu đã thu đủ — số liệu được <b>khóa, không sửa/xóa</b>. Vẫn có thể bổ sung/điều chỉnh <b>thông tin dự án</b> bên dưới.</div>`
+    : locked
     ? `<div style="font-size:12px;background:rgba(196,138,57,.1);border-left:3px solid var(--warn);padding:8px 10px;margin-bottom:10px"><b>⚠ Khóa sửa</b> · Bản ghi đang ở trạng thái <b>${wfState(r).label}</b>. ${r.status==='approved'?'Đã duyệt — cần "Trả về Nháp" mới sửa được.':'Đang chờ duyệt — cần được "Từ chối" để chuyển về Nháp.'}</div>`
     : '';
 
@@ -35910,7 +35934,7 @@ function _arEditorBody(r,isPayable){
       ${expenseTypeBlock}
       <div class="field company-ui"><label>Công ty *</label><select id="ar-company" ${lockedAttr}>${companyOpts}</select></div>
       <div class="field"><label>Mảng *</label><select id="ar-segment" ${lockedAttr} onchange="_arSegmentChanged()">${segOpts}</select></div>
-      <div class="field"><label>Dự án (tùy chọn)</label><select id="ar-project" ${lockedAttr}>${projOpts}</select></div>
+      <div class="field"><label>Dự án (tùy chọn)</label><select id="ar-project" ${projLockedAttr}>${projOpts}</select></div>
       <div class="field"><label>Tàu (tùy chọn)</label><select id="ar-vessel" ${lockedAttr} onchange="try{_apFuelFillEvents()}catch(e){}; try{_arKhoanToggle()}catch(e){}">${vesselOpts}</select></div>
     </div>
 
@@ -36643,8 +36667,13 @@ function openReceivableModal(id){
   // v3.06.13: NV xem được ở mọi trạng thái. Đã trình ký/đã duyệt (!wfCanEdit) → CHẾ ĐỘ XEM.
   const _viewOnly = isEdit && !wfCanEdit(r);
   const _canDocs = isEdit && _viewOnly && wfCanUpdateDocs(r);  // v3.06.19: vẫn bổ sung hồ sơ
+  // v3.09.71: đã NHẬN THANH TOÁN (thu đủ) → khóa số liệu, KHÔNG xóa; chỉ cho lưu thông tin DỰ ÁN
+  const _paidFull = isEdit && (typeof arRemaining==='function') && (arRemaining(r) <= 0.001) && (+r.amount||0) > 0;
   let foot;
-  if(_viewOnly){
+  if(_paidFull && !_viewOnly){
+    foot=`<button class="btn-sec" onclick="closeModal()">Đóng</button>`
+      + `<button class="btn-primary" onclick="saveArProjectOnly('ar','${id}')" title="Lưu thông tin dự án — không đổi số liệu đã tất toán" style="background:var(--good);border-color:var(--good)">💾 Lưu dự án</button>`;
+  } else if(_viewOnly){
     foot=`<button class="btn-sec" onclick="closeModal()">Đóng</button>`
       + (_canDocs ? `<button class="btn-primary" onclick="saveArDocsOnly('ar','${id}')" title="Lưu chứng từ/giải trình vừa bổ sung — không đổi nội dung phiếu" style="background:var(--good);border-color:var(--good)">💾 Lưu hồ sơ</button>` : '');
   } else if(isEdit){
@@ -39449,6 +39478,14 @@ function _mrStockSend(){
 function saveAr(kind,id){
   const list=kind==='ap'?'payables':'receivables';
   S[list]=S[list]||[];
+  // v3.09.71: AR đã NHẬN THANH TOÁN (thu đủ) → khóa, không cho cập nhật số liệu qua đây.
+  //   (UI đã thay nút bằng "Lưu dự án"; chốt này phòng gọi trực tiếp.)
+  if(kind==='ar' && id){
+    const _r=(S[list]||[]).find(x=>x.id===id);
+    if(_r && typeof arRemaining==='function' && arRemaining(_r)<=0.001 && (+_r.amount||0)>0 && !isAdmin()){
+      toast('🔒 Khoản phải thu đã tất toán — số liệu khóa. Chỉ sửa được thông tin dự án.','bad'); return;
+    }
+  }
   const err=document.getElementById('ar-err');
   err.textContent='';
   const partner=document.getElementById('ar-partner').value.trim();
@@ -39790,6 +39827,30 @@ function saveAr(kind,id){
     });
   }catch(e){}
   toast(kind==='ap'?'Đã lưu phải trả':((isAdmin()||canCheckAcc())?'Đã lưu phải thu (vào sổ ngay)':'Đã lưu phải thu (chờ KT kiểm)'));
+}
+
+/* v3.09.71 — LƯU CHỈ THÔNG TIN DỰ ÁN cho khoản phải thu ĐÃ NHẬN THANH TOÁN (thu đủ).
+   Số liệu đã khóa (không sửa/xóa) nhưng vẫn cho bổ sung/điều chỉnh dự án (phân loại quản trị).
+   CHỈ đụng projectId — tuyệt đối không đổi amount/ngày/nội dung tiền. */
+function saveArProjectOnly(kind,id){
+  const list=kind==='ap'?'payables':'receivables';
+  const r=(S[list]||[]).find(x=>x.id===id);
+  if(!r){ toast('Không tìm thấy phiếu','bad'); return; }
+  // chốt an toàn: chỉ áp dụng khi thực sự đã thu đủ
+  if(!(typeof arRemaining==='function' && arRemaining(r)<=0.001 && (+r.amount||0)>0)){
+    toast('Phiếu chưa tất toán — dùng nút Cập nhật thường','warn'); return;
+  }
+  const sel=document.getElementById('ar-project');
+  const newProj = sel ? (sel.value||null) : (r.projectId||null);
+  const oldProj = r.projectId||null;
+  if(newProj===oldProj){ toast('Không có thay đổi dự án','info'); closeModal(); return; }
+  r.projectId = newProj;
+  touchRecord(r);
+  saveState();
+  try{ logAuditEvent('ar_project_update_after_paid',{kind,id,from:oldProj,to:newProj,amount:r.amount,ccy:r.ccy}); }catch(e){}
+  toast('✓ Đã cập nhật dự án (số liệu vẫn khóa)','good');
+  closeModal();
+  try{ renderAll(); }catch(e){}
 }
 
 /* v3.06.19 — LƯU CHỈ HỒ SƠ (chứng từ đính kèm + giải trình) — KHÔNG đụng nội dung phiếu.
@@ -40658,6 +40719,11 @@ function fixFxApply(src,id,i){
 function deleteAr(kind,id){
   const list=kind==='ap'?'payables':'receivables';
   const r=S[list].find(x=>x.id===id);if(!r)return;
+  // v3.09.71: AR đã NHẬN THANH TOÁN (thu đủ) → KHÓA, không cho xóa (bảo toàn số liệu đã tất toán).
+  if(kind==='ar' && typeof arRemaining==='function' && arRemaining(r)<=0.001 && (+r.amount||0)>0 && !isAdmin()){
+    toast('🔒 Khoản phải thu đã tất toán — không thể xóa. Số liệu đã khóa.','bad');
+    return;
+  }
   // v1.34: Block direct delete of AP auto-created from loan
   if(r.autoSource==='loan_interest' || r.autoSource==='loan_prepay_fee'){
     toast('🔒 Bút toán auto từ Ngân hàng — bỏ đánh dấu "đã trả" kỳ vay (hoặc xóa prepay) để xóa AP này.','bad');
@@ -59893,7 +59959,16 @@ function hrmImportEmployees(inputEl){
             cCompanyType=col('phân loại công ty','phan loai cong ty'),
             cDivShort=col('bộ phận\n(viết tắt','viết tắt','viet tat'),
             cQuit=col('ngày nghỉ việc','ngay nghi viec'),
-            cNote=col('ghi chú','ghi chu');
+            cNote=col('ghi chú','ghi chu'),
+            cType=col('loại nhân sự','loai nhan su','nhóm nhân sự','nhom nhan su','phân loại nhân sự'),
+            // v3.09.69: 5 field nhân sự MỚI (chuyên gia/thuyền viên)
+            cSeaRank=col('chức danh đi biển','chuc danh di bien','rank','sea rank'),
+            cPviCare=col('pvi-care','pvi care','pvicare'),
+            cInsNo=col('mã số bhxh','ma so bhxh','số bhxh','insurance'),
+            cEmailPersonal=col('email cá nhân','mail cá nhân','email ca nhan'),
+            cCurVessel=col('tàu hiện tại','tàu','vessel','current vessel'),
+            cOnboard=col('ngày xuống tàu','ngay xuong tau','onboard'),
+            cContractNoNew=col('số hợp đồng','so hop dong','contract no');
       const _s=(row,i)=> i>=0 ? String(row[i]==null?'':row[i]).trim() : '';
       const _date=(v)=>{ // chuẩn hóa về YYYY-MM-DD nếu nhận diện được
         if(!v) return '';
@@ -59928,7 +60003,19 @@ function hrmImportEmployees(inputEl){
           dob:_date(_s(row,cDob)),
           gender: /nữ|nu|female|f/i.test(g)?'Nữ':(/nam|male|m/i.test(g)?'Nam':''),
           dept:_hrmCanonDept(_s(row,cDept)), title:_s(row,cTitle),
-          empType: _hrmGuessType(_s(row,cDept), _s(row,cTitle)),   // v3.07.31: Đội tàu → 'crew'
+          // v3.09.69: ưu tiên cột "Loại nhân sự" trong file (office/crew/expert/expert_om);
+          //   chỉ tự đoán khi file KHÔNG có cột type hoặc ô trống → giữ tương thích file cũ.
+          empType: (function(){
+            const raw=_stripAccentLower(_s(row,cType)||'');
+            if(raw){
+              if(raw.includes('o&m')||raw.includes('o and m')||raw==='expert_om'||(raw.includes('chuyen gia')&&raw.includes('om'))) return 'expert_om';
+              if(raw.includes('expert_om')) return 'expert_om';
+              if(raw.includes('chuyen gia')||raw==='expert') return 'expert';
+              if(raw.includes('thuyen vien')||raw==='crew') return 'crew';
+              if(raw.includes('van phong')||raw==='office') return 'office';
+            }
+            return _hrmGuessType(_s(row,cDept), _s(row,cTitle));   // v3.07.31: Đội tàu → 'crew'
+          })(),
           startDate:_date(_s(row,cStart)),
           workplace:_s(row,cWork),
           // v3.07.18: các trường mới
@@ -59952,6 +60039,14 @@ function hrmImportEmployees(inputEl){
           bankAccOwnerRaw:_s(row,cBankOwner),   // v3.07.27: chủ TK ĐỌC THẲNG từ cột riêng (AH) nếu có
           emergencyContact:_s(row,cEmergency), // v3.07.27: liên hệ khẩn (AE)
           division:_s(row,cDivShort),          // v3.07.27: bộ phận viết tắt (S)
+          // v3.09.69: 5 field nhân sự mới
+          seaRank:_s(row,cSeaRank),            // chức danh đi biển (rank)
+          pviCare:_s(row,cPviCare),            // bảo hiểm PVI-CARE
+          insuranceNo:_s(row,cInsNo),          // mã số BHXH (field riêng, ngoài note)
+          emailPersonal:_s(row,cEmailPersonal),// email cá nhân (field riêng)
+          currentVessel:_s(row,cCurVessel),    // tên tàu hiện tại (text, gắn linkVesselId sau)
+          onboardDate:_date(_s(row,cOnboard)), // ngày xuống tàu
+          contractNo:_s(row,cContractNoNew),   // số hợp đồng (field riêng)
           noteFull:_noteParts.join(' | ')
         });
       }
@@ -60086,7 +60181,11 @@ function hrmImportApply(){
       certExpiry:r.certExpiry, passportExpiry:r.passportExpiry,
       bankAccNo:r.bankAccNo, bankName:_bankShort(r.bankName), bankBranch:_bankBranch(r.bankName),
       bankAccName: r.bankAccOwnerRaw || _bankAccOwner(r._bankRaw, r.fullName),
-      emergencyContact:r.emergencyContact, division:r.division
+      emergencyContact:r.emergencyContact, division:r.division,
+      // v3.09.69: 5 field nhân sự mới
+      seaRank:r.seaRank, pviCare:r.pviCare, insuranceNo:r.insuranceNo,
+      emailPersonal:r.emailPersonal, currentVessel:r.currentVessel,
+      onboardDate:r.onboardDate, contractNo:r.contractNo
     };
     const _importNote = r.noteFull || (r.workplace?('Nơi làm việc: '+r.workplace):'');   // v3.07.23: note từ import (gộp, không đè)
     const ex=HRService.employees().find(e=>String(e.smartId||'').trim().toUpperCase()===String(r.smartId||'').trim().toUpperCase() && r.smartId);
@@ -61245,9 +61344,15 @@ function hrmViewEmployee(id){
     row('Liên hệ khẩn cấp', e.emergencyContact));
   const work=sec('Thông tin công việc',
     row('Nhóm', HRM_TYPE_LABEL[e.type]||e.type)+row('Chức danh', e.title)+
-    row('Phòng ban', e.dept)+row('Bộ phận', e.division)+row('Tàu công tác', hrmVesselName(e.linkVesselId))+
+    row('Phòng ban', e.dept)+row('Bộ phận', e.division)+row('Tàu công tác', hrmVesselName(e.linkVesselId)||e.currentVessel||'')+
+    (e.seaRank?row('Chức danh đi biển', e.seaRank):'')+
+    (e.onboardDate?row('Ngày xuống tàu', _fmtDOnly(e.onboardDate)):'')+
+    (e.pviCare?row('PVI-CARE', e.pviCare):'')+
     row('Ngày vào làm', e.startDate)+row('Ngày thử việc', e.probationDate)+
     row('Ngày ký HĐ', maskIfIT(e.contractSignDate))+row('Loại hợp đồng', maskIfIT(e.contractType))+
+    (e.contractNo?row('Số hợp đồng', e.contractNo):'')+
+    (e.insuranceNo?row('Mã số BHXH', e.insuranceNo):'')+
+    (e.emailPersonal?row('Email cá nhân', e.emailPersonal):'')+
     row('Tài khoản liên kết', linkedUser)+row('Trạng thái', e.status==='inactive'?'Đã nghỉ':'Đang làm việc'));
   // v3.08.12 FIELD-LEVEL: thông tin ngân hàng là dữ liệu lương — ẩn HOÀN TOÀN nếu không có quyền Payroll
   const bank=(typeof payrollFieldVisible==='function' && payrollFieldVisible())
