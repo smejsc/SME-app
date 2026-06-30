@@ -3471,7 +3471,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.09.73';            // bumped on each release
+const APP_VERSION='3.09.77';            // bumped on each release
 /* Debug logging: dlog() chỉ in khi DEBUG_MODE bật (mặc định TẮT ở production để
    tránh nhiễu/lộ cấu trúc nội bộ qua DevTools). Bật bằng: localStorage.DEBUG_MODE='1'.
    console.warn/error GIỮ NGUYÊN (cảnh báo & lỗi vận hành luôn hiện). */
@@ -13216,7 +13216,7 @@ async function cloudSync(mode, opts){
   //   Chỉ áp khi KHÔNG do người chủ động bấm (interactive) — người bấm vẫn được hỏi confirm bình thường.
   if((mode==='push' || mode==='both') && !_interactive){
     try{
-      if(typeof _stateLooksEmpty==='function' && _stateLooksEmpty()){
+      if(typeof _stateLooksEmpty==='function' && _stateLooksEmpty(S)){
         console.warn('[sync] State trống → CHẶN auto-push, chuyển PULL (chống đè cloud từ máy mới).');
         mode='pull';
       }
@@ -13655,6 +13655,9 @@ async function cloudSync(mode, opts){
       if(_interactive){ toast('Đã đồng bộ lên cloud' + compressionInfo); }
       try{ _updateLastKnownRecordCount(); }catch(e){}  // v2.99.30
       try{ _lastPushHash=_quickStateHash(); }catch(e){}  // v2.99.42: ghi mốc hash chống push trùng
+      // v3.09.74 (ADR-015 YC3): push thành công → đánh dấu tombstone đã SYNCED.
+      //   Sau khi cloud nhận, bia mộ mới được phép dọn theo tuổi (vòng đời Soft Delete).
+      try{ if(Array.isArray(S.deletedIds)) S.deletedIds.forEach(d=>{ if(d && d._synced!==true) d._synced=true; }); }catch(_){}
       try{ window._syncBackoffUntil=0; }catch(e){}  // v2.99.45: sync OK → xóa backoff
       // v1.55.0: Refresh banner
       try{ updateBackupBanner(); }catch(e){} try{ updateEmptyStateBanner(); }catch(e){}
@@ -17956,16 +17959,23 @@ function saveState(){
   try{
     if(Array.isArray(S.auditLogShared) && S.auditLogShared.length>300){ S.auditLogShared=S.auditLogShared.slice(-300); }
     if(Array.isArray(S.auditLog) && S.auditLog.length>100){ S.auditLog=S.auditLog.slice(-100); }
-    // v3.01.26: dọn tombstone cũ hơn 365 ngày (trước là 45 — quá ngắn, gây hồi sinh rác
-    // kế toán khi cloud/snapshot cũ còn bản đã xóa). Kế toán cần giữ bia mộ lâu.
+    // v3.09.74 (ADR-015 YC3 — Soft Delete Lifecycle): tombstone của BÚT TOÁN TIỀN
+    //   (payables/receivables/opTransactions) KHÔNG bị dọn theo tuổi nếu CHƯA synced — chống
+    //   hồi sinh khi cloud/snapshot cũ còn bản. Tombstone đã synced + đủ già mới được archive/purge.
+    //   Tombstone field KHÁC (hoặc legacy) vẫn dọn theo 365 ngày như cũ (gọn payload).
+    const _MONEY_FIELDS=new Set(['payables','receivables','opTransactions','transactions','cashTxns','revenues']);
     if(Array.isArray(S.deletedIds) && S.deletedIds.length>0){
       const cutoff=Date.now() - 365*24*3600*1000;
       const before=S.deletedIds.length;
       S.deletedIds=S.deletedIds.filter(d=>{
         if(!d || !d.at) return true;  // không có ngày → giữ cho an toàn
+        // YC3: bút toán tiền CHƯA synced (_synced!==true) → GIỮ vĩnh viễn (tới khi synced+archive).
+        if(d.field && _MONEY_FIELDS.has(d.field) && d._synced!==true) return true;
+        // legacy (không field) cũng giữ nếu chưa synced — an toàn cho AP/giao dịch cũ.
+        if(!d.field && d._synced!==true) return true;
         return new Date(d.at).getTime() >= cutoff;
       });
-      if(S.deletedIds.length<before) dlog('[saveState] dọn tombstone cũ:', before, '→', S.deletedIds.length);
+      if(S.deletedIds.length<before) dlog('[saveState] dọn tombstone cũ (đã synced):', before, '→', S.deletedIds.length);
     }
   }catch(e){ console.warn('[saveState] trim lỗi:', e&&e.message); }
   // If crypto key available, save encrypted; else fall back to plain (during setup before login)
@@ -17984,6 +17994,78 @@ function saveState(){
       try{ toast('⚠ Không lưu được dữ liệu (bộ nhớ trình duyệt đầy?) — '+(e.message||e),'bad'); }catch(_){}
     }
   }
+}
+
+/* ============================================================
+   v3.09.74 — CHUẨN TRANSACTION COMMIT (ADR-015)
+   1 luồng cho Create/Update/Delete/Approve/Import. Bắt đầu dùng ở AP.
+   ============================================================ */
+function _stateRev(){ if(!S.meta||typeof S.meta!=='object') S.meta={}; if(typeof S.meta.rev!=='number') S.meta.rev=0; return S.meta.rev; }
+function _bumpStateRev(){ if(!S.meta||typeof S.meta!=='object') S.meta={}; S.meta.rev=(typeof S.meta.rev==='number'?S.meta.rev:0)+1; S.meta.revAt=new Date().toISOString(); return S.meta.rev; }
+
+/* saveStateVerified (YC2): lưu + verify đọc lại + kiểm version. Trả TxResult CHI TIẾT. KHÔNG nuốt lỗi. */
+async function saveStateVerified(expectRev){
+  const res={ success:false, verify:false, cache:false, cloud:'skipped', audit:false,
+              version:{before:null, after:null}, error:null };
+  try{
+    res.version.before = (expectRev!=null) ? (expectRev-1) : _stateRev();
+    if(CRYPTO_KEY){
+      await saveStateEncrypted();   // đã có verify đọc-lại + rollback per-key + throw khi quota
+    } else {
+      const _key=_storeKeyForUser();
+      const _prev=localStorage.getItem(_key);
+      const _ser=JSON.stringify(S);
+      localStorage.setItem(_key,_ser);
+      const _rb=localStorage.getItem(_key);
+      if(_rb===null || _rb.length!==_ser.length){
+        if(_prev!=null) localStorage.setItem(_key,_prev);   // rollback per-key
+        throw new Error('Verify thất bại (đọc lại không khớp) — có thể bộ nhớ đầy.');
+      }
+    }
+    res.verify=true;
+    res.version.after=_stateRev();
+    if(expectRev!=null && res.version.after!==expectRev){
+      res.error='Version sau ghi ('+res.version.after+') ≠ kỳ vọng ('+expectRev+')';
+      return res;
+    }
+    window._lastSaveVerifiedAt=Date.now(); res.cache=true;
+    res.success=true;
+    return res;
+  }catch(e){
+    res.error=(e&&e.message)||String(e);
+    return res;   // KHÔNG throw — trả chi tiết cho commit xử lý
+  }
+}
+
+/* commitTransaction (YC1,5): luồng chuẩn. mutateFn sửa S; fields = field sẽ đụng (rollback HẸP).
+   Trả TxResult. Nơi gọi CHỈ renderAll khi success=true. */
+async function commitTransaction(mutateFn, opts){
+  opts=opts||{};
+  const fields=Array.isArray(opts.fields)?opts.fields:[];
+  const action=opts.action||'mutate';
+  const _backup={};
+  fields.forEach(f=>{ try{ _backup[f]=JSON.parse(JSON.stringify(S[f])); }catch(_){ _backup[f]=undefined; } });
+  const _revBefore=_stateRev();
+  let _mutateErr=null;
+  try{ mutateFn(); }catch(e){ _mutateErr=e; }
+  if(_mutateErr){
+    fields.forEach(f=>{ if(_backup[f]!==undefined) S[f]=_backup[f]; });
+    return { success:false, verify:false, cache:false, cloud:'skipped', audit:false,
+             version:{before:_revBefore, after:_stateRev()}, error:'Mutate lỗi: '+((_mutateErr&&_mutateErr.message)||_mutateErr) };
+  }
+  const _revExpect=_bumpStateRev();   // bump version TRƯỚC persist (YC4)
+  const r=await saveStateVerified(_revExpect);
+  if(!r.success){
+    // ROLLBACK HẸP (YC5): chỉ field đụng + rev. KHÔNG đụng field khác.
+    fields.forEach(f=>{ if(_backup[f]!==undefined) S[f]=_backup[f]; });
+    if(S.meta) S.meta.rev=_revBefore;
+    try{ logAuditEvent('tx_failed',{action, fields, error:r.error}); }catch(_){}
+    r.audit=true;
+    return r;
+  }
+  try{ logAuditEvent('tx_commit',{action, fields, rev:r.version.after}); r.audit=true; }catch(_){}
+  try{ if(typeof scheduleAutoSync==='function'){ scheduleAutoSync(); r.cloud='queued'; } }catch(_){}
+  return r;
 }
 
 let _autoSyncTimer=null;
@@ -26128,36 +26210,45 @@ function renderTxList(){
 }
 
 /* === Workflow actions for Tx === */
+/* v3.09.74: helper chuyển workflow giao dịch qua CHUẨN TRANSACTION (ADR-015).
+   doFn sửa state (workflow); chỉ renderAll + toast khi commit success. */
+function _txCommitWf(doFn, okMsg, action){
+  return commitTransaction(doFn, {action:action||'tx_workflow', fields:['transactions']}).then(r=>{
+    if(r.success){ renderAll(); if(okMsg) toast(okMsg); }
+    else { toast('⚠ CHƯA lưu được — '+(r.error||'')+'. Hãy dọn bộ nhớ rồi thử lại.','bad'); }
+    return r;
+  });
+}
 function txSubmit(id){
   const t=S.transactions.find(x=>x.id===id);if(!t)return;
   if(!wfCanEdit(t)){toast('Không thể gửi duyệt từ trạng thái này','bad');return;}
-  wfSubmit(t);saveState();renderAll();toast('Đã gửi trình ký — chờ L1 duyệt');
+  _txCommitWf(()=>wfSubmit(t), 'Đã gửi trình ký — chờ L1 duyệt', 'tx_submit');
 }
 function txApproveL1(id){
   const t=S.transactions.find(x=>x.id===id);if(!t)return;
   if(wfStatus(t)!=='pending_l1'){toast('Bút toán không ở trạng thái chờ duyệt L1','bad');return;}
-  if(wfApproveL1(t)){saveState();renderAll();toast('Đã duyệt L1 (trình ký) — chuyển sang Chờ thanh toán (L2)');}
+  let ok=false; _txCommitWf(()=>{ ok=wfApproveL1(t); if(!ok) throw new Error('Duyệt L1 thất bại'); }, 'Đã duyệt L1 (trình ký) — chuyển sang Chờ thanh toán (L2)', 'tx_approve_l1');
 }
 function txApproveL2(id){
   const t=S.transactions.find(x=>x.id===id);if(!t)return;
   if(wfStatus(t)!=='pending_l2'){toast('Bút toán không ở trạng thái chờ duyệt L2','bad');return;}
-  if(wfApproveL2(t)){saveState();renderAll();toast('Đã duyệt L2 — bút toán vào báo cáo BI');}
+  _txCommitWf(()=>{ if(!wfApproveL2(t)) throw new Error('Duyệt L2 thất bại'); }, 'Đã duyệt L2 — bút toán vào báo cáo BI', 'tx_approve_l2');
 }
 function txReject(id){
   const t=S.transactions.find(x=>x.id===id);if(!t)return;
   const reason=prompt('Lý do từ chối:','');
   if(reason===null) return;
   if(!reason.trim()){toast('Phải nhập lý do','bad');return;}
-  if(wfReject(t,reason.trim())){saveState();renderAll();toast('Đã trả về '+(t._rejectBackTo==='L1'?'cấp duyệt L1':t._rejectBackTo==='KT'?'KT kiểm':'NV nhập')+' để xử lý lại','warn');
-    // v3.08.02: Email Service — báo người tạo phiếu bị từ chối/trả về
-    try{ const to=_emailOfUser(t.createdBy);
-      if(to) SendEmailTemplate('approval_rejected', { to, DocumentNo:(t.code||t.id||''), Subject:(t.desc||''), ApproverName:(actorName()||''), Reason:reason.trim() }, {to}); }catch(e){}
-  }
+  _txCommitWf(()=>{ if(!wfReject(t,reason.trim())) throw new Error('Từ chối thất bại'); },
+    'Đã trả về '+(t._rejectBackTo==='L1'?'cấp duyệt L1':t._rejectBackTo==='KT'?'KT kiểm':'NV nhập')+' để xử lý lại', 'tx_reject').then(r=>{
+    if(r.success){ try{ const to=_emailOfUser(t.createdBy);
+      if(to) SendEmailTemplate('approval_rejected', { to, DocumentNo:(t.code||t.id||''), Subject:(t.desc||''), ApproverName:(actorName()||''), Reason:reason.trim() }, {to}); }catch(e){} }
+  });
 }
 function txReturn(id){
   const t=S.transactions.find(x=>x.id===id);if(!t)return;
   if(!confirm('Trả bút toán về trạng thái Nháp để NV nhập sửa lại? (Mất 2 chữ ký duyệt L1+L2)'))return;
-  if(wfReturnToDraft(t)){saveState();renderAll();toast('Đã trả về Nháp');}
+  _txCommitWf(()=>{ if(!wfReturnToDraft(t)) throw new Error('Trả về nháp thất bại'); }, 'Đã trả về Nháp', 'tx_return');
 }
 
 /* ============================================================
@@ -35722,7 +35813,7 @@ function _arEditorBody(r,isPayable){
   const locked = !isAdmin() && !wfCanEdit(r) && (r.status==='approved' || r.status==='pending_l1' || r.status==='pending_l2');
   // v3.09.71: KHÓA khi ĐÃ NHẬN THANH TOÁN (thu đủ). Bản ghi đã tất toán → không sửa số liệu/không xóa.
   //   NGOẠI LỆ: vẫn cho bổ sung/điều chỉnh thông tin DỰ ÁN (phân loại quản trị, không đổi số tiền).
-  const _paidFull = isEdit && !isPayable && (typeof arRemaining==='function') && (arRemaining(r) <= 0.001) && (+r.amount||0) > 0;
+  const _paidFull = !isNew && !isPayable && (typeof arRemaining==='function') && (arRemaining(r) <= 0.001) && (+r.amount||0) > 0;
   // v3.09.72: KTT (canCheckAcc) + admin được SỬA số liệu kể cả khi đã tất toán (override khóa, có audit).
   //   NV thường vẫn khóa số liệu (chỉ sửa dự án).
   const _canEditPaid = (typeof isAdmin==='function' && isAdmin()) || (typeof canCheckAcc==='function' && canCheckAcc());
@@ -39522,6 +39613,7 @@ function _mrStockSend(){
 }
 
 function saveAr(kind,id){
+  const isEdit=!!id;  // v3.09.77: khai báo isEdit thiếu (pre-existing) — id có giá trị = đang sửa
   const list=kind==='ap'?'payables':'receivables';
   S[list]=S[list]||[];
   // v3.09.71: AR đã NHẬN THANH TOÁN (thu đủ) → khóa, không cho cập nhật số liệu qua đây.
@@ -40811,10 +40903,23 @@ function deleteAr(kind,id){
       try{ const ids=(rec.attachments||[]).map(a=>a&&a.id).filter(Boolean); if(ids.length) _trashDriveFiles(ids); }catch(e){}
     });
     const delIds=new Set(recs.map(x=>x.id));
-    try{ _recycleRecords(list, recs); }catch(e){ console.warn('[recycle] lỗi:', e&&e.message); }
-    S[list]=S[list].filter(x=>!delIds.has(x.id));
-    recs.forEach(x=>markDeleted(x.id));
-    saveState(); renderAll();
+    // v3.09.74: DELETE qua CHUẨN TRANSACTION (ADR-015) — recycle + xóa + bia mộ là 1 commit nguyên tử.
+    //   _recycleBin nằm TRONG fields → nếu commit fail, rollback hẹp khôi phục cả recycle (không để rác).
+    //   Chỉ renderAll + báo thành công khi đã VERIFY ghi xuống localStorage (chống hồi sinh khi quota đầy).
+    commitTransaction(()=>{
+      try{ _recycleRecords(list, recs); }catch(e){ console.warn('[recycle] lỗi:', e&&e.message); }
+      S[list]=S[list].filter(x=>!delIds.has(x.id));
+      recs.forEach(x=>markDeleted(x.id));
+    }, { action:(kind==='ap'?'delete_ap':'delete_ar'), fields:[list,'deletedIds','_recycleBin'] }).then(r=>{
+      if(r.success){
+        renderAll();
+        try{ toast('✓ Đã xóa'+(recs.length>1?' '+recs.length+' dòng':'')+' (đã lưu)','good'); }catch(_){}
+      } else {
+        // PERSIST/VERIFY thất bại → commit đã ROLLBACK HẸP (list+deletedIds+_recycleBin về nguyên trạng).
+        try{ renderAll(); }catch(_){}
+        try{ toast('⚠ CHƯA xóa được — '+(r.error||'lưu thất bại')+'. Bản ghi được giữ nguyên. Hãy dọn bộ nhớ (Storage Health) rồi thử lại.','bad'); }catch(_){}
+      }
+    });
   };
   const detail=`<b>${esc(r.partner)}</b> · ${fmtFull(r.amount,r.ccy)}${pd>0?'<br><b style="color:var(--bad)">Cảnh báo:</b> Đã có '+r.payments.length+' lần TT ('+fmtFull(pd,r.ccy)+')':''}${_isMulti?`<br><br><b style="color:#8a5a1e">Phiếu này có ${_batch.length} dòng (cùng lô).</b> Bạn muốn xóa cả phiếu hay chỉ dòng này?`:''}`;
   if(_isMulti){
@@ -59970,18 +60075,19 @@ function hrmImportEmployees(inputEl){
       for(let i=0;i<Math.min(aoa.length,20);i++){
         const line=(aoa[i]||[]).map(x=>String(x||'').toLowerCase());
         // v3.09.40: nhận cả 'MSNV' lẫn 'Mã NV'/'Mã số NV' + 'Họ và tên'/'Họ tên'
-        const hasCode=line.some(c=>c.includes('msnv')||c.includes('ma nv')||c.includes('mã nv')||c.includes('ma so nv')||c.includes('mã số nv'));
+        // v3.09.77: nhận thêm 'Employee ID' / 'Mã số nhân viên' (file Master_Employee xuất từ hệ thống)
+        const hasCode=line.some(c=>c.includes('msnv')||c.includes('ma nv')||c.includes('mã nv')||c.includes('ma so nv')||c.includes('mã số nv')||c.includes('employee id')||c.includes('employeeid')||c.includes('mã số nhân viên')||c.includes('ma so nhan vien'));
         const hasName=line.some(c=>c.includes('họ và tên')||c.includes('ho va ten')||c.includes('họ tên')||c.includes('ho ten'));
         if(hasCode && hasName){ hr=i; break; }
       }
-      if(hr<0){ toast('Không tìm thấy hàng tiêu đề (cần cột Mã NV/MSNV + Họ và tên/Họ tên)','bad'); return; }
+      if(hr<0){ toast('Không tìm thấy hàng tiêu đề (cần cột Mã NV/MSNV/Employee ID + Họ và tên/Họ tên)','bad'); return; }
       const head=(aoa[hr]||[]).map(x=>String(x||'').trim().toLowerCase());
       const col=(...keys)=>{ for(const k of keys){ const idx=head.findIndex(h=>h.includes(k)); if(idx>=0) return idx; } return -1; };
-      const cMsnv=col('msnv','mã nv','ma nv','mã số nv','ma so nv'), cName=col('họ và tên','ho va ten','họ tên','ho ten'),
+      const cMsnv=col('msnv','mã nv','ma nv','mã số nv','ma so nv','employee id','employeeid','mã số nhân viên','ma so nhan vien'), cName=col('họ và tên','ho va ten','họ tên','ho ten'),
             cDob=col('ngày tháng năm sinh','ngày sinh','ngay sinh'),
             cGender=col('giới tính','gioi tinh'), cWork=col('nơi làm việc','noi lam viec'),
             cDept=col('bộ phận','bo phan'), cTitle=col('chức danh','chuc danh'),
-            cStart=col('ngày nhận việc','ngay nhan viec');
+            cStart=col('ngày nhận việc','ngay nhan viec','ngày vào làm','ngay vao lam');
       // v3.07.18: map ĐẦY ĐỦ các cột còn lại (file DS chi tiết 36 cột)
       const cId=col('cccd','passport','cmnd'),
             cIdDate=col('ngày cấp'),
@@ -60004,7 +60110,7 @@ function hrmImportEmployees(inputEl){
             cEmailP=col('mail cá nhân','email cá nhân','mail ca nhan'),
             cEmailW=col('mail công ty','email công ty','mail cong ty'),
             cBankNo=col('số tài khoản','so tai khoan','tài khoản ngân'),
-            cBankName=col('tên ngân hàng','ten ngan hang','ngân hàng - chi'),
+            cBankName=col('tên ngân hàng','ten ngan hang','ngân hàng - chi','ngân hàng','ngan hang'),
             cBankOwner=col('tên chủ tài khoản','chủ tài khoản','chu tai khoan'),
             cEmergency=col('liên hệ khẩn','lien he khan','khẩn cấp','khan cap'),
             cCompanyType=col('phân loại công ty','phan loai cong ty'),
