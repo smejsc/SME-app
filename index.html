@@ -3471,7 +3471,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.09.81';            // bumped on each release
+const APP_VERSION='3.09.84';            // bumped on each release
 /* Debug logging: dlog() chỉ in khi DEBUG_MODE bật (mặc định TẮT ở production để
    tránh nhiễu/lộ cấu trúc nội bộ qua DevTools). Bật bằng: localStorage.DEBUG_MODE='1'.
    console.warn/error GIỮ NGUYÊN (cảnh báo & lỗi vận hành luôn hiện). */
@@ -3754,6 +3754,7 @@ function versionGT(a,b){
    _syncPendingPush bật khi sync lỗi/offline (xem updateSyncStatus).
    Khi trình duyệt báo có mạng trở lại, nếu còn thay đổi chưa đẩy → tự push. */
 let _syncPendingPush=false;
+let _autoSyncTimer=null;   // v3.09.84: khai báo tường minh — trước là global ẩn, gây "_autoSyncTimer is not defined" khi clearTimeout chạy trước lần gán đầu (vd luồng update/reload trên máy chưa từng auto-sync). clearTimeout(null) vô hại.
 let _netAutoSyncStarted=false;
 function startNetworkAutoSync(){
   if(_netAutoSyncStarted) return;
@@ -6206,7 +6207,7 @@ const TAB_TO_FIELDS={
    IMPORTANT v1.39.1: bankAccounts/bankSnapshots/loans REMOVED from shared — chỉ user có quyền tab 'banking' mới load. */
 // v1.57.0: auditLog REMOVED from shared sync — stays local only (admin trên 1 máy chính)
 // Trade-off: nếu admin đăng nhập máy khác → audit log empty. Đổi lại: giảm payload size.
-const SHARED_FIELDS=['fxRate','fxRateAt','displayCcy','companyInfo','meta','presence','vesselExpenseCats','omProjectExpenseCats','hrExpenseCats','qnExpenseCats','departments','vendors','expenseTypes','revenueTypes','companies','deletedIds','purgedBatches','purgedContent','auditLogShared','cashflowConfig'];
+const SHARED_FIELDS=['fxRate','fxRateAt','displayCcy','displayCcyAt','companyInfo','meta','presence','vesselExpenseCats','omProjectExpenseCats','hrExpenseCats','qnExpenseCats','departments','vendors','expenseTypes','revenueTypes','companies','deletedIds','purgedBatches','purgedContent','auditLogShared','cashflowConfig'];
 /* All possible data fields (used by admin or for save-merge) */
 const ALL_DATA_FIELDS=[
   'archiveLibrary',
@@ -17837,7 +17838,22 @@ function mergeStateByFields(cloudFull, localFull, fields){
       const {merged:mArr, conflicts}=mergeByID(cloudFull[f], localFull[f], 'id', f==='deletedIds', f);
       merged[f]=mArr;
       if(conflicts.length>0) conflictReport[f]=conflicts;
-    } else if(f==='fxRate' || f==='displayCcy'){
+    } else if(f==='displayCcy'){
+      // v3.09.82: displayCcy có MỐC RIÊNG (displayCcyAt) — không dùng chung fxRateAt nữa.
+      //   Ai đặt hiển thị SAU thắng. Đổi tỷ giá (fxRateAt) KHÔNG còn kéo displayCcy về default.
+      const lAt=Date.parse((localFull.displayCcyAt||''))||0;
+      const cAt=Date.parse((cloudFull.displayCcyAt||''))||0;
+      const lv=localFull[f], cv=cloudFull[f];
+      const lValid=(lv==='USD'||lv==='VND'), cValid=(cv==='USD'||cv==='VND');
+      if(lAt && cAt) merged[f]=(lAt>=cAt)?lv:cv;
+      else if(cAt && !lAt) merged[f]=cValid?cv:lv;
+      else if(lAt && !cAt) merged[f]=lValid?lv:cv;
+      else merged[f]=lValid?lv:(cValid?cv:'USD');   // cả 2 chưa có mốc → giữ local nếu hợp lệ
+    } else if(f==='displayCcyAt'){
+      const lAt=Date.parse((localFull.displayCcyAt||''))||0;
+      const cAt=Date.parse((cloudFull.displayCcyAt||''))||0;
+      merged[f]=(lAt>=cAt)?(localFull[f]||''):(cloudFull[f]||'');
+    } else if(f==='fxRate'){
       // v2.99.65: SỬA TẬN GỐC "tỷ giá tự về 25.000 qua đêm".
       // NGUYÊN NHÂN THẬT: quy tắc cũ (v2.99.50) "admin → luôn dùng local" khiến nếu
       // local của admin đang là MẶC ĐỊNH 25000 (vd state bị seed default trước khi pull
@@ -21763,6 +21779,7 @@ function _cap(s){ return s ? s.charAt(0).toUpperCase() + s.slice(1) : ''; }
 /* ===== FX & DISPLAY CCY ===== */
 function setDisplayCcy(c){
   S.displayCcy=c;
+  S.displayCcyAt=new Date().toISOString();  // v3.09.82: mốc riêng — lựa chọn hiển thị không bị fxRateAt (đổi tỷ giá) ghi đè khi sync
   saveState();
   updateCcyToggleUI();
   renderAll();
@@ -36965,12 +36982,15 @@ function openReceivableModal(id){
   try{ window._arCurrentKind='ar'; }catch(e){}
   const body=_arEditorBody(r,false);
   // v3.06.13: NV xem được ở mọi trạng thái. Đã trình ký/đã duyệt (!wfCanEdit) → CHẾ ĐỘ XEM.
-  const _viewOnly = isEdit && !wfCanEdit(r);
-  const _canDocs = isEdit && _viewOnly && wfCanUpdateDocs(r);  // v3.06.19: vẫn bổ sung hồ sơ
   // v3.09.71/72: đã NHẬN THANH TOÁN (thu đủ) → NV thường khóa số liệu (chỉ sửa dự án);
   //   KTT (canCheckAcc) + admin vẫn sửa số liệu bình thường (override, có audit).
+  //   v3.09.82: khai báo TRƯỚC _viewOnly để loại AR-đã-thu-KTT-sửa khỏi nhánh view-only.
   const _paidFull = isEdit && (typeof arRemaining==='function') && (arRemaining(r) <= 0.001) && (+r.amount||0) > 0;
   const _canEditPaid = isAdmin() || (typeof canCheckAcc==='function' && canCheckAcc());
+  // v3.09.82: AR đã tất toán + người dùng là KTT/Admin → KHÔNG coi là view-only (phiếu approved),
+  //   để rơi xuống nhánh isEdit → hiện nút "Cập nhật" (saveAr có guard + audit ar_edit_after_paid_ktt).
+  const _viewOnly = isEdit && !wfCanEdit(r) && !(_paidFull && _canEditPaid);
+  const _canDocs = isEdit && _viewOnly && wfCanUpdateDocs(r);  // v3.06.19: vẫn bổ sung hồ sơ
   let foot;
   if(_paidFull && !_canEditPaid && !_viewOnly){
     foot=`<button class="btn-sec" onclick="closeModal()">Đóng</button>`
@@ -42044,9 +42064,12 @@ function openMgmtFeeDetail(vid){
     ? issuedList.map(f=>{
         const ar=AccountingService.receivables().find(x=>x.id===f.arId || x._mgmtFeeId===f.id);
         const issued = ar && wfStatus(ar)==='approved';
+        // v3.09.82: màn Chi tiết (👁) trước KHÔNG có nút cập nhật tình trạng HĐ → thêm cho nhất quán
+        //   với openMgmtFeeModal. canIssue giữ nguyên (isAdmin||canCheckAcc||L1||L2) — KT/KTT/L1/L2/Admin.
+        const canIssue=(isAdmin()||canCheckAcc()||canApproveL1()||canApproveL2());
         const stCell = issued
-          ? `<span style="color:var(--good);font-size:11px;font-weight:600">✓ Đã xuất HĐ${ar&&(ar.payments||[]).some(p=>p._mgmtFeeOffset)?' · đã thu':''}</span>`
-          : `<span style="color:var(--accent);font-size:11px">📋 DT dự kiến (chưa HĐ)</span>`;
+          ? `<span style="color:var(--good);font-size:11px;font-weight:600">✓ Đã xuất HĐ${ar&&(ar.payments||[]).some(p=>p._mgmtFeeOffset)?' · đã thu':''}</span>${canIssue?`<br><button class="link-btn" style="font-size:10px;color:var(--muted);background:none;border:none;cursor:pointer;padding:2px 0;text-decoration:underline" title="Bỏ đánh dấu — đưa về DT dự kiến (tích nhầm)" onclick="mgmtFeeUnmarkIssued('${f.id}','${vid}')">↩ bỏ đánh dấu</button>`:''}`
+          : `<span style="color:var(--accent);font-size:11px">📋 DT dự kiến (chưa HĐ)</span>${canIssue?`<br><button class="btn-mini" style="font-size:10px;margin-top:3px;padding:2px 8px;background:var(--good);color:#fff;border:none;border-radius:4px;cursor:pointer" title="Đánh dấu đã phát hóa đơn cho chủ tàu (bắt buộc nhập số HĐ)" onclick="mgmtFeeMarkIssued('${f.id}','${vid}')">🧾 Đánh dấu đã phát HĐ</button>`:''}`;
         const ymTag = f.periodMonth ? '' : `<div style="font-size:10px;color:var(--warn)" title="Bản ghi chưa gán Kỳ tháng — app đang suy từ ngày phát hành (${esc(String(f.date||'').slice(0,7))}). Bấm ⚙ để gán đúng tháng phí.">⚠ chưa gán kỳ tháng</div>`;
         return `<tr><td class="mono" style="font-size:11px">${esc(f.date||'')}</td><td>${esc(f.period||'')}${f.periodMonth?`<div style="font-size:10px;color:var(--muted)">kỳ tháng: ${esc(f.periodMonth)}</div>`:''}${ymTag}</td><td class="r num">${fmtMoney(f.amount)}</td><td>${stCell}</td><td style="font-size:11px;color:var(--muted)">${esc(f.invoiceNo||'—')}</td><td><button class="icon-btn" title="Sửa kỳ tháng của phí này" onclick="editMgmtFeePeriod('${f.id}','${vid}')">⚙</button></td></tr>`;
       }).join('')
@@ -44582,7 +44605,7 @@ function renderOpInputRecent(){
           ? `<button class="icon-btn" title="Đã thực hiện → chi thực" onclick="opMarkActual('${t.id}')" style="color:var(--good)">✓</button><button class="icon-btn" title="Sửa" onclick="editOpTx('${t.id}')">✎</button>${docBtn}<button class="icon-btn danger" title="Hủy dự kiến" onclick="opDeleteBudget('${t.id}')">✕</button>`
           : (t.paid
             ? `${_canConfirmOpTT()?`<button class="icon-btn" title="Sửa (đã TT)" onclick="editOpFees('${t.id}')">✎</button>`:`<span class="mono" style="font-size:9px;color:var(--muted)" title="Đã TT">🔒</span>`}${docBtn}${(isAdmin() && !t._fromAp && t.khoanRole!=='chi' && !t._isBudget && !t._mgmtFeeId && t.type==='OUT')?`<button class="icon-btn" title="${t.seahorseOwn?'Chuyển LẠI thành chi hộ chủ tàu':'Chủ tàu KHÔNG đồng ý trả → chuyển CHI PHÍ SEAHORSE (Hải Mã) TỰ CHỊU'}" onclick="toggleOpTxSeahorseOwn('${t.id}')" style="color:#8a5a1e">${t.seahorseOwn?'⇄':'⇄🏢'}</button>`:''}`
-            : `<button class="icon-btn" title="Sửa" onclick="editOpTx('${t.id}')">✎</button>${docBtn}<button class="icon-btn danger" title="Xóa" onclick="delOpTx('${t.id}')">✕</button>${(isAdmin() && !t._fromAp && t.khoanRole!=='chi' && !t._isBudget && !t._mgmtFeeId && t.type==='OUT')?`<button class="icon-btn" title="${t.seahorseOwn?'Chuyển LẠI thành chi hộ chủ tàu':'Chủ tàu KHÔNG đồng ý trả → chuyển CHI PHÍ SEAHORSE (Hải Mã) TỰ CHỊU'}" onclick="toggleOpTxSeahorseOwn('${t.id}')" style="color:#8a5a1e">${t.seahorseOwn?'⇄':'⇄🏢'}</button>`:''}${isAdmin()?`<button class="icon-btn danger" title="Xóa VĨNH VIỄN — chặn sống lại qua đồng bộ (dùng khi phiếu cứ hồi sinh)" onclick="purgeOpTxForever('${t.id}')" style="opacity:.7">⛔</button>`:''}`)));
+            : `${(t.payApproved && _canConfirmOpTT())?`<button class="icon-btn" title="Lệnh đã duyệt${t.payApprovedBy?' bởi '+esc(t.payApprovedBy):''} — KT xác nhận đã chi tiền + nhập phí NH → chuyển Đã TT" onclick="confirmOpPayment('${t.id}')" style="color:var(--good);font-weight:700">💳</button>`:''}<button class="icon-btn" title="Sửa" onclick="editOpTx('${t.id}')">✎</button>${docBtn}<button class="icon-btn danger" title="Xóa" onclick="delOpTx('${t.id}')">✕</button>${(isAdmin() && !t._fromAp && t.khoanRole!=='chi' && !t._isBudget && !t._mgmtFeeId && t.type==='OUT')?`<button class="icon-btn" title="${t.seahorseOwn?'Chuyển LẠI thành chi hộ chủ tàu':'Chủ tàu KHÔNG đồng ý trả → chuyển CHI PHÍ SEAHORSE (Hải Mã) TỰ CHỊU'}" onclick="toggleOpTxSeahorseOwn('${t.id}')" style="color:#8a5a1e">${t.seahorseOwn?'⇄':'⇄🏢'}</button>`:''}${isAdmin()?`<button class="icon-btn danger" title="Xóa VĨNH VIỄN — chặn sống lại qua đồng bộ (dùng khi phiếu cứ hồi sinh)" onclick="purgeOpTxForever('${t.id}')" style="opacity:.7">⛔</button>`:''}`)));
       const _rowStyle = _locked
         ? ' style="background:rgba(120,120,120,.07);border-left:3px solid var(--bad)"'
         : (isBudget ? ' style="background:rgba(214,158,46,.06);border-left:3px solid var(--warn)"' : '');
@@ -60429,7 +60452,8 @@ function hrmImportEmployees(inputEl){
             cEmergency=col('liên hệ khẩn','lien he khan','khẩn cấp','khan cap'),
             cCompanyType=col('phân loại công ty','phan loai cong ty'),
             cDivShort=col('bộ phận\n(viết tắt','viết tắt','viet tat'),
-            cQuit=col('ngày nghỉ việc','ngay nghi viec'),
+            cQuit=col('ngày nghỉ việc','ngay nghi viec','ngày nghỉ cuối','ngay nghi cuoi'),
+            cStatusCol=col('trạng thái','trang thai','tình trạng','tinh trang'),
             cNote=col('ghi chú','ghi chu'),
             cType=col('loại nhân sự','loai nhan su','nhóm nhân sự','nhom nhan su','phân loại nhân sự'),
             // v3.09.69: 5 field nhân sự MỚI (chuyên gia/thuyền viên)
@@ -60518,6 +60542,10 @@ function hrmImportEmployees(inputEl){
           currentVessel:_s(row,cCurVessel),    // tên tàu hiện tại (text, gắn linkVesselId sau)
           onboardDate:_date(_s(row,cOnboard)), // ngày xuống tàu
           contractNo:_s(row,cContractNoNew),   // số hợp đồng (field riêng)
+          // v3.09.82: ngày nghỉ = ngày chấm dứt HĐLĐ (field riêng terminationDate, không chỉ note)
+          terminationDate:_date(_s(row,cQuit)),
+          // v3.09.82: trạng thái nghỉ → để apply set status='inactive' (app KHÔNG nhắc quá hạn NV đã nghỉ)
+          empStatusRaw:_stripAccentLower(_s(row,cStatusCol)||''),
           noteFull:_noteParts.join(' | ')
         });
       }
@@ -60634,10 +60662,54 @@ function _bankAccOwner(rawAG, fullName){
   return nv;   // không chắc → an toàn dùng tên NV
 }
 
+/* v3.09.82: khớp tên tàu (text từ import) → vessel trong đội tàu. Dùng chung cho import hồ sơ.
+   Bỏ tiền tố M/V, M/A, MV... + khớp một phần (≥4 ký tự). Trả về vessel hoặc null. */
+function _hrmMatchVessel(name){
+  if(!name) return null;
+  const _vKey=s=>{ let x=_ciNorm(s); x=x.replace(/^(m\/v|m\/a|mv|ma|tau|tàu)\s+/,''); return x.replace(/\s+/g,' ').trim(); };
+  const k=_vKey(name);
+  if(!k || /^(nghi|nghỉ)/.test(k)) return null;   // "Nghỉ ca / Nghỉ KHL" → không phải tàu
+  const vlist=fleetVessels();
+  let exact=vlist.find(v=>_vKey(v.name)===k);
+  if(exact) return exact;
+  let hit=null;
+  vlist.forEach(v=>{ const vk=_vKey(v.name); if(vk.length>=4 && (k.includes(vk)||vk.includes(k))) hit=v; });
+  return hit;
+}
 function hrmImportApply(){
   const rows=_hrmImportRows; if(!rows||!rows.length){ closeModal(); return; }
   if(!Array.isArray(S.hrEmployees)) S.hrEmployees=[];
-  let nNew=0,nUpd=0;
+  let nNew=0,nUpd=0,nLink=0,nAssign=0,nTerm=0;
+  const _nowIso=new Date().toISOString();
+  // v3.09.82: gán tàu (linkVesselId) + tạo QĐ điều động + xử lý nghỉ việc cho 1 hồ sơ sau import.
+  const _hrmPostImport=(emp,r)=>{
+    // (A) NGHỈ VIỆC: ngày nghỉ = ngày chấm dứt HĐLĐ → field riêng + status inactive (app không nhắc quá hạn)
+    const _isRest = /nghi|nghỉ|demob|inactive|da nghi|đã nghỉ|thoi viec|thôi việc/.test(r.empStatusRaw||'')
+                    || (r.currentVessel && /^(nghi|nghỉ)/i.test(String(r.currentVessel).trim()));
+    if(r.terminationDate || _isRest){
+      if(r.terminationDate && !emp.terminationDate) emp.terminationDate=r.terminationDate;
+      if(_isRest || r.terminationDate){ emp.status='inactive'; nTerm++; }
+    }
+    // (B) GÁN TÀU: crew/expert đang làm + có tên tàu → khớp vessel → linkVesselId + QĐ điều động
+    if(emp.status!=='inactive' && r.currentVessel){
+      const v=_hrmMatchVessel(r.currentVessel);
+      if(v){
+        if(emp.linkVesselId!==v.id){ emp.linkVesselId=v.id; nLink++; }
+        if(emp.type!=='crew' && emp.type!=='expert' && emp.type!=='expert_om') emp.type='crew';
+        // tạo QĐ điều động onboard nếu chưa có bản active cùng emp+tàu
+        const dup=HRService.crewAssignments().some(a=>a&&a.empId===emp.id&&a.vesselId===v.id&&a.status==='active'&&a.kind==='onboard');
+        if(!dup){
+          HRService.addCrewAssignment({ id:(typeof uid==='function'?uid():'ca_'+Date.now()+'_'+Math.random().toString(36).slice(2,7)),
+            empId:emp.id, vesselId:v.id, kind:'onboard', status:'active',
+            onboardDate:r.onboardDate||_nowIso.slice(0,10), decisionDate:r.onboardDate||_nowIso.slice(0,10),
+            note:'Tự tạo khi import hồ sơ NS'+(r.seaRank?' · '+r.seaRank:''),
+            createdBy:(typeof actorName==='function'?actorName():'import'), createdAt:_nowIso });
+          nAssign++;
+        }
+      }
+    }
+    if(typeof touchRecord==='function') touchRecord(emp);
+  };
   rows.forEach(r=>{
     if(!r.smartId && !r.fullName) return;
     const fields={
@@ -60674,6 +60746,7 @@ function hrmImportApply(){
       if(r.empType==='expert' && ex.type!=='expert' && ex.type!=='crew' && ex.type!=='expert_om') ex.type='expert';
       // v3.09.66: Chuyên gia O&M — nâng lên expert_om (ưu tiên cao hơn expert, không hạ crew)
       if(r.empType==='expert_om' && ex.type!=='expert_om' && ex.type!=='crew') ex.type='expert_om';
+      _hrmPostImport(ex, r);   // v3.09.82: gán tàu + QĐ điều động + nghỉ việc
       if(typeof touchRecord==='function') touchRecord(ex);
       hrmLogHistory(ex.id,'edit','Import Excel','',r.smartId,'Cập nhật từ import danh sách');
       nUpd++;
@@ -60686,6 +60759,7 @@ function hrmImportApply(){
       }, fields);
       newEmp.note=_importNote;   // v3.07.23: NV mới — note từ import (không có note cũ để gộp)
       HRService.addEmployee(newEmp);
+      _hrmPostImport(newEmp, r);   // v3.09.82: gán tàu + QĐ điều động + nghỉ việc
       hrmLogHistory(newEmp.id,'create','','',newEmp.smartId,'Tạo từ import danh sách');
       nNew++;
     }
@@ -60694,7 +60768,7 @@ function hrmImportApply(){
   saveState();
   closeModal();
   renderHRM();
-  toast(`Đã import: ${nNew} mới, ${nUpd} cập nhật ✓`,'good');
+  toast(`Đã import: ${nNew} mới, ${nUpd} cập nhật ✓ · gán tàu ${nLink} · QĐ điều động ${nAssign}${nTerm?' · đã nghỉ '+nTerm:''}`,'good');
 }
 
 let _hrmView='dash';
@@ -62066,7 +62140,7 @@ function hrmEditEmployee(id){
     ${rowWrap(sel('Tàu công tác','hrm-f-vessel',vesselOpt)+sel('Quản lý trực tiếp','hrm-f-manager',managerOpt))}
     ${rowWrap(fld('Ngày vào làm','hrm-f-startDate',e.startDate,'date')+fld('Ngày thử việc','hrm-f-probationDate',e.probationDate,'date')+fld('Ngày ký HĐ','hrm-f-contractSignDate',e.contractSignDate,'date'))}
     ${rowWrap(sel('Loại hợp đồng','hrm-f-contractType',opt([''].concat(HRM_CONTRACT_TYPES),e.contractType))+fld('Ngày hết hạn HĐLĐ','hrm-f-contractEndDate',e.contractEndDate,'date')+sel('Liên kết tài khoản đăng nhập','hrm-f-linkUser',userOpt))}
-    ${(()=>{ const allowed=(typeof canManageAppUser==='function')?canManageAppUser():false; const on=(e.appUser!==false); 
+    ${(()=>{ const allowed=(typeof canManageAppUser==='function')?canManageAppUser():false; const on=(e.appUser===true); 
       if(allowed){ return `<div style="margin:6px 0;padding:8px 10px;border:1px solid var(--rule);border-radius:8px;background:#f7faf7">
         <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:12.5px;font-weight:600">
           <input type="checkbox" id="hrm-f-appUser" ${on?'checked':''}> 🔑 Cho phép sử dụng App (App User)
