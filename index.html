@@ -3471,7 +3471,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.09.84';            // bumped on each release
+const APP_VERSION='3.09.85';            // bumped on each release
 /* Debug logging: dlog() chỉ in khi DEBUG_MODE bật (mặc định TẮT ở production để
    tránh nhiễu/lộ cấu trúc nội bộ qua DevTools). Bật bằng: localStorage.DEBUG_MODE='1'.
    console.warn/error GIỮ NGUYÊN (cảnh báo & lỗi vận hành luôn hiện). */
@@ -5625,6 +5625,8 @@ async function authAction(){
     if(cfg.scriptUrl){
       selfWrapInCloudCfg(name, pw).catch(e=>console.warn('[self-wrap]', e.message));
     }
+    // v3.09.85 AUTO RECOVERY: dọn state admin bỏ quên trên máy NV TRƯỚC khi đọc/ghi state (chống quota).
+    try{ _autoRecoverQuota(); }catch(_){}
     await loadEncryptedLocal();
     // v3.08.16: KIỂM TRA CỜ APP USER — đăng nhập đúng mật khẩu chưa đủ, hồ sơ NV phải được cấp quyền App User
     if(CURRENT_ROLE==='user' && typeof isAppUserAllowed==='function' && !isAppUserAllowed(CURRENT_USER)){
@@ -7381,6 +7383,8 @@ async function _complete2FALogin(){
   if(cfg.scriptUrl && CURRENT_ROLE === 'user'){
     selfWrapInCloudCfg(pending.name, pending.pw).catch(e => console.warn('[self-wrap]', e.message));
   }
+  // v3.09.85 AUTO RECOVERY: dọn state admin bỏ quên trên máy NV TRƯỚC khi đọc/ghi state (chống quota).
+  try{ _autoRecoverQuota(); }catch(_){}
   await loadEncryptedLocal();
   // v3.08.16: kiểm App User cho cả luồng 2FA
   if(CURRENT_ROLE==='user' && typeof isAppUserAllowed==='function' && !isAppUserAllowed(CURRENT_USER)){
@@ -14719,6 +14723,37 @@ function _storeKeyForUser(){
     const u=String(CURRENT_USER.name).toLowerCase().replace(/[^a-z0-9]+/g,'_');
     return STORE_KEY + '__nv_' + u;
   }catch(e){ return STORE_KEY; }
+}
+/* v3.09.85 — AUTO RECOVERY (Hotfix quota): tự dọn "state Admin bỏ quên trên máy NV".
+   ROOT CAUSE đã xác nhận bằng log: máy NV còn khối 'seahorse_v1' (state admin ~2.8MB)
+   + 'seahorse_local_snapshots' từ lần admin/user khác đăng nhập → chiếm quota → NV không lưu được.
+   ĐIỀU KIỆN DỌN (bám root cause, KHÔNG dùng ngưỡng dung lượng):
+     (1) CURRENT_ROLE==='user'                    → là NV (admin THOÁT NGAY, không đụng gì)
+     (2) _storeKeyForUser() bắt đầu 'seahorse_v1__nv_'  → user hiện tại lưu ở key riêng
+     (3) localStorage['seahorse_v1'] tồn tại       → có khối state admin bỏ quên (RÁC với NV này)
+   → xóa 'seahorse_v1' + 'seahorse_local_snapshots' (nếu có). KHÔNG PUSH. Luồng login tự pull cloud về.
+   AN TOÀN: KHÔNG đụng __nv_ của user, auth_v3, offline_queue, rescue_*, deletedIds, purgedBatches.
+   Cloud giữ bản gốc admin → không mất dữ liệu. Idempotent: lần sau 'seahorse_v1' đã hết → (3) false → no-op. */
+function _autoRecoverQuota(){
+  try{
+    // (1) CHỐT CHẶN SINH TỬ: chỉ máy NV. Admin thoát ngay dòng đầu.
+    if(CURRENT_ROLE!=='user') return {acted:false, reason:'not-user'};
+    // (2) user hiện tại phải lưu ở key riêng __nv_ (không phải key chung)
+    var me=_storeKeyForUser();
+    if(!(typeof me==='string' && me.indexOf(STORE_KEY+'__nv_')===0)) return {acted:false, reason:'not-nv-key'};
+    // (3) có khối state admin bỏ quên 'seahorse_v1' (key CHÍNH XÁC, không phải __nv_)
+    var junk=null; try{ junk=localStorage.getItem(STORE_KEY); }catch(_){ junk=null; }
+    if(junk===null || junk===undefined) return {acted:false, reason:'no-junk'};
+    // → chắc chắn là rác admin bỏ quên trên máy NV. Dọn.
+    var freed=0;
+    try{ freed += (localStorage.getItem(STORE_KEY)||'').length; }catch(_){}
+    try{ freed += (localStorage.getItem(_SNAP_KEY)||'').length; }catch(_){}
+    try{ localStorage.removeItem(STORE_KEY); }catch(_){}
+    try{ localStorage.removeItem(_SNAP_KEY); }catch(_){}   // snapshot cục bộ — phao rollback, tái tạo được
+    try{ logAuditEvent('auto_recover_quota',{ user:(CURRENT_USER&&CURRENT_USER.name)||'?', freedKB:Math.round(freed/1024), removed:[STORE_KEY,_SNAP_KEY] }); }catch(_){}
+    try{ console.log('[auto-recover] Đã dọn state admin bỏ quên (~'+Math.round(freed/1024)+' KB). Sẽ tải lại từ cloud.'); }catch(_){}
+    return {acted:true, freedKB:Math.round(freed/1024)};
+  }catch(e){ try{ console.warn('[auto-recover] lỗi (bỏ qua an toàn):', e&&e.message); }catch(_){} return {acted:false, reason:'error'}; }
 }
 let S = loadState();
 
