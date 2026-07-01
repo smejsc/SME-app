@@ -3471,7 +3471,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.09.87-p1';            // bumped on each release
+const APP_VERSION='3.09.87-p1-rev2';            // bumped on each release
 /* Debug logging: dlog() chỉ in khi DEBUG_MODE bật (mặc định TẮT ở production để
    tránh nhiễu/lộ cấu trúc nội bộ qua DevTools). Bật bằng: localStorage.DEBUG_MODE='1'.
    console.warn/error GIỮ NGUYÊN (cảnh báo & lỗi vận hành luôn hiện). */
@@ -14998,22 +14998,29 @@ function _persistHash(str){
 let _shadowMatch = 0, _shadowMismatch = 0;   // đếm cho telemetry Commit 7
 async function _persistVerifyAfterWrite(key, expectedValue){
   try{
-    // Đọc lại từ CẢ HAI nguồn
+    // Đọc lại từ CẢ HAI nguồn TẠI CÙNG THỜI ĐIỂM.
     let idbVal = null, lsVal = null;
     try{ idbVal = await IDBBackend.get(key); }catch(e){ idbVal = '__IDB_READ_ERR__'; }
     try{ lsVal = localStorage.getItem(key); }catch(e){ lsVal = '__LS_READ_ERR__'; }
     const lenIdb = (idbVal||'').length, lenLs = (lsVal||'').length, lenExp = (expectedValue||'').length;
     const hashIdb = _persistHash(idbVal), hashLs = _persistHash(lsVal), hashExp = _persistHash(expectedValue);
-    // Điều kiện MATCH: IDB khớp expected VÀ localStorage khớp expected (cả 2 đồng nhất với bản vừa ghi)
-    const idbOk = (idbVal===expectedValue);
-    const lsOk  = (lsVal===expectedValue);
-    if(idbOk && lsOk){
+    /* v3.09.87-p1 rev2 — SỬA BUG VERIFY (race condition).
+       Mục tiêu Phase 1 = chứng minh IDB KHỚP localStorage (2 nguồn thật đồng nhất),
+       KHÔNG phải khớp 1 snapshot 'expected' đã cũ. presenceHeartbeat ghi state dồn dập
+       → giữa lúc ghi và verify async, saveState mới đã ghi bản mới hơn vào CẢ 2 nơi →
+       idbVal/lsVal = bản mới (khớp nhau), nhưng expectedValue = bản cũ → so nhầm.
+       ĐÚNG: MATCH khi idbVal === lsVal (IDB đồng nhất localStorage tại cùng thời điểm).
+       'expected' chỉ dùng để LOG tham khảo (phân biệt "cùng bản vừa ghi" vs "đã nhảy bản mới"). */
+    const sourcesMatch = (idbVal === lsVal);        // ĐIỀU KIỆN CHÍNH: 2 nguồn thật khớp nhau
+    const matchedExpected = (idbVal === expectedValue);  // tham khảo: có phải đúng bản vừa ghi không
+    if(sourcesMatch){
       _shadowMatch++;
-      if(typeof _persistTelemetry==='function') _persistTelemetry('shadow_write_match', { key, len: lenExp });
+      if(typeof _persistTelemetry==='function') _persistTelemetry('shadow_write_match', { key, len: lenLs, matchedExpected });
     }else{
+      // CHỈ coi là mismatch THẬT khi IDB ≠ localStorage (shadow write sai thật sự).
       _shadowMismatch++;
-      const detail = { key, lenIdb, lenLs, lenExp, hashIdb, hashLs, hashExp, idbOk, lsOk };
-      try{ console.warn('[shadow-verify] MISMATCH:', JSON.stringify(detail)); }catch(_){}
+      const detail = { key, lenIdb, lenLs, lenExp, hashIdb, hashLs, hashExp, sourcesMatch, matchedExpected };
+      try{ console.warn('[shadow-verify] MISMATCH THẬT (IDB≠localStorage):', JSON.stringify(detail)); }catch(_){}
       if(typeof _persistTelemetry==='function') _persistTelemetry('shadow_write_mismatch', detail);
     }
   }catch(e){ try{ console.warn('[shadow-verify] lỗi (bỏ qua):', e&&e.message); }catch(_){} }
