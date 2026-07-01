@@ -3471,7 +3471,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.09.85';            // bumped on each release
+const APP_VERSION='3.09.86';            // bumped on each release
 /* Debug logging: dlog() chỉ in khi DEBUG_MODE bật (mặc định TẮT ở production để
    tránh nhiễu/lộ cấu trúc nội bộ qua DevTools). Bật bằng: localStorage.DEBUG_MODE='1'.
    console.warn/error GIỮ NGUYÊN (cảnh báo & lỗi vận hành luôn hiện). */
@@ -5627,6 +5627,8 @@ async function authAction(){
     }
     // v3.09.85 AUTO RECOVERY: dọn state admin bỏ quên trên máy NV TRƯỚC khi đọc/ghi state (chống quota).
     try{ _autoRecoverQuota(); }catch(_){}
+    // v3.09.86: dọn high-water cũ ngoài quyền (one-time) — hết báo giả "sụt giảm" chặn sync.
+    try{ _cleanupHighWaterOutOfScope(); }catch(_){}
     await loadEncryptedLocal();
     // v3.08.16: KIỂM TRA CỜ APP USER — đăng nhập đúng mật khẩu chưa đủ, hồ sơ NV phải được cấp quyền App User
     if(CURRENT_ROLE==='user' && typeof isAppUserAllowed==='function' && !isAppUserAllowed(CURRENT_USER)){
@@ -7385,6 +7387,8 @@ async function _complete2FALogin(){
   }
   // v3.09.85 AUTO RECOVERY: dọn state admin bỏ quên trên máy NV TRƯỚC khi đọc/ghi state (chống quota).
   try{ _autoRecoverQuota(); }catch(_){}
+  // v3.09.86: dọn high-water cũ ngoài quyền (one-time) — hết báo giả "sụt giảm" chặn sync.
+  try{ _cleanupHighWaterOutOfScope(); }catch(_){}
   await loadEncryptedLocal();
   // v3.08.16: kiểm App User cho cả luồng 2FA
   if(CURRENT_ROLE==='user' && typeof isAppUserAllowed==='function' && !isAppUserAllowed(CURRENT_USER)){
@@ -13597,7 +13601,16 @@ async function cloudSync(mode, opts){
       try{
         const cfg3=getAuthConfig();
         const lkc=(cfg3 && cfg3.lastKnownCounts) || {};
-        const watch=['payables','receivables','opTransactions','loans','bankAccounts','projects','vessels','fixedAssets'];
+        let watch=['payables','receivables','opTransactions','loans','bankAccounts','projects','vessels','fixedAssets'];
+        // v3.09.86 — HIGH-WATER × PHÂN QUYỀN: NV chỉ kiểm shrink cho field TRONG quyền sở hữu.
+        //   Field ngoài quyền → user không thể làm nó "giảm" → kiểm là vô nghĩa + gây báo động giả chặn sync.
+        //   Admin giữ đủ 8 field (bảo vệ nguyên vẹn).
+        try{
+          if(CURRENT_ROLE!=='admin' && typeof allowedFieldsForUser==='function'){
+            const _allow=new Set(allowedFieldsForUser());
+            watch=watch.filter(f=>_allow.has(f));
+          }
+        }catch(_){}
         const labelMap={payables:'Phải trả',receivables:'Phải thu',opTransactions:'Thu/Chi hộ',loans:'Khoản vay',bankAccounts:'Tài khoản NH',projects:'Dự án',vessels:'Tàu',fixedAssets:'TSCĐ'};
         const drops=[];
         watch.forEach(f=>{
@@ -14754,6 +14767,29 @@ function _autoRecoverQuota(){
     try{ console.log('[auto-recover] Đã dọn state admin bỏ quên (~'+Math.round(freed/1024)+' KB). Sẽ tải lại từ cloud.'); }catch(_){}
     return {acted:true, freedKB:Math.round(freed/1024)};
   }catch(e){ try{ console.warn('[auto-recover] lỗi (bỏ qua an toàn):', e&&e.message); }catch(_){} return {acted:false, reason:'error'}; }
+}
+/* v3.09.86 — DỌN HIGH-WATER CŨ NGOÀI QUYỀN (PA-A, one-time khi login).
+   Máy NV đã nhiễm high-water của field NGOÀI quyền (vd loans:47) từ trước bản 3.09.86
+   → guard so nhầm → báo giả "sụt giảm" chặn sync. Fix ghi (điểm 1) chặn ghi MỚI, nhưng
+   giá trị CŨ vẫn nằm trong auth → cần dọn 1 lần. Chỉ xóa key high-water mà field ∉ quyền NV.
+   AN TOÀN: admin thoát ngay; chỉ đụng cfg.lastKnownCounts (không phải dữ liệu nghiệp vụ);
+   field TRONG quyền giữ nguyên (guard vẫn bảo vệ). Idempotent: lần sau không còn key ngoài quyền → no-op. */
+function _cleanupHighWaterOutOfScope(){
+  try{
+    if(CURRENT_ROLE!=='user') return {acted:false, reason:'not-user'};
+    if(typeof allowedFieldsForUser!=='function') return {acted:false, reason:'no-fn'};
+    var cfg=getAuthConfig(); if(!cfg || !cfg.lastKnownCounts || typeof cfg.lastKnownCounts!=='object') return {acted:false, reason:'no-lkc'};
+    var allow=new Set(allowedFieldsForUser());
+    var removed=[];
+    Object.keys(cfg.lastKnownCounts).forEach(function(f){
+      if(!allow.has(f)){ delete cfg.lastKnownCounts[f]; removed.push(f); }
+    });
+    if(!removed.length) return {acted:false, reason:'clean'};
+    setAuthConfig(cfg);
+    try{ logAuditEvent('cleanup_highwater_oos',{ user:(CURRENT_USER&&CURRENT_USER.name)||'?', removed:removed }); }catch(_){}
+    try{ console.log('[hw-cleanup] Đã dọn high-water ngoài quyền:', removed.join(', ')); }catch(_){}
+    return {acted:true, removed:removed};
+  }catch(e){ try{ console.warn('[hw-cleanup] lỗi (bỏ qua an toàn):', e&&e.message); }catch(_){} return {acted:false, reason:'error'}; }
 }
 let S = loadState();
 
@@ -17805,7 +17841,17 @@ function _updateLastKnownRecordCount(){
     }
     // v3.01.25: mốc cao nhất TỪNG THẤY của từng mảng quan trọng (high-water) — để phát hiện sụt giảm bất thường khi push.
     try{
-      const watch=['payables','receivables','opTransactions','loans','bankAccounts','projects','vessels','fixedAssets'];
+      let watch=['payables','receivables','opTransactions','loans','bankAccounts','projects','vessels','fixedAssets'];
+      // v3.09.86 — HIGH-WATER × PHÂN QUYỀN: NV chỉ ghi high-water cho field TRONG quyền sở hữu.
+      //   Bug cũ: NV không quyền 'loans' nhưng S.loans=47 (state thô từ cloud) → ghi high-water 47
+      //   → khi push, merged.loans (field ngoài quyền, lấy từ cloud) lệch → guard báo giả "47→0" → chặn sync.
+      //   Fix: field ∉ allowedFieldsForUser() thì KHÔNG ghi high-water (admin giữ đủ 8 field như cũ).
+      try{
+        if(CURRENT_ROLE!=='admin' && typeof allowedFieldsForUser==='function'){
+          const _allow=new Set(allowedFieldsForUser());
+          watch=watch.filter(f=>_allow.has(f));
+        }
+      }catch(_){}
       const lkc = (cfg.lastKnownCounts && typeof cfg.lastKnownCounts==='object') ? cfg.lastKnownCounts : {};
       watch.forEach(f=>{
         const n=(s[f]||[]).length;
