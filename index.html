@@ -3471,7 +3471,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.09.77';            // bumped on each release
+const APP_VERSION='3.09.81';            // bumped on each release
 /* Debug logging: dlog() chỉ in khi DEBUG_MODE bật (mặc định TẮT ở production để
    tránh nhiễu/lộ cấu trúc nội bộ qua DevTools). Bật bằng: localStorage.DEBUG_MODE='1'.
    console.warn/error GIỮ NGUYÊN (cảnh báo & lỗi vận hành luôn hiện). */
@@ -17107,6 +17107,8 @@ function cleanLoanInterestDupes(){
   const dupeGroups=Object.entries(byKey).filter(([,g])=>g.length>1);
   if(!dupeGroups.length){ dlog('✅ Không có AP lãi vay trùng kỳ.'); return; }
   const removeIds=[];
+  commitMutation(()=>{
+  removeIds.length=0;
   dupeGroups.forEach(([k,g])=>{
     g.sort((a,b)=>String(a.createdAt||'').localeCompare(String(b.createdAt||'')));
     const keep=g[0];
@@ -17120,11 +17122,12 @@ function cleanLoanInterestDupes(){
     g.slice(1).forEach(r=>removeIds.push(r.id));
   });
   S.payables=AccountingService.payables().filter(r=>!removeIds.includes(r.id));
-  try{ markDeleted(removeIds); }catch(e){}
-  saveState();
+  try{ markDeleted(removeIds,'payables'); }catch(e){}
+  }, {action:'loan_interest_dedupe', fields:['payables','loans','deletedIds'], onOk:()=>{
   try{ logAuditEvent('loan_interest_dedupe',{removed:removeIds.length, groups:dupeGroups.length}); }catch(e){}
   if(typeof renderAll==='function') renderAll();
   dlog(`✅ Đã dọn ${removeIds.length} AP lãi vay dư (${dupeGroups.length} kỳ trùng) · giữ bản cũ nhất mỗi kỳ · đã gỡ link đúng. Bấm Sync để đẩy lên cloud.`);
+  }});
   return removeIds.length;
 }
 try{ window.checkLoanInterestDupes=checkLoanInterestDupes; window.cleanLoanInterestDupes=cleanLoanInterestDupes; }catch(e){}
@@ -17277,11 +17280,13 @@ function fixOpCcyFx(apply, nguong, vndOnly){
   if(dryRun){ dlog('→ XEM TRƯỚC. Chạy fixOpCcyFx(false) để SỬA THẬT (chế độ CHỈ-VND, không đụng USD).'); return; }
   if(typeof isAdmin==='function' && !isAdmin()){ dlog('Chỉ admin được sửa.'); return; }
   try{ localStorage.setItem('seahorse_rescue_opCcyFx', JSON.stringify({at:new Date().toISOString(), before:changes.map(c=>({id:c.t.id,ccy:c.t.ccy,fxToUsd:c.t.fxToUsd,amountUsd:c.t.amountUsd}))})); }catch(e){}
+  commitMutation(()=>{
   changes.forEach(c=>{ c.t.ccy=c.newCcy; c.t.fxToUsd=c.newFx; c.t.amountUsd=c.newUsd; try{touchRecord(c.t);}catch(e){c.t.updatedAt=new Date().toISOString();} });
-  saveState();
+  }, {action:'op_ccyfx_bulkfix', fields:['opTransactions'], onOk:()=>{
   try{ logAuditEvent('op_ccyfx_bulkfix',{count:changes.length, onlyVnd}); }catch(e){}
   if(typeof renderAll==='function') renderAll();
   dlog(`✅ Đã sửa ${changes.length} dòng. Đã lưu bản sao (key seahorse_rescue_opCcyFx). Bấm Sync để đẩy lên cloud.`);
+  }});
 }
 try{ window.fixOpCcyFx=fixOpCcyFx; }catch(e){}
 
@@ -18054,7 +18059,19 @@ async function commitTransaction(mutateFn, opts){
              version:{before:_revBefore, after:_stateRev()}, error:'Mutate lỗi: '+((_mutateErr&&_mutateErr.message)||_mutateErr) };
   }
   const _revExpect=_bumpStateRev();   // bump version TRƯỚC persist (YC4)
-  const r=await saveStateVerified(_revExpect);
+  let r;
+  try{
+    r=await saveStateVerified(_revExpect);
+  }catch(_persistErr){
+    // YC5b: saveStateVerified NÉM lỗi (vd QuotaExceededError khi localStorage đầy) → coi như persist thất bại,
+    //   ROLLBACK HẸP để tránh "UI báo thành công nhưng dữ liệu không lưu" + chống hồi sinh bản ghi.
+    fields.forEach(f=>{ if(_backup[f]!==undefined) S[f]=_backup[f]; });
+    if(S.meta) S.meta.rev=_revBefore;
+    const _msg=(_persistErr&&_persistErr.message)||String(_persistErr);
+    try{ logAuditEvent('tx_failed',{action, fields, error:'persist throw: '+_msg}); }catch(_){}
+    return { success:false, verify:false, cache:false, cloud:'skipped', audit:true,
+             version:{before:_revBefore, after:_stateRev()}, error:_msg };
+  }
   if(!r.success){
     // ROLLBACK HẸP (YC5): chỉ field đụng + rev. KHÔNG đụng field khác.
     fields.forEach(f=>{ if(_backup[f]!==undefined) S[f]=_backup[f]; });
@@ -18068,8 +18085,22 @@ async function commitTransaction(mutateFn, opts){
   return r;
 }
 
-let _autoSyncTimer=null;
-let _suppressAutoSync=false;  // Set true temporarily to block auto-push (e.g., during login pull)
+/* v3.09.78 (ADR-015): helper CRUD nghiệp vụ — bọc mutate trong transaction,
+   gọi onOk() CHỈ khi verify PASS (chứa render/toast/close riêng từng hàm),
+   báo lỗi rõ + KHÔNG chạy onOk khi fail (chống "UI báo thành công nhưng chưa lưu"). */
+function commitMutation(mutateFn, opts){
+  opts=opts||{};
+  const onOk=typeof opts.onOk==='function'?opts.onOk:function(){};
+  const onFail=typeof opts.onFail==='function'?opts.onFail:null;
+  return commitTransaction(mutateFn, {action:opts.action||'mutate', fields:opts.fields||[]}).then(r=>{
+    if(r.success){ try{ onOk(r); }catch(e){ console.warn('[commitMutation onOk]', e&&e.message); } }
+    else {
+      if(onFail){ try{ onFail(r); }catch(_){ } }
+      else { try{ toast('⚠ CHƯA lưu được — '+(r.error||'')+'. Dữ liệu giữ nguyên, hãy dọn bộ nhớ (Storage Health) rồi thử lại.','bad'); }catch(_){} }
+    }
+    return r;
+  });
+}
 /* v3.04.03: sau khi reset MK NV, khóa việc PULL cfg auth ghi đè local trong vài giây —
    tránh pull kéo cfg cloud CŨ (chưa kịp có MK mới) về đè mất MK vừa tạo. */
 let _cfgResetGuardUntil=0;
@@ -26056,6 +26087,7 @@ function addTx(){
   const ccy=document.getElementById('tx-ccy').value;
   const paid=document.getElementById('tx-paid').value==='1';
   if(amount<=0){toast('Số tiền > 0','bad');return;}
+  commitMutation(()=>{
   S.transactions.push({
     id:uid(),date,type,projectId,segment,category,desc,amount,ccy,paid,
     status:'draft',
@@ -26065,10 +26097,11 @@ function addTx(){
     rejectedBy:'',rejectedAt:'',rejectReason:'',rejectedAtLevel:null,
     createdBy:actorName(),createdAt:new Date().toISOString()
   });
-  saveState();
+  }, {action:'tx_add', fields:['transactions'], onOk:()=>{
   document.getElementById('tx-desc').value='';
   document.getElementById('tx-amount').value=0;
   toast('Đã ghi bút toán (Nháp). Bấm "Gửi duyệt" để chuyển sang chờ duyệt L1.');renderAll();
+  }});
 }
 function delTx(id){
   const t=S.transactions.find(x=>x.id===id);if(!t)return;
@@ -26083,7 +26116,7 @@ function delTx(id){
   const p=S.projects.find(p=>p.id===t.projectId);
   confirmDelete('bút toán này',
     `${t.date} · ${t.type==='REV'?'Doanh thu':'Chi phí'} · ${esc(t.category) || ''}<br>${p?p.code+' · ':''}${esc(t.desc) || '—'}<br><b>${fmtFull(t.amount,t.ccy)}</b> · ${t.paid?'Đã TT':'Chưa TT'}`,
-    ()=>{S.transactions=S.transactions.filter(x=>x.id!==id);markDeleted(id);saveState();toast('Đã xóa bút toán');renderAll();});
+    ()=>{ commitMutation(()=>{ S.transactions=S.transactions.filter(x=>x.id!==id);markDeleted(id,'transactions'); }, {action:'tx_delete', fields:['transactions','deletedIds'], onOk:()=>{ toast('Đã xóa bút toán');renderAll(); }, onFail:(rr)=>{ toast('⚠ CHƯA xóa được — '+(rr.error||'')+'. Giữ nguyên.','bad'); }}); });
 }
 function editTx(id){
   const t=S.transactions.find(x=>x.id===id);if(!t)return;
@@ -26113,9 +26146,10 @@ function editTx(id){
       const p=S.projects.find(p=>p.id===d.projectId);
       if(p) d.segment=p.segment;
     }
-    Object.assign(t,d,{paid:d.paid==='1',projectId:d.projectId||null});
-    touchRecord(t);  // v2.61.0: timestamp cho sync
-    saveState();
+    commitMutation(()=>{
+      Object.assign(t,d,{paid:d.paid==='1',projectId:d.projectId||null});
+      touchRecord(t);  // v2.61.0: timestamp cho sync
+    }, {action:'tx_edit', fields:['transactions'], onOk:()=>{ renderAll(); }});
   });
   // After modal renders: wire dynamic category refresh
   setTimeout(()=>{
@@ -26136,7 +26170,7 @@ function editTx(id){
 }
 function togglePaid(id){
   const t=S.transactions.find(x=>x.id===id);if(!t)return;
-  t.paid=!t.paid;touchRecord(t);saveState();renderAll();
+  commitMutation(()=>{ t.paid=!t.paid;touchRecord(t); }, {action:'tx_toggle_paid', fields:['transactions'], onOk:()=>{ renderAll(); }});
 }
 function renderTxList(){
   const yr=+document.getElementById('tx-filter-year').value;
@@ -26466,7 +26500,9 @@ function confirmContractSettle(recId){
       const adjAmt = Math.abs(diff);
       const fxToUsd = (ccy==='USD')?1:(ccy==='VND'?(+S.fxRate||0):(+r.fxToUsd||0));
       const adjUsd = (ccy==='USD')?adjAmt:(fxToUsd>0?adjAmt/fxToUsd:adjAmt);
-      const rec={
+      let _rec;
+      commitMutation(()=>{
+      _rec={
         id:uid(), date:today, vesselId:r.vesselId, type:adjType,
         desc:(diff<0?'Điều chỉnh quyết toán HĐ (hoàn lại) ':'Điều chỉnh quyết toán HĐ (thu thêm) ')+(r.contractNo||inv),
         amount:adjAmt, ccy, fxToUsd, fxToVnd:(ccy==='USD'||ccy==='VND')?0:(+r.fxToVnd||0),
@@ -26477,31 +26513,38 @@ function confirmContractSettle(recId){
         paid:false, paidDate:'',
         createdBy:actorName(), createdByDept:(typeof getActorDeptName==='function'?getActorDeptName():''), createdAt:nowIso
       };
-      VesselService.addOpTransaction(rec);
+      VesselService.addOpTransaction(_rec);
       // đánh dấu HĐ gốc đã quyết toán (giữ nguyên giá trị cũ trong sổ đã khóa)
       r._settled=true; r._settledAt=nowIso; r._settledBy=actorName(); r._settleNote=note;
       r._settledValue=newVal; r.invoiceNo=r.invoiceNo||inv;
-      touchRecord(r); saveState();
-      try{ logAuditEvent('contract_settle_adjust',{recId:r.id, vesselId:r.vesselId, from:v0, to:newVal, adjType, adjAmt, adjId:rec.id, invoiceNo:inv}); }catch(e){}
+      touchRecord(r);
+      }, {action:'contract_settle_adjust', fields:['opTransactions'], onOk:()=>{
+      try{ logAuditEvent('contract_settle_adjust',{recId:r.id, vesselId:r.vesselId, from:v0, to:newVal, adjType, adjAmt, adjId:_rec.id, invoiceNo:inv}); }catch(e){}
       renderAll(); closeModal();
       toast('✓ Quyết toán HĐ '+esc(inv)+' (kỳ đã khóa) → đã tạo bút toán '+(adjType==='IN'?'THU hộ hoàn lại':'CHI hộ thu thêm')+' '+fmt(adjAmt,ccy)+' ở '+today,'good');
+      }});
       return;
     }
     // Kỳ CHƯA khóa (hoặc đúng giá trị) → sửa thẳng bút toán gốc.
+    commitMutation(()=>{
     r.amount=newVal;
     const fx=(ccy==='USD')?1:(ccy==='VND'?(+S.fxRate||0):(+r.fxToUsd||0));
     r.amountUsd=(ccy==='USD')?newVal:(fx>0?newVal/fx:newVal);
     r.amountGross=newVal+(+r.vatAmount||0);
     r.invoiceNo=inv;
     r._settled=true; r._settledAt=nowIso; r._settledBy=actorName(); r._settleNote=note; r._settledValue=newVal;
-    touchRecord(r); saveState();
+    touchRecord(r);
+    }, {action:'contract_settle', fields:['opTransactions'], onOk:()=>{
     try{ logAuditEvent('contract_settle',{recId:r.id, kind:'op', from:v0, to:newVal, invoiceNo:inv}); }catch(e){}
     renderAll(); closeModal();
     toast('✓ Đã quyết toán HĐ '+esc(inv)+(Math.abs(diff)>0.0001?(' · điều chỉnh '+(diff>0?'+':'−')+fmt(Math.abs(diff),ccy)):' · đúng giá trị HĐ'),'good');
+    }});
     return;
   }
 
   // ===== AP / AR công ty ===== (P&L = amountNet → đổi giá trị là P&L tự điều chỉnh)
+  const _csField = kind==='ap'?'payables':'receivables';
+  commitMutation(()=>{
   r.amount=newVal;
   if(r.amountNet!=null) r.amountNet=newVal;
   const vat=+r.vatAmount||0;
@@ -26509,11 +26552,13 @@ function confirmContractSettle(recId){
   r.invoiceNo=inv;
   r._isProvisional=false;
   r._settled=true; r._settledAt=nowIso; r._settledBy=actorName(); r._settleNote=note; r._settledValue=newVal;
-  touchRecord(r); saveState();
+  touchRecord(r);
+  }, {action:'contract_settle', fields:[_csField], onOk:()=>{
   try{ logAuditEvent('contract_settle',{recId:r.id, kind, from:v0, to:newVal, invoiceNo:inv}); }catch(e){}
   renderAll();
   closeModal();
   toast('✓ Đã quyết toán HĐ '+esc(inv)+(Math.abs(diff)>0.0001?(' · P&L '+(diff>0?'+':'−')+fmt(Math.abs(diff),ccy)):' · đúng giá trị HĐ'),'good');
+  }});
 }
 
 
@@ -26600,6 +26645,8 @@ function confirmAddContractInvoice(recId){
   const net = inputAmt;
   const vat = _isOpChiHo ? 0 : Math.round(net*pct/100*100)/100;
   if(!Array.isArray(r.invoices)) r.invoices=[];
+  const _civField = AccountingService.payableById(recId) ? 'payables' : (AccountingService.receivableById(recId) ? 'receivables' : 'opTransactions');
+  commitMutation(()=>{
   const entry={
     id:uid(), invoiceNo:inv, issueDate:dateStr,
     amountNet:net, vatPercent:pct, vatAmount:vat, amountGross:net+vat,
@@ -26617,11 +26664,13 @@ function confirmAddContractInvoice(recId){
   r.invoiceNo  = r.invoices.map(x=>x.invoiceNo).filter(Boolean).join(', ');
   // 1.a: phủ đủ → tự bỏ cờ dự kiến.
   if(typeof acProvisionalShouldClear==='function' && acProvisionalShouldClear(r)){ r._isProvisional=false; }
-  touchRecord(r); saveState();
+  touchRecord(r);
+  }, {action:'contract_invoice_add', fields:[_civField], onOk:()=>{
   try{ logAuditEvent('contract_invoice_add',{recId:r.id, invoiceNo:inv, net, vat, nInvoice:r.invoices.length, provisionalCleared:!r._isProvisional}); }catch(e){}
   toast('✓ Đã thêm đợt hóa đơn '+esc(inv)+' ('+fmt(net,r.ccy||'USD')+(pct?' +VAT '+pct+'%':'')+')'+(!r._isProvisional?' · đã đủ hồ sơ':''),'good');
   closeModal();
   try{ renderAll(); }catch(e){}
+  }});
 }
 
 /* ============================================================
@@ -27488,14 +27537,16 @@ function apprPitConfirm(batchId){
   const err=document.getElementById('appr-pit-err');
   if(amt<0){ if(err) err.textContent='TNCN không được âm'; return; }
   const first=recs.slice().sort((a,b)=>(a.createdAt||'').localeCompare(b.createdAt||''))[0];
-  if(amt>0) first.pitAmount=amt;
-  recs.forEach(r=>{ r._pitConfirmed=true; r._pitConfirmedBy=actorName(); r._pitConfirmedAt=new Date().toISOString(); touchRecord(r); });
-  saveState();
-  try{ logAuditEvent('payroll_pit_confirm',{batchId,pit:amt,ccy:first.ccy,actor:actorName()}); }catch(e){}
-  closeModal();
-  toast(amt>0?`✓ Đã ghi nhận TNCN ${fmtFull(amt,first.ccy)} — phiếu hoàn thành`:'✓ Xác nhận không có TNCN — phiếu hoàn thành','good');
-  renderAll();
-  try{ renderApprovalList(); }catch(e){}
+  commitMutation(()=>{
+    if(amt>0) first.pitAmount=amt;
+    recs.forEach(r=>{ r._pitConfirmed=true; r._pitConfirmedBy=actorName(); r._pitConfirmedAt=new Date().toISOString(); touchRecord(r); });
+  }, {action:'payroll_pit_confirm', fields:['payables'], onOk:()=>{
+    try{ logAuditEvent('payroll_pit_confirm',{batchId,pit:amt,ccy:first.ccy,actor:actorName()}); }catch(e){}
+    closeModal();
+    toast(amt>0?`✓ Đã ghi nhận TNCN ${fmtFull(amt,first.ccy)} — phiếu hoàn thành`:'✓ Xác nhận không có TNCN — phiếu hoàn thành','good');
+    renderAll();
+    try{ renderApprovalList(); }catch(e){}
+  }, onFail:(rr)=>{ if(err) err.textContent='⚠ CHƯA lưu được: '+(rr.error||''); }});
 }
 /* v3.03.36: Section HẬU KIỂM phiếu hoàn ứng quỹ (do thuyền trưởng khai).
    Hiển thị trên tab Phê duyệt — số liệu ĐÃ ghi sổ, đây chỉ là theo dõi/đánh dấu đã kiểm. */
@@ -27913,6 +27964,8 @@ function approvalBulkApprove(){
       let ok=0, fail=0;
       const _failWhy=[];    // v3.06.73: lý do fail chi tiết (không gộp mơ hồ)
       const okRecords=[];   // v3.06.00: gom hồ sơ duyệt thành công để xuất PDF
+      const _doBulkApprove=()=>{
+      ok=0; fail=0; _failWhy.length=0; okRecords.length=0;
       records.forEach(c=>{
         const r=c.record;
         try{
@@ -27964,7 +28017,8 @@ function approvalBulkApprove(){
           } else { fail++; _failWhy.push((r.partner||r.desc||'').slice(0,22)+' (sai cấp: đang ở "'+(typeof WF_STATES!=='undefined'&&WF_STATES[wfStatus(r)]?WF_STATES[wfStatus(r)].label:wfStatus(r))+'")'); }
         } catch(e){ fail++; _failWhy.push('lỗi: '+(e&&e.message||'?')); }
       });
-      saveState();
+      };
+      commitMutation(_doBulkApprove, {action:'approval_bulk_approve', fields:['payables','receivables','transactions'], onOk:()=>{
       APPROVAL_SELECTED.clear();
       renderAll();
       if(fail>0){ try{ console.warn('[phê duyệt] '+fail+' phiếu fail:', _failWhy); }catch(e){} }
@@ -28001,6 +28055,7 @@ function approvalBulkApprove(){
           }
         }, 350);
       }
+      }});
     },
     false   // v3.02.27: KHÔNG phải hành động xóa → nút "Đồng ý" xanh, không phải "Xác nhận xóa" đỏ
   );
@@ -28019,6 +28074,8 @@ function approvalBulkReject(){
   const candidates=approvalGetCandidates();
   const records=candidates.filter(c=>APPROVAL_SELECTED.has(c.id));
   let ok=0, fail=0;
+  commitMutation(()=>{
+  ok=0; fail=0;
   records.forEach(c=>{
     try{
       // v3.06.09: từ chối LỆNH CHI ĐỢT → hủy lệnh (xóa khỏi paymentOrders), không động phiếu gốc.
@@ -28040,10 +28097,11 @@ function approvalBulkReject(){
       }
     } catch(e){ fail++; }
   });
-  saveState();
+  }, {action:'approval_bulk_reject', fields:['payables','receivables','transactions'], onOk:()=>{
   APPROVAL_SELECTED.clear();
   renderAll();
   toast(`Đã ${actionLabel.toLowerCase()} ${ok} bút toán${fail?`, ${fail} thất bại`:''}`);
+  }});
 }
 
 /* ============================================================
@@ -29431,6 +29489,7 @@ function sfContributeOne(arId){
   const amount=Math.round(net*rate/100);
   if(!(amount>0)){toast('Số tiền trích phải > 0','bad');return;}
   _sfInit();
+  commitMutation(()=>{
   SalaryFundService.addContribution({
     id:'SF-C-'+uid().slice(-6),
     sourceArId:arId,
@@ -29442,10 +29501,11 @@ function sfContributeOne(arId){
     note:`Từ HĐ ${r.invoiceNo||r.id} · ${r.partner||''}`,
     addedBy:actorName()
   });
+  }, {action:'salary_fund_contribute', fields:['salaryFund'], onOk:()=>{
   try{logAuditEvent('salary_fund_contribute',{arId,amount,ccy:r.ccy,rate});}catch(e){}
-  saveState();
   toast(`💰 Đã trích ${amount.toLocaleString()} ${r.ccy} vào quỹ`);
   renderSalaryFund();
+  }});
 }
 
 /* v2.66.0: Số dư đầu kỳ Quỹ tiền lương.
@@ -29472,6 +29532,7 @@ function sfSetOpeningBalance(){
   if(input===null) return;  // bấm Cancel
   const amount=Math.round(Number(String(input).replace(/[,\s]/g,''))||0);
   if(isNaN(amount)||amount<0){toast('Số tiền không hợp lệ','bad');return;}
+  commitMutation(()=>{
   // Xóa dòng số dư đầu kỳ cũ (nếu có) rồi tạo lại
   S.salaryFund.contributions=SalaryFundService.contributions().filter(c=>c.isOpening!==true); // xóa opening cũ
   if(amount>0){
@@ -29490,10 +29551,11 @@ function sfSetOpeningBalance(){
     touchRecord(rec);
     SalaryFundService.addContribution(rec);
   }
+  }, {action:'salary_fund_opening_balance', fields:['salaryFund'], onOk:()=>{
   try{logAuditEvent('salary_fund_opening_balance',{amount,ccy:curCcy});}catch(e){}
-  saveState();
   toast(amount>0?('Đã ghi số dư đầu kỳ: '+amount.toLocaleString()+' '+curCcy):'Đã xóa số dư đầu kỳ');
   renderSalaryFund();
+  }});
 }
 
 function _sfBulkContribute(){
@@ -29503,6 +29565,8 @@ function _sfBulkContribute(){
   if(!confirm(`Trích quỹ TL từ ${checked.length} bút toán DT đã chọn?`)) return;
   _sfInit();
   let count=0;
+  commitMutation(()=>{
+  count=0;
   checked.forEach(c=>{
     const arId=c.getAttribute('data-arid');
     const r=AccountingService.receivableById(arId);
@@ -29522,10 +29586,11 @@ function _sfBulkContribute(){
     });
     count++;
   });
+  }, {action:'sf_bulk_contribute', fields:['salaryFund'], onOk:()=>{
   try{logAuditEvent('salary_fund_bulk_contribute',{count});}catch(e){}
-  saveState();
   toast(`💰 Đã trích quỹ ${count} bút toán DT`);
   renderSalaryFund();
+  }});
 }
 
 /* Tab 2: Withdraw */
@@ -29564,7 +29629,7 @@ function sfAddWithdrawManual(){
   if(cats.length===0){
     cats.push('Phụ cấp dự án','Thưởng','Phúc lợi','Tham quan nghỉ mát','Bảo hiểm PVI care','Chi ngoài khác');
     S.salaryFund.config.withdrawCategories=cats;
-    saveState();
+    commitMutation(()=>{}, {action:'salary_fund_default_cats', fields:['salaryFund']});
   }
   const body=`
     <div style="font-size:13px;display:grid;grid-template-columns:1fr 1fr;gap:10px">
@@ -29607,17 +29672,19 @@ function _sfDoAddWithdrawManual(){
   if(!cat){err.textContent='Chọn danh mục';return;}
   if(!(amt>0)){err.textContent='Số tiền phải > 0';return;}
   _sfInit();
+  commitMutation(()=>{
   SalaryFundService.addWithdrawal({
     id:'SF-W-'+uid().slice(-6),
     sourceApId:null,
     category:cat, amount:amt, ccy, date, note,
     addedBy:actorName(), addedAt:new Date().toISOString()
   });
+  }, {action:'salary_fund_withdraw_manual', fields:['salaryFund'], onOk:()=>{
   try{logAuditEvent('salary_fund_withdraw_manual',{cat,amt,ccy});}catch(e){}
-  saveState();
   toast(`💸 Đã ghi chi ${amt.toLocaleString()} ${ccy} từ quỹ`);
   closeModal();
   renderSalaryFund();
+  }, onFail:(rr)=>{ if(err) err.textContent='⚠ CHƯA lưu được: '+(rr.error||''); }});
 }
 
 function sfAddWithdrawFromAP(){
@@ -29780,16 +29847,18 @@ function _sfUnlinkAp(apId, wdId){
   if(!confirm('Bỏ tích AP này khỏi Quỹ TL?\n\nKhoản chi quỹ tương ứng sẽ bị xóa, hoàn lại tồn quỹ.')) return;
   _sfInit();
   const before = SalaryFundService.withdrawals().length;
+  const _after = SalaryFundService.withdrawals().filter(w => w.id !== wdId).length;
+  if(before - _after === 0){ toast('Không tìm thấy bản ghi chi quỹ','bad'); return; }
+  commitMutation(()=>{
   S.salaryFund.withdrawals = SalaryFundService.withdrawals().filter(w => w.id !== wdId);
-  const removed = before - SalaryFundService.withdrawals().length;
-  if(removed === 0){ toast('Không tìm thấy bản ghi chi quỹ','bad'); return; }
+  }, {action:'salary_fund_unlink_ap', fields:['salaryFund'], onOk:()=>{
   try{logAuditEvent('salary_fund_unlink_ap', {apId, wdId});}catch(e){}
-  saveState();
   toast('↩ Đã bỏ tích — Hoàn quỹ thành công','good');
   closeModal();
   renderSalaryFund();
   // Refresh BCQT note
   try{ if(typeof renderBcqtSalaryFundNote === 'function') renderBcqtSalaryFundNote(); }catch(e){}
+  }, onFail:(rr)=>{ toast('⚠ CHƯA bỏ tích được — '+(rr.error||'')+'. Giữ nguyên.','bad'); }});
 }
 
 function _sfDoAddWithdrawFromAP(){
@@ -29798,6 +29867,8 @@ function _sfDoAddWithdrawFromAP(){
   if(checked.length===0){toast('Chưa chọn AP nào','bad');return;}
   _sfInit();
   let count=0;
+  commitMutation(()=>{
+  count=0;
   checked.forEach(c=>{
     const apId=c.getAttribute('data-apid');
     const p=AccountingService.payableById(apId);
@@ -29818,13 +29889,14 @@ function _sfDoAddWithdrawFromAP(){
     });
     count++;
   });
+  }, {action:'salary_fund_link_ap', fields:['salaryFund'], onOk:()=>{
   try{logAuditEvent('salary_fund_link_ap',{count});}catch(e){}
-  saveState();
   toast(`✓ Đã tích ${count} AP vào Quỹ TL`,'good');
   closeModal();
   renderSalaryFund();
   // v1.52.0: Refresh BCQT note nếu đang xem
   try{ if(typeof renderBcqtSalaryFundNote === 'function') renderBcqtSalaryFundNote(); }catch(e){}
+  }});
 }
 
 function sfDeleteWithdrawal(id){
@@ -29833,11 +29905,11 @@ function sfDeleteWithdrawal(id){
   const w=SalaryFundService.withdrawals().find(x=>x.id===id);
   if(!w) return;
   if(!confirm(`Xóa đợt chi "${w.category}" (${(+w.amount||0).toLocaleString()} ${w.ccy})?`)) return;
-  SalaryFundService.removeWithdrawal(id);
+  commitMutation(()=>{ SalaryFundService.removeWithdrawal(id); }, {action:'sf_withdraw_delete', fields:['salaryFund','deletedIds'], onOk:()=>{
   try{logAuditEvent('salary_fund_withdraw_delete',{id});}catch(e){}
-  saveState();
   toast('Đã xóa');
   renderSalaryFund();
+  }, onFail:(rr)=>{ toast('⚠ CHƯA xóa được — '+(rr.error||'')+'. Giữ nguyên.','bad'); }});
 }
 
 /* v2.99.22: Xóa đợt trích quỹ */
@@ -29848,11 +29920,11 @@ function sfDeleteContribution(id){
   if(!c) return;
   const note = c.note || (c.isOpening?'Khai báo số dư đầu kỳ':'Trích quỹ');
   if(!confirm(`Xóa đợt trích "${note}" (${(+c.amount||0).toLocaleString()} ${c.ccy})?\n\nLưu ý: Nếu trích này được tạo từ 1 khoản AR đã thu (sourceArId) → AR đó sẽ có thể trích lại sau khi xóa.`)) return;
-  SalaryFundService.removeContribution(id);
+  commitMutation(()=>{ SalaryFundService.removeContribution(id); }, {action:'sf_contribute_delete', fields:['salaryFund','deletedIds'], onOk:()=>{
   try{logAuditEvent('salary_fund_contribute_delete',{id, amount:c.amount, ccy:c.ccy});}catch(e){}
-  saveState();
   toast('Đã xóa');
   renderSalaryFund();
+  }, onFail:(rr)=>{ toast('⚠ CHƯA xóa được — '+(rr.error||'')+'. Giữ nguyên.','bad'); }});
 }
 
 /* v2.99.22: Sửa đợt trích quỹ */
@@ -29901,6 +29973,7 @@ function _sfSaveEditContribution(id){
   if(!date){err.textContent='Nhập ngày';return;}
   if(!(amt>0)){err.textContent='Số tiền phải > 0';return;}
   const oldAmt=c.amount, oldCcy=c.ccy, oldDate=(c.contributedAt||'').slice(0,10);
+  commitMutation(()=>{
   c.amount=amt;
   c.ccy=ccy;
   c.contributedAt=date+'T00:00:00.000Z';
@@ -29908,11 +29981,12 @@ function _sfSaveEditContribution(id){
   c.updatedAt=new Date().toISOString();
   c.updatedBy=actorName();
   try{ touchRecord(c); }catch(e){}
+  }, {action:'salary_fund_contribute_edit', fields:['salaryFund'], onOk:()=>{
   try{logAuditEvent('salary_fund_contribute_edit',{id, oldAmt, oldCcy, oldDate, newAmt:amt, newCcy:ccy, newDate:date});}catch(e){}
-  saveState();
   toast('Đã cập nhật đợt trích','good');
   closeModal();
   renderSalaryFund();
+  }, onFail:(rr)=>{ if(err) err.textContent='⚠ CHƯA lưu được: '+(rr.error||''); }});
 }
 
 /* v2.99.22: Sửa đợt chi quỹ */
@@ -29968,6 +30042,7 @@ function _sfSaveEditWithdrawal(id){
   if(!cat){err.textContent='Chọn danh mục';return;}
   if(!(amt>0)){err.textContent='Số tiền phải > 0';return;}
   const oldAmt=w.amount, oldCat=w.category, oldDate=w.date;
+  commitMutation(()=>{
   w.date=date;
   w.ccy=ccy;
   w.category=cat;
@@ -29976,11 +30051,12 @@ function _sfSaveEditWithdrawal(id){
   w.updatedAt=new Date().toISOString();
   w.updatedBy=actorName();
   try{ touchRecord(w); }catch(e){}
+  }, {action:'salary_fund_withdraw_edit', fields:['salaryFund'], onOk:()=>{
   try{logAuditEvent('salary_fund_withdraw_edit',{id, oldAmt, oldCat, oldDate, newAmt:amt, newCat:cat, newDate:date});}catch(e){}
-  saveState();
   toast('Đã cập nhật đợt chi','good');
   closeModal();
   renderSalaryFund();
+  }, onFail:(rr)=>{ if(err) err.textContent='⚠ CHƯA lưu được: '+(rr.error||''); }});
 }
 
 /* Tab 3: History */
@@ -30084,10 +30160,7 @@ function _sfAddCat(){
   if(!v){toast('Nhập tên','bad');return;}
   _sfInit();
   if(S.salaryFund.config.withdrawCategories.includes(v)){toast('Danh mục đã tồn tại','warn');return;}
-  S.salaryFund.config.withdrawCategories.push(v);
-  saveState();
-  inp.value='';
-  renderSalaryFund();
+  commitMutation(()=>{ S.salaryFund.config.withdrawCategories.push(v); }, {action:'salary_fund_addcat', fields:['salaryFund'], onOk:()=>{ inp.value=''; renderSalaryFund(); }});
 }
 
 function _sfRemoveCat(idx){
@@ -30100,9 +30173,7 @@ function _sfRemoveCat(idx){
   } else {
     if(!confirm(`Xóa danh mục "${cat}"?`)) return;
   }
-  S.salaryFund.config.withdrawCategories.splice(idx,1);
-  saveState();
-  renderSalaryFund();
+  commitMutation(()=>{ S.salaryFund.config.withdrawCategories.splice(idx,1); }, {action:'salary_fund_removecat', fields:['salaryFund'], onOk:()=>{ renderSalaryFund(); }});
 }
 
 function _sfSaveConfig(){
@@ -30110,9 +30181,7 @@ function _sfSaveConfig(){
   _sfInit();
   const rate=+document.getElementById('sf-cfg-rate').value;
   if(isNaN(rate)||rate<0||rate>100){toast('Tỷ lệ không hợp lệ (0-100)','bad');return;}
-  S.salaryFund.config.defaultRate=rate;
-  saveState();
-  toast('💾 Đã lưu cấu hình quỹ');
+  commitMutation(()=>{ S.salaryFund.config.defaultRate=rate; }, {action:'salary_fund_config', fields:['salaryFund'], onOk:()=>{ toast('💾 Đã lưu cấu hình quỹ'); }});
 }
 
 /* ============================================================
@@ -30242,8 +30311,13 @@ function saveCashFund(id){
   if(fundType==='VESSEL' && !vesselId){err.textContent='Quỹ loại Tàu phải chọn tàu đích danh';return;}
   if(fundType==='PROJECT' && !projectId){err.textContent='Quỹ loại Dự án phải chọn dự án O&M đích danh';return;}
   if(id){
+    const _f0=AccountingService.cashFunds().find(x=>x.id===id);
+    if(!_f0){err.textContent='Không tìm thấy quỹ';return;}
+  }
+  commitMutation(()=>{
+  if(id){
     const f=AccountingService.cashFunds().find(x=>x.id===id);
-    if(!f){err.textContent='Không tìm thấy quỹ';return;}
+    if(!f){ return; }
     f.name=name; f.fundType=fundType; f.ccy=ccy; f.isActive=isActive; f.note=note; f.vesselId=vesselId; f.projectId=projectId; f.needManagerApproval=needManagerApproval;
     if(typeof touchRecord==='function') touchRecord(f);
   } else {
@@ -30258,8 +30332,10 @@ function saveCashFund(id){
         sourceType:'manual',sourceId:null,recordedBy:actorName(),recordedAt:new Date().toISOString()});
     }
   }
-  saveState();closeModal();renderAll();
+  }, {action:'cash_fund_save', fields:['cashFunds','cashTxns'], onOk:()=>{
+  closeModal();renderAll();
   toast(id?'Đã lưu quỹ':'Đã tạo quỹ tiền mặt');
+  }, onFail:(rr)=>{ if(err) err.textContent='⚠ CHƯA lưu được: '+(rr.error||''); }});
 }
 
 function renderCashFunds(){
@@ -30713,6 +30789,7 @@ function cashImportWrite(){
     const me2=me, now2=nowIso;
     const batchId2='CASHIMP-'+importMonth.replace('-','')+'-'+Math.random().toString(36).slice(2,6);
     const byType2={}; allRows.forEach(r=>{ const c=r.expType||'OTHER'; (byType2[c]=byType2[c]||[]).push(r); });
+    commitMutation(()=>{
     Object.entries(byType2).forEach(([code,rows])=>{
       const sum=rows.reduce((s,r)=>s+r.amount,0);
       const et=(S.expenseTypes||[]).find(x=>x.code===code);
@@ -30723,11 +30800,15 @@ function cashImportWrite(){
         recordedBy:me2,recordedAt:now2});
     });
     f.balance=(+f.balance||0)-totalChi;
-    touchRecord(f); saveState(); renderAll();
+    touchRecord(f);
+    }, {action:'cash_import_money', fields:['cashFunds','cashTxns'], onOk:()=>{
     try{ logAuditEvent('cash_import_money',{fund:f.id,month:importMonth,lines:allRows.length,total:totalChi}); }catch(e){}
+    renderAll();
     _cashSaveImportFile(f, batchId2, importMonth);
     toast('✓ Đã ghi '+allRows.length+' khoản chi ('+totalChi.toLocaleString('vi-VN')+' '+ccy+') — trừ quỹ (không vào P&L)','good');
-    window._cashImportData=null; closeModal(); viewCashLedger(f.id); return;
+    window._cashImportData=null; closeModal(); viewCashLedger(f.id);
+    }, onFail:(rr)=>{ toast('⚠ CHƯA ghi được — '+(rr.error||'')+'. Giữ nguyên.','bad'); }});
+    return;
   }
   const _scopeLine = (f.fundType==='VESSEL'&&f.vesselId)
     ? ('• Chi phí gắn TÀU: '+((VesselService.vessels().find(x=>x.id===f.vesselId)||{}).name||'?')+' → vào P&L tàu\n')
@@ -30759,6 +30840,8 @@ function cashImportWrite(){
     _impSegment='OTHER';
   }
   let nPhieu=0;
+  const _doCashImport=()=>{
+  nPhieu=0;
   Object.entries(byType).forEach(([code, rows])=>{
     const net=rows.reduce((s,r)=>s+r.amount,0);  // không tách VAT (sổ quỹ ghi gross = net)
     const et=(S.expenseTypes||[]).find(x=>x.code===code);
@@ -30789,12 +30872,16 @@ function cashImportWrite(){
       sourceType:'cash_import',sourceId:batchId,recordedBy:me,recordedAt:nowIso});
   });
   f.balance=(+f.balance||0)-totalChi;
-  touchRecord(f); saveState(); renderAll();
+  touchRecord(f);
+  };
+  commitMutation(_doCashImport, {action:'cash_import_write', fields:['payables','cashFunds','cashTxns'], onOk:()=>{
+  renderAll();
   try{ logAuditEvent('cash_import_write',{fund:f.id,month:importMonth,lines:allRows.length,types:nPhieu,total:totalChi}); }catch(e){}
   _cashSaveImportFile(f, batchId, importMonth);
   toast('✓ Đã ghi '+nPhieu+' phiếu hoàn ứng ('+totalChi.toLocaleString('vi-VN')+' '+ccy+') vào P&L + trừ quỹ','good');
   window._cashImportData=null;
   closeModal(); viewCashLedger(f.id);
+  }, onFail:(rr)=>{ toast('⚠ CHƯA ghi được — '+(rr.error||'')+'. Giữ nguyên.','bad'); }});
 }
 
 /* v3.09.45 — Xem lại các file Excel sổ quỹ đã nhập (để đối chiếu). */
@@ -30857,7 +30944,11 @@ function saveCashTxn(fundId, txnId){
   if(amt<=0){ toast('Số tiền phải > 0','bad'); return; }
   const signOf=(d,a)=> d==='IN'? a : -a;
   if(txnId){
-    const t=AccountingService.cashTxns().find(x=>x.id===txnId); if(!t){toast('Không tìm thấy giao dịch','bad');return;}
+    const _t0=AccountingService.cashTxns().find(x=>x.id===txnId); if(!_t0){toast('Không tìm thấy giao dịch','bad');return;}
+  }
+  commitMutation(()=>{
+  if(txnId){
+    const t=AccountingService.cashTxns().find(x=>x.id===txnId); if(!t){ return; }
     // hoàn tác ảnh hưởng số dư cũ rồi áp số mới
     f.balance=(+f.balance||0) - signOf(t.direction, +t.amount||0) + signOf(dir, amt);
     Object.assign(t,{direction:dir,date,amount:amt,category:cat,desc,
@@ -30870,23 +30961,30 @@ function saveCashTxn(fundId, txnId){
     AccountingService.addCashTxn(t);
     f.balance=(+f.balance||0)+signOf(dir,amt);
   }
-  touchRecord(f); saveState(); renderAll();
+  touchRecord(f);
+  }, {action:'cash_txn_save', fields:['cashFunds','cashTxns'], onOk:()=>{
+  renderAll();
   toast(txnId?'Đã lưu giao dịch':'Đã thêm giao dịch');
   viewCashLedger(fundId);
+  }});
 }
 function deleteCashTxn(fundId, txnId){
   const f=AccountingService.cashFunds().find(x=>x.id===fundId); if(!f) return;
   const t=AccountingService.cashTxns().find(x=>x.id===txnId); if(!t){toast('Không tìm thấy','bad');return;}
   if(t.sourceType && t.sourceType!=='manual'){ toast('Dòng tự sinh từ nguồn khác — không xóa trực tiếp','bad'); return; }
   if(!confirm(`Xóa giao dịch ${t.direction==='IN'?'Thu':'Chi'} ${(+t.amount||0).toLocaleString('vi-VN')} ${t.ccy||f.ccy||'VND'} ngày ${t.date}?\nSố dư quỹ sẽ được điều chỉnh lại.`)) return;
+  commitMutation(()=>{
   // hoàn tác ảnh hưởng số dư
   f.balance=(+f.balance||0) - (t.direction==='IN'? (+t.amount||0) : -(+t.amount||0));
   try{ _recycleRecords('cashTxns', [t]); }catch(e){ console.warn('[recycle]', e&&e.message); }
   S.cashTxns=AccountingService.cashTxns().filter(x=>x.id!==txnId);
   try{ markDeleted(txnId,'cashTxns'); }catch(e){}  // v3.04.42: bia mộ để xóa lan máy khác
-  touchRecord(f); saveState(); renderAll();
+  touchRecord(f);
+  }, {action:'cash_txn_delete', fields:['cashFunds','cashTxns','deletedIds','_recycleBin'], onOk:()=>{
+  renderAll();
   toast('Đã xóa giao dịch');
   viewCashLedger(fundId);
+  }, onFail:(rr)=>{ toast('⚠ CHƯA xóa được — '+(rr.error||'')+'. Giữ nguyên.','bad'); }});
 }
 
 /* v3.02.38: PHIẾU HOÀN ỨNG (giảm quỹ = ghi chi phí vào P&L).
@@ -31070,13 +31168,18 @@ function saveCashClear(){
   if(st.mode==='refund'){
     const amt=Math.round((+st.refundAmount||0)*100)/100;
     if(amt<=0){ toast('Nhập số tiền hoàn > 0','bad'); return; }
+    commitMutation(()=>{
     f.balance=(+f.balance||0)-amt;
     AccountingService.addCashTxn({id:uid(),fundId:f.id,date:st.date,direction:'OUT',amount:amt,ccy,
       category:'Hoàn tiền',desc:st.refundNote||'Hoàn lại tiền mặt thừa',
       sourceType:'manual',recordedBy:me,recordedAt:nowIso});
-    touchRecord(f); saveState(); renderAll();
+    touchRecord(f);
+    }, {action:'cash_clear_refund', fields:['cashFunds','cashTxns'], onOk:()=>{
+    renderAll();
     toast(`Đã hoàn tiền ${fmtCcy(amt,ccy)} — trừ quỹ`,'good');
-    _cashClearState=null; viewCashLedger(f.id); return;
+    _cashClearState=null; viewCashLedger(f.id);
+    }, onFail:(rr)=>{ toast('⚠ CHƯA hoàn được — '+(rr.error||'')+'. Giữ nguyên.','bad'); }});
+    return;
   }
 
   // ===== CHẾ ĐỘ GHI CHI PHÍ =====
@@ -31086,6 +31189,8 @@ function saveCashClear(){
   if(!valid.length){ toast('Cần ít nhất 1 khoản có loại CP + số tiền','bad'); return; }
   let total=0; let n=0;
   const batchId='CASHCLEAR-'+Math.random().toString(36).slice(2,8);
+  const _doCashClear=()=>{
+  total=0; n=0;
   valid.forEach(l=>{
     const net=+l.amount||0; const vatPct=+l.vatPercent||0; const vat=Math.round(net*vatPct)/100; const gross=net+vat;
     total+=gross;
@@ -31129,10 +31234,7 @@ function saveCashClear(){
     AccountingService.addCashTxn({id:uid(),fundId:f.id,date:st.date,direction:'OUT',amount:total,ccy,
       category:'Hoàn ứng — CHỜ DUYỆT ('+n+' khoản)',desc:st.noteHeader||('Hoàn ứng chờ Manager duyệt — '+n+' khoản'),
       sourceType:'cash_clear_pending',sourceId:batchId,_pending:true,recordedBy:me,recordedAt:nowIso});
-    touchRecord(f); saveState(); renderAll();
-    toast(`Đã gửi ${n} khoản (${fmtCcy(total,ccy)}) — CHỜ Manager duyệt. Chưa trừ quỹ.`,'good');
-    _cashClearState=null;
-    viewCashLedger(f.id);
+    touchRecord(f);
     return;
   }
   // giảm quỹ + ghi 1 dòng sổ quỹ tổng
@@ -31140,10 +31242,18 @@ function saveCashClear(){
   AccountingService.addCashTxn({id:uid(),fundId:f.id,date:st.date,direction:'OUT',amount:total,ccy,
     category:'Hoàn ứng ('+n+' khoản)',desc:st.noteHeader||('Hoàn ứng — ghi '+n+' khoản chi phí'),
     sourceType:'cash_clear',sourceId:batchId,recordedBy:me,recordedAt:nowIso});
-  touchRecord(f); saveState(); renderAll();
-  toast(`Đã ghi ${n} khoản chi phí (${fmtCcy(total,ccy)}) + trừ quỹ`,'good');
+  touchRecord(f);
+  };
+  commitMutation(_doCashClear, {action:_needApproval?'cash_clear_pending':'cash_clear', fields:['payables','cashFunds','cashTxns'], onOk:()=>{
+  renderAll();
+  if(_needApproval){
+    toast(`Đã gửi ${n} khoản (${fmtCcy(total,ccy)}) — CHỜ Manager duyệt. Chưa trừ quỹ.`,'good');
+  } else {
+    toast(`Đã ghi ${n} khoản chi phí (${fmtCcy(total,ccy)}) + trừ quỹ`,'good');
+  }
   _cashClearState=null;
   viewCashLedger(f.id);
+  }, onFail:(rr)=>{ toast('⚠ CHƯA ghi được — '+(rr.error||'')+'. Giữ nguyên.','bad'); }});
 }
 
 /* v3.03.74: Manager DUYỆT phiếu hoàn ứng quỹ (quỹ cần duyệt) — trừ quỹ + ghi chi phí vào P&L. */
@@ -31169,6 +31279,7 @@ function approveFundClear(fundId, batchId){
   const f=info.fund, recs=info.recs, total=info.total, ccy=info.ccy;
   if(!confirm(`Duyệt phiếu hoàn ứng (${recs.length} khoản · ${fmtCcy(total,ccy)})?\n\nDuyệt xong sẽ TRỪ QUỸ + ghi chi phí vào P&L.`)) return;
   const me=actorName(); const nowIso=new Date().toISOString();
+  commitMutation(()=>{
   recs.forEach(r=>{
     r.status='approved'; r._fundPending=false;
     r.approvedL1By='(Hoàn ứng — duyệt: '+me+')'; r.approvedL1At=nowIso;
@@ -31186,10 +31297,13 @@ function approveFundClear(fundId, batchId){
     pend.approvedBy=me; pend.approvedAt=nowIso;
   }
   f.balance=(+f.balance||0)-total;
+  touchRecord(f);
+  }, {action:'fund_clear_approve', fields:['payables','cashFunds','cashTxns'], onOk:()=>{
   try{ logAuditEvent('fund_clear_approve',{fundId,batchId,total,ccy,by:me}); }catch(e){}
-  touchRecord(f); saveState(); renderAll();
+  renderAll();
   toast(`✓ Đã duyệt — trừ quỹ ${fmtCcy(total,ccy)} + ghi ${recs.length} khoản chi phí`,'good');
   viewCashLedger(fundId);
+  }, onFail:(rr)=>{ toast('⚠ CHƯA duyệt được — '+(rr.error||'')+'. Giữ nguyên.','bad'); }});
 }
 function rejectFundClear(fundId, batchId){
   if(!canApproveFund()){ toast('Chỉ Manager quỹ (hoặc admin) được từ chối','bad'); return; }
@@ -31197,14 +31311,17 @@ function rejectFundClear(fundId, batchId){
   if(!recs.length){ toast('Không tìm thấy phiếu chờ duyệt','bad'); return; }
   if(!confirm(`Từ chối & HỦY phiếu hoàn ứng này (${recs.length} khoản)? Phiếu sẽ bị xóa, quỹ giữ nguyên.`)) return;
   const ids=new Set(recs.map(r=>r.id));
+  commitMutation(()=>{
   S.payables=AccountingService.payables().filter(r=>!ids.has(r.id));
   try{ markDeleted([...ids],'payables'); }catch(e){}  // v3.04.42: bia mộ để xóa lan máy khác
   try{ const _rm=AccountingService.cashTxns().filter(t=>(t.sourceId===batchId && t._pending)).map(t=>t.id); if(_rm.length) markDeleted(_rm,'cashTxns'); }catch(e){}
   S.cashTxns=AccountingService.cashTxns().filter(t=>!(t.sourceId===batchId && t._pending));
+  }, {action:'fund_clear_reject', fields:['payables','cashTxns','deletedIds'], onOk:()=>{
   try{ logAuditEvent('fund_clear_reject',{fundId,batchId,n:recs.length,by:actorName()}); }catch(e){}
-  saveState(); renderAll();
+  renderAll();
   toast('Đã từ chối & hủy phiếu hoàn ứng','good');
   viewCashLedger(fundId);
+  }, onFail:(rr)=>{ toast('⚠ CHƯA hủy được — '+(rr.error||'')+'. Giữ nguyên.','bad'); }});
 }
 
 /* ============================================================
@@ -32726,6 +32843,11 @@ function saveCreditFacility(id){
   if(!limit || limit<=0){err.textContent='Nhập hạn mức tổng (>0)';return;}
   if(!S.creditFacilities) S.creditFacilities=[];
   if(id){
+    const _f0 = S.creditFacilities.find(x=>x.id===id);
+    if(!_f0){ err.textContent='Không tìm thấy hạn mức'; return; }
+  }
+  commitMutation(()=>{
+  if(id){
     const f = S.creditFacilities.find(x=>x.id===id);
     if(!f) return;
     Object.assign(f, {bankName:bank, year, limit, ccy, contractNo, startDate, expiryDate, collateral, note, isActive:active, updatedAt:new Date().toISOString()});
@@ -32737,10 +32859,11 @@ function saveCreditFacility(id){
       createdAt:new Date().toISOString(), createdBy:actorName()
     });
   }
-  saveState();
+  }, {action:'credit_facility_save', fields:['creditFacilities'], onOk:()=>{
   toast(id?'Đã cập nhật hạn mức':'Đã thêm hạn mức tín dụng');
   closeModal();
   renderBanking();
+  }, onFail:(rr)=>{ if(err) err.textContent='⚠ CHƯA lưu được: '+(rr.error||''); }});
 }
 
 function deleteCreditFacility(id){
@@ -32750,14 +32873,16 @@ function deleteCreditFacility(id){
   const linked = AccountingService.loans().filter(l=>l.facilityId===id).length;
   const linkedMsg = linked>0 ? `\n⚠ Có ${linked} khoản vay đang liên kết với hạn mức này (sẽ bị bỏ liên kết, không bị xóa).` : '';
   if(!confirm(`Xóa hạn mức "${f.bankName} ${f.year}" (${fmtCcy(f.limit, f.ccy)})?${linkedMsg}`)) return;
+  commitMutation(()=>{
   // Bỏ liên kết facilityId ở các loans (không xóa loan)
   AccountingService.loans().forEach(l=>{ if(l.facilityId===id) l.facilityId=null; });
   S.creditFacilities = (S.creditFacilities||[]).filter(x=>x.id!==id);
-  markDeleted(id);
-  saveState();
+  markDeleted(id,'creditFacilities');
+  }, {action:'credit_facility_delete', fields:['creditFacilities','loans','deletedIds'], onOk:()=>{
   toast('Đã xóa hạn mức');
   closeModal();
   renderBanking();
+  }, onFail:(rr)=>{ toast('⚠ CHƯA xóa được — '+(rr.error||'')+'. Giữ nguyên.','bad'); }});
 }
 
 function addLoan(){
@@ -32950,6 +33075,7 @@ function _saveLoan(id){
   }
   // Auto-compute endDate if not provided
   const finalEnd = end || (()=>{ const d=new Date(startEff); d.setMonth(d.getMonth()+term); return d.toISOString().slice(0,10); })();
+  commitMutation(()=>{
   let loan;
   if(id){
     loan=AccountingService.loans().find(x=>x.id===id);
@@ -32977,10 +33103,11 @@ function _saveLoan(id){
     loan.paymentSchedule=generateLoanSchedule(loan);
     AccountingService.addLoan(loan);
   }
-  saveState();
+  }, {action:'loan_save', fields:['loans'], onOk:()=>{
   toast(id?'Đã cập nhật vay (schedule tự tính lại)':'Đã thêm món vay + lịch trả nợ');
   closeModal();
   renderBanking();
+  }, onFail:(rr)=>{ if(err) err.textContent='⚠ CHƯA lưu được: '+(rr.error||''); }});
 }
 function deleteLoan(id){
   if(!isAdmin()){toast('Chỉ admin','bad');return;}
@@ -32992,17 +33119,19 @@ function deleteLoan(id){
     ? `\n⚠ Có ${linkedAPs.length} bút toán AP (lãi vay + phí NH) đã tạo tự động từ vay này — cũng sẽ bị xóa.`
     : '';
   if(!confirm(`Xóa món vay "${l.contractNo||l.bankName}"?\nLịch trả nợ và các kỳ đã đánh dấu trả cũng sẽ bị xóa.${linkedMsg}`))return;
+  commitMutation(()=>{
   S.loans=AccountingService.loans().filter(x=>x.id!==id);
-  markDeleted(id);
+  markDeleted(id,'loans');
   // Remove linked APs
   if(linkedAPs.length>0){
-    markDeleted(linkedAPs.map(p=>p.id));
+    markDeleted(linkedAPs.map(p=>p.id),'payables');
     S.payables=AccountingService.payables().filter(p=>p.linkedLoanId!==id);
   }
+  }, {action:'loan_delete', fields:['loans','payables','deletedIds'], onOk:()=>{
   try{logAuditEvent('loan_delete',{loanId:id,linkedApsRemoved:linkedAPs.length});}catch(e){}
-  saveState();
   toast(`Đã xóa món vay${linkedAPs.length>0?` + ${linkedAPs.length} AP liên kết`:''}`);
   renderBanking();
+  }, onFail:(rr)=>{ toast('⚠ CHƯA xóa được — '+(rr.error||'')+'. Giữ nguyên.','bad'); }});
 }
 
 /* View loan payment schedule */
@@ -33166,13 +33295,18 @@ function editScheduleDate(loanId, period){
   const prevDate = idx>0 ? (sched[idx-1].dueDate || l.startDate) : (l.startDate);
   const days = Math.max(1, Math.round((new Date(nv) - new Date(prevDate)) / 86400000));
   const interest = Math.round(bal * annualRate * days / 365);
+  commitMutation(()=>{
+  p.dueDate=nv;
   p.interest = interest;
   p.total = Math.round((+p.principal||0) + interest);
   p.dayBased = true;            // đánh dấu lãi tính theo ngày
   p._interestDays = days;
-  touchRecord(l); saveState(); renderAll();
+  touchRecord(l);
+  }, {action:'loan_schedule_date_edit', fields:['loans'], onOk:()=>{
+  renderAll();
   toast(`Kỳ ${period}: ${days} ngày → lãi ${interest.toLocaleString('vi-VN')} ${l.ccy}`,'good');
   viewLoanSchedule(loanId);
+  }, onFail:(rr)=>{ toast('⚠ CHƯA lưu được — '+(rr.error||'')+'. Giữ nguyên.','bad'); }});
 }
 
 /* v3.06.36 — ĐỔI PHƯƠNG ÁN / GIA HẠN giữa kỳ (chỉ khoản giải ngân nhiều đợt / day-based) */
@@ -33263,21 +33397,27 @@ function _saveReschedule(loanId){
   else if(action==='change_method'){ r.method=document.getElementById('rs-method').value; }
   else if(action==='change_rate'){ const rt=+document.getElementById('rs-rate').value; if(isNaN(rt)||rt<0){err.textContent='Lãi suất không hợp lệ';return;} r.rate=rt; }
   if(!l.reschedules) l.reschedules=[];
+  commitMutation(()=>{
   l.reschedules.push(r);
   _loanRebuildSchedule(l);
-  touchRecord(l); saveState();
+  touchRecord(l);
+  }, {action:'loan_reschedule_save', fields:['loans'], onOk:()=>{
   toast('✓ Đã thêm mốc — lịch trả tính lại','good');
   closeModal(); viewLoanSchedule(loanId);
+  }, onFail:(rr)=>{ if(err) err.textContent='⚠ CHƯA lưu được: '+(rr.error||''); }});
 }
 function loanDeleteReschedule(loanId, rsId){
   if(!canEditTreasury()){ toast('Chỉ Admin / Kế toán trưởng','bad'); return; }
   const l=AccountingService.loans().find(x=>x.id===loanId); if(!l) return;
   if(!confirm('Xóa mốc này? Lịch trả sẽ tính lại.')) return;
+  commitMutation(()=>{
   l.reschedules=(l.reschedules||[]).filter(x=>x.id!==rsId);
   _loanRebuildSchedule(l);
-  touchRecord(l); saveState();
+  touchRecord(l);
+  }, {action:'loan_reschedule_delete', fields:['loans'], onOk:()=>{
   toast('Đã xóa mốc — lịch trả tính lại','good');
   viewLoanSchedule(loanId);
+  }, onFail:(rr)=>{ toast('⚠ CHƯA xóa được — '+(rr.error||'')+'. Giữ nguyên.','bad'); }});
 }
 
 function loanAddCustomExpense(loanId){
@@ -33406,6 +33546,7 @@ function _lceSave(loanId){
     autoSource: m.src,
     linkedLoanId: l.id
   };
+  commitMutation(()=>{
   AccountingService.addPayable(apRecord);
   // Nếu là tất toán trước hạn → đóng khoản vay
   if(closeLoan){
@@ -33417,12 +33558,13 @@ function _lceSave(loanId){
       if(!p.paid){ p.paid=true; p.paidDate=date; p.paidNote='Tất toán trước hạn'; }
     });
   }
-  try{ logAuditEvent('loan_custom_expense', {loanId:l.id, type, amount, closeLoan}); }catch(e){}
   try{ touchRecord(l); }catch(e){ l.updatedAt=new Date().toISOString(); }  // v3.06.00: dấu sync
-  saveState();
+  }, {action:'loan_custom_expense', fields:['loans','payables'], onOk:()=>{
+  try{ logAuditEvent('loan_custom_expense', {loanId:l.id, type, amount, closeLoan}); }catch(e){}
   toast(`Đã ghi nhận ${amount.toLocaleString()} ${l.ccy} — AP đã tạo${closeLoan?', khoản vay ĐÓNG':''}`,'good');
   closeModal();
   renderAll();
+  }, onFail:(rr)=>{ if(err) err.textContent='⚠ CHƯA lưu được: '+(rr.error||''); }});
 }
 
 /* ===== PREPAY CRUD ===== */
@@ -33486,6 +33628,8 @@ function _loanDoPrepay(loanId){
   if(amount > remaining + 1){err.textContent=`Vượt dư nợ (${remaining.toLocaleString()})`;return;}
   // Add prepayment
   if(!l.prepayments) l.prepayments=[];
+  let feeApMsg = '';
+  commitMutation(()=>{
   l.prepayments.push({
     id:'PP-'+uid().slice(-6),
     date, amount, fee, mode, note,
@@ -33504,7 +33648,6 @@ function _loanDoPrepay(loanId){
   // Close loan if all paid (loanApplyPrepay handles this for full payoff)
   if((l.paymentSchedule||[]).every(x=>x.paid)) l.status='closed';
   // v1.34: Auto-create AP for prepay fee if fee > 0
-  let feeApMsg = '';
   if(fee > 0){
     const pp = l.prepayments[l.prepayments.length-1];
     const apId = _loanCreatePrepayFeeAP(l, pp);
@@ -33513,13 +33656,14 @@ function _loanDoPrepay(loanId){
       feeApMsg = ` · 🏦 Auto-tạo AP phí NH ${fee.toLocaleString()}`;
     }
   }
-  try{logAuditEvent('loan_prepay',{loanId,amount,mode,fee});}catch(e){}
   try{ touchRecord(l); }catch(e){ l.updatedAt=new Date().toISOString(); }  // v3.06.00: dấu sync
-  saveState();
+  }, {action:'loan_prepay', fields:['loans','payables'], onOk:()=>{
+  try{logAuditEvent('loan_prepay',{loanId,amount,mode,fee});}catch(e){}
   toast(`💵 Đã ghi nhận trả trước ${amount.toLocaleString()} ${l.ccy}${feeApMsg}`);
   closeModal();
   setTimeout(()=>viewLoanSchedule(loanId),100);
   renderBanking();
+  }, onFail:(rr)=>{ if(err) err.textContent='⚠ CHƯA lưu được: '+(rr.error||''); }});
 }
 
 function loanDeletePrepay(loanId, ppId){
@@ -33529,6 +33673,7 @@ function loanDeletePrepay(loanId, ppId){
   const pp=l.prepayments.find(x=>x.id===ppId);
   if(!pp)return;
   if(!confirm(`Xóa lần trả trước ${(+pp.amount||0).toLocaleString()} ${l.ccy} (${pp.date})?\nLịch trả nợ sẽ tính lại như chưa có lần này.${pp.linkedFeeApId?'\nAP phí NH đã tạo cũng sẽ bị xóa.':''}`))return;
+  commitMutation(()=>{
   // v1.34: Remove linked fee AP if any
   if(pp.linkedFeeApId){
     const idx = AccountingService.payables().findIndex(x=>x.id===pp.linkedFeeApId);
@@ -33545,12 +33690,13 @@ function loanDeletePrepay(loanId, ppId){
   // Update status
   if((l.paymentSchedule||[]).every(x=>x.paid)){l.status='closed';}
   else if(l.status==='closed'){l.status='active';}
-  try{logAuditEvent('loan_prepay_delete',{loanId,ppId});}catch(e){}
   try{ touchRecord(l); }catch(e){ l.updatedAt=new Date().toISOString(); }  // v3.06.00: dấu sync
-  saveState();
+  }, {action:'loan_prepay_delete', fields:['loans','payables','deletedIds'], onOk:()=>{
+  try{logAuditEvent('loan_prepay_delete',{loanId,ppId});}catch(e){}
   toast('Đã xóa lần trả trước');
   setTimeout(()=>viewLoanSchedule(loanId),100);
   renderBanking();
+  }, onFail:(rr)=>{ toast('⚠ CHƯA xóa được — '+(rr.error||'')+'. Giữ nguyên.','bad'); }});
 }
 /* ============================================================
    v3.03.42: TÍN DỤNG — AUTO TỰ THU theo từng NGÂN HÀNG (lender).
@@ -33607,13 +33753,15 @@ function _loanConfirmDue(loanId, period){
   const p=(l.paymentSchedule||[]).find(x=>x.period===period); if(!p){ toast('Không tìm thấy kỳ','bad'); return; }
   if(p.paid){ toast(`Kỳ ${period} đã trả rồi`,'warn'); return; }
   const interest=+p.interest||0;
-  _loanAutoApplyPeriod(l, p);  // giảm gốc + AP lãi (idempotent)
+  commitMutation(()=>{
+  _loanAutoApplyPeriod(l, p);  // giảm gốc + AP lãi (idempotent, thuần mutate)
   p.paidNote='Xác nhận tay (nhắc KT)';   // ghi đè note auto cho rõ nguồn
   delete p._autoCollected;
   try{ touchRecord(l); }catch(e){}
-  saveState();
+  }, {action:'loan_confirm_due', fields:['loans','payables'], onOk:()=>{
   toast(`✓ Đã ghi trả kỳ ${period}${interest>0?` · 💸 AP lãi vay ${interest.toLocaleString('vi-VN')} ${l.ccy}`:''}`,'good');
   renderBanking();
+  }, onFail:(rr)=>{ toast('⚠ CHƯA ghi được — '+(rr.error||'')+'. Giữ nguyên.','bad'); }});
 }
 
 function _loanLenderKey(l){ return (l.lender||l.bankName||'(Chưa rõ)').trim(); }
@@ -33627,16 +33775,18 @@ function toggleLoanAuto(lenderB64){
   try{ lender=decodeURIComponent(escape(atob(lenderB64))); }catch(e){ lender=lenderB64; }
   S.loanAutoCollect=S.loanAutoCollect||{};
   const now=!S.loanAutoCollect[lender];
+  commitMutation(()=>{
   S.loanAutoCollect[lender]=now;
+  }, {action:'loan_auto_toggle', fields:['loanAutoCollect'], onOk:()=>{
   try{ logAuditEvent('loan_auto_toggle',{lender, on:now, actor:actorName()}); }catch(e){}
-  saveState();
   if(now){
-    const n=_loanAutoRunDue(lender);  // chạy ngay khi bật
+    const n=_loanAutoRunDue(lender);  // chạy ngay khi bật (tự commit riêng)
     toast(n>0 ? `🔄 Bật auto tự thu cho ${lender} — đã tự ghi ${n} kỳ tới hạn` : `🔄 Đã bật auto tự thu cho ${lender}`,'good');
   } else {
     toast(`⏸ Đã tắt auto tự thu cho ${lender}`,'warn');
   }
   renderBanking();
+  }, onFail:(rr)=>{ toast('⚠ CHƯA lưu được — '+(rr.error||'')+'. Giữ nguyên.','bad'); }});
 }
 /* Chạy auto: tự ghi mọi kỳ tới hạn (dueDate <= hôm nay) chưa trả, cho các NH đang bật auto.
    lenderFilter (tùy chọn): chỉ chạy cho 1 NH. Trả về số kỳ đã tự ghi. */
@@ -33644,6 +33794,8 @@ function _loanAutoRunDue(lenderFilter){
   if(!canEditTreasury()) return 0;          // chỉ Admin/KTT mới có quyền ghi sổ
   const today=todayISO();
   let count=0; const touched=[];
+  const _run=()=>{
+  count=0; touched.length=0;
   AccountingService.loans().forEach(l=>{
     if(l.status==='closed') return;
     const lender=_loanLenderKey(l);
@@ -33652,13 +33804,17 @@ function _loanAutoRunDue(lenderFilter){
     (l.paymentSchedule||[]).forEach(p=>{
       if(p.paid) return;
       if(!p.dueDate || p.dueDate>today) return;   // chỉ kỳ ĐÃ tới hạn
-      // ghi sổ kỳ này (giảm gốc + AP lãi). _loanMarkPaid tự chặn trùng + cập nhật trạng thái.
+      // ghi sổ kỳ này (giảm gốc + AP lãi). _loanAutoApplyPeriod thuần mutate (chặn trùng + cập nhật trạng thái).
       try{
         _loanAutoApplyPeriod(l, p);
         count++; touched.push(`${lender}·${l.contractNo||l.id.slice(-6)}·K${p.period}`);
       }catch(e){ console.warn('[loan-auto]',e); }
     });
   });
+  };
+  // backup TRƯỚC vòng lặp — toàn bộ kỳ tới hạn ghi trong 1 transaction (all-or-nothing).
+  const r=commitTransaction(_run, {action:'loan_auto_collect', fields:['loans','payables']});
+  // commitTransaction async → nhưng caller cũ dùng đồng bộ count; trả count sau khi mutate (đã chạy trong _run đồng bộ).
   if(count>0){
     try{ logAuditEvent('loan_auto_collect',{count, items:touched, actor:'(auto)'}); }catch(e){}
   }
@@ -33667,6 +33823,7 @@ function _loanAutoRunDue(lenderFilter){
 /* Ghi 1 kỳ theo cơ chế auto — KHÔNG mở lại modal/toast như _loanMarkPaid (tránh spam khi chạy hàng loạt).
    Dùng đúng logic: paid=true + tạo AP chi phí lãi (idempotent), cập nhật trạng thái khoản vay. */
 function _loanAutoApplyPeriod(l, p){
+  // THUẦN mutate state — KHÔNG tự saveState. Caller chịu trách nhiệm commit (commitTransaction/commitMutation).
   if(p.paid) return;
   p.paid=true;
   p.paidDate=p.dueDate || todayISO();
@@ -33681,7 +33838,6 @@ function _loanAutoApplyPeriod(l, p){
   }
   if((l.paymentSchedule||[]).every(x=>x.paid)) l.status='closed';
   try{ touchRecord(l); }catch(e){ l.updatedAt=new Date().toISOString(); }
-  saveState();
 }
 
 function _loanMarkPaid(loanId, period){
@@ -33696,12 +33852,13 @@ function _loanMarkPaid(loanId, period){
     viewLoanSchedule(loanId);
     return;
   }
+  let apCreated = '';
+  commitMutation(()=>{
   p.paid=true;
   p.paidDate=todayISO();
   // v1.34: AUTO-CREATE AP record for interest (if interest > 0)
   // (Principal is just debt reduction, not an expense)
   const interest = +p.interest||0;
-  let apCreated = '';
   if(interest > 0){
     const apId = _loanCreateInterestAP(l, p);
     if(apId){
@@ -33711,13 +33868,13 @@ function _loanMarkPaid(loanId, period){
   }
   // Update loan status if all paid
   if((l.paymentSchedule||[]).every(x=>x.paid)) l.status='closed';
-  // v2.99.83: BẮT BUỘC bump updatedAt — nếu không, merge khi pull (2.99.81) coi bản local
-  // "không mới hơn" cloud → tie-break giữ cloud → MẤT cái tích trả nợ vừa làm.
+  // v2.99.83: BẮT BUỘC bump updatedAt
   try{ touchRecord(l); }catch(e){ l.updatedAt=new Date().toISOString(); }
-  saveState();
-  try{ if(typeof renderBanking==='function') renderBanking(); }catch(e){}  // v2.99.80: refresh thẻ tóm tắt (đã trả gốc/còn nợ)
+  }, {action:'loan_mark_paid', fields:['loans','payables'], onOk:()=>{
+  try{ if(typeof renderBanking==='function') renderBanking(); }catch(e){}  // v2.99.80: refresh thẻ tóm tắt
   toast(`Đã đánh dấu trả kỳ ${period}${apCreated}`);
   viewLoanSchedule(loanId);  // refresh modal
+  }, onFail:(rr)=>{ toast('⚠ CHƯA lưu được — '+(rr.error||'')+'. Giữ nguyên.','bad'); }});
 }
 function _loanUnmarkPaid(loanId, period){
   if(!canEditTreasury()){toast('Chỉ Admin / Kế toán trưởng','bad');return;}
@@ -33725,12 +33882,13 @@ function _loanUnmarkPaid(loanId, period){
   if(!l)return;
   const p=(l.paymentSchedule||[]).find(x=>x.period===period);
   if(!p)return;
+  let apRemoved='';
+  commitMutation(()=>{
   p.paid=false;
   p.paidDate=null;
   delete p._autoCollected;        // v3.03.42: gỡ cờ auto khi bỏ đánh dấu
   if(p.paidNote && /Auto tự thu|Xác nhận tay/.test(p.paidNote)) delete p.paidNote;
   // v1.34: Remove linked AP record (if any)
-  let apRemoved='';
   if(p.linkedApId){
     const idx = AccountingService.payables().findIndex(x=>x.id===p.linkedApId);
     if(idx>=0){
@@ -33742,10 +33900,11 @@ function _loanUnmarkPaid(loanId, period){
   }
   if(l.status==='closed') l.status='active';
   try{ touchRecord(l); }catch(e){ l.updatedAt=new Date().toISOString(); }  // v2.99.83: để merge giữ thay đổi
-  saveState();
+  }, {action:'loan_unmark_paid', fields:['loans','payables','deletedIds'], onOk:()=>{
   try{ if(typeof renderBanking==='function') renderBanking(); }catch(e){}  // v2.99.80: refresh thẻ tóm tắt
   toast(`Đã bỏ đánh dấu kỳ ${period}${apRemoved}`);
   viewLoanSchedule(loanId);
+  }, onFail:(rr)=>{ toast('⚠ CHƯA lưu được — '+(rr.error||'')+'. Giữ nguyên.','bad'); }});
 }
 
 /* v1.34: Auto-create AP record for loan interest payment.
@@ -34464,15 +34623,15 @@ function _batchSubmitAll(kind,batchId){
   const list=kind==='ap'?'payables':'receivables';
   const recs=(S[list]||[]).filter(r=>r.batchId===batchId && (wfStatus(r)==='draft'||wfStatus(r)==='rejected'));
   if(!recs.length){toast('Không có dòng nào để gửi duyệt','warn');return;}
-  recs.forEach(r=>{ try{ wfSubmit(r,kind); }catch(e){} });
-  saveState();renderAll();closeModal();
-  toast(`Đã gửi duyệt cả phiếu (${recs.length} dòng)`,'good');
+  commitMutation(()=>{ recs.forEach(r=>{ try{ wfSubmit(r,kind); }catch(e){} }); }, {action:'batch_submit', fields:[list], onOk:()=>{ renderAll();closeModal(); toast(`Đã gửi duyệt cả phiếu (${recs.length} dòng)`,'good'); }});
 }
 /* Duyệt cả phiếu theo cấp */
 function _batchApproveAll(kind,batchId,level){
   const list=kind==='ap'?'payables':'receivables';
   const recs=(S[list]||[]).filter(r=>r.batchId===batchId);
   let ok=0,fail=0;
+  commitMutation(()=>{
+  ok=0;fail=0;
   recs.forEach(r=>{
     try{
       if(level==='acc' && wfStatus(r)==='pending_acc'){ wfCheckAcc(r)?ok++:fail++; }
@@ -34480,8 +34639,7 @@ function _batchApproveAll(kind,batchId,level){
       else if(level==='l2' && wfStatus(r)==='pending_l2'){ wfApproveL2(r)?ok++:fail++; }
     }catch(e){ fail++; }
   });
-  saveState();renderAll();closeModal();
-  toast(`Đã duyệt ${ok} dòng cả phiếu${fail?` · ${fail} lỗi`:''}`,ok?'good':'warn');
+  }, {action:'batch_approve', fields:[list], onOk:()=>{ renderAll();closeModal(); toast(`Đã duyệt ${ok} dòng cả phiếu${fail?` · ${fail} lỗi`:''}`,ok?'good':'warn'); }});
 }
 /* Từ chối cả phiếu */
 function _batchRejectAll(kind,batchId){
@@ -34490,9 +34648,7 @@ function _batchRejectAll(kind,batchId){
   const list=kind==='ap'?'payables':'receivables';
   const recs=(S[list]||[]).filter(r=>r.batchId===batchId && ['pending_acc','pending_l1','pending_l2'].includes(wfStatus(r)));
   let n=0;
-  recs.forEach(r=>{ try{ if(wfReject(r,reason)) n++; }catch(e){} });
-  saveState();renderAll();closeModal();
-  toast(`Đã từ chối ${n} dòng cả phiếu`,'warn');
+  commitMutation(()=>{ n=0; recs.forEach(r=>{ try{ if(wfReject(r,reason)) n++; }catch(e){} }); }, {action:'batch_reject', fields:[list], onOk:()=>{ renderAll();closeModal(); toast(`Đã từ chối ${n} dòng cả phiếu`,'warn'); }});
 }
 
 /* v3.07.34: XÓA CẢ PHIẾU nháp nhiều dòng — xóa mọi dòng cùng batchId mà NV được phép xóa. */
@@ -34514,10 +34670,7 @@ function _batchDeleteAll(kind,batchId){
       n++;
     });
     const delIds=new Set(recs.map(x=>x.id));
-    S[list]=S[list].filter(x=>!delIds.has(x.id));
-    recs.forEach(x=>markDeleted(x.id));
-    saveState(); closeModal(); renderAll();
-    toast(`Đã xóa cả phiếu (${n} dòng)`,'good');
+    commitMutation(()=>{ S[list]=S[list].filter(x=>!delIds.has(x.id)); recs.forEach(x=>markDeleted(x.id, list)); }, {action:kind==='ap'?'delete_ap':'delete_ar', fields:[list,'deletedIds'], onOk:()=>{ closeModal(); renderAll(); toast(`Đã xóa cả phiếu (${n} dòng)`,'good'); }, onFail:(rr)=>{ toast('⚠ CHƯA xóa được — '+(rr.error||'')+'. Giữ nguyên.','bad'); }});
   }, true, `🗑 Xóa ${recs.length} dòng`);
 }
 
@@ -35006,12 +35159,13 @@ function arSubmit(kind,id){
   if(!wfCanEdit(r)){toast('Không thể gửi duyệt từ trạng thái này','bad');return;}
   // v3.07.09: 1 PHIẾU = gửi duyệt CẢ PHIẾU (mọi dòng cùng batchId còn ở trạng thái sửa được)
   const sibs = r.batchId ? S[list].filter(x=>x.batchId===r.batchId && wfCanEdit(x)) : [r];
-  sibs.forEach(x=>{ try{ wfSubmit(x, kind); }catch(e){} });
-  saveState();renderAll();
-  try{ logAuditEvent('submit_for_approval', {kind, id:r.id, partner:r.partner||'', amount:r.amountGross||r.amount||0, ccy:r.ccy||'', actor:actorName(), lines:sibs.length}); }catch(e){}
-  const fastTracked = (kind==='ar' && (isAdmin() || canApproveL1()));
-  const _multi = sibs.length>1 ? ` (cả phiếu ${sibs.length} dòng)` : '';
-  toast(fastTracked ? '⚡ Fast-track AR — gửi thẳng L2 (admin/BOD duyệt)'+_multi : 'Đã gửi → Chờ KT viên kiểm'+_multi);
+  commitMutation(()=>{ sibs.forEach(x=>{ try{ wfSubmit(x, kind); }catch(e){} }); }, {action:'ar_submit', fields:[list], onOk:()=>{
+    renderAll();
+    try{ logAuditEvent('submit_for_approval', {kind, id:r.id, partner:r.partner||'', amount:r.amountGross||r.amount||0, ccy:r.ccy||'', actor:actorName(), lines:sibs.length}); }catch(e){}
+    const fastTracked = (kind==='ar' && (isAdmin() || canApproveL1()));
+    const _multi = sibs.length>1 ? ` (cả phiếu ${sibs.length} dòng)` : '';
+    toast(fastTracked ? '⚡ Fast-track AR — gửi thẳng L2 (admin/BOD duyệt)'+_multi : 'Đã gửi → Chờ KT viên kiểm'+_multi);
+  }});
 }
 /* v3.07.09: áp 1 thao tác workflow cho CẢ PHIẾU (mọi dòng cùng batchId ở đúng cấp).
    1 phiếu = 1 lần duyệt cho tất cả dòng → không để lệch trạng thái. */
@@ -35027,26 +35181,27 @@ function arApproveL1(kind,id){
   const list=kind==='ap'?'payables':'receivables';
   const r=S[list].find(x=>x.id===id);if(!r)return;
   if(wfStatus(r)!=='pending_l1'){toast('Không ở trạng thái Trình ký','bad');return;}
-  const res=_applyWfBatch(kind,id,'pending_l1',wfApproveL1);
-  if(res.n>0){saveState();renderAll();toast('Đã duyệt L1 (trình ký)'+(res.multi?` cả phiếu (${res.n} dòng)`:'')+' — chuyển sang Chờ thanh toán (L2)');}
+  let res;
+  commitMutation(()=>{ res=_applyWfBatch(kind,id,'pending_l1',wfApproveL1); }, {action:'ar_approve_l1', fields:[list], onOk:()=>{ if(res&&res.n>0){ renderAll();toast('Đã duyệt L1 (trình ký)'+(res.multi?` cả phiếu (${res.n} dòng)`:'')+' — chuyển sang Chờ thanh toán (L2)'); } }});
 }
 /* v1.99.0: KT viên kiểm chứng từ xong → Trình ký lên L1 */
 function arKtCheck(kind,id){
   const list=kind==='ap'?'payables':'receivables';
   const r=S[list].find(x=>x.id===id);if(!r)return;
   if(wfStatus(r)!=='pending_acc'){toast('Hóa đơn không ở trạng thái Chờ KT kiểm','bad');return;}
-  const res=_applyWfBatch(kind,id,'pending_acc',wfCheckAcc);
-  if(res.n>0){saveState();renderAll();
+  let res;
+  commitMutation(()=>{ res=_applyWfBatch(kind,id,'pending_acc',wfCheckAcc); }, {action:'ar_kt_check', fields:[list], onOk:()=>{ if(res&&res.n>0){
     try{ logAuditEvent('kt_check',{kind,id:r.id,partner:r.partner||'',amount:r.amountGross||r.amount||0,ccy:r.ccy||'',actor:actorName()}); }catch(e){}
-    toast('Đã kiểm chứng từ'+(res.multi?` cả phiếu (${res.n} dòng)`:'')+' — Trình ký lên cấp L1 (KTT duyệt)');}
+    renderAll();
+    toast('Đã kiểm chứng từ'+(res.multi?` cả phiếu (${res.n} dòng)`:'')+' — Trình ký lên cấp L1 (KTT duyệt)'); } }});
 }
 function arApproveL2(kind,id){
   const list=kind==='ap'?'payables':'receivables';
   const r=S[list].find(x=>x.id===id);if(!r)return;
   if(!guardAction('approve_l2', {kind, id:r.id, partner:r.partner||'', desc:r.desc||r.noteHeader||'', amount:r.amountGross||r.amount||0, ccy:r.ccy||''})) return;
   if(wfStatus(r)!=='pending_l2'){toast('Không ở trạng thái Chờ thanh toán','bad');return;}
-  const res=_applyWfBatch(kind,id,'pending_l2',wfApproveL2);
-  if(res.n>0){saveState();renderAll();toast('Đã duyệt L2'+(res.multi?` cả phiếu (${res.n} dòng)`:'')+' — sẵn sàng ghi nhận thanh toán thực tế, đã vào báo cáo BI');}
+  let res;
+  commitMutation(()=>{ res=_applyWfBatch(kind,id,'pending_l2',wfApproveL2); }, {action:'ar_approve_l2', fields:[list], onOk:()=>{ if(res&&res.n>0){ renderAll();toast('Đã duyệt L2'+(res.multi?` cả phiếu (${res.n} dòng)`:'')+' — sẵn sàng ghi nhận thanh toán thực tế, đã vào báo cáo BI'); } }});
 }
 function arReject(kind,id){
   const list=kind==='ap'?'payables':'receivables';
@@ -35059,14 +35214,15 @@ function arReject(kind,id){
   const reason=prompt(nMulti?`Lý do từ chối (áp cho CẢ PHIẾU — ${sibs.length} dòng):`:'Lý do từ chối:','');
   if(reason===null) return;
   if(!reason.trim()){toast('Phải nhập lý do','bad');return;}
-  let n=0; sibs.forEach(x=>{ try{ if(wfReject(x,reason.trim())) n++; }catch(e){} });
-  if(n>0){saveState();renderAll();toast('Đã trả về '+(r._rejectBackTo==='L1'?'cấp duyệt L1':r._rejectBackTo==='KT'?'KT kiểm':'NV nhập')+(nMulti?` để xử lý lại (cả phiếu ${n} dòng)`:' để xử lý lại'),'warn');}
+  let n=0;
+  commitMutation(()=>{ n=0; sibs.forEach(x=>{ try{ if(wfReject(x,reason.trim())) n++; }catch(e){} }); }, {action:'ar_reject', fields:[list], onOk:()=>{ if(n>0){ renderAll();toast('Đã trả về '+(r._rejectBackTo==='L1'?'cấp duyệt L1':r._rejectBackTo==='KT'?'KT kiểm':'NV nhập')+(nMulti?` để xử lý lại (cả phiếu ${n} dòng)`:' để xử lý lại'),'warn'); } }});
 }
 function arReturn(kind,id){
   const list=kind==='ap'?'payables':'receivables';
   const r=S[list].find(x=>x.id===id);if(!r)return;
   if(!confirm('Trả về trạng thái Nháp để sửa? (Mất 2 chữ ký duyệt L1+L2)'))return;
-  if(wfReturnToDraft(r)){saveState();renderAll();toast('Đã trả về Nháp');}
+  let _ok=false;
+  commitMutation(()=>{ _ok=wfReturnToDraft(r); }, {action:'ar_return_draft', fields:[list], onOk:()=>{ if(_ok){ renderAll();toast('Đã trả về Nháp'); } }});
 }
 
 /* v2.99.70: KT GÁN DỰ ÁN/TÀU khi kiểm hồ sơ (NV quên gán).
@@ -35603,6 +35759,7 @@ function openOpTxDocsAfterLock(txId){
 function saveOpDocsOnly(){
   const t=VesselService.opTransactions().find(x=>x.id===window._opDalTxId);
   if(!t){ toast('Không tìm thấy bút toán','bad'); return; }
+  commitMutation(()=>{
   const exEl=document.getElementById('opdal-explain-note');
   if(exEl){
     const v=exEl.value.trim();
@@ -35610,11 +35767,13 @@ function saveOpDocsOnly(){
       t._explainNote=v; t._explainBy=actorName(); t._explainAt=new Date().toISOString();
     } else if(!v){ t._explainNote=''; }
   }
-  touchRecord(t); saveState();
+  touchRecord(t);
+  }, {action:'op_docs_update', fields:['opTransactions'], onOk:()=>{
   try{ logAuditEvent('op_docs_update',{txId:t.id, vesselId:t.vesselId, attachments:(t.attachments||[]).length}); }catch(e){}
   toast('✓ Đã cập nhật hồ sơ (chứng từ/giải trình)','good');
   closeModal();
   try{ renderAll(); }catch(e){}
+  }});
 }
 function _opDocAfterLockRender(){
   const t=VesselService.opTransactions().find(x=>x.id===window._opDalTxId);
@@ -35639,7 +35798,7 @@ function _opDocAfterLockRender(){
 }
 function opDocAfterLockType(i,val){
   const t=VesselService.opTransactions().find(x=>x.id===window._opDalTxId);
-  if(t&&t.attachments&&t.attachments[i]){ t.attachments[i].docType=val; touchRecord(t); saveState(); }
+  if(t&&t.attachments&&t.attachments[i]){ commitMutation(()=>{ t.attachments[i].docType=val; touchRecord(t); }, {action:'op_doc_type', fields:['opTransactions']}); }
 }
 function opDocAfterLockRemove(i){
   const t=VesselService.opTransactions().find(x=>x.id===window._opDalTxId);
@@ -35650,9 +35809,10 @@ function opDocAfterLockRemove(i){
     toast('🔒 Chứng từ này có trước khi khóa — chỉ Admin được gỡ','bad'); return;
   }
   if(f&&f.id){ try{ _trashDriveFiles([f.id]); }catch(e){} }
-  t.attachments.splice(i,1); touchRecord(t); saveState();
+  commitMutation(()=>{ t.attachments.splice(i,1); touchRecord(t); }, {action:'op_doc_remove_afterlock', fields:['opTransactions'], onOk:()=>{
   try{ logAuditEvent('op_doc_remove_afterlock',{txId:t.id, vesselId:t.vesselId, period:String(t.date).slice(0,7)}); }catch(e){}
   _opDocAfterLockRender();
+  }});
 }
 async function opDocAfterLockUpload(inputEl){
   const files=inputEl&&inputEl.files; if(!files||!files.length) return;
@@ -35674,8 +35834,9 @@ async function opDocAfterLockUpload(inputEl){
       const data=await resp.json();
       if(!data||!data.ok){ throw new Error((data&&data.error)||'upload lỗi'); }
       const dt=(document.getElementById('opdal-type')||{}).value||'';
-      t.attachments.push({ id:data.file.id, name:data.file.name, url:data.file.url, size:data.file.size, mimeType:data.file.mimeType, uploadedAt:data.file.uploadedAt, uploadedBy:actorName(), docType:dt, _afterLock:locked||false });
-      touchRecord(t); saveState();
+      const _att={ id:data.file.id, name:data.file.name, url:data.file.url, size:data.file.size, mimeType:data.file.mimeType, uploadedAt:data.file.uploadedAt, uploadedBy:actorName(), docType:dt, _afterLock:locked||false };
+      const _r=await commitTransaction(()=>{ t.attachments.push(_att); touchRecord(t); }, {action:'op_doc_add_afterlock', fields:['opTransactions']});
+      if(!_r.success){ if(st){ st.style.color='var(--bad)'; st.textContent='✗ CHƯA lưu được chứng từ — '+(_r.error||''); } toast('⚠ Tải lên cloud OK nhưng CHƯA lưu được vào máy — '+(_r.error||''),'bad'); continue; }
       try{ logAuditEvent('op_doc_add_afterlock',{txId:t.id, vesselId:t.vesselId, period:String(t.date).slice(0,7), locked:locked, fileName:data.file.name}); }catch(e){}
       if(st){ st.style.color='var(--good)'; st.textContent='✓ Đã tải '+t.attachments.length+' chứng từ'; }
       _opDocAfterLockRender();
@@ -35689,13 +35850,16 @@ function opMarkContractAdvance(txId){
   const t=VesselService.opTransactions().find(x=>x.id===txId);
   if(!t){ toast('Không tìm thấy bút toán','bad'); return; }
   if(t.type!=='OUT'){ toast('Chỉ áp dụng cho bút toán CHI hộ','bad'); return; }
+  commitMutation(()=>{
   t._contractAdvance=true;
   if(t._contractValue0==null) t._contractValue0=+t.amount||0;   // chốt giá trị HĐ gốc
   if(!Array.isArray(t._installments)) t._installments=[];
-  touchRecord(t); saveState();
+  touchRecord(t);
+  }, {action:'op_contract_mark', fields:['opTransactions'], onOk:()=>{
   try{ logAuditEvent('op_contract_mark',{txId:t.id, vesselId:t.vesselId, value:t._contractValue0}); }catch(e){}
   toast('📑 Đã đánh dấu HĐ trả trước (giá trị HĐ '+fmt(t._contractValue0,t.ccy||'USD')+')','good');
   try{ openOpTxDocsAfterLock(txId); }catch(e){}
+  }});
 }
 /* v3.06.00: thêm 1 đợt thanh toán (chuyển NCC) — chỉ THEO DÕI, không tạo bút toán số dư
    (giá trị HĐ đã trừ đủ vào số dư khi tạo). */
@@ -35725,13 +35889,16 @@ function opSaveInstallment(txId){
   const date=((document.getElementById('oin-date')||{}).value||todayISO());
   const note=((document.getElementById('oin-note')||{}).value||'').trim();
   if(!Array.isArray(t._installments)) t._installments=[];
+  commitMutation(()=>{
   t._installments.push({ amount:amt, date, note, recordedBy:actorName(), recordedAt:new Date().toISOString() });
-  touchRecord(t); saveState();
+  touchRecord(t);
+  }, {action:'op_contract_installment', fields:['opTransactions'], onOk:()=>{
   try{ logAuditEvent('op_contract_installment',{txId:t.id, amount:amt, date}); }catch(e){}
   const pr=contractProgress(t);
   if(pr.overpaid>0) toast('⚠ Tổng đã chuyển vượt giá trị HĐ '+fmt(pr.overpaid,t.ccy||'USD'),'warn');
   else toast('✓ Đã ghi đợt '+fmt(amt,t.ccy||'USD'),'good');
   try{ openOpTxDocsAfterLock(txId); }catch(e){}
+  }});
 }
 function _arEditorBody(r,isPayable){
   const segOpts=Object.entries(SEGMENTS).map(([k,v])=>`<option value="${k}" ${k===(r.segment||'')?'selected':''}>${esc(v.name)}</option>`).join('');
@@ -36876,6 +37043,7 @@ function saveArAndIssue(id){
   if(!r){return;}
   if(wfStatus(r)!=='approved'){
     const nowIso=new Date().toISOString();
+    commitMutation(()=>{
     r.status='approved';
     r.submittedBy=r.submittedBy||actorName();
     r.submittedAt=r.submittedAt||nowIso;
@@ -36898,8 +37066,10 @@ function saveArAndIssue(id){
       try{ const fee=VesselService.opMgmtFees().find(f=>f.arId===r.id || f.id===r._mgmtFeeId); if(fee){ fee.revenueRecognized=true; fee.recognizedBy=actorName(); fee.recognizedAt=nowIso; } }catch(e){}
     }
     touchRecord(r);
-    try{ logAuditEvent('ar_issue_invoice',{recordId:r.id,partner:r.partner||'',amount:r.amountGross||r.amount||0,ccy:r.ccy||'',actor:actorName(),note:'Phát hóa đơn — Đã xuất HĐ (approved)'}); }catch(e){}
-    saveState();renderAll();
+    }, {action:'ar_issue_invoice', fields:['receivables','opMgmtFees'], onOk:()=>{
+      try{ logAuditEvent('ar_issue_invoice',{recordId:r.id,partner:r.partner||'',amount:r.amountGross||r.amount||0,ccy:r.ccy||'',actor:actorName(),note:'Phát hóa đơn — Đã xuất HĐ (approved)'}); }catch(e){}
+      renderAll();
+    }});
   }
   toast('🧾 Đã phát hóa đơn — trạng thái "Đã xuất HĐ"','good');
 }
@@ -39830,10 +40000,17 @@ function saveAr(kind,id){
   // Auto-create or link vendor (NCC master)
   const vendor=getOrCreateVendor(partner);
   const vendorId=vendor?vendor.id:'';
-  if(id){
+  // v3.09.78 (ADR-015): validate sửa TRƯỚC commit (return sớm giữ modal mở)
+  if(isEdit){
+    const _r0=S[list].find(x=>x.id===id);
+    if(!_r0){err.textContent='Không tìm thấy';return;}
+    if(!wfCanEdit(_r0)){err.textContent='Bản ghi đã khóa sửa do trạng thái phê duyệt';return;}
+  }
+  let _auditRecId=id, _auditIsNew=false;
+  const _doSaveAr=()=>{
+  if(isEdit){
     const r=S[list].find(x=>x.id===id);
-    if(!r){err.textContent='Không tìm thấy';return;}
-    if(!wfCanEdit(r)){err.textContent='Bản ghi đã khóa sửa do trạng thái phê duyệt';return;}
+    if(!r){ return; }
     const updates = {partner,vendorId,desc,invoiceNo,amountNet:amountNetS,vatPercent,vatAmount:vatAmountS,amountGross:amountGrossS,amount:amountS,ccy,fxToUsd,fxToVnd,segment,companyId,projectId,vesselId,issueDate,dueDate,dueMonth,dueAmount,_isCreditNote:_isCreditNote,_adjustsInvoice:_isCreditNote?_adjustsInvoice:'',_adjustsInvoiceId:_isCreditNote?_adjustsInvoiceId:''};
     if(kind==='ap'){
       updates.expenseType = expenseType;
@@ -39935,12 +40112,12 @@ function saveAr(kind,id){
     if(kind==='ar' && window._AR_CONTRACT_ADVANCE){ newRec._contractAdvance = true; newRec._contractValue0 = +newRec.amount||0; }
     S[list].push(newRec);
     window._LAST_SAVED_AR_ID = newRec.id;  // v3.01.28: để saveArDraft / saveArAndIssue lấy id bản mới
-    var _auditRecId=newRec.id, _auditIsNew=true;
+    _auditRecId=newRec.id; _auditIsNew=true;
   }
   // v3.01.00: ghi lượng+đơn giá nhiên liệu vào fuelPumped của event được gắn (đè đúng loại NL)
   if(kind==='ap'){
     try{
-      const recSaved = isEdit ? r : S[list][S[list].length-1];
+      const recSaved = isEdit ? S[list].find(x=>x.id===id) : S[list][S[list].length-1];
       if(recSaved && recSaved.fuelEventId && recSaved.fuelKind){
         _apWriteFuelToEvent(recSaved);
       }
@@ -39950,7 +40127,7 @@ function saveAr(kind,id){
   // Sửa: reverse trước rồi apply lại theo loại mới (chống cộng trùng / đổi loại).
   if(kind==='ap'){
     try{
-      const recSaved = isEdit ? r : S[list][S[list].length-1];
+      const recSaved = isEdit ? S[list].find(x=>x.id===id) : S[list][S[list].length-1];
       if(recSaved){
         try{ if(recSaved._dockApplied) reverseDockFromAsset(recSaved); }catch(e){}
         try{ if(recSaved._assetApplied) reverseAssetFromTools(recSaved); }catch(e){}
@@ -39959,7 +40136,9 @@ function saveAr(kind,id){
       }
     }catch(e){ console.warn('[ap capitalize on save]', e&&e.message); }
   }
-  saveState();closeModal();renderAll();
+  };
+  commitMutation(_doSaveAr, {action:kind==='ap'?'save_ap':'save_ar', fields:['payables','receivables','fixedAssets','tools','events'], onOk:()=>{
+  closeModal();renderAll();
   // v2.99.78: ghi audit khi tạo/sửa AP/AR (trước đây KHÔNG log → admin không thấy NV thao tác).
   try{
     logAuditEvent(kind==='ap'?'save_ap':'save_ar', {
@@ -39970,6 +40149,7 @@ function saveAr(kind,id){
     });
   }catch(e){}
   toast(kind==='ap'?'Đã lưu phải trả':((isAdmin()||canCheckAcc())?'Đã lưu phải thu (vào sổ ngay)':'Đã lưu phải thu (chờ KT kiểm)'));
+  }, onFail:(rr)=>{ if(err) err.textContent='⚠ CHƯA lưu được: '+(rr.error||''); }});
 }
 
 /* v3.09.71 — LƯU CHỈ THÔNG TIN DỰ ÁN cho khoản phải thu ĐÃ NHẬN THANH TOÁN (thu đủ).
@@ -39987,13 +40167,12 @@ function saveArProjectOnly(kind,id){
   const newProj = sel ? (sel.value||null) : (r.projectId||null);
   const oldProj = r.projectId||null;
   if(newProj===oldProj){ toast('Không có thay đổi dự án','info'); closeModal(); return; }
-  r.projectId = newProj;
-  touchRecord(r);
-  saveState();
-  try{ logAuditEvent('ar_project_update_after_paid',{kind,id,from:oldProj,to:newProj,amount:r.amount,ccy:r.ccy}); }catch(e){}
-  toast('✓ Đã cập nhật dự án (số liệu vẫn khóa)','good');
-  closeModal();
-  try{ renderAll(); }catch(e){}
+  commitMutation(()=>{ r.projectId = newProj; touchRecord(r); }, {action:'ar_project_update_after_paid', fields:[list], onOk:()=>{
+    try{ logAuditEvent('ar_project_update_after_paid',{kind,id,from:oldProj,to:newProj,amount:r.amount,ccy:r.ccy}); }catch(e){}
+    toast('✓ Đã cập nhật dự án (số liệu vẫn khóa)','good');
+    closeModal();
+    try{ renderAll(); }catch(e){}
+  }});
 }
 
 /* v3.06.19 — LƯU CHỈ HỒ SƠ (chứng từ đính kèm + giải trình) — KHÔNG đụng nội dung phiếu.
@@ -40004,6 +40183,7 @@ function saveArDocsOnly(kind,id){
   const r=(S[list]||[]).find(x=>x.id===id);
   if(!r){ toast('Không tìm thấy phiếu','bad'); return; }
   if(!wfCanUpdateDocs(r)){ toast('Bạn không có quyền cập nhật hồ sơ phiếu này','bad'); return; }
+  commitMutation(()=>{
   // Chứng từ đính kèm (đã upload Drive, nằm ở _curAttachments)
   if(Array.isArray(window._curAttachments)){
     r.attachments = JSON.parse(JSON.stringify(window._curAttachments));
@@ -40019,11 +40199,12 @@ function saveArDocsOnly(kind,id){
     }
   }
   touchRecord(r);
-  saveState();
-  try{ logAuditEvent('docs_update',{kind,id,attachments:(r.attachments||[]).length}); }catch(e){}
-  toast('✓ Đã cập nhật hồ sơ (chứng từ/giải trình)','good');
-  closeModal();
-  try{ renderAll(); }catch(e){}
+  }, {action:'docs_update', fields:[list], onOk:()=>{
+    try{ logAuditEvent('docs_update',{kind,id,attachments:(r.attachments||[]).length}); }catch(e){}
+    toast('✓ Đã cập nhật hồ sơ (chứng từ/giải trình)','good');
+    closeModal();
+    try{ renderAll(); }catch(e){}
+  }});
 }
 
 /* v2.84.0: Migration một-lần — nâng tất cả AR đang Nháp/chờ duyệt sang trạng thái 'approved'.
@@ -40048,6 +40229,8 @@ function migrateArToApproved(){
   const nowIso = new Date().toISOString();
   const histTag = '(Migration v2.84.0 — '+actorName()+')';
   let n=0;
+  commitMutation(()=>{
+  n=0;
   needFix.forEach(r=>{
     r.status = 'approved';
     if(!r.submittedBy){ r.submittedBy = r.createdBy || actorName(); r.submittedAt = r.createdAt || nowIso; }
@@ -40058,11 +40241,12 @@ function migrateArToApproved(){
     try{ touchRecord(r); }catch(e){}
     n++;
   });
-  try{ logAuditEvent('ar_migration_v2_84', {count:n, by:actorName()}); }catch(e){}
-  saveState();
-  toast('Đã nâng '+n+' bản ghi AR sang "Đã duyệt"','good');
-  closeModal();
-  renderAll();
+  }, {action:'ar_migration_v2_84', fields:['receivables'], onOk:()=>{
+    try{ logAuditEvent('ar_migration_v2_84', {count:n, by:actorName()}); }catch(e){}
+    toast('Đã nâng '+n+' bản ghi AR sang "Đã duyệt"','good');
+    closeModal();
+    renderAll();
+  }});
 }
 
 /* v3.02.50: LỆNH CHI TỪNG ĐỢT cho AP (chờ duyệt → duyệt → chi).
@@ -40141,11 +40325,15 @@ function apProposeOrder(id){
   const amt=+String(a).replace(/[^\d.-]/g,'')||0;
   const val=acValidateProposeAmount(amt, rem); if(!val.ok){ toast(val.reason,'bad'); return; }
   const note=prompt('Ghi chú lệnh chi (tùy chọn):','')||'';
+  commitMutation(()=>{
   _apOrders(r).push(acBuildPaymentOrder(r, amt, note, actorName()));
-  touchRecord(r); saveState(); renderAll();
+  touchRecord(r);
+  }, {action:'ap_order_propose', fields:['payables'], onOk:()=>{
   try{ logAuditEvent('ap_order_propose',{recordId:r.id,amount:amt,ccy:r.ccy,actor:actorName()}); }catch(e){}
+  renderAll();
   toast('Đã tạo lệnh chi — vào Danh sách chờ duyệt (L1 → L2)','good');
   openPayableModal(id);
+  }});
 }
 // KTT/L2 duyệt ĐÚNG lệnh đó — v3.02.69: modal xác nhận đẹp thay prompt
 function apApproveOrder(id, orderId){
@@ -40260,13 +40448,18 @@ function apApproveOrderConfirm(id, orderId){
   const amt=+(document.getElementById('apv-approve-amt')||{}).value||0;
   const val=acValidateApproveAmount(amt, remMax);
   if(!val.ok){ if(err) err.textContent = amt>0 ? `Vượt số còn lại (tối đa ${fmtFull(remMax,o.ccy||r.ccy)})` : 'Giá trị duyệt phải > 0'; return; }
-  const res=acApplyApproveOrder(o, amt, actorName());
-  if(res.changed) o.approveNote=`Duyệt ${fmtFull(amt,o.ccy)} (đề xuất ${fmtFull(o.proposedAmount,o.ccy)})`;
-  touchRecord(r); saveState(); renderAll();
-  try{ logAuditEvent('ap_order_approve',{recordId:r.id,orderId,proposed:o.proposedAmount,approved:amt,changed:res.changed,ccy:o.ccy,actor:actorName()}); }catch(e){}
-  toast(changed?`Đã duyệt ${fmtFull(amt,o.ccy)} (khác đề xuất)`:'Đã duyệt lệnh chi','good');
+  let _res;
+  commitMutation(()=>{
+  _res=acApplyApproveOrder(o, amt, actorName());
+  if(_res.changed) o.approveNote=`Duyệt ${fmtFull(amt,o.ccy)} (đề xuất ${fmtFull(o.proposedAmount,o.ccy)})`;
+  touchRecord(r);
+  }, {action:'ap_order_approve', fields:['payables'], onOk:()=>{
+  try{ logAuditEvent('ap_order_approve',{recordId:r.id,orderId,proposed:o.proposedAmount,approved:amt,changed:_res&&_res.changed,ccy:o.ccy,actor:actorName()}); }catch(e){}
+  renderAll();
+  toast((_res&&_res.changed)?`Đã duyệt ${fmtFull(amt,o.ccy)} (khác đề xuất)`:'Đã duyệt lệnh chi','good');
   closeModal();
   try{ if(typeof renderApprovalList==='function') renderApprovalList(); }catch(e){}
+  }});
 }
 // Hủy lệnh chi (khi chưa chi)
 // Logic thuần: lệnh có thể hủy không (không hủy lệnh đã chi).
@@ -40286,9 +40479,13 @@ function apCancelOrder(id, orderId){
   const o=_apOrders(r).find(x=>x.id===orderId); if(!o) return;
   const can=acCanCancelOrder(o); if(!can.ok){ toast(can.reason,'bad'); return; }
   if(!confirm('Hủy lệnh chi này?')) return;
+  commitMutation(()=>{
   acRemoveOrder(r, orderId);
-  touchRecord(r); saveState(); renderAll(); openPayableModal(id);
+  touchRecord(r);
+  }, {action:'ap_order_cancel', fields:['payables'], onOk:()=>{
+  renderAll(); openPayableModal(id);
   toast('Đã hủy lệnh chi','warn');
+  }});
 }
 // Ghi nhận ĐÃ CHI cho lệnh đã duyệt → tạo payment
 // Logic thuần: lệnh có thể đem thanh toán không (phải đã duyệt).
@@ -40319,13 +40516,17 @@ function apAddOldPayment(id){
   const amt=+String(a).replace(/[^\d.-]/g,'')||0;
   if(amt<=0){ toast('Số tiền > 0','bad'); return; }
   const note=prompt('Ghi chú (UNC, số chứng từ...):','(đợt cũ — nhập bù)')||'';
+  commitMutation(()=>{
   r.payments=r.payments||[];
   r.payments.push({date:(d||'').trim()||todayISO(), amount:amt, ccy:r.ccy, note:note, method:'old',
     recordedBy:actorName(), recordedAt:new Date().toISOString(), _oldEntry:true});
-  touchRecord(r); saveState(); renderAll();
+  touchRecord(r);
+  }, {action:'ap_old_payment', fields:['payables'], onOk:()=>{
   try{ logAuditEvent('ap_old_payment',{recordId:r.id,amount:amt,ccy:r.ccy,actor:actorName()}); }catch(e){}
+  renderAll();
   toast('Đã nhập đợt TT cũ — công nợ cập nhật','good');
   openPayableModal(id);
+  }});
 }
 
 function addArPayment(kind,id){
@@ -40495,6 +40696,7 @@ function saveArPayment(kind,id){
   if(_bf>0) pay.bankFee=_bf;
   if(_of>0) pay.otherFee=_of;
   if(_fn) pay.feeNote=_fn;
+  const _doPay=()=>{
   r.payments=r.payments||[];
   r.payments.push(pay);
   // v3.02.50: nếu đang ghi chi cho 1 LỆNH đã duyệt → đánh dấu lệnh 'paid'
@@ -40521,8 +40723,8 @@ function saveArPayment(kind,id){
       try{ touchRecord(acc); }catch(e){ acc.updatedAt=new Date().toISOString(); }
     }
   }
-  saveState();closeModal();renderAll();
-  toast('Đã ghi nhận thanh toán');
+  };
+  commitMutation(_doPay, {action:'ar_pay', fields:[list,'bankAccounts'], onOk:()=>{ closeModal();renderAll(); toast('Đã ghi nhận thanh toán'); }, onFail:(rr)=>{ if(err) err.textContent='⚠ CHƯA ghi được: '+(rr.error||''); }});
 }
 
 function removeArPayment(kind,id,idx){
@@ -40530,6 +40732,7 @@ function removeArPayment(kind,id,idx){
   const r=S[list].find(x=>x.id===id);if(!r||!r.payments||!r.payments[idx])return;
   const p=r.payments[idx];
   if(!confirm(`Xóa lần thanh toán ngày ${p.date} (${fmtFull(p.amount,r.ccy)})?`))return;
+  commitMutation(()=>{
   // v1.87.0: hoàn lại số dư ngân hàng nếu lần TT này đã ghi vào một tài khoản
   if(p.bankAccountId){
     const acc=AccountingService.bankAccounts().find(a=>a.id===p.bankAccountId);
@@ -40542,9 +40745,11 @@ function removeArPayment(kind,id,idx){
   }
   r.payments.splice(idx,1);
   try{ touchRecord(r); }catch(e){ r.updatedAt=new Date().toISOString(); }  // v3.06.00: dấu sync (AR/AP đã sửa payments)
-  saveState();closeModal();
+  }, {action:'ar_pay_remove', fields:[list,'bankAccounts'], onOk:()=>{
+  closeModal();
   // Re-open the edit modal to show updated payments list
   if(kind==='ap') openPayableModal(id); else openReceivableModal(id);
+  }});
 }
 
 /* v1.87.0: Quy đổi giá trị một lần TT sang CCY của tài khoản ngân hàng.
@@ -40708,6 +40913,7 @@ function arSaveQuickReceive(id){
     recordedAt:new Date().toISOString()
   };
   if(bankAccountId) pay.bankAccountId=bankAccountId;
+  commitMutation(()=>{
   r.payments=r.payments||[];
   r.payments.push(pay);
   // Ghi tăng số dư tài khoản ngân hàng (chỉ khi chuyển khoản)
@@ -40715,7 +40921,8 @@ function arSaveQuickReceive(id){
     acc.balance=(+acc.balance||0) + _arPayAmountInCcy(pay, r.ccy, acc.ccy||'USD');
   }
   try{ touchRecord(r); }catch(e){}
-  saveState();closeModal();renderAll();
+  }, {action:'ar_quick_receive', fields:['receivables','bankAccounts'], onOk:()=>{
+  closeModal();renderAll();
   const newRem = rem - amt;
   let methodMsg;
   if(acc){
@@ -40730,6 +40937,7 @@ function arSaveQuickReceive(id){
   } else {
     toast(`✓ Đã xác nhận thu đủ — công nợ về 0${methodMsg}`, 'good');
   }
+  }, onFail:(rr)=>{ if(err) err.textContent='⚠ CHƯA ghi được: '+(rr.error||''); }});
 }
 
 /* === v3.03.55: TÌM BÚT TOÁN TOÀN CỤC (admin) — quét payables/receivables/opTransactions ===
@@ -40842,6 +41050,8 @@ function fixFxApply(src,id,i){
   if(!rec){ toast('Không tìm thấy bút toán','bad'); return; }
   const ccy=rec.ccy||'USD';
   if(!_fxSane(ccy,newFx)){ if(!confirm('Tỷ giá '+newFx.toLocaleString('vi-VN')+' vẫn ngoài khoảng thường của '+ccy+'. Vẫn áp dụng?')) return; }
+  const _fxField = src==='optx' ? 'opTransactions' : (src==='ap'?'payables':'receivables');
+  commitMutation(()=>{
   rec.fxToUsd=newFx;
   const amt=+rec.amount||0;
   if(src==='optx'){
@@ -40851,12 +41061,13 @@ function fixFxApply(src,id,i){
     rec.amountUsd = net/newFx;
   }
   try{ touchRecord(rec); }catch(e){ rec.updatedAt=new Date().toISOString(); }
+  }, {action:'fix_fx', fields:[_fxField], onOk:()=>{
   try{ logAuditEvent('fix_fx',{src,id,newFx,ccy,actor:actorName()}); }catch(e){}
-  saveState();
   const row=document.getElementById('fixfx-row-'+i);
   if(row){ row.style.opacity='.45'; const c=row.querySelector('td:last-child'); if(c) c.innerHTML='<span style="color:var(--good);font-size:11px">✓ Đã sửa</span>'; }
   toast('✓ Đã sửa tỷ giá → '+newFx.toLocaleString('vi-VN'),'good');
   try{ renderAll(); }catch(e){}
+  }});
 }
 
 function deleteAr(kind,id){
@@ -41005,13 +41216,14 @@ function openBankModal(idx){
     {key:'balance',label:'Số dư hiện tại',type:'number'}
   ],acc,(d)=>{
     if(!d.name||!d.name.trim()){toast('Nhập tên tài khoản','bad');return false;}
+    commitMutation(()=>{
     if(isEdit){
       Object.assign(S.bankAccounts[idx],d);
       touchRecord(S.bankAccounts[idx]);  // v2.61.0: timestamp cho sync
     } else {
       AccountingService.addBankAccount(touchRecord({id:uid(),...d}));  // v2.61.0: timestamp cho sync
     }
-    saveState();
+    }, {action:'bank_account_save', fields:['bankAccounts'], onOk:()=>{ renderAll&&renderAll(); }});
   });
 }
 
@@ -41902,7 +42114,7 @@ function saveMgmtFeePeriod(feeId, vid){
    cấn trừ quỹ nếu phí đã cấn trừ (giống saveArAndIssue), set fee.revenueRecognized=true.
    Có thể đính kèm chứng từ (giữ luồng). */
 function mgmtFeeMarkIssued(feeId, vid){
-  if(!(isAdmin()||canApproveL2())){ toast('Chỉ Admin/KTT được đánh dấu đã phát hóa đơn','bad'); return; }
+  if(!(isAdmin()||canCheckAcc()||canApproveL1()||canApproveL2())){ toast('Chỉ Admin/KTT được đánh dấu đã phát hóa đơn','bad'); return; }
   const f=VesselService.opMgmtFees().find(x=>x.id===feeId);
   if(!f){ toast('Không tìm thấy kỳ phí QL','bad'); return; }
   const v=VesselService.opVessels().find(x=>x.id===(vid||f.vesselId));
@@ -41963,7 +42175,7 @@ function mgmtFeeConfirmIssued(feeId, vid){
 }
 /* Bỏ đánh dấu (revert về DT dự kiến) — tích nhầm. Gỡ approved + payment offset của AR. */
 function mgmtFeeUnmarkIssued(feeId, vid){
-  if(!(isAdmin()||canApproveL2())){ toast('Chỉ Admin/KTT được bỏ đánh dấu','bad'); return; }
+  if(!(isAdmin()||canCheckAcc()||canApproveL1()||canApproveL2())){ toast('Chỉ Admin/KTT được bỏ đánh dấu','bad'); return; }
   const f=VesselService.opMgmtFees().find(x=>x.id===feeId);
   if(!f){ toast('Không tìm thấy kỳ phí QL','bad'); return; }
   confirmDelete('việc đánh dấu "đã phát HĐ" của kỳ phí này',
@@ -42006,7 +42218,7 @@ function openMgmtFeeModal(vid){
     ? issuedList.map(f=>{
         const ar=AccountingService.receivables().find(x=>x.id===f.arId || x._mgmtFeeId===f.id);
         const issued = ar && wfStatus(ar)==='approved';
-        const canIssue=(isAdmin()||canApproveL2());
+        const canIssue=(isAdmin()||canCheckAcc()||canApproveL1()||canApproveL2());
         const stCell = issued
           ? `<span style="color:var(--good);font-size:11px;font-weight:600" title="Đã phát hóa đơn → DT thực hiện${ar&&(ar.payments||[]).some(p=>p._mgmtFeeOffset)?' · đã thu (cấn trừ quỹ)':''}">✓ Đã xuất HĐ${ar&&(ar.payments||[]).some(p=>p._mgmtFeeOffset)?' · đã thu':''}</span>${canIssue?`<br><button class="link-btn" style="font-size:10px;color:var(--muted);background:none;border:none;cursor:pointer;padding:2px 0;text-decoration:underline" title="Bỏ đánh dấu — đưa về DT dự kiến (tích nhầm)" onclick="mgmtFeeUnmarkIssued('${f.id}','${vid}')">↩ bỏ đánh dấu</button>`:''}`
           : `<span style="color:var(--accent);font-size:11px" title="Doanh thu dự kiến — chưa phát hóa đơn cho chủ tàu.">📋 DT dự kiến (chưa HĐ)</span>${canIssue?`<br><button class="btn-mini" style="font-size:10px;margin-top:3px;padding:2px 8px;background:var(--good);color:#fff;border:none;border-radius:4px;cursor:pointer" title="KTT/Admin: đánh dấu đã phát hóa đơn cho chủ tàu (bắt buộc nhập số HĐ)" onclick="mgmtFeeMarkIssued('${f.id}','${vid}')">🧾 Đánh dấu đã phát HĐ</button>`:'<br><span style="font-size:9px;color:var(--muted);font-style:italic">(KTT phát HĐ)</span>'}`;
@@ -42347,12 +42559,12 @@ function _opReceiveSave(){
     amountUsd:cv.usd||0, vatPercent:0, vatAmount:0, amountGross:amount,
     reportToOwner:true, createdBy:actorName(), createdByDept:(typeof getActorDeptName==='function'?getActorDeptName():''), createdAt:new Date().toISOString()
   };
-  VesselService.addOpTransaction(rec);
-  saveState();
+  commitMutation(()=>{ VesselService.addOpTransaction(rec); }, {action:'op_receive', fields:['opTransactions'], onOk:()=>{
   try{ logAuditEvent('op_receive',{vesselId, amount, ccy, usd:cv.usd}); }catch(e){}
   if(typeof renderAll==='function') renderAll();
   closeModal();
   toast('✓ Đã lưu thu hộ '+fmtCcy(cv.usd||amount,'USD'),'good');
+  }});
 }
 
 /* v1.92.0 / v3.03.65: Lấy tỷ giá bình quân gia quyền của ngoại tệ trong năm hiện tại (gợi ý).
@@ -42961,6 +43173,8 @@ function _opMrSave(){
   { const _lc=_checkLateEntry(s.date);
     if(_lc.late){ const rsn=_promptLateReason(s.date, 'phiếu chi hộ'); if(rsn===null) return; _lateReasonOp=rsn; _lateDaysOp=_lc.days; } }
   let n=0;
+  const _doMrSave=()=>{
+  n=0;
   valid.forEach(l=>{
     const cv=_opConvert(+l.gross||0, s.ccy, +s.fxInput||0);
     const rec={
@@ -42992,10 +43206,12 @@ function _opMrSave(){
       amountUsd:cvD.usd||0, khoanCat:s.khoanCat, khoanRole:'doi', khoanPeriod:s.khoanPeriod||String(s.date||'').slice(0,7),
       reportToOwner:false, createdBy:actorName(), createdAt:new Date().toISOString() });
   }
-  saveState();
+  };
+  commitMutation(_doMrSave, {action:'op_mr_save', fields:['opTransactions'], onOk:()=>{
   if(typeof renderAll==='function') renderAll();
   closeModal();
   toast('✓ Đã lưu '+n+' dòng chi hộ'+(s.khoanChk?' + khoán đòi':''),'good');
+  }, onFail:(rr)=>{ if(err) err.textContent='⚠ CHƯA lưu được: '+(rr.error||''); }});
 }
 
 function addOpTx(){
@@ -43101,6 +43317,7 @@ function addOpTx(){
     }
   }
   // v3.03.48: chi hộ có tên NCC → tạo/cập nhật vendor (kèm MST) để lần sau gợi ý + đối chiếu GTGT.
+  const _doAddOp=()=>{
   if(isChi && vendor && typeof getOrCreateVendor==='function'){
     try{
       const _v=getOrCreateVendor(vendor);
@@ -43162,7 +43379,8 @@ function addOpTx(){
       createdAt:new Date().toISOString(), updatedAt:new Date().toISOString()
     });
   }
-  saveState();
+  };
+  commitMutation(_doAddOp, {action:'op_add', fields:['opTransactions','vendors'], onOk:()=>{
   document.getElementById('opt-desc').value='';
   document.getElementById('opt-amount').value='';
   const fxEl=document.getElementById('opt-fx'); if(fxEl) fxEl.value='';
@@ -43189,6 +43407,7 @@ function addOpTx(){
     opVatRecalc();
   }
   toast(khoanRole==='pair'?'Đã ghi nhận khoán đủ cặp (Đòi + Thực chi)':'Đã ghi nhận'); renderAll();
+  }});
 }
 /* v1.88.0: Ngoại tệ gốc của một giao dịch thu/chi hộ.
    Giao dịch cũ (trước v1.88.0) chưa có t.ccy → fallback theo ccy của tàu QL hộ. */
@@ -43223,10 +43442,13 @@ function purgeOpTxForever(id){
     ()=>{
       // v3.07.21: CHỈ xóa ĐÚNG phiếu theo ID + ghi tombstone ID. KHÔNG dùng purgedContent
       //   (chặn theo nội dung gây xóa nhầm 2 khoản hợp lệ giống nhau — vd 2 lần thu hộ 500k).
+      commitMutation(()=>{
       S.opTransactions=VesselService.opTransactions().filter(x=>x.id!==id);
       try{ markDeleted([id], 'opTransactions'); }catch(e){ try{ markDeleted(id); }catch(_){} }
+      }, {action:'purge_optx_forever', fields:['opTransactions','deletedIds'], onOk:()=>{
       try{ logAuditEvent('purge_optx_forever',{id, vesselId:t.vesselId, desc:(t.desc||'').slice(0,60)}); }catch(e){}
-      saveState(); toast('Đã xóa phiếu — ghi bia mộ chống sống lại','good'); renderAll();
+      toast('Đã xóa phiếu — ghi bia mộ chống sống lại','good'); renderAll();
+      }, onFail:(rr)=>{ toast('⚠ CHƯA xóa được — '+(rr.error||'')+'. Giữ nguyên.','bad'); }});
     });
 }
 
@@ -43246,7 +43468,7 @@ function delOpTx(id){
   const v=VesselService.opVessels().find(v=>v.id===t.vesselId);
   confirmDelete('bút toán thu/chi hộ',
     `${t.date} · ${v?v.name:'?'} · ${t.type==='IN'?'Thu hộ':'Chi hộ'}<br>${esc(t.desc) || '—'}<br><b>${fmtFull(t.amount,v?v.ccy:'VND')}</b>`,
-    ()=>{_removeOpTxOnce(id);saveState();toast('Đã xóa');renderAll();});
+    ()=>{ commitMutation(()=>{ _removeOpTxOnce(id); }, {action:'optx_delete', fields:['opTransactions','deletedIds'], onOk:()=>{ toast('Đã xóa');renderAll(); }, onFail:(rr)=>{ toast('⚠ CHƯA xóa được — '+(rr.error||'')+'. Giữ nguyên.','bad'); }}); });
 }
 /* v3.02.84: Vòng đời DỰ KIẾN CHI (tab 4 + tab 06).
    - opMarkActual: NV xác nhận khoản dự kiến ĐÃ THỰC HIỆN (có hóa đơn) → bỏ cờ _isBudget,
@@ -43272,15 +43494,17 @@ function opMarkActual(id){
 function _opMarkActualConfirm(id){
   const t=VesselService.opTransactions().find(x=>x.id===id);
   if(!t){ closeModal(); return; }
+  commitMutation(()=>{
   t._isBudget=false;
   t._budgetRealizedAt=new Date().toISOString();
   t._budgetRealizedBy=actorName();
   if(typeof touchRecord==='function') touchRecord(t);
-  saveState();
+  }, {action:'op_budget_realize', fields:['opTransactions'], onOk:()=>{
   try{ if(typeof logAuditEvent==='function') logAuditEvent('op_budget_realize',{id:t.id,amount:t.amount,ccy:t.ccy,actor:actorName()}); }catch(e){}
   closeModal();
   toast('✓ Đã chuyển sang Chi hộ thực','good');
   renderAll();
+  }});
 }
 function opDeleteBudget(id){
   const t=VesselService.opTransactions().find(x=>x.id===id);
@@ -43290,7 +43514,7 @@ function opDeleteBudget(id){
   const ccy=t.ccy||(v?v.ccy:'VND')||'VND';
   confirmDelete('khoản dự kiến chi',
     `${t.date} · ${v?v.name:'?'}<br>${esc(t.desc)||'—'}<br><b>${fmtFull(t.amount,ccy)}</b><br><span style="color:var(--muted);font-size:11px">Hủy khoản dự kiến không phát sinh.</span>`,
-    ()=>{ _removeOpTxOnce(id); saveState(); toast('Đã hủy dự kiến'); renderAll(); });
+    ()=>{ commitMutation(()=>{ _removeOpTxOnce(id); }, {action:'op_delete_budget', fields:['opTransactions','deletedIds'], onOk:()=>{ toast('Đã hủy dự kiến'); renderAll(); }, onFail:(rr)=>{ toast('⚠ CHƯA hủy được — '+(rr.error||'')+'. Giữ nguyên.','bad'); }}); });
 }
 /* ============================================================
    v3.02.89: TẠM ỨNG NHÂN VIÊN (tab 04)
@@ -43482,11 +43706,10 @@ function saveAdvance(targetStatus, editId){
   if(amt<=0){ if(err)err.textContent='Số tiền phải > 0'; return; }
   if(!desc){ if(err)err.textContent='Nhập diễn giải/mục đích'; return; }
   let a;
+  const _doSave=()=>{
   if(editId){
     a=AccountingService.advances().find(x=>x.id===editId);
-    if(!a){ closeModal(); return; }
-    if(!['draft','rejected'].includes(a.status)){ toast('Chỉ sửa được NHÁP / BỊ TỪ CHỐI','bad'); return; }
-    if(!isAdmin() && a.createdBy && a.createdBy!==actorName()){ toast('Chỉ admin/người tạo mới sửa được','bad'); return; }
+    if(!a){ return; }
     a.employee=emp; a.amount=amt; a.desc=desc;
     a.advType=(document.getElementById('adv-type')||{}).value||'congtac';
     a.date=(document.getElementById('adv-date')||{}).value||todayISO();
@@ -43508,36 +43731,54 @@ function saveAdvance(targetStatus, editId){
     };
     if(targetStatus==='pending'){ a.submittedBy=actorName(); a.submittedAt=new Date().toISOString(); } AccountingService.addAdvance(a);
   }
-  touchRecord(a); saveState();
-  try{ logAuditEvent(editId?'advance_edit':'advance_create',{id:a.id,employee:emp,amount:amt,ccy:a.ccy,type:a.advType,status:targetStatus,actor:actorName()}); }catch(e){}
-  closeModal(); toast(targetStatus==='pending'?'Đã gửi tạm ứng — chờ KTT/Admin duyệt':'💾 Đã lưu nháp tạm ứng','good'); renderAdvances();
+  touchRecord(a);
+  };
+  // validate trạng thái sửa TRƯỚC khi commit (return sớm, modal còn mở)
+  if(editId){
+    const _a0=AccountingService.advances().find(x=>x.id===editId);
+    if(!_a0){ closeModal(); return; }
+    if(!['draft','rejected'].includes(_a0.status)){ toast('Chỉ sửa được NHÁP / BỊ TỪ CHỐI','bad'); return; }
+    if(!isAdmin() && _a0.createdBy && _a0.createdBy!==actorName()){ toast('Chỉ admin/người tạo mới sửa được','bad'); return; }
+  }
+  commitMutation(_doSave, {action:editId?'advance_edit':'advance_create', fields:['advances'], onOk:()=>{
+    try{ logAuditEvent(editId?'advance_edit':'advance_create',{id:a.id,employee:emp,amount:amt,ccy:a.ccy,type:a.advType,status:targetStatus,actor:actorName()}); }catch(e){}
+    closeModal(); toast(targetStatus==='pending'?'Đã gửi tạm ứng — chờ KTT/Admin duyệt':'💾 Đã lưu nháp tạm ứng','good'); renderAdvances();
+  }, onFail:(r)=>{ if(err) err.textContent='⚠ CHƯA lưu được: '+(r.error||''); }});
 }
 /* v3.03.02: NV gửi duyệt nháp của mình */
 function advSubmit(id){
   const a=AccountingService.advances().find(x=>x.id===id); if(!a) return;
   if(!['draft','rejected'].includes(a.status)){ toast('Chỉ gửi duyệt được từ NHÁP / BỊ TỪ CHỐI','bad'); return; }
   if(!isAdmin() && a.createdBy && a.createdBy!==actorName()){ toast('Chỉ admin/người tạo mới gửi duyệt được','bad'); return; }
-  a.status='pending'; a.submittedBy=actorName(); a.submittedAt=new Date().toISOString();
-  touchRecord(a); saveState();
-  try{ logAuditEvent('advance_submit',{id:a.id,employee:a.employee,amount:a.amount,actor:actorName()}); }catch(e){}
-  toast('Đã gửi tạm ứng — chờ KTT/Admin duyệt','good'); renderAdvances();
+  commitMutation(()=>{
+    a.status='pending'; a.submittedBy=actorName(); a.submittedAt=new Date().toISOString();
+    touchRecord(a);
+  }, {action:'advance_submit', fields:['advances'], onOk:()=>{
+    try{ logAuditEvent('advance_submit',{id:a.id,employee:a.employee,amount:a.amount,actor:actorName()}); }catch(e){}
+    toast('Đã gửi tạm ứng — chờ KTT/Admin duyệt','good'); renderAdvances();
+  }});
 }
 function advApprove(id){
   if(!_advCanApprove()){ toast('Cần quyền KTT/Admin','bad'); return; }
   const a=AccountingService.advances().find(x=>x.id===id); if(!a) return;
   if(a.status!=='pending'){ toast('Chỉ duyệt được tạm ứng đang CHỜ DUYỆT','bad'); return; }  // v3.03.02
   if(!isAdmin() && a.createdBy===actorName() && a.employee===actorName()){ toast('🔒 SOD: không tự duyệt tạm ứng của chính mình','bad'); return; }
-  a.status='approved'; a.approvedBy=actorName(); a.approvedAt=new Date().toISOString();
-  touchRecord(a); saveState();
-  try{ logAuditEvent('advance_approve',{id:a.id,employee:a.employee,amount:a.amount,actor:actorName()}); }catch(e){}
-  toast('✓ Đã duyệt tạm ứng '+fmtFull(a.amount,a.ccy)+' cho '+a.employee,'good'); renderAdvances();
+  commitMutation(()=>{
+    a.status='approved'; a.approvedBy=actorName(); a.approvedAt=new Date().toISOString();
+    touchRecord(a);
+  }, {action:'advance_approve', fields:['advances'], onOk:()=>{
+    try{ logAuditEvent('advance_approve',{id:a.id,employee:a.employee,amount:a.amount,actor:actorName()}); }catch(e){}
+    toast('✓ Đã duyệt tạm ứng '+fmtFull(a.amount,a.ccy)+' cho '+a.employee,'good'); renderAdvances();
+  }});
 }
 function advReject(id){
   if(!_advCanApprove()){ toast('Cần quyền KTT/Admin','bad'); return; }
   const a=AccountingService.advances().find(x=>x.id===id); if(!a) return;
   if(a.status!=='pending'){ toast('Chỉ từ chối được tạm ứng đang CHỜ DUYỆT','bad'); return; }  // v3.03.02
-  a.status='rejected'; a.rejectedBy=actorName(); a.rejectedAt=new Date().toISOString();
-  touchRecord(a); saveState(); toast('Đã từ chối tạm ứng','warn'); renderAdvances();
+  commitMutation(()=>{
+    a.status='rejected'; a.rejectedBy=actorName(); a.rejectedAt=new Date().toISOString();
+    touchRecord(a);
+  }, {action:'advance_reject', fields:['advances'], onOk:()=>{ toast('Đã từ chối tạm ứng','warn'); renderAdvances(); }});
 }
 function advDelete(id){
   const a=AccountingService.advances().find(x=>x.id===id); if(!a) return;
@@ -43545,7 +43786,7 @@ function advDelete(id){
   // v3.02.98: enforce trong hàm (không chỉ ẩn nút) — chỉ người tạo/admin xóa
   if(!isAdmin() && a.createdBy && a.createdBy!==actorName()){ toast('Chỉ admin/người tạo mới xóa được tạm ứng','bad'); return; }
   confirmDelete('tạm ứng', `${esc(a.employee)} · ${fmtFull(a.amount,a.ccy)}<br>${esc(a.desc)||''}`,
-    ()=>{ S.advances=AccountingService.advances().filter(x=>x.id!==id); markDeleted(id); saveState(); toast('Đã xóa'); renderAdvances(); });
+    ()=>{ commitMutation(()=>{ S.advances=AccountingService.advances().filter(x=>x.id!==id); markDeleted(id,'advances'); }, {action:'advance_delete', fields:['advances','deletedIds'], onOk:()=>{ toast('Đã xóa'); renderAdvances(); }, onFail:(r)=>{ toast('⚠ CHƯA xóa được — '+(r.error||'')+'. Tạm ứng giữ nguyên.','bad'); }}); });
 }
 function advSettleCashModal(id){
   if(!_advCanSettle()){ toast('Hoàn ứng cần quyền KT trở lên','bad'); return; }  // v3.03.01
@@ -43572,15 +43813,18 @@ function advSettleCashConfirm(id){
   const err=document.getElementById('advc-err');
   if(amt<=0){ if(err)err.textContent='Số tiền > 0'; return; }
   if(amt>bal+0.01){ if(err)err.textContent='Vượt số dư tạm ứng ('+fmtFull(bal,a.ccy)+')'; return; }
-  (a.settlements=a.settlements||[]).push({
-    id:'AS'+Date.now().toString(36), kind:'cash',
-    date:(document.getElementById('advc-date')||{}).value||todayISO(),
-    amount:amt, note:(document.getElementById('advc-note')||{}).value.trim(),
-    by:actorName(), at:new Date().toISOString()
-  });
-  touchRecord(a); saveState();
-  try{ logAuditEvent('advance_settle_cash',{id:a.id,employee:a.employee,amount:amt,actor:actorName()}); }catch(e){}
-  closeModal(); toast('✓ Đã hoàn ứng tiền mặt '+fmtFull(amt,a.ccy)+(advBalance(a)<=0.001?' — TẠM ỨNG ĐÃ TẤT TOÁN':''),'good'); renderAdvances();
+  commitMutation(()=>{
+    (a.settlements=a.settlements||[]).push({
+      id:'AS'+Date.now().toString(36), kind:'cash',
+      date:(document.getElementById('advc-date')||{}).value||todayISO(),
+      amount:amt, note:(document.getElementById('advc-note')||{}).value.trim(),
+      by:actorName(), at:new Date().toISOString()
+    });
+    touchRecord(a);
+  }, {action:'advance_settle_cash', fields:['advances'], onOk:()=>{
+    try{ logAuditEvent('advance_settle_cash',{id:a.id,employee:a.employee,amount:amt,actor:actorName()}); }catch(e){}
+    closeModal(); toast('✓ Đã hoàn ứng tiền mặt '+fmtFull(amt,a.ccy)+(advBalance(a)<=0.001?' — TẠM ỨNG ĐÃ TẤT TOÁN':''),'good'); renderAdvances();
+  }, onFail:(r)=>{ if(err) err.textContent='⚠ CHƯA lưu được: '+(r.error||''); }});
 }
 function advSettleExpenseModal(id){
   const a=AccountingService.advances().find(x=>x.id===id); if(!a) return;
@@ -43626,7 +43870,9 @@ function advSettleExpenseConfirm(id){
   // v3.03.04: tạo phiếu AP đi LUỒNG DUYỆT CHUẨN (chuyển KT kiểm) — KHÔNG trừ ứng ngay.
   //   Trừ ứng + đánh dấu 'TT bằng tạm ứng' khi L2 duyệt xong (applyAdvanceSettlementFromAp trong wfApproveL2).
   const nowISO=new Date().toISOString();
-  const ap={
+  let ap;
+  const _doExpense=()=>{
+  ap={
     id:'AP'+Date.now().toString(36)+Math.random().toString(36).slice(2,6),
     partner, desc:desc+' (hoàn ứng tạm ứng — '+a.employee+')',
     invoiceNo:(document.getElementById('adve-invoice')||{}).value.trim(),
@@ -43642,10 +43888,13 @@ function advSettleExpenseConfirm(id){
     createdBy:actorName(), createdByDept:(typeof getActorDeptName==='function'?(getActorDeptName()||''):''), createdAt:nowISO
   };
 AccountingService.addPayable(ap);
-  touchRecord(ap); saveState();
-  try{ logAuditEvent('advance_settle_submit',{id:a.id,employee:a.employee,amount:amt,apId:ap.id,actor:actorName()}); }catch(e){}
-  closeModal(); toast('→ Đã gửi phiếu hoàn ứng '+fmtFull(amt,a.ccy)+' — chờ KT kiểm → KTT/L2 duyệt. Duyệt xong mới trừ tạm ứng.','good');
-  renderAdvances(); try{ renderAll(); }catch(e){}
+  touchRecord(ap);
+  };
+  commitMutation(_doExpense, {action:'advance_settle_submit', fields:['payables'], onOk:()=>{
+    try{ logAuditEvent('advance_settle_submit',{id:a.id,employee:a.employee,amount:amt,apId:ap.id,actor:actorName()}); }catch(e){}
+    closeModal(); toast('→ Đã gửi phiếu hoàn ứng '+fmtFull(amt,a.ccy)+' — chờ KT kiểm → KTT/L2 duyệt. Duyệt xong mới trừ tạm ứng.','good');
+    renderAdvances(); try{ renderAll(); }catch(e){}
+  }, onFail:(r)=>{ if(err) err.textContent='⚠ CHƯA lưu được: '+(r.error||''); }});
 }
 function advDetailModal(id){
   const a=AccountingService.advances().find(x=>x.id===id); if(!a) return;
@@ -43706,10 +43955,11 @@ function editOpTx(id){
     // v2.99.31: dự kiến chi chỉ áp dụng cho Chi hộ (OUT). Thu hộ luôn không phải budget.
     d._isBudget = (d.type==='OUT') && (d._budgetSel==='BUDGET');
     delete d._budgetSel;
+    commitMutation(()=>{
     Object.assign(t,d);
     delete t._budgetSel;
     touchRecord(t);  // v2.61.0: timestamp cho sync
-    saveState();
+    }, {action:'op_edit', fields:['opTransactions'], onOk:()=>{ renderAll&&renderAll(); }});
   },
   // v3.03.58: nút Xóa ngay trong modal sửa bút toán thu/chi hộ
   ()=>{
@@ -43717,7 +43967,7 @@ function editOpTx(id){
     const v=VesselService.opVessels().find(x=>x.id===t.vesselId);
     confirmDelete('bút toán thu/chi hộ',
       `${esc(t.date||'')} · ${v?esc(v.name):'?'} · ${t.type==='IN'?'Thu hộ':'Chi hộ'}<br>${esc(t.desc)||'—'}<br><b>${fmtFull(t.amount, t.ccy||(v?v.ccy:'VND'))}</b>`,
-      ()=>{ _removeOpTxOnce(t.id); saveState(); closeModal(); toast('Đã xóa bút toán','good'); renderAll(); });
+      ()=>{ commitMutation(()=>{ _removeOpTxOnce(t.id); }, {action:'op_delete', fields:['opTransactions','deletedIds'], onOk:()=>{ closeModal(); toast('Đã xóa bút toán','good'); renderAll(); }, onFail:(rr)=>{ toast('⚠ CHƯA xóa được — '+(rr.error||'')+'. Giữ nguyên.','bad'); }}); });
   },
   _opTxStatusTimeline(t));   // v3.06.10: timeline rút gọn (Lập → Đã chi/thu)
 }
@@ -43732,6 +43982,7 @@ function opApproveFromAp(apId){
   if(!canApprove){ toast('Cần quyền Admin / KTT / Duyệt L2 để duyệt phiếu này','bad'); return; }
   const now=new Date().toISOString(); const me=actorName();
   if(!confirm(`Duyệt nhanh phiếu này (${esc(r.partner||'')} · ${fmtFull(r.amount,r.ccy)})?\nPhiếu sẽ chuyển sang ĐÃ DUYỆT, sau đó bạn ghi nhận thanh toán đợt.`)) return;
+  commitMutation(()=>{
   r.status='approved';
   r.accCheckedBy=r.accCheckedBy||(me+' (duyệt nhanh tab 06)');
   r.accCheckedAt=r.accCheckedAt||now;
@@ -43739,11 +43990,13 @@ function opApproveFromAp(apId){
   r.approvedL1At=r.approvedL1At||now;
   r.approvedL2By=me+' (duyệt nhanh tab 06)';
   r.approvedL2At=now;
-  touchRecord(r); saveState();
+  touchRecord(r);
+  }, {action:'op_quick_approve_ap', fields:['payables'], onOk:()=>{
   try{ logAuditEvent('op_quick_approve_ap',{recordId:r.id,partner:r.partner||'',amount:r.amount||0,ccy:r.ccy||'',actor:me}); }catch(e){}
   renderAll();
   toast('Đã duyệt phiếu — ghi nhận thanh toán đợt','good');
   addArPayment('ap', apId);
+  }});
 }
 
 /* v3.02.29: DUYỆT LỆNH THANH TOÁN (bước trước khi KT xác nhận đã TT).
@@ -43759,21 +44012,26 @@ function approveOpPayment(id){
   if(!_canApproveOpPay()){ toast('Chỉ KTT/Admin được duyệt lệnh thanh toán','bad'); return; }
   const t=VesselService.opTransactions().find(x=>x.id===id); if(!t) return;
   if(t.paid){ toast('Bút toán đã thanh toán rồi','warn'); return; }
+  commitMutation(()=>{
   t.payApproved=true;
   t.payApprovedBy=actorName();
   t.payApprovedAt=new Date().toISOString();
-  touchRecord(t); saveState(); renderAll();
+  touchRecord(t);
+  }, {action:'op_pay_approve', fields:['opTransactions'], onOk:()=>{
+  renderAll();
   try{ logAuditEvent('op_pay_approve',{id:t.id,vesselId:t.vesselId,amount:t.amount||0,ccy:t.ccy||'',actor:actorName()}); }catch(e){}
   toast('Đã DUYỆT lệnh thanh toán — KT có thể xác nhận đã TT','good');
+  }});
 }
 function unapproveOpPayment(id){
   if(!_canApproveOpPay()){ toast('Chỉ KTT/Admin được bỏ duyệt','bad'); return; }
   const t=VesselService.opTransactions().find(x=>x.id===id); if(!t) return;
   if(t.paid){ toast('Đã TT — bỏ xác nhận TT trước đã','bad'); return; }
   if(!confirm('Bỏ duyệt lệnh thanh toán cho bút toán này?')) return;
+  commitMutation(()=>{
   t.payApproved=false; t.payApprovedBy=''; t.payApprovedAt='';
-  touchRecord(t); saveState(); renderAll();
-  toast('Đã bỏ duyệt lệnh','warn');
+  touchRecord(t);
+  }, {action:'op_pay_unapprove', fields:['opTransactions'], onOk:()=>{ renderAll(); toast('Đã bỏ duyệt lệnh','warn'); }});
 }
 
 /* v3.02.55: PHIẾU TỪ AP — duyệt + xác nhận TT + phí NGAY TẠI TAB 06 (thống nhất với phiếu nhập tay).
@@ -43785,13 +44043,17 @@ function opApproveAp(apId){
   if(wfStatus(r)==='approved'){ opConfirmApPay(apId); return; }
   if(!confirm(`Duyệt phiếu: ${esc(r.partner||'')} · ${fmtFull(r.amount,r.ccy)}?\nSau khi duyệt, KT ghi nhận thanh toán đợt + phí.`)) return;
   const now=new Date().toISOString(), me=actorName();
+  commitMutation(()=>{
   r.status='approved';
   r.accCheckedBy=r.accCheckedBy||(me+' (tab 06)'); r.accCheckedAt=r.accCheckedAt||now;
   r.approvedL1By=r.approvedL1By||(me+' (tab 06)'); r.approvedL1At=r.approvedL1At||now;
   r.approvedL2By=me+' (tab 06)'; r.approvedL2At=now;
-  touchRecord(r); saveState(); renderAll();
+  touchRecord(r);
+  }, {action:'op_ap_approve', fields:['payables'], onOk:()=>{
   try{ logAuditEvent('op_ap_approve',{recordId:r.id,amount:r.amount||0,ccy:r.ccy||'',actor:me}); }catch(e){}
+  renderAll();
   toast('Đã duyệt — KT ghi nhận thanh toán đợt','good');
+  }});
 }
 function opConfirmApPay(apId){
   const r=AccountingService.payableById(apId);
@@ -43880,10 +44142,11 @@ function confirmOpPayment(id){
   if(isUnconfirm){
     // Allow toggle off if accidentally marked
     if(!confirm('Bỏ xác nhận đã thanh toán cho bút toán này? Phí NH và phí khác sẽ được giữ lại để xem lại.')) return;
+    commitMutation(()=>{
     t.paid=false;
     t.paidDate='';
     try{ touchRecord(t); }catch(e){ t.updatedAt=new Date().toISOString(); }  // v3.06.00: dấu sync
-    saveState();renderAll();toast('Đã bỏ xác nhận');
+    }, {action:'op_pay_unconfirm', fields:['opTransactions'], onOk:()=>{ renderAll();toast('Đã bỏ xác nhận'); }});
     return;
   }
   // Prefill with today + suggested fee (last bank fee for same vessel as default)
@@ -43966,6 +44229,16 @@ function saveOpConfirm(id){
     if(c) t.contractNo=c.value.trim();
     if(i) t.invoiceNo=i.value.trim();
   }
+  commitMutation(()=>{
+  // v1.40.1: read 3 chứng từ fields if Chi hộ (form may have them)
+  if(t.type==='OUT'){
+    const v=document.getElementById('op-confirm-vendor');
+    const c=document.getElementById('op-confirm-contract');
+    const i=document.getElementById('op-confirm-invoice');
+    if(v) t.vendor=v.value.trim();
+    if(c) t.contractNo=c.value.trim();
+    if(i) t.invoiceNo=i.value.trim();
+  }
   t.paid=true;
   t.paidDate=paidDate;
   t.paidBy=actorName();  // v3.02.31: lưu người xác nhận TT
@@ -43976,10 +44249,11 @@ function saveOpConfirm(id){
   t.feeFxToUsd = feeCcy==='USD' ? 0 : feeFxToUsd;
   if(feeNote) t.feeNote=feeNote;
   touchRecord(t);  // v1.38.4
-  saveState();
+  }, {action:'op_confirm_pay', fields:['opTransactions'], onOk:()=>{
   closeModal();
   renderAll();
   toast('Đã xác nhận thanh toán + phí');
+  }, onFail:(rr)=>{ if(err) err.textContent='⚠ CHƯA lưu được: '+(rr.error||''); }});
 }
 
 function editOpFees(id){
@@ -44161,17 +44435,19 @@ function saveOpEditFull(id){
       amountUsd = amount/txFx;
     }
   }
+  commitMutation(()=>{
   Object.assign(t,{date,vesselId,type,amount,ccy:ccyT,fxToUsd:txFx,fxToVnd,amountUsd,desc,paidDate,bankFee,otherFee,feeCcy,feeFxToUsd,feeNote,vendor,contractNo,invoiceNo,vatPercent,vatAmount,amountGross,opCat});
   touchRecord(t);  // v1.38.4
-  saveState();closeModal();renderAll();toast('Đã cập nhật');
+  }, {action:'op_edit_full', fields:['opTransactions'], onOk:()=>{ closeModal();renderAll();toast('Đã cập nhật'); }, onFail:(rr)=>{ if(err) err.textContent='⚠ CHƯA lưu được: '+(rr.error||''); }});
 }
 
 function unconfirmOpPayment(id){
   const t=VesselService.opTransactions().find(x=>x.id===id);if(!t)return;
   if(!confirm('Bỏ xác nhận thanh toán? Bút toán sẽ trở về trạng thái chưa xác nhận, người nhập có thể sửa lại nội dung.'))return;
+  commitMutation(()=>{
   t.paid=false;t.paidDate='';
   try{ touchRecord(t); }catch(e){ t.updatedAt=new Date().toISOString(); }  // v3.06.00: dấu sync
-  saveState();closeModal();renderAll();toast('Đã bỏ xác nhận');
+  }, {action:'op_pay_unconfirm', fields:['opTransactions'], onOk:()=>{ closeModal();renderAll();toast('Đã bỏ xác nhận'); }});
 }
 
 /* v1.44.0: Populate vessel filter in op_input sub-tab */
@@ -44419,11 +44695,14 @@ function toggleSeahorseOwn(apId){
     ? `Chuyển khoản này thành <b>CHI PHÍ SEAHORSE TỰ CHỊU</b>?<br><br>${esc(r.partner||'')} · ${esc(r.desc||'')}<br><b>${_apAmt}</b> · ${v?esc(v.name):''}<br><br><span style="color:var(--accent);font-size:11px">→ KHÔNG đòi chủ tàu, KHÔNG lên báo cáo chủ tàu, KHÔNG trừ số dư chủ tàu. Ghi vào P&L mảng QL vận hành (Seahorse gánh).</span>`
     : `Chuyển NGƯỢC lại thành <b>CHI HỘ CHỦ TÀU</b>?<br><br>${esc(r.partner||'')} · ${esc(r.desc||'')}<br><b>${_apAmt}</b><br><br><span style="color:var(--muted);font-size:11px">→ Quay lại đòi chủ tàu, lên báo cáo chủ tàu, trừ số dư chủ tàu như cũ.</span>`;
   confirmDialog(turningOn?'Chuyển sang Seahorse tự chịu?':'Chuyển lại Chi hộ chủ tàu?', msg, '', ()=>{
+    commitMutation(()=>{
     r.seahorseOwn = turningOn;
     try{ touchRecord(r); }catch(e){ r.updatedAt=new Date().toISOString(); }
+    }, {action:'toggle_seahorse_own', fields:['payables'], onOk:()=>{
     try{ logAuditEvent('toggle_seahorse_own',{apId:r.id, seahorseOwn:turningOn, vesselId:r.vesselId, partner:r.partner||'', amount:r.amountGross||r.amount||0, by:actorName()}); }catch(e){}
-    saveState(); renderAll();
+    renderAll();
     toast(turningOn?'Đã chuyển sang CP Seahorse tự chịu ✓':'Đã chuyển lại Chi hộ chủ tàu ✓','good');
+    }});
   }, false, turningOn?'⇄🏢 Chuyển sang Seahorse chịu':'⇄ Chuyển lại Chi hộ chủ tàu');
 }
 
@@ -44630,16 +44909,18 @@ function opWfAdvance(id, toState){
   if(!OP_WF_STATES[toState]){ toast('Trạng thái không hợp lệ','bad'); return; }
   if(!_opCanAdvance(t, toState)){ toast('Bạn không có quyền duyệt bước này','bad'); return; }
   const fromState=opWfStatus(t);
+  commitMutation(()=>{
   t.ncStatus=toState;
   t._ncHist=t._ncHist||[];
   t._ncHist.push({from:fromState, to:toState, by:actorName(), at:new Date().toISOString()});
   if(toState==='approved'){ t._ncApprovedBy=actorName(); t._ncApprovedAt=new Date().toISOString(); }
   try{ touchRecord(t); }catch(e){}
+  }, {action:'op_wf_advance', fields:['opTransactions'], onOk:()=>{
   try{ logAuditEvent('op_wf_advance',{id, from:fromState, to:toState, by:actorName()}); }catch(e){}
-  saveState();
   toast('✓ Hồ sơ → '+(OP_WF_STATES[toState].label)+'. Nhớ Sync.','good');
   closeModal();
   renderAll();
+  }});
 }
 /* v3.07.49: từ chối / trả lại hồ sơ NCC về Nháp. */
 function opWfReject(id){
@@ -44650,16 +44931,18 @@ function opWfReject(id){
   const note=prompt('Lý do từ chối (trả hồ sơ về Nháp):','');
   if(note===null) return;
   const fromState=opWfStatus(t);
+  commitMutation(()=>{
   t.ncStatus='rejected';
   t._ncRejectNote=note;
   t._ncHist=t._ncHist||[];
   t._ncHist.push({from:fromState, to:'rejected', by:actorName(), at:new Date().toISOString(), note});
   try{ touchRecord(t); }catch(e){}
+  }, {action:'op_wf_reject', fields:['opTransactions'], onOk:()=>{
   try{ logAuditEvent('op_wf_reject',{id, from:fromState, by:actorName(), note}); }catch(e){}
-  saveState();
   toast('Đã từ chối hồ sơ. Người nhập sửa lại rồi trình lại.','warn');
   closeModal();
   renderAll();
+  }});
 }
 /* v3.07.55: nhập một ĐỢT CHI CŨ (đã trả NCC trước khi dùng app / nhập bù lịch sử) vào line công nợ chi hộ.
    Đối xứng apAddOldPayment của AP. Ghi vào payments[] với cờ _oldEntry — KHÔNG đụng reportedValue (báo cáo chủ tàu). */
@@ -44677,14 +44960,16 @@ function opAddOldPayment(id){
   if(amt<=0){ toast('Số tiền > 0','bad'); return; }
   if(amt>rem+0.001){ if(!confirm('Số nhập ('+amt.toLocaleString('vi-VN')+') lớn hơn còn nợ ('+rem.toLocaleString('vi-VN')+'). Vẫn nhập?')) return; }
   const note=prompt('Ghi chú (UNC, số chứng từ...):','(đợt cũ — nhập bù lịch sử)')||'';
+  commitMutation(()=>{
   t.payments=t.payments||[];
   t.payments.push({date:(d||'').trim()||todayISO(), amount:amt, ccy, note, by:actorName(), at:new Date().toISOString(), _oldEntry:true});
   if(opNccRemaining(t)<=0.001){ t.paid=true; t.paidDate=t.paidDate||((d||'').trim()||todayISO()); t.paidBy=t.paidBy||actorName(); }
   try{ touchRecord(t); }catch(e){}
+  }, {action:'op_old_payment', fields:['opTransactions'], onOk:()=>{
   try{ logAuditEvent('op_old_payment',{id, amount:amt, ccy, by:actorName()}); }catch(e){}
-  saveState();
   toast('✓ Đã nhập đợt chi cũ — công nợ NCC cập nhật','good');
   showOpTxDetail(id);
+  }});
 }
 /* v3.07.49: mở form ghi nhận một đợt thanh toán NCC. */
 function openOpNccPayment(id){
@@ -44715,6 +45000,7 @@ function opSaveNccPayment(id){
     if(!confirm('Số trả ('+amt.toLocaleString('vi-VN')+') LỚN HƠN còn nợ ('+remain.toLocaleString('vi-VN')+'). Vẫn ghi nhận (trả thừa)?')) return;
   }
   const note=(document.getElementById('op-ncc-pay-note')||{}).value||'';
+  commitMutation(()=>{
   t.payments=t.payments||[];
   t.payments.push({date, amount:amt, ccy, note, by:actorName(), at:new Date().toISOString()});
   // Đồng bộ cờ paid khi đã trả hết (để các view cũ dựa vào t.paid vẫn đúng).
@@ -44722,11 +45008,12 @@ function opSaveNccPayment(id){
     t.paid=true; t.paidDate=t.paidDate||date; t.paidBy=t.paidBy||actorName(); t.paidAt=new Date().toISOString();
   }
   try{ touchRecord(t); }catch(e){}
+  }, {action:'op_ncc_payment', fields:['opTransactions'], onOk:()=>{
   try{ logAuditEvent('op_ncc_payment',{id, amount:amt, ccy, by:actorName()}); }catch(e){}
-  saveState();
   toast('✓ Đã ghi đợt thanh toán '+amt.toLocaleString('vi-VN')+' '+ccy+(opNccRemaining(t)<=0.001?' — đã trả HẾT':'')+'. Nhớ Sync.','good');
   closeModal();
   showOpTxDetail(id);
+  }});
 }
 
 /* v3.07.17: đảo cờ seahorseOwn cho opTransaction (chi hộ trực tiếp). */
@@ -44751,11 +45038,14 @@ function toggleOpTxSeahorseOwn(id){
     ? `Chuyển khoản này thành <b>CHI PHÍ SEAHORSE TỰ CHỊU</b>?<br><br>${esc(t.desc||'')}<br><b>${_amtStr}</b> · ${v?esc(v.name):''}<br><br><span style="color:#8a5a1e;font-size:11px">→ KHÔNG đòi chủ tàu, KHÔNG lên báo cáo chủ tàu, KHÔNG trừ số dư chủ tàu. Seahorse gánh chi phí này.</span>`
     : `Chuyển NGƯỢC lại thành <b>CHI HỘ CHỦ TÀU</b>?<br><br>${esc(t.desc||'')}<br><b>${_amtStr}</b><br><br><span style="color:var(--muted);font-size:11px">→ Quay lại đòi chủ tàu, lên báo cáo, trừ số dư chủ tàu như cũ.</span>`;
   confirmDialog(turningOn?'Chuyển sang Seahorse tự chịu?':'Chuyển lại Chi hộ chủ tàu?', msg, '', ()=>{
+    commitMutation(()=>{
     t.seahorseOwn=turningOn;
     try{ touchRecord(t); }catch(e){ t.updatedAt=new Date().toISOString(); }
+    }, {action:'toggle_optx_seahorse_own', fields:['opTransactions'], onOk:()=>{
     try{ logAuditEvent('toggle_optx_seahorse_own',{id:t.id, seahorseOwn:turningOn, vesselId:t.vesselId, desc:(t.desc||'').slice(0,60), amount:t.amount, by:actorName()}); }catch(e){}
-    saveState(); closeModal(); renderAll();
+    closeModal(); renderAll();
     toast(turningOn?'Đã chuyển sang CP Seahorse tự chịu ✓':'Đã chuyển lại Chi hộ chủ tàu ✓','good');
+    }});
   }, false, turningOn?'⇄🏢 Chuyển sang Seahorse chịu':'⇄ Chuyển lại Chi hộ chủ tàu');
 }
 
@@ -45577,6 +45867,10 @@ function signLockOwnerReport(){
     if(u && u.departmentId){ const d=HRService.departments().find(x=>x.id===u.departmentId); signerDept=d?d.name:''; }
   }catch(e){}
   const nowISO=new Date().toISOString();
+  let _lockedCount=0;
+  let _reconciledCount=0;   // v3.09.34: chi dự kiến → "đã đối chiếu chủ tàu" khi khóa sổ (chốt A)
+  const _doLock=()=>{
+  _lockedCount=0; _reconciledCount=0;
   S.ownerReportLocks=S.ownerReportLocks||[];
   vids.forEach(vid=>{
     const ex=ownerReportLockFor(vid, month);
@@ -45585,8 +45879,6 @@ function signLockOwnerReport(){
   });
   // v3.06.31: KHÓA ĐÍCH DANH từng phiếu CHI THỰC của tàu+kỳ — gắn cờ _locked trên record, GIỮ NGUYÊN ngày.
   //   Chi DỰ KIẾN (_isBudget) KHÔNG khóa, KHÔNG dời — nằm yên đúng tháng tới khi hoàn tất thủ tục.
-  let _lockedCount=0;
-  let _reconciledCount=0;   // v3.09.34: chi dự kiến → "đã đối chiếu chủ tàu" khi khóa sổ (chốt A)
   VesselService.opTransactions().forEach(t=>{
     if(vids.includes(t.vesselId) && String(t.date).slice(0,7)===month){
       if(t._isBudget){
@@ -45618,11 +45910,13 @@ function signLockOwnerReport(){
       }
     }
   });
+  };
+  commitMutation(_doLock, {action:'owner_report_lock', fields:['opTransactions','ownerReportLocks'], onOk:()=>{
   try{ logAuditEvent('owner_report_lock',{period:month, vessels:vids, signedBy:signer, lockedTx:_lockedCount, reconciledBudget:_reconciledCount}); }catch(e){}
-  saveState();
   toast('🔒 Đã ký & khóa kỳ '+month+' ('+vids.length+' tàu · '+_lockedCount+' phiếu chi thực'+(_reconciledCount>0?' · '+_reconciledCount+' chi dự kiến → đã đối chiếu':'')+'). Nhớ bấm Sync.','good');
   closeModal();
   renderAll();
+  }, onFail:(rr)=>{ toast('⚠ CHƯA khóa được — '+(rr.error||'')+'. Giữ nguyên.','bad'); }});
 }
 /* Mở khóa kỳ (chỉ admin/BOD) — trường hợp đặc biệt cần sửa lại. */
 function unlockOwnerReport(vesselId, period){
@@ -45631,9 +45925,11 @@ function unlockOwnerReport(vesselId, period){
   if(!confirm('Mở khóa kỳ '+period+' của '+(v?v.name:'tàu')+'?\nSau khi mở, bút toán kỳ này lại sửa được. Số đã gửi chủ tàu có thể thay đổi — cân nhắc kỹ.')) return;
   const reason=prompt('Lý do mở khóa (bắt buộc — để ghi log):','')||'';
   if(!reason.trim()){ toast('Cần nhập lý do mở khóa','bad'); return; }
+  let _unlocked=0;
+  commitMutation(()=>{
+  _unlocked=0;
   S.ownerReportLocks=(S.ownerReportLocks||[]).filter(x=>!(x.vesselId===vesselId && String(x.period).slice(0,7)===String(period).slice(0,7)));
   // v3.06.31: gỡ cờ khóa đích danh trên các phiếu chi thực của tàu+kỳ này
-  let _unlocked=0;
   VesselService.opTransactions().forEach(t=>{
     if(t._locked && t.vesselId===vesselId && String(t._lockedPeriod||t.date).slice(0,7)===String(period).slice(0,7)){
       t._locked=false; t._lockedPeriod=''; t._lockedBy=''; t._lockedAt='';
@@ -45646,10 +45942,11 @@ function unlockOwnerReport(vesselId, period){
       try{ touchRecord(t); }catch(e){}
     }
   });
+  }, {action:'owner_report_unlock', fields:['opTransactions','ownerReportLocks'], onOk:()=>{
   try{ logAuditEvent('owner_report_unlock',{period, vesselId, reason, by:actorName(), unlockedTx:_unlocked}); }catch(e){}
-  saveState();
   toast('Đã mở khóa kỳ '+period+'. Nhớ Sync.','good');
   renderAll();
+  }, onFail:(rr)=>{ toast('⚠ CHƯA mở khóa được — '+(rr.error||'')+'. Giữ nguyên.','bad'); }});
 }
 function generateOpReport(){
   const from=document.getElementById('rep-from').value;
@@ -56600,15 +56897,19 @@ function apMarkForPayOrder(id){
   if(wfStatus(r)!=='pending_acc'){ toast('Chỉ trình ký phiếu đang "Chờ KT kiểm"','bad'); return; }
   if(r._inPayOrder){
     // bấm lại → bỏ khỏi lệnh
-    r._inPayOrder=false; touchRecord(r); saveState(); renderAll();
-    toast('Đã bỏ phiếu khỏi Lệnh trình duyệt','warn'); return;
+    commitMutation(()=>{ r._inPayOrder=false; touchRecord(r); }, {action:'ap_pay_order_remove', fields:['payables'], onOk:()=>{ renderAll(); toast('Đã bỏ phiếu khỏi Lệnh trình duyệt','warn'); }});
+    return;
   }
-  r._inPayOrder=true;
-  r._payOrderBy=actorName();                    // v3.07.52: tên NV trình gắn theo hồ sơ
-  r._payOrderAt=new Date().toISOString();
-  touchRecord(r); saveState(); renderAll();
-  const cnt=AccountingService.payables().filter(x=>x._inPayOrder && wfStatus(x)==='pending_acc').length;
-  toast('✓ Đã đưa vào Lệnh trình duyệt ('+cnt+' phiếu). Mở "📋 Lệnh trình duyệt" để chọn NH & trình ký KTT.','good');
+  commitMutation(()=>{
+    r._inPayOrder=true;
+    r._payOrderBy=actorName();                    // v3.07.52: tên NV trình gắn theo hồ sơ
+    r._payOrderAt=new Date().toISOString();
+    touchRecord(r);
+  }, {action:'ap_pay_order_add', fields:['payables'], onOk:()=>{
+    renderAll();
+    const cnt=AccountingService.payables().filter(x=>x._inPayOrder && wfStatus(x)==='pending_acc').length;
+    toast('✓ Đã đưa vào Lệnh trình duyệt ('+cnt+' phiếu). Mở "📋 Lệnh trình duyệt" để chọn NH & trình ký KTT.','good');
+  }});
 }
 function openApPaymentOrder(focusId){
   if(!canCheckAcc()){ toast('Chỉ Kế toán (KT trở lên) được lập lệnh trình duyệt','bad'); return; }
@@ -56738,6 +57039,8 @@ function apOrderSubmitToKtt(){
   if(!toSubmit.length){ toast('Các phiếu đã chọn đều đã ở cấp KTT (L1) — chỉ lưu lại hình thức/NH','warn'); }
   if(!confirm('TRÌNH KÝ KTT cho '+rows.length+' phiếu đã chọn?\nHình thức chi + ngân hàng sẽ được lưu, phiếu chuyển sang KTT (L1) duyệt.')) return;
   let ok=0, fail=0;
+  commitMutation(()=>{
+  ok=0;fail=0;
   rows.forEach(r=>{
     const rec=AccountingService.payableById(r.id);
     if(!rec){ fail++; return; }
@@ -56749,11 +57052,12 @@ function apOrderSubmitToKtt(){
     if(wfStatus(rec)==='pending_acc'){ if(wfCheckAcc(rec)){ rec._inPayOrder=false; ok++; } else fail++; }
     else { rec._inPayOrder=false; touchRecord(rec); }
   });
-  saveState();
+  }, {action:'ap_trinh_ky_ktt', fields:['payables'], onOk:()=>{
   closeModal();
   try{ renderAll(); }catch(e){}
   try{ logAuditEvent('ap_trinh_ky_ktt',{count:ok,actor:actorName()}); }catch(e){}
   toast('✓ Đã trình ký '+ok+' phiếu lên KTT (L1)'+(fail?' · '+fail+' phiếu lỗi':''), ok?'good':'warn');
+  }});
 }
 /* v3.06.34 — DUYỆT NGAY TRONG MODAL Trình duyệt(L1)/Duyệt chi(L2): lưu hình thức chi + NH
    (giống PDF) rồi chạy wfApproveL1/wfApproveL2 cho các phiếu đã chọn → chuyển cấp luôn. */
@@ -56773,6 +57077,8 @@ function apprOrderApproveAll(level){
   // v3.07.54: khi L2 duyệt → gắn LÔ DUYỆT CHI chung (Phiếu hồ sơ "GĐ đã duyệt thanh toán").
   const _batchId = (!isL1) ? ('PB'+Date.now().toString(36)+Math.random().toString(36).slice(2,5)) : '';
   const _batchAt = new Date().toISOString(); const _batchBy = actorName();
+  commitMutation(()=>{
+  ok=0;fail=0;failReasons.length=0;
   rows.forEach(r=>{
     const rec=AccountingService.payableById(r.id);
     if(!rec){ fail++; failReasons.push('mất phiếu (id '+String(r.id).slice(-6)+')'); return; }
@@ -56794,9 +57100,9 @@ function apprOrderApproveAll(level){
     }
     else { fail++; failReasons.push(_nm+' (sai cấp: đang ở "'+ (typeof WF_STATES!=='undefined'&&WF_STATES[st]?WF_STATES[st].label:st) +'", không phải '+(isL1?'Trình ký':'Chờ TT')+')'); }
   });
+  }, {action:'ap_pay_order_approve', fields:['payables'], onOk:()=>{
   if(!isL1 && ok>0){ try{ logAuditEvent('ap_l2_batch_approved',{batchId:_batchId, count:ok, by:_batchBy}); }catch(e){} }
   if(fail>0){ try{ console.warn('[duyệt] '+fail+' phiếu fail:', failReasons); }catch(e){} }
-  saveState();
   closeModal();
   try{ renderAll(); }catch(e){}
   if(ok>0 && fail===0){
@@ -56806,6 +57112,7 @@ function apprOrderApproveAll(level){
   } else {
     toast('⚠ Không duyệt được phiếu nào ('+fail+'): '+failReasons.slice(0,3).join('; ')+(failReasons.length>3?'…':''),'bad');
   }
+  }});
 }
 /* v3.06.00: chọn/bỏ chọn tất cả phiếu trong lệnh trình duyệt */
 function _apPayOrderSelectAll(val){
@@ -57266,15 +57573,17 @@ function deleteImportBatchById(batchId, field){
         localStorage.setItem('seahorse_rescue_lastDelete', JSON.stringify(rescue));
         dlog('[rescue] đã lưu bản sao', victims.length, 'bản ghi vào localStorage (key: seahorse_rescue_lastDelete). Khôi phục bằng restoreLastDelete() nếu xóa nhầm.');
       }catch(e){ console.warn('[rescue] không lưu được bản sao:', e&&e.message); }
+      commitMutation(()=>{
       S[field]=arr.filter(r=>!(r && r._importBatch===batchId));
       try{ markDeleted(ids, field); }catch(e){ console.warn('[delBatchById] markDeleted:', e&&e.message); }
       try{ registerPurgedBatch(batchId, field); }catch(e){}  // v3.01.26: cấm lô này sống lại vĩnh viễn
       if(S.lastImportBatch && S.lastImportBatch.batchId===batchId) S.lastImportBatch=null;
-      saveState();
+      }, {action:'import_batch_delete', fields:[field,'deletedIds','purgedBatches','lastImportBatch'], onOk:()=>{
       try{ logAuditEvent('import_batch_delete',{target:field, batchId, count:victims.length, by:actorName()}); }catch(e){}
       renderAll();
       try{ renderImportBatchList(); }catch(e){}
       toast(`Đã xóa lô ${victims.length} bản ghi. Bấm Sync để dọn trên cloud. (Đã lưu bản sao phòng hờ)`);
+      }, onFail:(rr)=>{ toast('⚠ CHƯA xóa được — '+(rr.error||'')+'. Giữ nguyên.','bad'); }});
     }
   );
 }
@@ -58177,6 +58486,8 @@ function excelConfirmImport(){
 
   let created=0;
   let warnings=[];
+  const _doImport=()=>{
+  created=0; warnings=[];
   validRows.forEach(r=>{
     const d=r.data;
     // Branch by target type
@@ -58937,7 +59248,6 @@ function excelConfirmImport(){
       sourceType:'cash_clear',sourceId:'IMP-'+IMPORT_BATCH_ID,recordedBy:actorName(),recordedAt:new Date().toISOString()});
     try{ touchRecord(f); }catch(e){}
   });
-  saveState();
   // v2.71.3: ghi nhớ LÔ IMPORT GẦN NHẤT để có thể "Xóa lô gần nhất" nếu lỡ import nhầm.
   try{
     S.lastImportBatch = {
@@ -58949,8 +59259,9 @@ function excelConfirmImport(){
       by: actorName(),
       at: new Date().toISOString()
     };
-    saveState();
   }catch(e){ console.warn('[lastImportBatch] save failed:', e&&e.message); }
+  };
+  commitMutation(_doImport, {action:'excel_import', fields:['payables','receivables','opTransactions','vendors','expenseTypes','revenueTypes','vessels','projects','fixedAssets','tools','bankAccounts','bankSnapshots','loans','warehouses','invMovements','events','cashFunds','cashTxns','lastImportBatch'], onOk:()=>{
   closeModal();
   EXCEL_PARSED_DATA=null;
   renderAll();
@@ -58966,6 +59277,7 @@ function excelConfirmImport(){
   } else {
     toast(msg,'good');
   }
+  }, onFail:(rr)=>{ toast('⚠ CHƯA import được — '+(rr.error||'')+'. Dữ liệu giữ nguyên.','bad'); }});
 }
 
 /* v2.71.3: XÓA LÔ IMPORT GẦN NHẤT — gỡ nhanh nếu lỡ import nhầm.
@@ -59168,13 +59480,15 @@ function dedupeOpTransactions(){
     ()=>{
       const ids=victims.map(v=>v.id).filter(Boolean);
       const idSet=new Set(ids);
+      commitMutation(()=>{
       S.opTransactions = all.filter(t=>!idSet.has(t.id));
-      try{ markDeleted(ids); }catch(e){ console.warn('[dedupeOp] markDeleted:', e&&e.message); }
-      saveState();
+      try{ markDeleted(ids, 'opTransactions'); }catch(e){ console.warn('[dedupeOp] markDeleted:', e&&e.message); }
+      }, {action:'op_dedupe', fields:['opTransactions','deletedIds'], onOk:()=>{
       try{ logAuditEvent('op_dedupe',{removed:victims.length}); }catch(e){}
       renderAll();
       try{ renderExcelImportInfo(); }catch(e){}
       toast(`Đã xóa ${victims.length} bút toán import trùng`,'good');
+      }, onFail:(rr)=>{ toast('⚠ CHƯA xóa được — '+(rr.error||'')+'. Giữ nguyên.','bad'); }});
     }
   );
 }
