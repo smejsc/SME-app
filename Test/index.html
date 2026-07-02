@@ -3471,7 +3471,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.09.87-feecol2';            // bumped on each release
+const APP_VERSION='3.09.87';            // bumped on each release
 /* Debug logging: dlog() chỉ in khi DEBUG_MODE bật (mặc định TẮT ở production để
    tránh nhiễu/lộ cấu trúc nội bộ qua DevTools). Bật bằng: localStorage.DEBUG_MODE='1'.
    console.warn/error GIỮ NGUYÊN (cảnh báo & lỗi vận hành luôn hiện). */
@@ -45429,6 +45429,7 @@ function renderOpTxList(){
           <th>Tàu${type==='OUT'?' · Số HĐ':''}</th>
           <th>Ngày</th>
           <th class="r">Số tiền</th>
+          ${type==='OUT'?'<th class="r" title="Phí giao dịch / phí khác (bankFee + otherFee), quy USD — RIÊNG, không cộng vào Số tiền">Phí GD/khác</th>':''}
           <th class="c">Trạng thái</th>
           <th></th>
         </tr></thead><tbody>`;
@@ -45436,9 +45437,9 @@ function renderOpTxList(){
       // v3.01.58: nếu CÓ bút toán loại này (bỏ lọc người nhập/tháng) nhưng đang bị lọc ẩn → báo rõ
       const hiddenByFilter = allTxScoped.filter(t=>t.type===type && (!fV||t.vesselId===fV)).length;
       if(hiddenByFilter>0 && (fC||fM)){
-        html+=`<tr><td colspan="6" class="empty" style="color:var(--warn)">⚠ Có <b>${hiddenByFilter}</b> bút toán ${type==='IN'?'thu hộ':'chi hộ'} nhưng đang bị ẩn bởi bộ lọc${fC?' Người nhập = <b>'+esc(fC)+'</b>':''}${fM?' · Tháng = <b>'+esc(fM)+'</b>':''}. <a onclick="_opClearFilters()" style="color:var(--accent);cursor:pointer;text-decoration:underline">Bỏ lọc để xem tất cả</a></td></tr>`;
+        html+=`<tr><td colspan="${type==='OUT'?'7':'6'}" class="empty" style="color:var(--warn)">⚠ Có <b>${hiddenByFilter}</b> bút toán ${type==='IN'?'thu hộ':'chi hộ'} nhưng đang bị ẩn bởi bộ lọc${fC?' Người nhập = <b>'+esc(fC)+'</b>':''}${fM?' · Tháng = <b>'+esc(fM)+'</b>':''}. <a onclick="_opClearFilters()" style="color:var(--accent);cursor:pointer;text-decoration:underline">Bỏ lọc để xem tất cả</a></td></tr>`;
       } else {
-        html+=`<tr><td colspan="6" class="empty">Không có bút toán ${type==='IN'?'thu hộ':'chi hộ'} ${fM?'trong tháng '+fM:''} ${fV?'của tàu này':''}</td></tr>`;
+        html+=`<tr><td colspan="${type==='OUT'?'7':'6'}" class="empty">Không có bút toán ${type==='IN'?'thu hộ':'chi hộ'} ${fM?'trong tháng '+fM:''} ${fV?'của tàu này':''}</td></tr>`;
       }
     } else {
       rows.forEach(t=>{
@@ -45474,12 +45475,16 @@ function renderOpTxList(){
         const _vatShow = (+t.vatAmount>0) ? +t.vatAmount : (+t._vatRaw||0);
         const _netShow = (+t.vatAmount>0) ? (+t.amount||0) : ((+t._netRaw>0)?+t._netRaw:(+t.amount||0));
         const vatLine = (type==='OUT' && _vatShow>0) ? `<div style="font-size:10px;color:var(--muted)">net ${fmtCcy(_netShow,ccy)} · vat ${fmtCcy(_vatShow,ccy)}</div>` : '';
-        const feeLine = feesUsd ? `<div style="font-size:10px;color:var(--muted)" title="${feeTip}">phí ${fmtCcy(feesUsd,'USD')}</div>` : '';
+        const feeLine = '';  // v3.09.87: phí chuyển sang CỘT RIÊNG (bên dưới), không còn dòng nhỏ dưới số tiền
         const col4=`<td class="r num"${fxHint}>
           <b>${fmtCcy(grossAmt,ccy)}</b>
           ${!isUsd?`<div style="font-size:10px;color:var(--accent)">≈ ${fmtCcy(usd,'USD')}</div>`:''}
           ${vatLine}${feeLine}
         </td>`;
+        // v3.09.87: Cột Phí GD/khác RIÊNG (chỉ bảng OUT) — quy USD + gốc; RIÊNG, không cộng vào Số tiền.
+        const colFee = (type==='OUT')
+          ? `<td class="r num" style="color:${feesUsd>0?'#8a5a1e':'var(--muted)'}" title="${feeTip}">${feesUsd>0?`<b>${fmtCcy(feesUsd,'USD')}</b>${feeCcyT!=='USD'?`<div style="font-size:10px;color:var(--muted);font-weight:400">${fmtCcy((+t.bankFee||0)+(+t.otherFee||0),feeCcyT)}</div>`:''}`:'—'}</td>`
+          : '';
         // Cột 6: trạng thái TT — v3.02.45: phiếu _fromAp xử lý qua AP GỐC (không phải op tx thật).
         const ttCell = t._fromAp
           ? (()=>{
@@ -45519,21 +45524,22 @@ function renderOpTxList(){
         html+=`<tr style="${t.paid?'':'background:rgba(196,138,57,.04)'}">
           ${col1}${col2}
           <td class="mono" style="font-size:11px">${t.date}</td>
-          ${col4}
+          ${col4}${colFee}
           <td class="c">${ttCell}</td>
           <td><div class="row-actions">${actCell}</div></td>
         </tr>`;
       });
-      // Totals (USD) — v3.01.61: TỔNG CHI HỘ gồm cả PHÍ (NH + khác). Tổng thu giữ nguyên.
-      const grandTot = (type==='OUT') ? (totAll + totFees) : totAll;
+      // v3.09.87: TỔNG CHI HỘ và TỔNG PHÍ để RIÊNG theo cột (KHÔNG cộng chung) — dễ đối chiếu báo cáo.
+      const grandTot = totAll;  // chỉ số tiền chi (net+VAT quy USD), KHÔNG gồm phí
       html+=`<tr class="total">
-        <td colspan="3">TỔNG ${type==='IN'?'THU':'CHI'} ${fM?'· T'+fM.slice(5)+'/'+fM.slice(0,4):'(tất cả)'} <span style="font-weight:400;color:var(--muted);font-size:10px">— quy USD${type==='OUT'?', net + phí':''}${totVatUsd>0?' · VAT ≈'+fmtCcy(totVatUsd,'USD'):''}${(type==='OUT'&&totFees)?' · trong đó phí '+fmtCcy(totFees,'USD'):''}</span></td>
+        <td colspan="3">TỔNG ${type==='IN'?'THU':'CHI'} ${fM?'· T'+fM.slice(5)+'/'+fM.slice(0,4):'(tất cả)'} <span style="font-weight:400;color:var(--muted);font-size:10px">— quy USD${totVatUsd>0?' · VAT ≈'+fmtCcy(totVatUsd,'USD'):''}</span></td>
         <td class="r"><b>${fmtCcy(grandTot,'USD')}</b></td>
+        ${type==='OUT'?`<td class="r" style="color:#8a5a1e"><b>${totFees?fmtCcy(totFees,'USD'):'—'}</b></td>`:''}
         <td colspan="2"></td>
       </tr>
       <tr style="font-size:11px;color:var(--muted)">
-        <td colspan="3" style="padding-left:24px;font-style:italic">↳ Đã TT: <b style="color:var(--good)">${fmtCcy(totPaid,'USD')}</b> · Chưa TT: <b style="color:var(--warn)">${fmtCcy(totUnpaid,'USD')}</b>${(type==='OUT'&&totFees)?' · Chi (net) '+fmtCcy(totAll,'USD')+' + phí '+fmtCcy(totFees,'USD'):''}</td>
-        <td colspan="3"></td>
+        <td colspan="3" style="padding-left:24px;font-style:italic">↳ Đã TT: <b style="color:var(--good)">${fmtCcy(totPaid,'USD')}</b> · Chưa TT: <b style="color:var(--warn)">${fmtCcy(totUnpaid,'USD')}</b>${(type==='OUT'&&totFees)?' · Chi (net) '+fmtCcy(totAll,'USD')+' · phí '+fmtCcy(totFees,'USD')+' (để riêng)':''}</td>
+        <td colspan="${type==='OUT'?'4':'3'}"></td>
       </tr>`;
     }
     html+='</tbody></table></div></div></details>';
@@ -46286,24 +46292,23 @@ function generateOpReport(){
         </tr>`;
       }).join('');
     };
-    // v1.40.1: Chi hộ table now has 3 extra columns: NCC / HĐ / HD
+    // v3.09.87: BỎ cột Chứng từ (Docs) → thay bằng cột Phí NH/khác (đối chiếu với báo cáo).
     const tableRowsOUT=(rows)=>{
       if(!rows.length) return `<tr><td colspan="8" style="text-align:center;font-style:italic;color:#888">— Không có giao dịch —</td></tr>`;
       return rows.map(x=>{
         const xccy=x.ccy||'USD';
-        const _att=Array.isArray(x.attachments)?x.attachments:[];
-        const _attCell=_att.length
-          ? _att.map((a,i)=>`<a href="${(a.url||'').replace(/"/g,'')}" target="_blank" rel="noopener" style="color:#1c3a5c;text-decoration:underline">${_att.length>1?('#'+(i+1)):'📎'}</a>`).join(' ')
-          : '—';
+        const _feeRaw=(+x.bankFee||0)+(+x.otherFee||0);
+        const _feeCcy=x.feeCcy||xccy;
+        const _feeCell=_feeRaw>0?fmtMoney(_feeRaw,_feeCcy):'—';
         return `<tr>
           <td>${fmtDate(x.date)}</td>
           <td>${(x.desc||'').replace(/</g,'&lt;')}</td>
           <td style="font-size:9pt">${(x.vendor||'').replace(/</g,'&lt;')||'—'}</td>
           <td style="font-size:8.5pt;font-family:monospace">${(x.contractNo||'').replace(/</g,'&lt;')||'—'}</td>
           <td style="font-size:8.5pt;font-family:monospace">${(x.invoiceNo||'').replace(/</g,'&lt;')||'—'}</td>
-          <td class="c" style="font-size:8.5pt">${_attCell}</td>
           <td class="c" style="font-size:9pt">${xccy}</td>
           <td class="r">${fmtMoney(x.amount,xccy)}</td>
+          <td class="r" style="color:#8a5a1e">${_feeCell}</td>
           <td class="r">${fmtMoney(opTxUsd(x),'USD')}</td>
         </tr>`;
       }).join('');
@@ -46407,13 +46412,13 @@ function generateOpReport(){
       <table>
         <thead><tr>
           <th style="width:9%">${t.date}</th>
-          <th style="width:26%">${esc(t.desc)}</th>
-          <th style="width:18%">${en?'Vendor':bi?'NCC · Vendor':'Tên NCC'}</th>
+          <th style="width:24%">${esc(t.desc)}</th>
+          <th style="width:17%">${en?'Vendor':bi?'NCC · Vendor':'Tên NCC'}</th>
           <th style="width:11%">${en?'Contract':bi?'HĐ · Contract':'Số HĐ'}</th>
           <th style="width:10%">${en?'Invoice':bi?'HD · Invoice':'Số HD'}</th>
-          <th class="c" style="width:7%">${en?'Docs':bi?'CT · Docs':'Chứng từ'}</th>
           <th class="c" style="width:8%">${enOrBi?'CCY':'Tiền tệ'}</th>
-          <th class="r" style="width:14%">${enOrBi?'Original':'Số tiền gốc'}</th>
+          <th class="r" style="width:13%">${enOrBi?'Original':'Số tiền gốc'}</th>
+          <th class="r" style="width:10%">${en?'Fee':bi?'Phí · Fee':'Phí'}</th>
           <th class="r" style="width:13%">USD</th>
         </tr></thead>
         <tbody>
@@ -46430,12 +46435,13 @@ function generateOpReport(){
       <table>
         <thead><tr>
           <th style="width:9%">${t.date}</th>
-          <th style="width:26%">${esc(t.desc)}</th>
-          <th style="width:18%">${en?'Vendor':bi?'NCC · Vendor':'Tên NCC'}</th>
+          <th style="width:24%">${esc(t.desc)}</th>
+          <th style="width:17%">${en?'Vendor':bi?'NCC · Vendor':'Tên NCC'}</th>
           <th style="width:11%">${en?'Contract':bi?'HĐ · Contract':'Số HĐ'}</th>
           <th style="width:11%">${en?'Invoice':bi?'HD · Invoice':'Số HD'}</th>
           <th class="c" style="width:8%">${enOrBi?'CCY':'Tiền tệ'}</th>
-          <th class="r" style="width:14%">${enOrBi?'Original':'Số tiền gốc'}</th>
+          <th class="r" style="width:13%">${enOrBi?'Original':'Số tiền gốc'}</th>
+          <th class="r" style="width:10%">${en?'Fee':bi?'Phí · Fee':'Phí'}</th>
           <th class="r" style="width:13%">USD</th>
         </tr></thead>
         <tbody>
@@ -46452,12 +46458,13 @@ function generateOpReport(){
       <table>
         <thead><tr>
           <th style="width:9%">${t.date}</th>
-          <th style="width:26%">${esc(t.desc)}</th>
-          <th style="width:18%">${en?'Vendor':bi?'NCC · Vendor':'Tên NCC'}</th>
+          <th style="width:24%">${esc(t.desc)}</th>
+          <th style="width:17%">${en?'Vendor':bi?'NCC · Vendor':'Tên NCC'}</th>
           <th style="width:11%">${en?'Contract':bi?'HĐ · Contract':'Số HĐ'}</th>
           <th style="width:11%">${en?'Invoice':bi?'HD · Invoice':'Số HD'}</th>
           <th class="c" style="width:8%">${enOrBi?'CCY':'Tiền tệ'}</th>
-          <th class="r" style="width:14%">${enOrBi?'Original':'Số tiền gốc'}</th>
+          <th class="r" style="width:13%">${enOrBi?'Original':'Số tiền gốc'}</th>
+          <th class="r" style="width:10%">${en?'Fee':bi?'Phí · Fee':'Phí'}</th>
           <th class="r" style="width:13%">USD</th>
         </tr></thead>
         <tbody>
