@@ -3471,7 +3471,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.09.87-p2a-rev3';            // bumped on each release
+const APP_VERSION='3.09.87-p2a-rc-invest';            // bumped on each release
 /* Debug logging: dlog() chỉ in khi DEBUG_MODE bật (mặc định TẮT ở production để
    tránh nhiễu/lộ cấu trúc nội bộ qua DevTools). Bật bằng: localStorage.DEBUG_MODE='1'.
    console.warn/error GIỮ NGUYÊN (cảnh báo & lỗi vận hành luôn hiện). */
@@ -13154,6 +13154,8 @@ async function saveStateEncrypted(){
 }
 async function loadEncryptedLocal(){
   window._loadFailed = false;  // v2.99.41: reset cờ mỗi lần thử load (chỉ bật lại nếu lần này lỗi)
+  // RC ĐIỀU TRA: mở chu kỳ khởi động mới — tăng bootId, ghi mốc bootstrap_start. Thuần quan sát.
+  try{ _persistBootId++; _bootstrapStartAt = Date.now(); _persistTsEvent('bootstrap_start', {}); }catch(_){}
   try{
     const raw=await Persistence.getState(_storeKeyForUser(), { source:'bootstrap' });  // PHASE 2a: đọc qua Persistence (admin→IDB, else→localStorage). Rollback = đổi lại localStorage.getItem(_storeKeyForUser()).
     if(!raw){S=defaultState();return;}
@@ -13366,6 +13368,7 @@ async function cloudSync(mode, opts){
       // v3.01.26: DIỆT TẬN GỐC — dọn lại mọi lô đã xóa vĩnh viễn (rác từ cloud/snapshot không sống lại)
       try{ enforcePurgedBatches(); }catch(e){ console.warn('[pull enforcePurged]', e&&e.message); }
       await saveStateEncrypted();
+      try{ _persistTsEvent('pull_apply', { note:'pull ghi localStorage xong' }); }catch(_){}
       try{ _updateLastKnownRecordCount(); }catch(e){}  // v2.99.30: cập nhật mốc cao nhất
       renderAll({fromSync:true});
       try{ maybeWarnDuplicates(); }catch(e){}  // v3.06.00: cảnh báo nghi trùng sau khi pull (không tự xóa)
@@ -14980,14 +14983,18 @@ const Persistence = {
             const v = await IDBBackend.get(key);
             if(v != null){
               if(typeof _persistTelemetry==='function') _persistTelemetry('read_source', { src:'idb', key, source:_src });
+              _persistTsEvent('getState_decision', { key, decision:'idb', source:_src });
               return v;
             }
             if(typeof _persistTelemetry==='function') _persistTelemetry('read_source', { src:'ls-fallback-empty', key, source:_src });
+            _persistTsEvent('getState_decision', { key, decision:'ls-fallback-empty', source:_src });
           }catch(e){
             if(typeof _persistTelemetry==='function') _persistTelemetry('read_source', { src:'ls-fallback-error', key, err:String(e&&e.message), source:_src });
+            _persistTsEvent('getState_decision', { key, decision:'ls-fallback-error', source:_src });
           }
         }else{
           if(typeof _persistTelemetry==='function') _persistTelemetry('read_source', { src:'ls-precutover-fail', key, source:_src });
+          _persistTsEvent('getState_decision', { key, decision:'ls-precutover-fail', source:_src });
         }
       }
     }catch(_){ /* bất kỳ lỗi → fallback localStorage bên dưới (an toàn) */ }
@@ -15017,6 +15024,9 @@ function _persistShadowWrite(key, value){
   try{
     _shadowSeq++;
     IDBBackend.set(key, value).then(function(){
+      // RC ĐIỀU TRA: mốc shadow_write_complete (timeline source of truth) + cache thời điểm.
+      _lastShadowWriteAt = Date.now();   // cache CHỈ phục vụ telemetry
+      _persistTsEvent('shadow_write_complete', { key, len:(value||'').length, hWritten:_persistHash(value) });
       // COMMIT 6 sẽ chèn verify-after-write ở đây.
       if(typeof _persistVerifyAfterWrite==='function'){ _persistVerifyAfterWrite(key, value); }
     }).catch(function(e){
@@ -15076,6 +15086,22 @@ async function _persistVerifyAfterWrite(key, expectedValue){
    ============================================================================ */
 const _PERSIST_TELEMETRY_KEY = 'seahorse_migration_health';
 const _PERSIST_TELEMETRY_MAX = 200;   // cap số event gần nhất
+/* ============================================================================
+   RC ĐIỀU TRA (timing shadow-write) — CHỈ TELEMETRY QUAN SÁT, KHÔNG điều khiển logic.
+   Timeline event là SOURCE OF TRUTH. Các biến dưới CHỈ là cache phục vụ telemetry,
+   KHÔNG được dùng trong bất kỳ điều kiện logic đọc/ghi/precutover nào.
+   ============================================================================ */
+let _lastShadowWriteAt = 0;   // cache: thời điểm shadow_write_complete gần nhất (chỉ telemetry đọc)
+let _bootstrapStartAt = 0;    // cache: thời điểm vào loadEncryptedLocal gần nhất (chỉ telemetry)
+let _persistBootId = 0;       // nhóm sự kiện theo chu kỳ khởi động (tăng mỗi bootstrap)
+function _persistTsEvent(name, extra){
+  // Ghi 1 mốc timeline với timestamp. Thuần quan sát.
+  try{
+    if(typeof _persistTelemetry==='function'){
+      _persistTelemetry('ts_event', Object.assign({ name, t: Date.now(), bootId: _persistBootId }, extra||{}));
+    }
+  }catch(_){}
+}
 function _persistTelemetry(event, data){
   try{
     let rec = {};
@@ -15229,6 +15255,49 @@ function persistDiagReset(){
   try{ localStorage.removeItem(_PERSIST_TELEMETRY_KEY); _shadowMatch=0; _shadowMismatch=0;
     console.log('✓ Đã reset telemetry Phase 1. Thao tác thực tế rồi gõ persistDiag() để xem.'); }catch(e){}
 }
+/* RC ĐIỀU TRA: in TIMELINE sự kiện theo thời gian (chứng minh/bác bỏ giả thuyết timing).
+   Timeline event là source of truth. Chỉ đọc telemetry + in — không đụng logic. */
+function persistTimeline(){
+  try{
+    const rec = JSON.parse(localStorage.getItem(_PERSIST_TELEMETRY_KEY)||'{}');
+    const evs = (rec.events||[]).filter(e=> e.e==='ts_event' || e.e==='precutover_fail' || e.e==='shadow_write_mismatch');
+    // sắp theo thời gian: ts_event có d.t; precutover_fail dùng d.sinceBootstrapStart không có t tuyệt đối →
+    // ưu tiên d.t nếu có, else giữ thứ tự ghi.
+    const withT = evs.map((e,i)=>({ e, t:(e.d&&e.d.t)||null, i }));
+    withT.sort((a,b)=> (a.t&&b.t)? (a.t-b.t) : (a.i-b.i));
+    if(!withT.length){ console.log('… Chưa có timeline event. Hãy F5→login (sinh bootstrap) rồi chạy lại.'); return rec; }
+    const t0 = withT.find(x=>x.t) ? withT.find(x=>x.t).t : 0;
+    console.log('%c=== PERSIST TIMELINE (RC điều tra timing) ===','font-weight:bold;color:#b8472e');
+    let curBoot = null;
+    withT.forEach(x=>{
+      const d = x.e.d||{};
+      const rel = x.t ? ('t+'+(x.t-t0)+'ms') : '(no-t)';
+      const boot = (d.bootId!=null)? d.bootId : '?';
+      if(boot!==curBoot){ console.log('──── bootId='+boot+' ────'); curBoot=boot; }
+      if(x.e.e==='ts_event'){
+        if(d.name==='precutover_check'){
+          console.log('  ['+rel+'] precutover_check ok='+d.ok+' hIdb='+d.hIdb+' hLs='+d.hLs+' idbLen='+d.idbLen+' lsLen='+d.lsLen+' sinceLastSW='+d.sinceLastShadowWrite+'ms sinceBoot='+d.sinceBootstrapStart+'ms');
+        }else if(d.name==='shadow_write_complete'){
+          console.log('  ['+rel+'] shadow_write_complete len='+d.len+' hWritten='+d.hWritten);
+        }else if(d.name==='getState_decision'){
+          console.log('  ['+rel+'] getState_decision → '+d.decision+' (source='+d.source+')');
+        }else if(d.name==='pull_apply'){
+          console.log('  ['+rel+'] pull_apply — '+(d.note||''));
+        }else if(d.name==='bootstrap_start'){
+          console.log('  ['+rel+'] bootstrap_start');
+        }else{
+          console.log('  ['+rel+'] '+d.name);
+        }
+      }else if(x.e.e==='precutover_fail'){
+        console.log('  ['+rel+'] ✗ precutover_fail '+d.reason+' hIdb='+d.hIdb+' hLs='+d.hLs+' idbLen='+d.idbLen+' lsLen='+d.lsLen+' sinceLastSW='+d.sinceLastShadowWrite+'ms');
+      }else if(x.e.e==='shadow_write_mismatch'){
+        console.log('  ['+rel+'] ⚠ shadow_write_mismatch lenIdb='+d.lenIdb+' lenLs='+d.lenLs);
+      }
+    });
+    console.log('=== HẾT TIMELINE ('+withT.length+' sự kiện) ===');
+    return { events: withT.length };
+  }catch(e){ console.warn('persistTimeline lỗi:', e&&e.message); }
+}
 /* END COMMIT 8 ============================================================== */
 /* ============================================================================
    ADR-010-MVP · PHASE 2a (READ CUTOVER) · COMMIT 1 — CỜ ROLE + _persistRoleUsesIdb
@@ -15270,8 +15339,18 @@ async function _persistPrecutoverCheck(key){
     const hLs = _persistHash(lsVal), hIdb = _persistHash(idbVal);
     const ok = (hLs === hIdb);   // HASH KHỚP TUYỆT ĐỐI
     _persistPrecutoverOk[key] = ok;
+    // RC ĐIỀU TRA: mốc precutover_check + ngữ cảnh timeline (thuần quan sát, không đổi logic).
+    _persistTsEvent('precutover_check', {
+      key, ok, hIdb, hLs, idbLen:(idbVal||'').length, lsLen:(lsVal||'').length,
+      sinceLastShadowWrite: _lastShadowWriteAt ? (Date.now()-_lastShadowWriteAt) : null,
+      sinceBootstrapStart: _bootstrapStartAt ? (Date.now()-_bootstrapStartAt) : null
+    });
     if(!ok && typeof _persistTelemetry==='function'){
-      _persistTelemetry('precutover_fail', { key, reason:'hash-mismatch', hIdb, hLs });
+      _persistTelemetry('precutover_fail', { key, reason:'hash-mismatch', hIdb, hLs,
+        idbLen:(idbVal||'').length, lsLen:(lsVal||'').length,
+        sinceLastShadowWrite: _lastShadowWriteAt ? (Date.now()-_lastShadowWriteAt) : null,
+        sinceBootstrapStart: _bootstrapStartAt ? (Date.now()-_bootstrapStartAt) : null,
+        bootId: _persistBootId });
     }
     return ok;
   }catch(e){
