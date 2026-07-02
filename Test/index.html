@@ -3471,7 +3471,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.09.87-p2b-writecut';            // bumped on each release
+const APP_VERSION='3.09.87-p2b-writecut-rev2';            // bumped on each release
 /* Debug logging: dlog() chỉ in khi DEBUG_MODE bật (mặc định TẮT ở production để
    tránh nhiễu/lộ cấu trúc nội bộ qua DevTools). Bật bằng: localStorage.DEBUG_MODE='1'.
    console.warn/error GIỮ NGUYÊN (cảnh báo & lỗi vận hành luôn hiện). */
@@ -13122,27 +13122,30 @@ async function saveStateEncrypted(){
     // PHASE 2b WRITE CUTOVER: admin → ghi/đọc/rollback qua IDB (đồng bộ, await);
     //   NV/chưa-login → giữ nguyên localStorage. Rollback = PERSIST_READ_FROM_IDB_ROLES=[].
     const _useIdbWrite = (typeof _persistRoleUsesIdb==='function') && _persistRoleUsesIdb();
-    // v3.09.60 (GĐ6): lưu giá trị CŨ trước khi ghi → rollback nếu verify thất bại. (đúng nguồn)
-    const _prevValue = _useIdbWrite ? (await IDBBackend.get(_key)) : localStorage.getItem(_key);
+    // _prevValue: CHỈ cần cho nhánh localStorage (để rollback khi verify quota fail). Admin/IDB không readback nên không cần.
+    const _prevValue = _useIdbWrite ? null : localStorage.getItem(_key);
     if(_useIdbWrite){
-      await IDBBackend.set(_key, _serialized);          // admin: ghi thẳng IDB (đồng bộ)
+      // PHASE 2b Hướng A: IDBBackend.set là async có await — nếu KHÔNG throw = ghi thành công.
+      //   KHÔNG readback-verify cho IDB: readback (await get) tạo cửa sổ race — một saveStateEncrypted
+      //   khác (heartbeat/thao tác) chen giữa set→get → đọc bản mới → length lệch → verify fail giả.
+      //   IDBBackend.set/get đã được xác nhận đáng tin (set===get). readback ở đây CHỈ để xác nhận
+      //   ghi (đã xác minh không gánh trách nhiệm khác) → await set không lỗi là đủ.
+      await IDBBackend.set(_key, _serialized);          // admin: ghi thẳng IDB; throw nếu lỗi
+      window._lastSaveVerifiedAt=Date.now();
     }else{
       localStorage.setItem(_key,_serialized);           // NV/chưa-login: v2.99.52 key riêng theo user
+      // v3.09.49 RUNTIME AUDIT — VERIFY (chỉ localStorage): đọc lại đồng bộ, so length. Bắt quota đầy.
+      const _readback = localStorage.getItem(_key);
+      if(_readback===null || _readback.length!==_serialized.length){
+        // v3.09.60: ROLLBACK — khôi phục giá trị cũ để KHÔNG để lại bản ghi hỏng.
+        try{
+          if(_prevValue!==null && _prevValue!==undefined){ localStorage.setItem(_key,_prevValue); }
+          console.warn('[saveStateEncrypted] verify thất bại → đã ROLLBACK về bản trước đó.');
+        }catch(_rb){ console.error('[saveStateEncrypted] rollback lỗi:', _rb&&_rb.message); }
+        throw new Error('Verify thất bại: dữ liệu đọc lại không khớp dữ liệu vừa ghi (có thể bộ nhớ đầy). Đã khôi phục bản trước.');
+      }
+      window._lastSaveVerifiedAt=Date.now();  // mốc xác nhận đã ghi thành công
     }
-    // v3.09.49 RUNTIME AUDIT — VERIFY sau khi ghi: đọc lại từ ĐÚNG NƠI VỪA GHI, xác nhận khớp length.
-    const _readback = _useIdbWrite ? (await IDBBackend.get(_key)) : localStorage.getItem(_key);
-    if(_readback===null || _readback.length!==_serialized.length){
-      // v3.09.60: ROLLBACK — khôi phục giá trị cũ (đúng nguồn) để KHÔNG để lại bản ghi hỏng.
-      try{
-        if(_prevValue!==null && _prevValue!==undefined){
-          if(_useIdbWrite){ await IDBBackend.set(_key,_prevValue); }
-          else { localStorage.setItem(_key,_prevValue); }
-        }
-        console.warn('[saveStateEncrypted] verify thất bại → đã ROLLBACK về bản trước đó.');
-      }catch(_rb){ console.error('[saveStateEncrypted] rollback lỗi:', _rb&&_rb.message); }
-      throw new Error('Verify thất bại: dữ liệu đọc lại không khớp dữ liệu vừa ghi (có thể bộ nhớ đầy). Đã khôi phục bản trước.');
-    }
-    window._lastSaveVerifiedAt=Date.now();  // mốc xác nhận đã ghi thành công
     // PHASE 1 · COMMIT 5 — SHADOW WRITE: chỉ cần khi ghi localStorage (NV). Admin đã ghi thẳng IDB.
     if(!_useIdbWrite){ try{ _persistShadowWrite(_key, _serialized); }catch(_){} }
   }catch(e){
