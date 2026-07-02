@@ -3471,7 +3471,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.09.87-p2a-rc-invest';            // bumped on each release
+const APP_VERSION='3.09.87-p2b-writecut';            // bumped on each release
 /* Debug logging: dlog() chỉ in khi DEBUG_MODE bật (mặc định TẮT ở production để
    tránh nhiễu/lộ cấu trúc nội bộ qua DevTools). Bật bằng: localStorage.DEBUG_MODE='1'.
    console.warn/error GIỮ NGUYÊN (cảnh báo & lỗi vận hành luôn hiện). */
@@ -13119,23 +13119,32 @@ async function saveStateEncrypted(){
     const payload=await encryptJSON(S);
     const _serialized=JSON.stringify(payload);
     const _key=_storeKeyForUser();
-    // v3.09.60 (GĐ6): lưu giá trị CŨ trước khi ghi → rollback nếu verify thất bại.
-    const _prevValue=localStorage.getItem(_key);
-    localStorage.setItem(_key,_serialized);  // v2.99.52: key riêng theo user
-    // v3.09.49 RUNTIME AUDIT — VERIFY sau khi ghi (save→đọc lại→xác nhận): đọc lại key vừa ghi,
-    //   xác nhận tồn tại + đúng nội dung. Nếu lệch → coi như LƯU THẤT BẠI (không báo thành công giả).
-    const _readback=localStorage.getItem(_key);
+    // PHASE 2b WRITE CUTOVER: admin → ghi/đọc/rollback qua IDB (đồng bộ, await);
+    //   NV/chưa-login → giữ nguyên localStorage. Rollback = PERSIST_READ_FROM_IDB_ROLES=[].
+    const _useIdbWrite = (typeof _persistRoleUsesIdb==='function') && _persistRoleUsesIdb();
+    // v3.09.60 (GĐ6): lưu giá trị CŨ trước khi ghi → rollback nếu verify thất bại. (đúng nguồn)
+    const _prevValue = _useIdbWrite ? (await IDBBackend.get(_key)) : localStorage.getItem(_key);
+    if(_useIdbWrite){
+      await IDBBackend.set(_key, _serialized);          // admin: ghi thẳng IDB (đồng bộ)
+    }else{
+      localStorage.setItem(_key,_serialized);           // NV/chưa-login: v2.99.52 key riêng theo user
+    }
+    // v3.09.49 RUNTIME AUDIT — VERIFY sau khi ghi: đọc lại từ ĐÚNG NƠI VỪA GHI, xác nhận khớp length.
+    const _readback = _useIdbWrite ? (await IDBBackend.get(_key)) : localStorage.getItem(_key);
     if(_readback===null || _readback.length!==_serialized.length){
-      // v3.09.60: ROLLBACK — khôi phục giá trị cũ để KHÔNG để lại bản ghi hỏng/nửa vời.
+      // v3.09.60: ROLLBACK — khôi phục giá trị cũ (đúng nguồn) để KHÔNG để lại bản ghi hỏng.
       try{
-        if(_prevValue!==null && _prevValue!==undefined){ localStorage.setItem(_key,_prevValue); }
+        if(_prevValue!==null && _prevValue!==undefined){
+          if(_useIdbWrite){ await IDBBackend.set(_key,_prevValue); }
+          else { localStorage.setItem(_key,_prevValue); }
+        }
         console.warn('[saveStateEncrypted] verify thất bại → đã ROLLBACK về bản trước đó.');
       }catch(_rb){ console.error('[saveStateEncrypted] rollback lỗi:', _rb&&_rb.message); }
       throw new Error('Verify thất bại: dữ liệu đọc lại không khớp dữ liệu vừa ghi (có thể bộ nhớ đầy). Đã khôi phục bản trước.');
     }
     window._lastSaveVerifiedAt=Date.now();  // mốc xác nhận đã ghi thành công
-    // PHASE 1 · COMMIT 5 — SHADOW WRITE: localStorage đã ghi+verify OK → ghi bóng IDB (fire-and-forget).
-    try{ _persistShadowWrite(_key, _serialized); }catch(_){}
+    // PHASE 1 · COMMIT 5 — SHADOW WRITE: chỉ cần khi ghi localStorage (NV). Admin đã ghi thẳng IDB.
+    if(!_useIdbWrite){ try{ _persistShadowWrite(_key, _serialized); }catch(_){} }
   }catch(e){
     // v2.64.0: localStorage có thể đầy (quota) hoặc lỗi mã hóa.
     // KHÔNG nuốt lỗi im lặng — báo rõ để NV biết dữ liệu CHƯA được lưu.
@@ -15298,6 +15307,39 @@ function persistTimeline(){
     return { events: withT.length };
   }catch(e){ console.warn('persistTimeline lỗi:', e&&e.message); }
 }
+/* ============================================================================
+   PHASE 2b · C1 — WRITE-PAUSE (tạm dừng nguồn ghi state TỰ ĐỘNG bằng CƠ CHẾ SẴN CÓ)
+   Mục đích: đóng cửa sổ "ghi chen" giữa verify→delete (điểm nghẽn R2). CHỈ dùng công cụ đã có:
+   clearInterval(_presenceTimer, emailQueueTimer) + cờ _suppressAutoSync. KHÔNG thêm cờ khóa vào
+   saveState (không chạm hàm ghi lõi). KHÔNG phát minh cơ chế đồng bộ mới.
+   Dùng theo cặp: _persist2bPauseWrites() ... (verify+delete) ... _persist2bResumeWrites().
+   Bắt buộc gọi resume trong finally để không kẹt timer.
+   ============================================================================ */
+let _persist2bPaused = false;   // cờ trạng thái (chỉ để tránh pause/resume lồng nhau)
+function _persist2bPauseWrites(){
+  // Tạm dừng 2 nguồn ghi state tự động + chặn auto-push. Dùng cơ chế sẵn có.
+  try{
+    if(_persist2bPaused) return true;   // đã pause rồi
+    clearInterval(_presenceTimer);      // dừng heartbeat (ghi S.presence → saveState)
+    clearInterval(emailQueueTimer); emailQueueTimer=null;  // dừng email queue (ghi state)
+    window._suppressAutoSync = true;    // chặn auto-push/pull ghi đè (cờ sẵn có)
+    _persist2bPaused = true;
+    try{ if(typeof _persistTsEvent==='function') _persistTsEvent('2b_pause_writes', {}); }catch(_){}
+    return true;
+  }catch(e){ try{ console.warn('[2b] pause writes lỗi:', e&&e.message); }catch(_){} return false; }
+}
+function _persist2bResumeWrites(){
+  // Khôi phục 2 timer bằng hàm start SẴN CÓ + bỏ cờ chặn. An toàn gọi nhiều lần (idempotent).
+  try{
+    window._suppressAutoSync = false;
+    try{ if(typeof presenceStart==='function') presenceStart(); }catch(_){}          // khôi phục heartbeat
+    try{ if(typeof emailQueueStartTimer==='function') emailQueueStartTimer(); }catch(_){}  // khôi phục email queue
+    _persist2bPaused = false;
+    try{ if(typeof _persistTsEvent==='function') _persistTsEvent('2b_resume_writes', {}); }catch(_){}
+    return true;
+  }catch(e){ try{ console.warn('[2b] resume writes lỗi:', e&&e.message); }catch(_){} return false; }
+}
+/* END P2b C1 ================================================================ */
 /* END COMMIT 8 ============================================================== */
 /* ============================================================================
    ADR-010-MVP · PHASE 2a (READ CUTOVER) · COMMIT 1 — CỜ ROLE + _persistRoleUsesIdb
