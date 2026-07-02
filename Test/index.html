@@ -3471,7 +3471,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.09.87-p2a';            // bumped on each release
+const APP_VERSION='3.09.87-p2a-rev3';            // bumped on each release
 /* Debug logging: dlog() chỉ in khi DEBUG_MODE bật (mặc định TẮT ở production để
    tránh nhiễu/lộ cấu trúc nội bộ qua DevTools). Bật bằng: localStorage.DEBUG_MODE='1'.
    console.warn/error GIỮ NGUYÊN (cảnh báo & lỗi vận hành luôn hiện). */
@@ -13155,7 +13155,7 @@ async function saveStateEncrypted(){
 async function loadEncryptedLocal(){
   window._loadFailed = false;  // v2.99.41: reset cờ mỗi lần thử load (chỉ bật lại nếu lần này lỗi)
   try{
-    const raw=localStorage.getItem(_storeKeyForUser());  // v2.99.52: key riêng theo user
+    const raw=await Persistence.getState(_storeKeyForUser(), { source:'bootstrap' });  // PHASE 2a: đọc qua Persistence (admin→IDB, else→localStorage). Rollback = đổi lại localStorage.getItem(_storeKeyForUser()).
     if(!raw){S=defaultState();return;}
     const payload=JSON.parse(raw);
     let data;
@@ -14965,9 +14965,11 @@ const LocalStorageBackend = {
    ============================================================================ */
 const Persistence = {
   // Phase 1: đọc LUÔN từ localStorage (nguồn đọc duy nhất theo yêu cầu Phase 1).
-  async getState(key){
+  async getState(key, opts){
     // PHASE 2a — READ CUTOVER (Admin-first): chỉ role ∈ PERSIST_READ_FROM_IDB_ROLES + precutover hash khớp
     //   mới đọc IDB. Còn lại (NV, chưa login, precutover fail, IDB lỗi) → localStorage (như Phase 1).
+    // opts.source: CHỈ để telemetry (observability) — TUYỆT ĐỐI không rẽ nhánh logic đọc theo nó.
+    const _src = (opts && opts.source) || undefined;
     try{
       if(_persistRoleUsesIdb()){
         // precutover: chỉ đọc IDB khi hash IDB === hash localStorage (kiểm 1 lần/phiên, cache).
@@ -14977,15 +14979,15 @@ const Persistence = {
           try{
             const v = await IDBBackend.get(key);
             if(v != null){
-              if(typeof _persistTelemetry==='function') _persistTelemetry('read_source', { src:'idb', key });
+              if(typeof _persistTelemetry==='function') _persistTelemetry('read_source', { src:'idb', key, source:_src });
               return v;
             }
-            if(typeof _persistTelemetry==='function') _persistTelemetry('read_source', { src:'ls-fallback-empty', key });
+            if(typeof _persistTelemetry==='function') _persistTelemetry('read_source', { src:'ls-fallback-empty', key, source:_src });
           }catch(e){
-            if(typeof _persistTelemetry==='function') _persistTelemetry('read_source', { src:'ls-fallback-error', key, err:String(e&&e.message) });
+            if(typeof _persistTelemetry==='function') _persistTelemetry('read_source', { src:'ls-fallback-error', key, err:String(e&&e.message), source:_src });
           }
         }else{
-          if(typeof _persistTelemetry==='function') _persistTelemetry('read_source', { src:'ls-precutover-fail', key });
+          if(typeof _persistTelemetry==='function') _persistTelemetry('read_source', { src:'ls-precutover-fail', key, source:_src });
         }
       }
     }catch(_){ /* bất kỳ lỗi → fallback localStorage bên dưới (an toàn) */ }
@@ -15107,11 +15109,11 @@ async function persistHealthSnapshot(){
     idb: c['read_source']||0  // tổng số lần gọi read_source (mọi src) — chi tiết theo src ở events
   };
   // Đếm chi tiết theo src từ events (chính xác hơn counter gộp)
-  let src_idb=0, src_ls_empty=0, src_ls_err=0, src_ls_precut=0;
+  let src_idb=0, src_ls_empty=0, src_ls_err=0, src_ls_precut=0, src_idb_bootstrap=0;
   try{
     (rec.events||[]).forEach(function(e){
       if(e.e==='read_source' && e.d){
-        if(e.d.src==='idb') src_idb++;
+        if(e.d.src==='idb'){ src_idb++; if(e.d.source==='bootstrap') src_idb_bootstrap++; }
         else if(e.d.src==='ls-fallback-empty') src_ls_empty++;
         else if(e.d.src==='ls-fallback-error') src_ls_err++;
         else if(e.d.src==='ls-precutover-fail') src_ls_precut++;
@@ -15126,6 +15128,7 @@ async function persistHealthSnapshot(){
     shadow_mismatch: mismatch,
     match_pct: total>0 ? Math.round(match/total*10000)/100 : null,
     read_from_idb: src_idb,
+    read_from_idb_bootstrap: src_idb_bootstrap,
     read_ls_fallback_empty: src_ls_empty,
     read_ls_fallback_error: src_ls_err,
     read_ls_precutover_fail: src_ls_precut,
@@ -15192,22 +15195,28 @@ async function persistDiag(){
       : (health.shadow_total===0 ? '… CHƯA có thao tác ghi nào — hãy thao tác thực tế rồi chạy lại'
          : '✗ CÓ MISMATCH — xem recent_mismatches, KHÔNG cutover')
   };
-  // Tiêu chí kỹ thuật 2a→2b: đọc toàn từ IDB, 0 fallback, 0 precutover_fail
-  const p2aClean = (report.read_from_idb>0
-    && (report.read_ls_fallback_empty||0)===0
-    && (report.read_ls_fallback_error||0)===0
-    && (report.read_ls_precutover_fail||0)===0
-    && (report.precutover_fail||0)===0);
+  // Tiêu chí kỹ thuật 2a→2b: có đọc IDB TRONG BOOTSTRAP, 0 fallback, 0 precutover_fail.
+  const _hasFallback = (report.read_ls_fallback_empty||0)>0
+    || (report.read_ls_fallback_error||0)>0
+    || (report.read_ls_precutover_fail||0)>0
+    || (report.precutover_fail||0)>0;
+  const _bootReads = health.read_from_idb_bootstrap||0;
+  report.read_from_idb_bootstrap = _bootReads;
   report.phase2a_verdict = (report.backend_read && report.backend_read.indexOf('indexeddb')>=0)
-    ? (p2aClean ? '✓ 2a SẠCH — đọc 100% IDB, 0 fallback, 0 precutover_fail (đạt tiêu chí sang 2b)'
-                : '⚠ 2a có fallback/precutover_fail — CHƯA sang 2b, xem chi tiết')
+    ? ( _hasFallback
+          ? '✗ 2a CÓ fallback/precutover_fail — KHÔNG sang 2b, xem chi tiết Read/precutover_fail'
+          : ( _bootReads>=5
+                ? '✓ 2a SẠCH — ≥5 bootstrap reads từ IDB, 0 fallback, 0 precutover_fail (đạt Phần 1; cần thêm 1 phiên dùng thực tế 0 mismatch để HOÀN TẤT)'
+                : ( _bootReads>0
+                      ? '⏳ 2a đang tốt — '+_bootReads+'/5 bootstrap reads từ IDB (F5→login thêm cho đủ ≥5)'
+                      : '⏳ CHƯA có bootstrap read — F5 (reload) + đăng nhập để app đọc state từ IDB trong bootstrap, rồi persistDiag() lại' ) ) )
     : '(role này chưa bật read-cutover — đọc localStorage như cũ)';
   try{
     console.log('%c=== PERSIST DIAGNOSTICS (Phase 2a) ===','font-weight:bold;color:#2d6a6a');
     console.log('Browser:', report.browser, '| IDB khả dụng:', report.idb_available, '| Role:', report.role, '| User:', report.user);
     console.log('Nguồn đọc:', report.backend_read, '| Phase:', report.phase2a);
     console.log('Shadow: total='+report.shadow_total+' match='+report.shadow_match+' mismatch='+report.shadow_mismatch+' ('+report.match_pct+'% match)');
-    console.log('Read: từ IDB='+report.read_from_idb+' | fallback(empty/err/precut)='+report.read_ls_fallback_empty+'/'+report.read_ls_fallback_error+'/'+report.read_ls_precutover_fail+' | precutover_fail='+report.precutover_fail);
+    console.log('Read: từ IDB='+report.read_from_idb+' (bootstrap='+report.read_from_idb_bootstrap+') | fallback(empty/err/precut)='+report.read_ls_fallback_empty+'/'+report.read_ls_fallback_error+'/'+report.read_ls_precutover_fail+' | precutover_fail='+report.precutover_fail);
     console.log('localStorage:', report.localStorage_usage, '| IDB dùng:', Math.round((report.idb_usage.used||0)/1024),'KB');
     console.log('SHADOW:', report.verdict);
     console.log('PHASE 2a:', report.phase2a_verdict);
