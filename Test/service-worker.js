@@ -6,8 +6,8 @@
    để force trình duyệt invalidate cache cũ.
 */
 
-const SW_VERSION = 'v3.09.91';
-const CACHE_NAME = `seahorse-test-${SW_VERSION}`;   // /Test/ CÔ LẬP: tiền tố riêng → activate KHÔNG xóa cache production 'seahorse-*'
+const SW_VERSION = 'v3.09.89.1';
+const CACHE_NAME = `seahorse-test-${SW_VERSION}`;   // /Test/ CÔ LẬP: activate KHÔNG xóa cache production 'seahorse-*'
 
 // Pre-cache critical files on install
 const PRECACHE_URLS = [
