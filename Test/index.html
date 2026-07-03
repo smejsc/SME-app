@@ -3473,7 +3473,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.09.90';            // bumped on each release
+const APP_VERSION='3.09.91';            // bumped on each release
 /* Debug logging: dlog() chỉ in khi DEBUG_MODE bật (mặc định TẮT ở production để
    tránh nhiễu/lộ cấu trúc nội bộ qua DevTools). Bật bằng: localStorage.DEBUG_MODE='1'.
    console.warn/error GIỮ NGUYÊN (cảnh báo & lỗi vận hành luôn hiện). */
@@ -14978,6 +14978,27 @@ const Persistence = {
     const _src = (opts && opts.source) || undefined;
     try{
       if(_persistRoleUsesIdb()){
+        // PHASE 2b — role ĐÃ WRITE-CUTOVER: đọc THẲNG IDB, BỎ QUA precutover.
+        //   Lý do (đã chứng minh): role write-cutover ghi state CHỈ vào IDB; localStorage là tàn dư cũ
+        //   không cập nhật → hash IDB≠LS LUÔN đúng → precutover sẽ chặn nhầm, gây "mất phiếu" sau F5.
+        //   IDB là nguồn chân lý duy nhất cho role này. Precutover cũ giữ NGUYÊN cho role read-cutover
+        //   chưa write (Phase 2a thuần) ở nhánh else bên dưới.
+        if(_persistRoleWriteCutover()){
+          try{
+            const v = await IDBBackend.get(key);
+            if(v != null){
+              if(typeof _persistTelemetry==='function') _persistTelemetry('read_source', { src:'idb-writecutover', key, source:_src });
+              _persistTsEvent('getState_decision', { key, decision:'idb-writecutover', source:_src });
+              return v;
+            }
+            // IDB rỗng (bất thường với role đã write-cutover) → fallback localStorage an toàn.
+            if(typeof _persistTelemetry==='function') _persistTelemetry('read_source', { src:'ls-fallback-empty-wc', key, source:_src });
+            _persistTsEvent('getState_decision', { key, decision:'ls-fallback-empty-wc', source:_src });
+          }catch(e){
+            if(typeof _persistTelemetry==='function') _persistTelemetry('read_source', { src:'ls-fallback-error-wc', key, err:String(e&&e.message), source:_src });
+            _persistTsEvent('getState_decision', { key, decision:'ls-fallback-error-wc', source:_src });
+          }
+        }else{
         // precutover: chỉ đọc IDB khi hash IDB === hash localStorage (kiểm 1 lần/phiên, cache).
         let pcOk = _persistPrecutoverOk[key];
         if(pcOk === undefined){ pcOk = await _persistPrecutoverCheck(key); }
@@ -14999,6 +15020,7 @@ const Persistence = {
           if(typeof _persistTelemetry==='function') _persistTelemetry('read_source', { src:'ls-precutover-fail', key, source:_src });
           _persistTsEvent('getState_decision', { key, decision:'ls-precutover-fail', source:_src });
         }
+        }  // END else (role read-cutover chưa write — precutover GIỮ NGUYÊN)
       }
     }catch(_){ /* bất kỳ lỗi → fallback localStorage bên dưới (an toàn) */ }
     return await LocalStorageBackend.get(key);   // Phase 1 path / fallback / NV
@@ -15346,6 +15368,17 @@ function _persistRoleUsesIdb(){
     if(typeof CURRENT_ROLE==='undefined' || !CURRENT_ROLE) return false;  // chưa login → localStorage
     return PERSIST_READ_FROM_IDB_ROLES.indexOf(CURRENT_ROLE) >= 0;
   }catch(_){ return false; }  // bất kỳ lỗi → an toàn: đọc localStorage
+}
+/* PHASE 2b — WRITE-CUTOVER PREDICATE (ADR-010).
+   Role đã write-cutover = role GHI state thẳng IDB (không ghi localStorage) trong saveStateEncrypted
+   (_useIdbWrite = _persistRoleUsesIdb()). Với role này, localStorage['seahorse_v1'] là TÀN DƯ CŨ,
+   KHÔNG được cập nhật → precutover hash-check (so IDB vs LS) LUÔN lệch → chặn nhầm đọc IDB.
+   ĐÃ CHỨNG MINH: sau write-cutover admin không có luồng nào dùng localStorage làm nguồn khôi phục.
+   ⇒ getState phải BỎ QUA precutover cho role đã write-cutover (đọc thẳng IDB — nguồn chân lý).
+   Hiện write-cutover dùng CHUNG cờ với read-cutover (_persistRoleUsesIdb). Tách tên để ngữ nghĩa
+   rõ + sẵn sàng nếu sau này tách 2 danh sách (read-cutover-mà-chưa-write vẫn giữ precutover). */
+function _persistRoleWriteCutover(){
+  try{ return _persistRoleUsesIdb(); }catch(_){ return false; }
 }
 /* END P2a COMMIT 1 ========================================================== */
 /* ============================================================================
