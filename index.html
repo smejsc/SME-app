@@ -3473,7 +3473,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.09.88';            // bumped on each release
+const APP_VERSION='3.09.88.2';            // bumped on each release
 /* Debug logging: dlog() chỉ in khi DEBUG_MODE bật (mặc định TẮT ở production để
    tránh nhiễu/lộ cấu trúc nội bộ qua DevTools). Bật bằng: localStorage.DEBUG_MODE='1'.
    console.warn/error GIỮ NGUYÊN (cảnh báo & lỗi vận hành luôn hiện). */
@@ -3617,6 +3617,10 @@ async function pwaInstall() {
 let CRYPTO_KEY=null;
 let CURRENT_ROLE=null;               // 'admin' | 'user'
 let CURRENT_USER=null;               // user object if role==='user'
+// HOTFIX (gộp vào 3.09.88.2) — khai báo _suppressAutoSync trước mọi lần đọc (chống ReferenceError
+//   khi migration lúc login gọi scheduleAutoSync đọc cờ trước khi có gán nào). window.* để nhất quán
+//   với các nơi dùng window._suppressAutoSync. Mặc định false = auto-sync bật (như cũ).
+window._suppressAutoSync = window._suppressAutoSync || false;
 
 /* Check version.json on GitHub Pages. If remote > local, auto-reload. */
 async function checkForUpdate(){
@@ -9456,6 +9460,55 @@ function opReportedAmount(t){
   if(!t) return 0;
   if(t.reportedValue!=null && t.reportedValue!=='') return +t.reportedValue||0;
   return +t.amount||0;
+}
+/* ============================================================
+   FREEZE POLICY (3.09.88.2) — MỘT nguồn sự thật cho "kỳ đã khóa".
+   Mọi đường GHI (edit/delete/installment/markActual/confirm/import) gọi CHUNG.
+   KHÔNG đổi schema, KHÔNG migrate, KHÔNG đụng ownerReportLocks/reportedValue.
+   ============================================================ */
+/* Ngày cuối cùng (YYYY-MM-DD) của kỳ đã khóa GẦN NHẤT cho 1 tàu. null nếu chưa khóa kỳ nào. */
+function ownerLockLastDay(vesselId){
+  if(!vesselId) return null;
+  var maxPer='';
+  (S.ownerReportLocks||[]).forEach(function(x){
+    if(x.vesselId===vesselId){ var p=String(x.period).slice(0,7); if(p>maxPer) maxPer=p; }
+  });
+  if(!maxPer) return null;
+  var y=+maxPer.slice(0,4), m=+maxPer.slice(5,7);
+  // ngày cuối tháng maxPer
+  return new Date(y, m, 0).toISOString().slice(0,10);
+}
+/* CHÍNH SÁCH: 1 giao dịch chi hộ có được GHI (tạo/sửa/xóa) không?
+   Trả {ok:true} hoặc {ok:false, reason:'...'}.
+   Quy tắc: nếu THÁNG của t.date thuộc kỳ đã khóa của tàu → KHÔNG ghi (đóng băng).
+   Chi dự kiến (_isBudget) trong kỳ đã khóa: theo yêu cầu Sếp R4 → CŨNG chặn (không miễn). */
+function ownerReportWritable(t){
+  if(!t || !t.vesselId || !t.date) return {ok:true};
+  if(typeof isOwnerPeriodLocked==='function' && isOwnerPeriodLocked(t.vesselId, t.date)){
+    return {ok:false, reason:'🔒 Kỳ '+String(t.date).slice(0,7)+' của tàu đã KHÓA (đã gửi chủ tàu) — không tạo/sửa/xóa giao dịch thuộc kỳ này. Chỉ được bổ sung chứng từ.'};
+  }
+  return {ok:true};
+}
+/* assert dùng ở đầu mọi hàm ghi: trả true nếu ĐƯỢC ghi; nếu bị chặn → toast + trả false. */
+function assertOwnerReportWritable(t){
+  var r=ownerReportWritable(t);
+  if(!r.ok){ try{ toast(r.reason,'bad'); }catch(_){}; return false; }
+  return true;
+}
+/* GIÁ TRỊ USD lên báo cáo: kỳ ĐÃ khóa → dùng reportedValue (bất biến) quy USD; chưa khóa → live opTxUsd. */
+function opReportUsd(t){
+  if(!t) return 0;
+  var frozen = (typeof isOwnerPeriodLocked==='function' && t.vesselId && t.date && isOwnerPeriodLocked(t.vesselId, t.date));
+  if(frozen && t.reportedValue!=null && t.reportedValue!==''){
+    // reportedValue lưu theo ccy gốc của phiếu (= amount lúc chốt). Quy USD như opTxUsd nhưng dùng reportedValue.
+    var rv=+t.reportedValue||0;
+    if((t.ccy||'USD')==='USD') return rv;
+    var fx=(+t.fxToUsd||0);
+    if(t.ccy==='VND' && fx<=1) fx=0;
+    if(fx<=0) fx=(+S.fxRate||0);
+    return fx>0 ? rv/fx : 0;
+  }
+  return (typeof opTxUsd==='function') ? opTxUsd(t) : (+t.amount||0);
 }
 /* Migrate an toàn (chạy 1 lần khi load): khoản chi hộ cũ chưa có ncStatus → gán 'draft';
    khoản đã _locked trước đây nhưng chưa có reportedValue → backfill = amount tại thời điểm này. */
@@ -17472,7 +17525,13 @@ const VesselService = (function(){
   function addVessel(v){ if(!v||!v.id) throw new Error('VesselService.addVessel: thiếu id'); vessels().push(v); return v; }
   function addOnhire(o){ if(!o||!o.id) throw new Error('VesselService.addOnhire: thiếu id'); onhires().push(o); return o; }
   function addOpVessel(v){ if(!v||!v.id) throw new Error('VesselService.addOpVessel: thiếu id'); opVessels().push(v); return v; }
-  function addOpTransaction(t){ if(!t||!t.id) throw new Error('VesselService.addOpTransaction: thiếu id'); opTransactions().push(t); return t; }
+  function addOpTransaction(t){ if(!t||!t.id) throw new Error('VesselService.addOpTransaction: thiếu id');
+    // FREEZE POLICY (3.09.88.2): CỬA GHI DUY NHẤT vào opTransactions → chặn TẠO record thuộc kỳ đã khóa
+    //   (bịt cả import Excel + mọi đường tạo). Không đụng schema. Throw để call-site (kể cả import) dừng.
+    if(typeof isOwnerPeriodLocked==='function' && t.vesselId && t.date && isOwnerPeriodLocked(t.vesselId, t.date)){
+      throw new Error('FREEZE: kỳ '+String(t.date).slice(0,7)+' của tàu đã KHÓA — không tạo giao dịch thuộc kỳ này.');
+    }
+    opTransactions().push(t); return t; }
   function addVesselNotif(n){ if(!n||!n.id) throw new Error('VesselService.addVesselNotif: thiếu id'); vesselNotifs().push(n); return n; }
   function addOpMgmtFee(f){ if(!f||!f.id) throw new Error('VesselService.addOpMgmtFee: thiếu id'); opMgmtFees().push(f); return f; }
   return { vessels, vesselById, events, eventsByVessel, dailyReports, dailyReportById, onhires, onhireById, opVessels, opVesselById, opTransactions, vesselNotifs, opMgmtFees, addEvent, addDailyReport, addVessel, addOnhire, addOpVessel, addOpTransaction, addVesselNotif, addOpMgmtFee };
@@ -36065,6 +36124,8 @@ function opAddInstallment(txId){
 function opSaveInstallment(txId){
   const t=VesselService.opTransactions().find(x=>x.id===txId);
   if(!t || !isContractAdvance(t)) return;
+  // FREEZE POLICY (3.09.88.2): chặn thêm/sửa đợt nếu phiếu thuộc kỳ đã khóa.
+  if(!assertOwnerReportWritable(t)) return;
   const amt=+((document.getElementById('oin-amt')||{}).value)||0;
   if(amt<=0){ toast('Nhập số tiền hợp lệ','bad'); return; }
   const date=((document.getElementById('oin-date')||{}).value||todayISO());
@@ -43653,11 +43714,13 @@ function purgeOpTxForever(id){
 
 function delOpTx(id){
   const t=VesselService.opTransactions().find(x=>x.id===id);if(!t)return;
-  // v3.06.31: KHÓA ĐÍCH DANH — chặn xóa nếu chính phiếu này đã bị khóa. Chi dự kiến không bị khóa.
+  // v3.06.31 + FREEZE POLICY (3.09.88.2): chặn xóa nếu phiếu thuộc kỳ đã khóa (gồm cả chi dự kiến — R4).
+  //   Giữ cả check _locked cũ (khóa đích danh phiếu) để tương thích ngược.
   if(t._locked && !t._isBudget){
     toast('🔒 Phiếu đã KHÓA (kỳ '+String(t._lockedPeriod||String(t.date).slice(0,7))+' đã gửi chủ tàu) — không xóa được','bad');
     return;
   }
+  if(!assertOwnerReportWritable(t)) return;
   if(t.paid){toast('Bút toán đã xác nhận TT — bỏ xác nhận trước khi xóa','bad');return;}
   // NV thường chỉ xóa được bút toán mình tạo (audit trail)
   if(!isAdmin() && t.createdBy && t.createdBy!==actorName()){
@@ -43677,6 +43740,8 @@ function opMarkActual(id){
   const t=VesselService.opTransactions().find(x=>x.id===id);
   if(!t){ toast('Không tìm thấy khoản dự kiến','bad'); return; }
   if(!t._isBudget){ toast('Khoản này đã là chi thực','warn'); return; }
+  // FREEZE POLICY (3.09.88.2): chặn chuyển dự kiến→thực nếu phiếu thuộc kỳ đã khóa.
+  if(!assertOwnerReportWritable(t)) return;
   if(!isAdmin() && t.createdBy && t.createdBy!==actorName()){ toast('Chỉ admin/người tạo mới chuyển được','bad'); return; }
   const v=VesselService.opVessels().find(x=>x.id===t.vesselId);
   const ccy=t.ccy||(v?v.ccy:'VND')||'VND';
@@ -44118,12 +44183,13 @@ function advDetailModal(id){
 }
 function editOpTx(id){
   const t=VesselService.opTransactions().find(x=>x.id===id);if(!t)return;
-  // v3.06.31: KHÓA ĐÍCH DANH — chặn sửa nếu chính phiếu này đã bị khóa (_locked). Chi dự kiến không bao giờ bị khóa.
+  // v3.06.31 + FREEZE POLICY (3.09.88.2): chặn sửa nếu phiếu thuộc kỳ đã khóa (gồm cả chi dự kiến — R4).
   if(t._locked && !t._isBudget){
     const v=VesselService.opVessels().find(x=>x.id===t.vesselId);
     toast('🔒 Phiếu đã KHÓA (kỳ '+String(t._lockedPeriod||String(t.date).slice(0,7))+' đã gửi chủ tàu) — không sửa được','bad');
     return;
   }
+  if(!assertOwnerReportWritable(t)) return;
   if(t.paid){toast('Bút toán đã xác nhận TT — chỉ người xác nhận sửa được (nút ✎ trong dòng)','bad');return;}
   if(!t.ccy) t.ccy='USD';
   if(t.fxToUsd==null) t.fxToUsd = t.ccy==='USD'?1:0;
@@ -44411,11 +44477,14 @@ function saveOpConfirm(id){
   const otherFee=+document.getElementById('op-other-fee').value||0;
   const feeNote=document.getElementById('op-fee-note').value.trim();
   if(bankFee<0||otherFee<0){err.textContent='Phí không được âm';return;}
-  // v3.09.88: CHẶN nhập phí nếu THÁNG của ngày phí (paidDate) đã KHÓA SỔ với chủ tàu.
-  //   Tháng đã chốt/ký gửi chủ tàu → không được thêm phí vào tháng đó. Chỉ áp dụng chi hộ chủ tàu (có vesselId).
-  if((bankFee>0||otherFee>0) && t.vesselId && typeof isOwnerPeriodLocked==='function' && isOwnerPeriodLocked(t.vesselId, paidDate)){
-    err.textContent='⛔ Tháng '+String(paidDate).slice(0,7)+' đã KHÓA SỔ báo cáo chủ tàu — không thể ghi phí vào tháng này. Nhập phí với ngày thuộc tháng CHƯA khóa.';
-    return;
+  // FREEZE POLICY (3.09.88.2) — R6: phí phát sinh sau kỳ ĐƯỢC ghi, NHƯNG ngày phí (paidDate) phải
+  //   LỚN HƠN ngày cuối cùng của kỳ đã khóa gần nhất (không back-date vào/ trước kỳ đã đóng băng).
+  if((bankFee>0||otherFee>0) && t.vesselId){
+    var _lockEnd = (typeof ownerLockLastDay==='function') ? ownerLockLastDay(t.vesselId) : null;
+    if(_lockEnd && String(paidDate) <= String(_lockEnd)){
+      err.textContent='⛔ Kỳ đã khóa tới hết '+_lockEnd+'. Phí phát sinh sau kỳ phải có NGÀY THANH TOÁN lớn hơn '+_lockEnd+' (không ghi vào/ trước kỳ đã khóa).';
+      return;
+    }
   }
   // v3.09.88: CẢNH BÁO nếu phí khác tháng khoản chi hộ gốc (t.date) và tháng phí chưa khóa → hỏi xác nhận.
   if((bankFee>0||otherFee>0) && t.vesselId && String(paidDate).slice(0,7)!==String(t.date||'').slice(0,7)){
@@ -44589,6 +44658,8 @@ function opEditCcyChanged(){
 
 function saveOpEditFull(id){
   const t=VesselService.opTransactions().find(x=>x.id===id);if(!t)return;
+  // FREEZE POLICY (3.09.88.2): chặn sửa nếu phiếu thuộc kỳ đã khóa (theo t.date hiện tại).
+  if(!assertOwnerReportWritable(t)) return;
   const err=document.getElementById('op-confirm-err');
   err.textContent='';
   const date=document.getElementById('op-edit-date').value.trim();
@@ -44616,6 +44687,10 @@ function saveOpEditFull(id){
   if(amount<=0){err.textContent='Số tiền > 0';return;}
   if(!paidDate){err.textContent='Nhập ngày thanh toán';return;}
   if(bankFee<0||otherFee<0){err.textContent='Phí không được âm';return;}
+  // FREEZE POLICY (3.09.88.2): không cho dời NGÀY MỚI vào kỳ đã khóa (chống back-date vào kỳ đóng băng).
+  if(typeof isOwnerPeriodLocked==='function' && isOwnerPeriodLocked(vesselId, date)){
+    err.textContent='🔒 Ngày '+String(date).slice(0,7)+' thuộc kỳ đã KHÓA của tàu — không được ghi/dời giao dịch vào kỳ này.';return;
+  }
   if((bankFee>0||otherFee>0) && feeCcy!=='USD' && feeFxToUsd<=0){
     err.textContent='Phí khác USD — nhập tỷ giá phí → USD';return;
   }
@@ -45278,10 +45353,14 @@ function opSaveNccPayment(id){
   const _of=+(document.getElementById('op-ncc-otherfee')||{}).value||0;
   const _fn=((document.getElementById('op-ncc-feenote')||{}).value||'').trim();
   if(_bf<0||_of<0){ toast('Phí không được âm','bad'); return; }
-  // v3.09.88: CHẶN ghi phí nếu THÁNG của ngày phí (date đợt) đã KHÓA SỔ chủ tàu (chỉ chi hộ chủ tàu).
-  if((_bf>0||_of>0) && t.vesselId && typeof isOwnerPeriodLocked==='function' && isOwnerPeriodLocked(t.vesselId, date)){
-    toast('⛔ Tháng '+String(date).slice(0,7)+' đã KHÓA SỔ báo cáo chủ tàu — không thể ghi phí vào tháng này. Chọn ngày thuộc tháng CHƯA khóa.','bad');
-    return;
+  // FREEZE POLICY (3.09.88.2) — R6: phí phát sinh sau kỳ ĐƯỢC ghi, nhưng NGÀY (date đợt) phải
+  //   LỚN HƠN ngày cuối kỳ đã khóa gần nhất (không back-date vào/ trước kỳ đã đóng băng).
+  if((_bf>0||_of>0) && t.vesselId){
+    var _lockEndN = (typeof ownerLockLastDay==='function') ? ownerLockLastDay(t.vesselId) : null;
+    if(_lockEndN && String(date) <= String(_lockEndN)){
+      toast('⛔ Kỳ đã khóa tới hết '+_lockEndN+'. Phí phát sinh sau kỳ phải có ngày lớn hơn '+_lockEndN+'.','bad');
+      return;
+    }
   }
   // v3.09.88: CẢNH BÁO nếu phí khác tháng khoản chi hộ gốc (t.date) và tháng phí CHƯA khóa → hỏi xác nhận.
   if((_bf>0||_of>0) && String(date).slice(0,7)!==String(t.date||'').slice(0,7)){
@@ -46374,7 +46453,7 @@ function generateOpReport(){
     all.forEach(x=>{
       if(x.date<from){
         if(x.khoanRole==='chi') return;  // v3.03.52: thực chi khoán không trừ số dư chủ tàu
-        const usd=opTxUsd(x);
+        const usd=opReportUsd(x);
         const delta=x.type==='IN'?usd:-usd;
         openBal += delta - opTxFeesUsd(x);
       }
@@ -46404,9 +46483,9 @@ function generateOpReport(){
     const extraFeeRows=[];  // v3.09.88: dòng phí phát sinh trong kỳ nhưng phiếu gốc thuộc kỳ KHÁC (đã khóa)
     period.forEach(x=>{
       if(_isKhoanChi(x)) return;  // v3.03.52: bỏ qua dòng thực chi của khoán (không lên báo cáo chủ tàu)
-      if(x.type==='IN') sumIn+=opTxUsd(x);
-      else if(x._isBudget) sumBudget+=opTxUsd(x);
-      else { const u=opTxUsd(x); sumOut+=u; if(x.opCat==='CREW_SALARY') sumCrew+=u; }
+      if(x.type==='IN') sumIn+=opReportUsd(x);
+      else if(x._isBudget) sumBudget+=opReportUsd(x);
+      else { const u=opReportUsd(x); sumOut+=u; if(x.opCat==='CREW_SALARY') sumCrew+=u; }
     });
     // v3.09.88: PHÍ tính theo NGÀY PHÁT SINH PHÍ (paidDate/payment.date), KHÔNG theo ngày phiếu gốc.
     //   Duyệt MỌI phiếu chi hộ của tàu (kể cả phiếu gốc ngoài kỳ). Phí có ngày trong [from,to] → tính kỳ này.
@@ -46491,7 +46570,7 @@ function generateOpReport(){
           <td>${(x.desc||'').replace(/</g,'&lt;')}</td>
           <td class="c" style="font-size:9pt">${xccy}</td>
           <td class="r">${fmtMoney(x.amount,xccy)}</td>
-          <td class="r">${fmtMoney(opTxUsd(x),'USD')}</td>
+          <td class="r">${fmtMoney(opReportUsd(x),'USD')}</td>
         </tr>`;
       }).join('');
     };
@@ -46512,7 +46591,7 @@ function generateOpReport(){
           <td class="c" style="font-size:9pt">${xccy}</td>
           <td class="r">${fmtMoney(x.amount,xccy)}</td>
           <td class="r" style="color:#8a5a1e">${_feeCell}</td>
-          <td class="r">${fmtMoney(opTxUsd(x),'USD')}</td>
+          <td class="r">${fmtMoney(opReportUsd(x),'USD')}</td>
         </tr>`;
       }).join('');
     };

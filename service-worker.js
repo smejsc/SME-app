@@ -6,8 +6,8 @@
    để force trình duyệt invalidate cache cũ.
 */
 
-const SW_VERSION = 'v3.09.88';
-const CACHE_NAME = `seahorse-${SW_VERSION}`;
+const SW_VERSION = 'v3.09.88.2';
+const CACHE_NAME = `seahorse-test-${SW_VERSION}`;
 
 // Pre-cache critical files on install
 const PRECACHE_URLS = [
@@ -33,7 +33,7 @@ self.addEventListener('activate', event => {
   console.log('[SW] Activate', SW_VERSION);
   event.waitUntil(
     caches.keys().then(keys =>
-      Promise.all(keys.filter(k => k.startsWith('seahorse-') && k !== CACHE_NAME)
+      Promise.all(keys.filter(k => k.startsWith('seahorse-test-') && k !== CACHE_NAME)
         .map(k => { console.log('[SW] Delete old cache', k); return caches.delete(k); })
       )
     ).then(() => self.clients.claim())
