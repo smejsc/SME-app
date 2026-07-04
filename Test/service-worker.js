@@ -1,4 +1,4 @@
-/* Seahorse Manager — Service Worker  [BẢN /Test/ — CACHE_NAME cô lập 'seahorse-test-*']
+/* Seahorse Manager — Service Worker
    Strategy: Network-first for index.html (so updates load fast),
              Cache-first for static assets (icons, manifest).
    Cache version bumps automatically when SW_VERSION changes below.
@@ -6,8 +6,8 @@
    để force trình duyệt invalidate cache cũ.
 */
 
-const SW_VERSION = 'v3.09.89.1';
-const CACHE_NAME = `seahorse-test-${SW_VERSION}`;   // /Test/ CÔ LẬP: activate KHÔNG xóa cache production 'seahorse-*'
+const SW_VERSION = 'v3.10.01';
+const CACHE_NAME = `seahorse-test-${SW_VERSION}`;
 
 // Pre-cache critical files on install
 const PRECACHE_URLS = [
