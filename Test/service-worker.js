@@ -1,4 +1,4 @@
-/* Seahorse Manager — Service Worker
+/* Seahorse Manager — Service Worker  [BUILD-TAG: v3.10.01-NETWORK-FIRST — /Test/ isolated]
    Strategy: Network-first for index.html (so updates load fast),
              Cache-first for static assets (icons, manifest).
    Cache version bumps automatically when SW_VERSION changes below.
@@ -63,21 +63,17 @@ self.addEventListener('fetch', event => {
   const isHTML = req.mode === 'navigate' || url.pathname.endsWith('.html') || url.pathname.endsWith('/');
 
   if (isHTML) {
-    // v3.06.00: STALE-WHILE-REVALIDATE cho index.html (app ~2.5MB).
-    //   Trả ngay bản CACHE (hiện app tức thì, không màn trắng), đồng thời tải bản mới
-    //   ngầm để cập nhật cache cho lần sau. Nếu chưa có cache (lần đầu) → tải network.
+    // v3.10.01: NETWORK-FIRST cho index.html (app tài chính — độ MỚI quan trọng hơn ~1-2s tốc độ).
+    //   Luôn lấy bản mới nhất từ mạng; mất mạng/offline → fallback cache (vẫn chạy).
+    //   Sửa triệt để lỗi "F5 ra bản cũ" của stale-while-revalidate cũ.
     event.respondWith(
-      caches.match(req).then(cached => {
-        const networkFetch = fetch(req).then(res => {
-          if (res.ok) {
-            const clone = res.clone();
-            caches.open(CACHE_NAME).then(c => c.put(req, clone));
-          }
-          return res;
-        }).catch(() => cached || caches.match('./index.html'));
-        // Có cache → trả ngay (mượt); không có → chờ network
-        return cached || networkFetch;
-      })
+      fetch(req, {cache:'no-store'}).then(res => {
+        if (res.ok) {
+          const clone = res.clone();
+          caches.open(CACHE_NAME).then(c => c.put(req, clone));
+        }
+        return res;
+      }).catch(() => caches.match(req).then(cached => cached || caches.match('./index.html')))
     );
   } else {
     // Cache-first for assets
