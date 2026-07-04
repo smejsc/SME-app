@@ -3473,7 +3473,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.09.88.2';            // bumped on each release
+const APP_VERSION='3.10.01';            // bumped on each release
 /* Debug logging: dlog() chỉ in khi DEBUG_MODE bật (mặc định TẮT ở production để
    tránh nhiễu/lộ cấu trúc nội bộ qua DevTools). Bật bằng: localStorage.DEBUG_MODE='1'.
    console.warn/error GIỮ NGUYÊN (cảnh báo & lỗi vận hành luôn hiện). */
@@ -3617,9 +3617,10 @@ async function pwaInstall() {
 let CRYPTO_KEY=null;
 let CURRENT_ROLE=null;               // 'admin' | 'user'
 let CURRENT_USER=null;               // user object if role==='user'
-// HOTFIX (gộp vào 3.09.88.2) — khai báo _suppressAutoSync trước mọi lần đọc (chống ReferenceError
-//   khi migration lúc login gọi scheduleAutoSync đọc cờ trước khi có gán nào). window.* để nhất quán
-//   với các nơi dùng window._suppressAutoSync. Mặc định false = auto-sync bật (như cũ).
+// HOTFIX 3.09.89.1 (port sang Phase 2b) — khai báo _suppressAutoSync trước mọi lần đọc
+//   (chống ReferenceError khi migration lúc login gọi scheduleAutoSync đọc cờ trước khi có gán nào).
+//   window.* để biến trần (sloppy mode = window property) + các nơi dùng window._suppressAutoSync
+//   (15341/15350 của Phase 2b) NHẤT QUÁN, không tách binding. Mặc định false = auto-sync bật (như cũ).
 window._suppressAutoSync = window._suppressAutoSync || false;
 
 /* Check version.json on GitHub Pages. If remote > local, auto-reload. */
@@ -5635,6 +5636,8 @@ async function authAction(){
     try{ _autoRecoverQuota(); }catch(_){}
     // v3.09.86: dọn high-water cũ ngoài quyền (one-time) — hết báo giả "sụt giảm" chặn sync.
     try{ _cleanupHighWaterOutOfScope(); }catch(_){}
+    // PHASE 2a: reset cache precutover mỗi phiên login → getState kiểm hash IDB↔localStorage tươi.
+    try{ _persistPrecutoverOk = {}; }catch(_){}
     await loadEncryptedLocal();
     // v3.08.16: KIỂM TRA CỜ APP USER — đăng nhập đúng mật khẩu chưa đủ, hồ sơ NV phải được cấp quyền App User
     if(CURRENT_ROLE==='user' && typeof isAppUserAllowed==='function' && !isAppUserAllowed(CURRENT_USER)){
@@ -7395,6 +7398,8 @@ async function _complete2FALogin(){
   try{ _autoRecoverQuota(); }catch(_){}
   // v3.09.86: dọn high-water cũ ngoài quyền (one-time) — hết báo giả "sụt giảm" chặn sync.
   try{ _cleanupHighWaterOutOfScope(); }catch(_){}
+  // PHASE 2a: reset cache precutover mỗi phiên login → getState kiểm hash IDB↔localStorage tươi.
+  try{ _persistPrecutoverOk = {}; }catch(_){}
   await loadEncryptedLocal();
   // v3.08.16: kiểm App User cho cả luồng 2FA
   if(CURRENT_ROLE==='user' && typeof isAppUserAllowed==='function' && !isAppUserAllowed(CURRENT_USER)){
@@ -9462,11 +9467,10 @@ function opReportedAmount(t){
   return +t.amount||0;
 }
 /* ============================================================
-   FREEZE POLICY (3.09.88.2) — MỘT nguồn sự thật cho "kỳ đã khóa".
+   FREEZE POLICY (v3.10.01, port từ 3.09.88.2) — MỘT nguồn sự thật cho "kỳ đã khóa".
    Mọi đường GHI (edit/delete/installment/markActual/confirm/import) gọi CHUNG.
    KHÔNG đổi schema, KHÔNG migrate, KHÔNG đụng ownerReportLocks/reportedValue.
    ============================================================ */
-/* Ngày cuối cùng (YYYY-MM-DD) của kỳ đã khóa GẦN NHẤT cho 1 tàu. null nếu chưa khóa kỳ nào. */
 function ownerLockLastDay(vesselId){
   if(!vesselId) return null;
   var maxPer='';
@@ -9475,13 +9479,8 @@ function ownerLockLastDay(vesselId){
   });
   if(!maxPer) return null;
   var y=+maxPer.slice(0,4), m=+maxPer.slice(5,7);
-  // ngày cuối tháng maxPer
   return new Date(y, m, 0).toISOString().slice(0,10);
 }
-/* CHÍNH SÁCH: 1 giao dịch chi hộ có được GHI (tạo/sửa/xóa) không?
-   Trả {ok:true} hoặc {ok:false, reason:'...'}.
-   Quy tắc: nếu THÁNG của t.date thuộc kỳ đã khóa của tàu → KHÔNG ghi (đóng băng).
-   Chi dự kiến (_isBudget) trong kỳ đã khóa: theo yêu cầu Sếp R4 → CŨNG chặn (không miễn). */
 function ownerReportWritable(t){
   if(!t || !t.vesselId || !t.date) return {ok:true};
   if(typeof isOwnerPeriodLocked==='function' && isOwnerPeriodLocked(t.vesselId, t.date)){
@@ -9489,18 +9488,15 @@ function ownerReportWritable(t){
   }
   return {ok:true};
 }
-/* assert dùng ở đầu mọi hàm ghi: trả true nếu ĐƯỢC ghi; nếu bị chặn → toast + trả false. */
 function assertOwnerReportWritable(t){
   var r=ownerReportWritable(t);
   if(!r.ok){ try{ toast(r.reason,'bad'); }catch(_){}; return false; }
   return true;
 }
-/* GIÁ TRỊ USD lên báo cáo: kỳ ĐÃ khóa → dùng reportedValue (bất biến) quy USD; chưa khóa → live opTxUsd. */
 function opReportUsd(t){
   if(!t) return 0;
   var frozen = (typeof isOwnerPeriodLocked==='function' && t.vesselId && t.date && isOwnerPeriodLocked(t.vesselId, t.date));
   if(frozen && t.reportedValue!=null && t.reportedValue!==''){
-    // reportedValue lưu theo ccy gốc của phiếu (= amount lúc chốt). Quy USD như opTxUsd nhưng dùng reportedValue.
     var rv=+t.reportedValue||0;
     if((t.ccy||'USD')==='USD') return rv;
     var fx=(+t.fxToUsd||0);
@@ -13170,21 +13166,35 @@ async function saveStateEncrypted(){
     const payload=await encryptJSON(S);
     const _serialized=JSON.stringify(payload);
     const _key=_storeKeyForUser();
-    // v3.09.60 (GĐ6): lưu giá trị CŨ trước khi ghi → rollback nếu verify thất bại.
-    const _prevValue=localStorage.getItem(_key);
-    localStorage.setItem(_key,_serialized);  // v2.99.52: key riêng theo user
-    // v3.09.49 RUNTIME AUDIT — VERIFY sau khi ghi (save→đọc lại→xác nhận): đọc lại key vừa ghi,
-    //   xác nhận tồn tại + đúng nội dung. Nếu lệch → coi như LƯU THẤT BẠI (không báo thành công giả).
-    const _readback=localStorage.getItem(_key);
-    if(_readback===null || _readback.length!==_serialized.length){
-      // v3.09.60: ROLLBACK — khôi phục giá trị cũ để KHÔNG để lại bản ghi hỏng/nửa vời.
-      try{
-        if(_prevValue!==null && _prevValue!==undefined){ localStorage.setItem(_key,_prevValue); }
-        console.warn('[saveStateEncrypted] verify thất bại → đã ROLLBACK về bản trước đó.');
-      }catch(_rb){ console.error('[saveStateEncrypted] rollback lỗi:', _rb&&_rb.message); }
-      throw new Error('Verify thất bại: dữ liệu đọc lại không khớp dữ liệu vừa ghi (có thể bộ nhớ đầy). Đã khôi phục bản trước.');
+    // PHASE 2b WRITE CUTOVER: admin → ghi/đọc/rollback qua IDB (đồng bộ, await);
+    //   NV/chưa-login → giữ nguyên localStorage. Rollback = PERSIST_READ_FROM_IDB_ROLES=[].
+    const _useIdbWrite = (typeof _persistRoleUsesIdb==='function') && _persistRoleUsesIdb();
+    // _prevValue: CHỈ cần cho nhánh localStorage (để rollback khi verify quota fail). Admin/IDB không readback nên không cần.
+    const _prevValue = _useIdbWrite ? null : localStorage.getItem(_key);
+    if(_useIdbWrite){
+      // PHASE 2b Hướng A: IDBBackend.set là async có await — nếu KHÔNG throw = ghi thành công.
+      //   KHÔNG readback-verify cho IDB: readback (await get) tạo cửa sổ race — một saveStateEncrypted
+      //   khác (heartbeat/thao tác) chen giữa set→get → đọc bản mới → length lệch → verify fail giả.
+      //   IDBBackend.set/get đã được xác nhận đáng tin (set===get). readback ở đây CHỈ để xác nhận
+      //   ghi (đã xác minh không gánh trách nhiệm khác) → await set không lỗi là đủ.
+      await IDBBackend.set(_key, _serialized);          // admin: ghi thẳng IDB; throw nếu lỗi
+      window._lastSaveVerifiedAt=Date.now();
+    }else{
+      localStorage.setItem(_key,_serialized);           // NV/chưa-login: v2.99.52 key riêng theo user
+      // v3.09.49 RUNTIME AUDIT — VERIFY (chỉ localStorage): đọc lại đồng bộ, so length. Bắt quota đầy.
+      const _readback = localStorage.getItem(_key);
+      if(_readback===null || _readback.length!==_serialized.length){
+        // v3.09.60: ROLLBACK — khôi phục giá trị cũ để KHÔNG để lại bản ghi hỏng.
+        try{
+          if(_prevValue!==null && _prevValue!==undefined){ localStorage.setItem(_key,_prevValue); }
+          console.warn('[saveStateEncrypted] verify thất bại → đã ROLLBACK về bản trước đó.');
+        }catch(_rb){ console.error('[saveStateEncrypted] rollback lỗi:', _rb&&_rb.message); }
+        throw new Error('Verify thất bại: dữ liệu đọc lại không khớp dữ liệu vừa ghi (có thể bộ nhớ đầy). Đã khôi phục bản trước.');
+      }
+      window._lastSaveVerifiedAt=Date.now();  // mốc xác nhận đã ghi thành công
     }
-    window._lastSaveVerifiedAt=Date.now();  // mốc xác nhận đã ghi thành công
+    // PHASE 1 · COMMIT 5 — SHADOW WRITE: chỉ cần khi ghi localStorage (NV). Admin đã ghi thẳng IDB.
+    if(!_useIdbWrite){ try{ _persistShadowWrite(_key, _serialized); }catch(_){} }
   }catch(e){
     // v2.64.0: localStorage có thể đầy (quota) hoặc lỗi mã hóa.
     // KHÔNG nuốt lỗi im lặng — báo rõ để NV biết dữ liệu CHƯA được lưu.
@@ -13203,8 +13213,10 @@ async function saveStateEncrypted(){
 }
 async function loadEncryptedLocal(){
   window._loadFailed = false;  // v2.99.41: reset cờ mỗi lần thử load (chỉ bật lại nếu lần này lỗi)
+  // RC ĐIỀU TRA: mở chu kỳ khởi động mới — tăng bootId, ghi mốc bootstrap_start. Thuần quan sát.
+  try{ _persistBootId++; _bootstrapStartAt = Date.now(); _persistTsEvent('bootstrap_start', {}); }catch(_){}
   try{
-    const raw=localStorage.getItem(_storeKeyForUser());  // v2.99.52: key riêng theo user
+    const raw=await Persistence.getState(_storeKeyForUser(), { source:'bootstrap' });  // PHASE 2a: đọc qua Persistence (admin→IDB, else→localStorage). Rollback = đổi lại localStorage.getItem(_storeKeyForUser()).
     if(!raw){S=defaultState();return;}
     const payload=JSON.parse(raw);
     let data;
@@ -13415,6 +13427,7 @@ async function cloudSync(mode, opts){
       // v3.01.26: DIỆT TẬN GỐC — dọn lại mọi lô đã xóa vĩnh viễn (rác từ cloud/snapshot không sống lại)
       try{ enforcePurgedBatches(); }catch(e){ console.warn('[pull enforcePurged]', e&&e.message); }
       await saveStateEncrypted();
+      try{ _persistTsEvent('pull_apply', { note:'pull ghi xong' }); }catch(_){}
       try{ _updateLastKnownRecordCount(); }catch(e){}  // v2.99.30: cập nhật mốc cao nhất
       renderAll({fromSync:true});
       try{ maybeWarnDuplicates(); }catch(e){}  // v3.06.00: cảnh báo nghi trùng sau khi pull (không tự xóa)
@@ -14847,6 +14860,621 @@ function _cleanupHighWaterOutOfScope(){
     return {acted:true, removed:removed};
   }catch(e){ try{ console.warn('[hw-cleanup] lỗi (bỏ qua an toàn):', e&&e.message); }catch(_){} return {acted:false, reason:'error'}; }
 }
+/* ============================================================================
+   ADR-010-MVP · PHASE 1 (Shadow Write) · COMMIT 1 — PERSISTENCE INTERFACE
+   Chỉ ĐỊNH NGHĨA contract + hằng số. CHƯA DÙNG ở bất kỳ đâu.
+   Business logic KHÔNG đổi. localStorage vẫn là nguồn đọc duy nhất.
+   ============================================================================ */
+const PERSIST_SCHEMA_VERSION = 1;              // Persistent Schema Version (ADR bổ sung 1)
+const PERSIST_IDB_NAME = 'seahorse_persist';   // tên IndexedDB (Phase 1: chỉ ghi bóng)
+const PERSIST_IDB_STORE = 'state';             // object store cho state blob
+const PERSIST_IDB_META = 'meta';               // object store cho metadata
+const PERSIST_IDB_VERSION = 1;                 // version schema của IDB (onupgradeneeded)
+/* Interface (contract) — mọi backend PHẢI hiện thực đủ các method này.
+   Bản thân object dưới đây chỉ là tài liệu/khuôn; backend thật ở Commit 2 & 3. */
+const PersistenceContract = {
+  // async get(key) -> string|null  (blob đã mã hóa, KHÔNG giải mã ở tầng này)
+  get: null,
+  // async set(key, value) -> boolean  (true nếu ghi OK)
+  set: null,
+  // async remove(key) -> boolean
+  remove: null,
+  // async keys(prefix?) -> string[]
+  keys: null,
+  // async estimateUsage() -> {used, quota, pct}
+  estimateUsage: null,
+  // name() -> 'localStorage' | 'indexeddb'
+  name: null
+};
+/* END COMMIT 1 ============================================================== */
+/* ============================================================================
+   PHASE 1 · COMMIT 2 — INDEXEDDB BACKEND (chưa tích hợp)
+   Hiện thực backend IDB theo PersistenceContract. CHƯA nối vào facade/luồng ghi.
+   Atomic Commit (ADR bổ sung 2): mỗi set ghi {blob, meta} trong MỘT transaction.
+   ============================================================================ */
+let _idbConn = null;   // kết nối IDB (mở 1 lần)
+function _idbOpen(){
+  return new Promise((resolve, reject)=>{
+    try{
+      if(_idbConn) return resolve(_idbConn);
+      if(typeof indexedDB==='undefined') return reject(new Error('IndexedDB không hỗ trợ'));
+      const req = indexedDB.open(PERSIST_IDB_NAME, PERSIST_IDB_VERSION);
+      req.onupgradeneeded = (e)=>{
+        const db = e.target.result;
+        if(!db.objectStoreNames.contains(PERSIST_IDB_STORE)) db.createObjectStore(PERSIST_IDB_STORE);
+        if(!db.objectStoreNames.contains(PERSIST_IDB_META)) db.createObjectStore(PERSIST_IDB_META);
+      };
+      req.onsuccess = (e)=>{ _idbConn = e.target.result; resolve(_idbConn); };
+      req.onerror = ()=> reject(req.error || new Error('IDB open lỗi'));
+    }catch(e){ reject(e); }
+  });
+}
+const IDBBackend = {
+  name: ()=> 'indexeddb',
+  async get(key){
+    const db = await _idbOpen();
+    return await new Promise((resolve, reject)=>{
+      try{
+        const tx = db.transaction(PERSIST_IDB_STORE, 'readonly');
+        const rq = tx.objectStore(PERSIST_IDB_STORE).get(key);
+        rq.onsuccess = ()=> resolve(rq.result===undefined ? null : rq.result);
+        rq.onerror = ()=> reject(rq.error);
+      }catch(e){ reject(e); }
+    });
+  },
+  async set(key, value){
+    const db = await _idbOpen();
+    return await new Promise((resolve, reject)=>{
+      try{
+        // Atomic: ghi blob + meta trong MỘT transaction (commit cả 2 hoặc abort cả 2).
+        const tx = db.transaction([PERSIST_IDB_STORE, PERSIST_IDB_META], 'readwrite');
+        tx.objectStore(PERSIST_IDB_STORE).put(value, key);
+        tx.objectStore(PERSIST_IDB_META).put({
+          schemaVersion: PERSIST_SCHEMA_VERSION,
+          appVersion: (typeof APP_VERSION!=='undefined'?APP_VERSION:'?'),
+          writtenAt: new Date().toISOString(),
+          len: (value||'').length
+        }, key);
+        tx.oncomplete = ()=> resolve(true);
+        tx.onerror = ()=> reject(tx.error);
+        tx.onabort = ()=> reject(tx.error || new Error('IDB tx abort'));
+      }catch(e){ reject(e); }
+    });
+  },
+  async remove(key){
+    const db = await _idbOpen();
+    return await new Promise((resolve, reject)=>{
+      try{
+        const tx = db.transaction([PERSIST_IDB_STORE, PERSIST_IDB_META], 'readwrite');
+        tx.objectStore(PERSIST_IDB_STORE).delete(key);
+        tx.objectStore(PERSIST_IDB_META).delete(key);
+        tx.oncomplete = ()=> resolve(true);
+        tx.onerror = ()=> reject(tx.error);
+      }catch(e){ reject(e); }
+    });
+  },
+  async keys(prefix){
+    const db = await _idbOpen();
+    return await new Promise((resolve, reject)=>{
+      try{
+        const tx = db.transaction(PERSIST_IDB_STORE, 'readonly');
+        const rq = tx.objectStore(PERSIST_IDB_STORE).getAllKeys();
+        rq.onsuccess = ()=>{ let ks = rq.result||[]; if(prefix) ks = ks.filter(k=>String(k).indexOf(prefix)===0); resolve(ks); };
+        rq.onerror = ()=> reject(rq.error);
+      }catch(e){ reject(e); }
+    });
+  },
+  async estimateUsage(){
+    try{
+      if(navigator.storage && navigator.storage.estimate){
+        const est = await navigator.storage.estimate();
+        const used = est.usage||0, quota = est.quota||0;
+        return { used, quota, pct: quota>0 ? (used/quota*100) : 0 };
+      }
+    }catch(_){}
+    return { used:0, quota:0, pct:0 };
+  }
+};
+/* END COMMIT 2 ============================================================== */
+/* ============================================================================
+   PHASE 1 · COMMIT 3 — LOCALSTORAGE ADAPTER
+   Bọc localStorage hiện có theo PersistenceContract. KHÔNG đổi hành vi localStorage.
+   Đây là nguồn đọc DUY NHẤT trong Phase 1.
+   ============================================================================ */
+const LocalStorageBackend = {
+  name: ()=> 'localStorage',
+  async get(key){
+    try{ const v = localStorage.getItem(key); return v===undefined ? null : v; }
+    catch(e){ throw e; }
+  },
+  async set(key, value){
+    // Giữ NGUYÊN hành vi hiện tại: ghi thẳng. (Verify/rollback vẫn do call-site
+    // saveStateEncrypted lo — Phase 1 KHÔNG đổi business logic.)
+    localStorage.setItem(key, value);
+    return true;
+  },
+  async remove(key){ localStorage.removeItem(key); return true; },
+  async keys(prefix){
+    let ks = [];
+    try{ ks = Object.keys(localStorage); }catch(_){ ks = []; }
+    return prefix ? ks.filter(k=>k.indexOf(prefix)===0) : ks;
+  },
+  async estimateUsage(){
+    // localStorage không có API quota chuẩn → ước lượng như storageHealthScan hiện có (trần ~5MB).
+    let total = 0;
+    try{ Object.keys(localStorage).forEach(k=>{ total += (localStorage.getItem(k)||'').length; }); }catch(_){}
+    const quota = 5*1024*1024;
+    return { used: total, quota, pct: total/quota*100 };
+  }
+};
+/* END COMMIT 3 ============================================================== */
+/* ============================================================================
+   PHASE 1 · COMMIT 4 — PERSISTENCE FACADE
+   Expose API thống nhất. Phase 1: nguồn đọc = localStorage; IDB chỉ ghi bóng (Commit 5).
+   CHƯA nối vào luồng ghi thật (loadState/saveStateEncrypted) — làm ở Commit 5.
+   Facade KHÔNG chứa business logic, KHÔNG giải mã (chỉ chuyển blob).
+   ============================================================================ */
+const Persistence = {
+  // Phase 1: đọc LUÔN từ localStorage (nguồn đọc duy nhất theo yêu cầu Phase 1).
+  async getState(key, opts){
+    // PHASE 2a — READ CUTOVER (Admin-first): chỉ role ∈ PERSIST_READ_FROM_IDB_ROLES + precutover hash khớp
+    //   mới đọc IDB. Còn lại (NV, chưa login, precutover fail, IDB lỗi) → localStorage (như Phase 1).
+    // opts.source: CHỈ để telemetry (observability) — TUYỆT ĐỐI không rẽ nhánh logic đọc theo nó.
+    const _src = (opts && opts.source) || undefined;
+    try{
+      if(_persistRoleUsesIdb()){
+        // PHASE 2b — role ĐÃ WRITE-CUTOVER: đọc THẲNG IDB, BỎ QUA precutover.
+        //   Lý do (đã chứng minh): role write-cutover ghi state CHỈ vào IDB; localStorage là tàn dư cũ
+        //   không cập nhật → hash IDB≠LS LUÔN đúng → precutover sẽ chặn nhầm, gây "mất phiếu" sau F5.
+        //   IDB là nguồn chân lý duy nhất cho role này. Precutover cũ giữ NGUYÊN cho role read-cutover
+        //   chưa write (Phase 2a thuần) ở nhánh else bên dưới.
+        if(_persistRoleWriteCutover()){
+          try{
+            const v = await IDBBackend.get(key);
+            if(v != null){
+              if(typeof _persistTelemetry==='function') _persistTelemetry('read_source', { src:'idb-writecutover', key, source:_src });
+              _persistTsEvent('getState_decision', { key, decision:'idb-writecutover', source:_src });
+              return v;
+            }
+            // IDB rỗng (bất thường với role đã write-cutover) → fallback localStorage an toàn.
+            if(typeof _persistTelemetry==='function') _persistTelemetry('read_source', { src:'ls-fallback-empty-wc', key, source:_src });
+            _persistTsEvent('getState_decision', { key, decision:'ls-fallback-empty-wc', source:_src });
+          }catch(e){
+            if(typeof _persistTelemetry==='function') _persistTelemetry('read_source', { src:'ls-fallback-error-wc', key, err:String(e&&e.message), source:_src });
+            _persistTsEvent('getState_decision', { key, decision:'ls-fallback-error-wc', source:_src });
+          }
+        }else{
+        // precutover: chỉ đọc IDB khi hash IDB === hash localStorage (kiểm 1 lần/phiên, cache).
+        let pcOk = _persistPrecutoverOk[key];
+        if(pcOk === undefined){ pcOk = await _persistPrecutoverCheck(key); }
+        if(pcOk === true){
+          try{
+            const v = await IDBBackend.get(key);
+            if(v != null){
+              if(typeof _persistTelemetry==='function') _persistTelemetry('read_source', { src:'idb', key, source:_src });
+              _persistTsEvent('getState_decision', { key, decision:'idb', source:_src });
+              return v;
+            }
+            if(typeof _persistTelemetry==='function') _persistTelemetry('read_source', { src:'ls-fallback-empty', key, source:_src });
+            _persistTsEvent('getState_decision', { key, decision:'ls-fallback-empty', source:_src });
+          }catch(e){
+            if(typeof _persistTelemetry==='function') _persistTelemetry('read_source', { src:'ls-fallback-error', key, err:String(e&&e.message), source:_src });
+            _persistTsEvent('getState_decision', { key, decision:'ls-fallback-error', source:_src });
+          }
+        }else{
+          if(typeof _persistTelemetry==='function') _persistTelemetry('read_source', { src:'ls-precutover-fail', key, source:_src });
+          _persistTsEvent('getState_decision', { key, decision:'ls-precutover-fail', source:_src });
+        }
+        }  // END else (role read-cutover chưa write — precutover GIỮ NGUYÊN)
+      }
+    }catch(_){ /* bất kỳ lỗi → fallback localStorage bên dưới (an toàn) */ }
+    return await LocalStorageBackend.get(key);   // Phase 1 path / fallback / NV
+  },
+  // set/remove/keys ở facade Phase 1 chỉ ủy quyền localStorage (shadow ghi IDB làm ở Commit 5,
+  //   trong hàm shadow riêng — KHÔNG để facade tự quyết ghi 2 nơi, giữ ranh giới rõ ràng).
+  async setStateLocal(key, value){ return await LocalStorageBackend.set(key, value); },
+  async removeStateLocal(key){ return await LocalStorageBackend.remove(key); },
+  async keysLocal(prefix){ return await LocalStorageBackend.keys(prefix); },
+  // estimateUsage: Phase 1 báo cáo localStorage (nguồn thật đang dùng) + IDB (tham khảo).
+  async estimateUsage(){ return await LocalStorageBackend.estimateUsage(); },
+  async estimateUsageIDB(){ try{ return await IDBBackend.estimateUsage(); }catch(_){ return {used:0,quota:0,pct:0}; } },
+  backend(){ return 'localStorage'; }   // Phase 1 luôn localStorage cho nguồn đọc
+};
+/* END COMMIT 4 ============================================================== */
+/* ============================================================================
+   PHASE 1 · COMMIT 5 — SHADOW WRITE
+   Sau khi localStorage ghi + verify THÀNH CÔNG (call-site hiện có), ghi BÓNG sang IDB.
+   NGUYÊN TẮC: fire-and-forget (KHÔNG await ở luồng ghi chính, KHÔNG throw) →
+   lỗi IDB TUYỆT ĐỐI không ảnh hưởng localStorage (nguồn thật). localStorage KHÔNG đổi.
+   Verify-after-write (so sánh 2 nơi) làm ở COMMIT 6.
+   ============================================================================ */
+let _shadowSeq = 0;   // đếm số lần shadow (telemetry Commit 7)
+function _persistShadowWrite(key, value){
+  // Gọi KHÔNG await từ call-site. Tự nuốt mọi lỗi. Không đụng luồng chính.
+  try{
+    _shadowSeq++;
+    IDBBackend.set(key, value).then(function(){
+      // RC ĐIỀU TRA: mốc shadow_write_complete (timeline source of truth) + cache thời điểm.
+      _lastShadowWriteAt = Date.now();   // cache CHỈ phục vụ telemetry
+      _persistTsEvent('shadow_write_complete', { key, len:(value||'').length, hWritten:_persistHash(value) });
+      // COMMIT 6 sẽ chèn verify-after-write ở đây.
+      if(typeof _persistVerifyAfterWrite==='function'){ _persistVerifyAfterWrite(key, value); }
+    }).catch(function(e){
+      try{ console.warn('[shadow-write] IDB set lỗi (bỏ qua an toàn, localStorage vẫn là nguồn thật):', e&&e.message); }catch(_){}
+    });
+  }catch(e){ try{ console.warn('[shadow-write] lỗi (bỏ qua):', e&&e.message); }catch(_){} }
+}
+/* END COMMIT 5 (def) ======================================================== */
+/* ============================================================================
+   PHASE 1 · COMMIT 6 — VERIFY-AFTER-WRITE
+   Sau khi ghi bóng IDB: đọc lại CẢ IDB và localStorage, so sánh length + hash.
+   Log mismatch (telemetry Commit 7). CHỈ so sánh + log — KHÔNG sửa gì, KHÔNG throw.
+   ============================================================================ */
+function _persistHash(str){
+  // Hash nhẹ (djb2) đủ để phát hiện lệch nội dung. Không cần crypto — chỉ so khớp.
+  try{
+    let h = 5381; const s = str||'';
+    for(let i=0;i<s.length;i++){ h = ((h<<5)+h) ^ s.charCodeAt(i); }
+    return (h>>>0).toString(16);
+  }catch(_){ return 'err'; }
+}
+let _shadowMatch = 0, _shadowMismatch = 0;   // đếm cho telemetry Commit 7
+async function _persistVerifyAfterWrite(key, expectedValue){
+  try{
+    // Đọc lại từ CẢ HAI nguồn TẠI CÙNG THỜI ĐIỂM.
+    let idbVal = null, lsVal = null;
+    try{ idbVal = await IDBBackend.get(key); }catch(e){ idbVal = '__IDB_READ_ERR__'; }
+    try{ lsVal = localStorage.getItem(key); }catch(e){ lsVal = '__LS_READ_ERR__'; }
+    const lenIdb = (idbVal||'').length, lenLs = (lsVal||'').length, lenExp = (expectedValue||'').length;
+    const hashIdb = _persistHash(idbVal), hashLs = _persistHash(lsVal), hashExp = _persistHash(expectedValue);
+    /* v3.09.87-p1 rev2 — SỬA BUG VERIFY (race condition).
+       Mục tiêu Phase 1 = chứng minh IDB KHỚP localStorage (2 nguồn thật đồng nhất),
+       KHÔNG phải khớp 1 snapshot 'expected' đã cũ. presenceHeartbeat ghi state dồn dập
+       → giữa lúc ghi và verify async, saveState mới đã ghi bản mới hơn vào CẢ 2 nơi →
+       idbVal/lsVal = bản mới (khớp nhau), nhưng expectedValue = bản cũ → so nhầm.
+       ĐÚNG: MATCH khi idbVal === lsVal (IDB đồng nhất localStorage tại cùng thời điểm).
+       'expected' chỉ dùng để LOG tham khảo (phân biệt "cùng bản vừa ghi" vs "đã nhảy bản mới"). */
+    const sourcesMatch = (idbVal === lsVal);        // ĐIỀU KIỆN CHÍNH: 2 nguồn thật khớp nhau
+    const matchedExpected = (idbVal === expectedValue);  // tham khảo: có phải đúng bản vừa ghi không
+    if(sourcesMatch){
+      _shadowMatch++;
+      if(typeof _persistTelemetry==='function') _persistTelemetry('shadow_write_match', { key, len: lenLs, matchedExpected });
+    }else{
+      // CHỈ coi là mismatch THẬT khi IDB ≠ localStorage (shadow write sai thật sự).
+      _shadowMismatch++;
+      const detail = { key, lenIdb, lenLs, lenExp, hashIdb, hashLs, hashExp, sourcesMatch, matchedExpected };
+      try{ console.warn('[shadow-verify] MISMATCH THẬT (IDB≠localStorage):', JSON.stringify(detail)); }catch(_){}
+      if(typeof _persistTelemetry==='function') _persistTelemetry('shadow_write_mismatch', detail);
+    }
+  }catch(e){ try{ console.warn('[shadow-verify] lỗi (bỏ qua):', e&&e.message); }catch(_){} }
+}
+/* END COMMIT 6 ============================================================== */
+/* ============================================================================
+   PHASE 1 · COMMIT 7 — LOGGING + TELEMETRY (Migration Health, ADR bổ sung 4)
+   Ghi gọn vào 1 key localStorage 'seahorse_migration_health'. Tự prune (cap dòng).
+   KHÔNG để telemetry thành nguồn phình mới. Đọc được để quyết go/no-go Phase 1→2.
+   ============================================================================ */
+const _PERSIST_TELEMETRY_KEY = 'seahorse_migration_health';
+const _PERSIST_TELEMETRY_MAX = 200;   // cap số event gần nhất
+/* ============================================================================
+   RC ĐIỀU TRA (timing shadow-write) — CHỈ TELEMETRY QUAN SÁT, KHÔNG điều khiển logic.
+   Timeline event là SOURCE OF TRUTH. Các biến dưới CHỈ là cache phục vụ telemetry,
+   KHÔNG được dùng trong bất kỳ điều kiện logic đọc/ghi/precutover nào.
+   ============================================================================ */
+let _lastShadowWriteAt = 0;   // cache: thời điểm shadow_write_complete gần nhất (chỉ telemetry đọc)
+let _bootstrapStartAt = 0;    // cache: thời điểm vào loadEncryptedLocal gần nhất (chỉ telemetry)
+let _persistBootId = 0;       // nhóm sự kiện theo chu kỳ khởi động (tăng mỗi bootstrap)
+function _persistTsEvent(name, extra){
+  // Ghi 1 mốc timeline với timestamp. Thuần quan sát.
+  try{
+    if(typeof _persistTelemetry==='function'){
+      _persistTelemetry('ts_event', Object.assign({ name, t: Date.now(), bootId: _persistBootId }, extra||{}));
+    }
+  }catch(_){}
+}
+function _persistTelemetry(event, data){
+  try{
+    let rec = {};
+    try{ rec = JSON.parse(localStorage.getItem(_PERSIST_TELEMETRY_KEY)||'{}'); }catch(_){ rec = {}; }
+    if(!rec.events) rec.events = [];
+    if(!rec.counters) rec.counters = {};
+    // counters tổng hợp
+    rec.counters[event] = (rec.counters[event]||0) + 1;
+    // event gần nhất (gọn)
+    rec.events.push({ e: event, at: new Date().toISOString(), d: data||null });
+    while(rec.events.length > _PERSIST_TELEMETRY_MAX) rec.events.shift();  // tự prune
+    rec.phase = 'shadow-write';
+    rec.appVersion = (typeof APP_VERSION!=='undefined'?APP_VERSION:'?');
+    rec.updatedAt = new Date().toISOString();
+    try{ localStorage.setItem(_PERSIST_TELEMETRY_KEY, JSON.stringify(rec)); }
+    catch(qe){ /* nếu localStorage đầy: KHÔNG để telemetry gây lỗi — bỏ qua ghi lần này */ }
+  }catch(e){ try{ console.warn('[persist-telemetry] lỗi (bỏ qua):', e&&e.message); }catch(_){} }
+}
+/* Health snapshot — đọc để quyết go/no-go (Storage Health có thể hiển thị sau, KHÔNG bắt buộc Phase 1). */
+async function persistHealthSnapshot(){
+  let rec = {};
+  try{ rec = JSON.parse(localStorage.getItem(_PERSIST_TELEMETRY_KEY)||'{}'); }catch(_){ rec = {}; }
+  const c = rec.counters||{};
+  const match = c.shadow_write_match||0, mismatch = c.shadow_write_mismatch||0;
+  const total = match + mismatch;
+  let idbEst = {used:0,quota:0,pct:0};
+  try{ idbEst = await IDBBackend.estimateUsage(); }catch(_){}
+  // PHASE 2a: thống kê nguồn đọc + precutover.
+  const readIdb = c.read_source ? 0 : 0;  // (counters read_source tính theo sub-key bên dưới)
+  const rs = {
+    idb: c['read_source']||0  // tổng số lần gọi read_source (mọi src) — chi tiết theo src ở events
+  };
+  // Đếm chi tiết theo src từ events (chính xác hơn counter gộp)
+  let src_idb=0, src_ls_empty=0, src_ls_err=0, src_ls_precut=0, src_idb_bootstrap=0;
+  try{
+    (rec.events||[]).forEach(function(e){
+      if(e.e==='read_source' && e.d){
+        if(e.d.src==='idb'){ src_idb++; if(e.d.source==='bootstrap') src_idb_bootstrap++; }
+        else if(e.d.src==='ls-fallback-empty') src_ls_empty++;
+        else if(e.d.src==='ls-fallback-error') src_ls_err++;
+        else if(e.d.src==='ls-precutover-fail') src_ls_precut++;
+      }
+    });
+  }catch(_){}
+  return {
+    phase: (typeof PERSIST_READ_FROM_IDB_ROLES!=='undefined' && _persistRoleUsesIdb()) ? 'read-cutover(2a)' : 'shadow-write',
+    backend_read: (typeof _persistRoleUsesIdb==='function' && _persistRoleUsesIdb()) ? 'indexeddb(admin)' : 'localStorage',
+    shadow_total: total,
+    shadow_match: match,
+    shadow_mismatch: mismatch,
+    match_pct: total>0 ? Math.round(match/total*10000)/100 : null,
+    read_from_idb: src_idb,
+    read_from_idb_bootstrap: src_idb_bootstrap,
+    read_ls_fallback_empty: src_ls_empty,
+    read_ls_fallback_error: src_ls_err,
+    read_ls_precutover_fail: src_ls_precut,
+    precutover_fail: c['precutover_fail']||0,
+    idb_usage: idbEst,
+    counters: c
+  };
+}
+/* END COMMIT 7 ============================================================== */
+/* ============================================================================
+   PHASE 1 · COMMIT 8 — PRODUCTION DIAGNOSTICS (điều kiện merge #3)
+   Công cụ thu thập bằng chứng trên MÁY THẬT (Admin+NV, Chrome+Edge) để quyết Cutover.
+   persistDiag(): gõ trong Console → báo cáo đầy đủ. Không đổi business logic.
+   ============================================================================ */
+function _persistBrowserInfo(){
+  const ua = (navigator&&navigator.userAgent)||'';
+  let name = 'unknown';
+  if(/Edg\//.test(ua)) name='Edge';
+  else if(/Chrome\//.test(ua) && !/Edg\//.test(ua)) name='Chrome';
+  else if(/Firefox\//.test(ua)) name='Firefox';
+  else if(/Safari\//.test(ua) && !/Chrome/.test(ua)) name='Safari';
+  else if(/Cốc Cốc|coc_coc|CocCoc/i.test(ua)) name='CocCoc';
+  return { name, ua: ua.slice(0,160) };
+}
+// Kiểm IDB có mở được thật không (private mode / browser cũ)
+async function _persistIDBAvailable(){
+  try{ await _idbOpen(); return true; }catch(e){ return false; }
+}
+/* persistDiag() — gõ trong Console. Trả về báo cáo đầy đủ + in gọn.
+   Dùng cho điều kiện merge #1,#2,#4: chạy trên Admin+NV, Chrome+Edge, xem mismatch=0. */
+async function persistDiag(){
+  const health = await persistHealthSnapshot();
+  const browser = _persistBrowserInfo();
+  const idbOk = await _persistIDBAvailable();
+  let lsUse = {used:0,quota:0,pct:0};
+  try{ lsUse = await LocalStorageBackend.estimateUsage(); }catch(_){}
+  let telemetryRaw = {};
+  try{ telemetryRaw = JSON.parse(localStorage.getItem(_PERSIST_TELEMETRY_KEY)||'{}'); }catch(_){}
+  // Chi tiết các mismatch gần nhất (nếu có) — để điều tra
+  const mismatches = (telemetryRaw.events||[]).filter(e=>e.e==='shadow_write_mismatch').slice(-10);
+  const report = {
+    phase: 'Phase 1 · Shadow Write',
+    appVersion: (typeof APP_VERSION!=='undefined'?APP_VERSION:'?'),
+    role: (typeof CURRENT_ROLE!=='undefined'?CURRENT_ROLE:'?'),
+    user: (typeof CURRENT_USER!=='undefined' && CURRENT_USER && CURRENT_USER.name)||'(admin)',
+    browser: browser.name,
+    idb_available: idbOk,
+    backend_read: health.backend_read,
+    phase2a: health.phase,
+    shadow_total: health.shadow_total,
+    shadow_match: health.shadow_match,
+    shadow_mismatch: health.shadow_mismatch,
+    match_pct: health.match_pct,
+    read_from_idb: health.read_from_idb,
+    read_ls_fallback_empty: health.read_ls_fallback_empty,
+    read_ls_fallback_error: health.read_ls_fallback_error,
+    read_ls_precutover_fail: health.read_ls_precutover_fail,
+    precutover_fail: health.precutover_fail,
+    localStorage_usage: (lsUse.pct||0).toFixed(1)+'% ('+Math.round(lsUse.used/1024)+' KB)',
+    idb_usage: health.idb_usage,
+    recent_mismatches: mismatches,
+    verdict: (health.shadow_total>0 && health.shadow_mismatch===0)
+      ? '✓ 0 MISMATCH — đủ điều kiện (cần thêm số lượng thao tác + nhiều máy)'
+      : (health.shadow_total===0 ? '… CHƯA có thao tác ghi nào — hãy thao tác thực tế rồi chạy lại'
+         : '✗ CÓ MISMATCH — xem recent_mismatches, KHÔNG cutover')
+  };
+  // Tiêu chí kỹ thuật 2a→2b: có đọc IDB TRONG BOOTSTRAP, 0 fallback, 0 precutover_fail.
+  const _hasFallback = (report.read_ls_fallback_empty||0)>0
+    || (report.read_ls_fallback_error||0)>0
+    || (report.read_ls_precutover_fail||0)>0
+    || (report.precutover_fail||0)>0;
+  const _bootReads = health.read_from_idb_bootstrap||0;
+  report.read_from_idb_bootstrap = _bootReads;
+  report.phase2a_verdict = (report.backend_read && report.backend_read.indexOf('indexeddb')>=0)
+    ? ( _hasFallback
+          ? '✗ 2a CÓ fallback/precutover_fail — KHÔNG sang 2b, xem chi tiết Read/precutover_fail'
+          : ( _bootReads>=5
+                ? '✓ 2a SẠCH — ≥5 bootstrap reads từ IDB, 0 fallback, 0 precutover_fail (đạt Phần 1; cần thêm 1 phiên dùng thực tế 0 mismatch để HOÀN TẤT)'
+                : ( _bootReads>0
+                      ? '⏳ 2a đang tốt — '+_bootReads+'/5 bootstrap reads từ IDB (F5→login thêm cho đủ ≥5)'
+                      : '⏳ CHƯA có bootstrap read — F5 (reload) + đăng nhập để app đọc state từ IDB trong bootstrap, rồi persistDiag() lại' ) ) )
+    : '(role này chưa bật read-cutover — đọc localStorage như cũ)';
+  try{
+    console.log('%c=== PERSIST DIAGNOSTICS (Phase 2a) ===','font-weight:bold;color:#2d6a6a');
+    console.log('Browser:', report.browser, '| IDB khả dụng:', report.idb_available, '| Role:', report.role, '| User:', report.user);
+    console.log('Nguồn đọc:', report.backend_read, '| Phase:', report.phase2a);
+    console.log('Shadow: total='+report.shadow_total+' match='+report.shadow_match+' mismatch='+report.shadow_mismatch+' ('+report.match_pct+'% match)');
+    console.log('Read: từ IDB='+report.read_from_idb+' (bootstrap='+report.read_from_idb_bootstrap+') | fallback(empty/err/precut)='+report.read_ls_fallback_empty+'/'+report.read_ls_fallback_error+'/'+report.read_ls_precutover_fail+' | precutover_fail='+report.precutover_fail);
+    console.log('localStorage:', report.localStorage_usage, '| IDB dùng:', Math.round((report.idb_usage.used||0)/1024),'KB');
+    console.log('SHADOW:', report.verdict);
+    console.log('PHASE 2a:', report.phase2a_verdict);
+    if(report.recent_mismatches.length) console.log('MISMATCH gần nhất:', report.recent_mismatches);
+  }catch(_){}
+  return report;
+}
+/* Reset telemetry (chạy trước 1 đợt test sạch trên máy thật). Chỉ xóa telemetry, KHÔNG đụng data. */
+function persistDiagReset(){
+  try{ localStorage.removeItem(_PERSIST_TELEMETRY_KEY); _shadowMatch=0; _shadowMismatch=0;
+    console.log('✓ Đã reset telemetry Phase 1. Thao tác thực tế rồi gõ persistDiag() để xem.'); }catch(e){}
+}
+/* RC ĐIỀU TRA: in TIMELINE sự kiện theo thời gian (chứng minh/bác bỏ giả thuyết timing).
+   Timeline event là source of truth. Chỉ đọc telemetry + in — không đụng logic. */
+function persistTimeline(){
+  try{
+    const rec = JSON.parse(localStorage.getItem(_PERSIST_TELEMETRY_KEY)||'{}');
+    const evs = (rec.events||[]).filter(e=> e.e==='ts_event' || e.e==='precutover_fail' || e.e==='shadow_write_mismatch');
+    // sắp theo thời gian: ts_event có d.t; precutover_fail dùng d.sinceBootstrapStart không có t tuyệt đối →
+    // ưu tiên d.t nếu có, else giữ thứ tự ghi.
+    const withT = evs.map((e,i)=>({ e, t:(e.d&&e.d.t)||null, i }));
+    withT.sort((a,b)=> (a.t&&b.t)? (a.t-b.t) : (a.i-b.i));
+    if(!withT.length){ console.log('… Chưa có timeline event. Hãy F5→login (sinh bootstrap) rồi chạy lại.'); return rec; }
+    const t0 = withT.find(x=>x.t) ? withT.find(x=>x.t).t : 0;
+    console.log('%c=== PERSIST TIMELINE (RC điều tra timing) ===','font-weight:bold;color:#b8472e');
+    let curBoot = null;
+    withT.forEach(x=>{
+      const d = x.e.d||{};
+      const rel = x.t ? ('t+'+(x.t-t0)+'ms') : '(no-t)';
+      const boot = (d.bootId!=null)? d.bootId : '?';
+      if(boot!==curBoot){ console.log('──── bootId='+boot+' ────'); curBoot=boot; }
+      if(x.e.e==='ts_event'){
+        if(d.name==='precutover_check'){
+          console.log('  ['+rel+'] precutover_check ok='+d.ok+' hIdb='+d.hIdb+' hLs='+d.hLs+' idbLen='+d.idbLen+' lsLen='+d.lsLen+' sinceLastSW='+d.sinceLastShadowWrite+'ms sinceBoot='+d.sinceBootstrapStart+'ms');
+        }else if(d.name==='shadow_write_complete'){
+          console.log('  ['+rel+'] shadow_write_complete len='+d.len+' hWritten='+d.hWritten);
+        }else if(d.name==='getState_decision'){
+          console.log('  ['+rel+'] getState_decision → '+d.decision+' (source='+d.source+')');
+        }else if(d.name==='pull_apply'){
+          console.log('  ['+rel+'] pull_apply — '+(d.note||''));
+        }else if(d.name==='bootstrap_start'){
+          console.log('  ['+rel+'] bootstrap_start');
+        }else{
+          console.log('  ['+rel+'] '+d.name);
+        }
+      }else if(x.e.e==='precutover_fail'){
+        console.log('  ['+rel+'] ✗ precutover_fail '+d.reason+' hIdb='+d.hIdb+' hLs='+d.hLs+' idbLen='+d.idbLen+' lsLen='+d.lsLen+' sinceLastSW='+d.sinceLastShadowWrite+'ms');
+      }else if(x.e.e==='shadow_write_mismatch'){
+        console.log('  ['+rel+'] ⚠ shadow_write_mismatch lenIdb='+d.lenIdb+' lenLs='+d.lenLs);
+      }
+    });
+    console.log('=== HẾT TIMELINE ('+withT.length+' sự kiện) ===');
+    return { events: withT.length };
+  }catch(e){ console.warn('persistTimeline lỗi:', e&&e.message); }
+}
+/* ============================================================================
+   PHASE 2b · C1 — WRITE-PAUSE (tạm dừng nguồn ghi state TỰ ĐỘNG bằng CƠ CHẾ SẴN CÓ)
+   Mục đích: đóng cửa sổ "ghi chen" giữa verify→delete (điểm nghẽn R2). CHỈ dùng công cụ đã có:
+   clearInterval(_presenceTimer, emailQueueTimer) + cờ _suppressAutoSync. KHÔNG thêm cờ khóa vào
+   saveState (không chạm hàm ghi lõi). KHÔNG phát minh cơ chế đồng bộ mới.
+   Dùng theo cặp: _persist2bPauseWrites() ... (verify+delete) ... _persist2bResumeWrites().
+   Bắt buộc gọi resume trong finally để không kẹt timer.
+   ============================================================================ */
+let _persist2bPaused = false;   // cờ trạng thái (chỉ để tránh pause/resume lồng nhau)
+function _persist2bPauseWrites(){
+  // Tạm dừng 2 nguồn ghi state tự động + chặn auto-push. Dùng cơ chế sẵn có.
+  try{
+    if(_persist2bPaused) return true;   // đã pause rồi
+    clearInterval(_presenceTimer);      // dừng heartbeat (ghi S.presence → saveState)
+    clearInterval(emailQueueTimer); emailQueueTimer=null;  // dừng email queue (ghi state)
+    window._suppressAutoSync = true;    // chặn auto-push/pull ghi đè (cờ sẵn có)
+    _persist2bPaused = true;
+    try{ if(typeof _persistTsEvent==='function') _persistTsEvent('2b_pause_writes', {}); }catch(_){}
+    return true;
+  }catch(e){ try{ console.warn('[2b] pause writes lỗi:', e&&e.message); }catch(_){} return false; }
+}
+function _persist2bResumeWrites(){
+  // Khôi phục 2 timer bằng hàm start SẴN CÓ + bỏ cờ chặn. An toàn gọi nhiều lần (idempotent).
+  try{
+    window._suppressAutoSync = false;
+    try{ if(typeof presenceStart==='function') presenceStart(); }catch(_){}          // khôi phục heartbeat
+    try{ if(typeof emailQueueStartTimer==='function') emailQueueStartTimer(); }catch(_){}  // khôi phục email queue
+    _persist2bPaused = false;
+    try{ if(typeof _persistTsEvent==='function') _persistTsEvent('2b_resume_writes', {}); }catch(_){}
+    return true;
+  }catch(e){ try{ console.warn('[2b] resume writes lỗi:', e&&e.message); }catch(_){} return false; }
+}
+/* END P2b C1 ================================================================ */
+/* END COMMIT 8 ============================================================== */
+/* ============================================================================
+   ADR-010-MVP · PHASE 2a (READ CUTOVER) · COMMIT 1 — CỜ ROLE + _persistRoleUsesIdb
+   Admin-first: chỉ role trong danh sách mới ĐỌC từ IDB. CHƯA DÙNG (getState chưa gọi).
+   ============================================================================ */
+// Danh sách role được đọc state từ IDB (Phase 2a: chỉ admin). Mở rộng NV sau = thêm 'user'.
+const PERSIST_READ_FROM_IDB_ROLES = ['admin'];
+function _persistRoleUsesIdb(){
+  try{
+    if(typeof CURRENT_ROLE==='undefined' || !CURRENT_ROLE) return false;  // chưa login → localStorage
+    return PERSIST_READ_FROM_IDB_ROLES.indexOf(CURRENT_ROLE) >= 0;
+  }catch(_){ return false; }  // bất kỳ lỗi → an toàn: đọc localStorage
+}
+/* PHASE 2b — WRITE-CUTOVER PREDICATE (ADR-010).
+   Role đã write-cutover = role GHI state thẳng IDB (không ghi localStorage) trong saveStateEncrypted
+   (_useIdbWrite = _persistRoleUsesIdb()). Với role này, localStorage['seahorse_v1'] là TÀN DƯ CŨ,
+   KHÔNG được cập nhật → precutover hash-check (so IDB vs LS) LUÔN lệch → chặn nhầm đọc IDB.
+   ĐÃ CHỨNG MINH: sau write-cutover admin không có luồng nào dùng localStorage làm nguồn khôi phục.
+   ⇒ getState phải BỎ QUA precutover cho role đã write-cutover (đọc thẳng IDB — nguồn chân lý).
+   Hiện write-cutover dùng CHUNG cờ với read-cutover (_persistRoleUsesIdb). Tách tên để ngữ nghĩa
+   rõ + sẵn sàng nếu sau này tách 2 danh sách (read-cutover-mà-chưa-write vẫn giữ precutover). */
+function _persistRoleWriteCutover(){
+  try{ return _persistRoleUsesIdb(); }catch(_){ return false; }
+}
+/* END P2a COMMIT 1 ========================================================== */
+/* ============================================================================
+   PHASE 2a · COMMIT 2 — _persistPrecutoverCheck (HASH KHỚP TUYỆT ĐỐI)
+   Xác minh IDB có bản KHỚP localStorage (hash tuyệt đối) TRƯỚC khi cho đọc IDB.
+   Điều chỉnh Cường: bỏ ngưỡng %, chỉ chấp nhận H_idb === H_ls. CHƯA GỌI (Commit 4 gọi).
+   ============================================================================ */
+// Cache kết quả precutover theo key trong 1 phiên (tránh kiểm lại mỗi lần đọc).
+let _persistPrecutoverOk = {};   // { key: true/false }
+async function _persistPrecutoverCheck(key){
+  try{
+    let lsVal = null, idbVal = null;
+    try{ lsVal = localStorage.getItem(key); }catch(_){ lsVal = null; }
+    try{ idbVal = await IDBBackend.get(key); }catch(_){ idbVal = null; }
+    // IDB thiếu key → fail (chưa sẵn sàng đọc IDB)
+    if(idbVal == null){
+      _persistPrecutoverOk[key] = false;
+      if(typeof _persistTelemetry==='function') _persistTelemetry('precutover_fail', { key, reason:'idb-empty' });
+      return false;
+    }
+    // localStorage thiếu key nhưng IDB có → không có cơ sở đối chứng → fail an toàn (dùng localStorage path)
+    if(lsVal == null){
+      _persistPrecutoverOk[key] = false;
+      if(typeof _persistTelemetry==='function') _persistTelemetry('precutover_fail', { key, reason:'ls-empty' });
+      return false;
+    }
+    const hLs = _persistHash(lsVal), hIdb = _persistHash(idbVal);
+    const ok = (hLs === hIdb);   // HASH KHỚP TUYỆT ĐỐI
+    _persistPrecutoverOk[key] = ok;
+    // RC ĐIỀU TRA: mốc precutover_check + ngữ cảnh timeline (thuần quan sát, không đổi logic).
+    _persistTsEvent('precutover_check', {
+      key, ok, hIdb, hLs, idbLen:(idbVal||'').length, lsLen:(lsVal||'').length,
+      sinceLastShadowWrite: _lastShadowWriteAt ? (Date.now()-_lastShadowWriteAt) : null,
+      sinceBootstrapStart: _bootstrapStartAt ? (Date.now()-_bootstrapStartAt) : null
+    });
+    if(!ok && typeof _persistTelemetry==='function'){
+      _persistTelemetry('precutover_fail', { key, reason:'hash-mismatch', hIdb, hLs,
+        idbLen:(idbVal||'').length, lsLen:(lsVal||'').length,
+        sinceLastShadowWrite: _lastShadowWriteAt ? (Date.now()-_lastShadowWriteAt) : null,
+        sinceBootstrapStart: _bootstrapStartAt ? (Date.now()-_bootstrapStartAt) : null,
+        bootId: _persistBootId });
+    }
+    return ok;
+  }catch(e){
+    _persistPrecutoverOk[key] = false;
+    try{ if(typeof _persistTelemetry==='function') _persistTelemetry('precutover_fail', { key, reason:'error', err:String(e&&e.message) }); }catch(_){}
+    return false;
+  }
+}
+/* END P2a COMMIT 2 ========================================================== */
+
 let S = loadState();
 
 /* ============================================================
@@ -17526,7 +18154,7 @@ const VesselService = (function(){
   function addOnhire(o){ if(!o||!o.id) throw new Error('VesselService.addOnhire: thiếu id'); onhires().push(o); return o; }
   function addOpVessel(v){ if(!v||!v.id) throw new Error('VesselService.addOpVessel: thiếu id'); opVessels().push(v); return v; }
   function addOpTransaction(t){ if(!t||!t.id) throw new Error('VesselService.addOpTransaction: thiếu id');
-    // FREEZE POLICY (3.09.88.2): CỬA GHI DUY NHẤT vào opTransactions → chặn TẠO record thuộc kỳ đã khóa
+    // FREEZE POLICY (v3.10.01): CỬA GHI DUY NHẤT vào opTransactions → chặn TẠO record thuộc kỳ đã khóa
     //   (bịt cả import Excel + mọi đường tạo). Không đụng schema. Throw để call-site (kể cả import) dừng.
     if(typeof isOwnerPeriodLocked==='function' && t.vesselId && t.date && isOwnerPeriodLocked(t.vesselId, t.date)){
       throw new Error('FREEZE: kỳ '+String(t.date).slice(0,7)+' của tàu đã KHÓA — không tạo giao dịch thuộc kỳ này.');
@@ -36124,7 +36752,7 @@ function opAddInstallment(txId){
 function opSaveInstallment(txId){
   const t=VesselService.opTransactions().find(x=>x.id===txId);
   if(!t || !isContractAdvance(t)) return;
-  // FREEZE POLICY (3.09.88.2): chặn thêm/sửa đợt nếu phiếu thuộc kỳ đã khóa.
+  // FREEZE POLICY (v3.10.01): chặn thêm/sửa đợt nếu phiếu thuộc kỳ đã khóa.
   if(!assertOwnerReportWritable(t)) return;
   const amt=+((document.getElementById('oin-amt')||{}).value)||0;
   if(amt<=0){ toast('Nhập số tiền hợp lệ','bad'); return; }
@@ -43714,8 +44342,7 @@ function purgeOpTxForever(id){
 
 function delOpTx(id){
   const t=VesselService.opTransactions().find(x=>x.id===id);if(!t)return;
-  // v3.06.31 + FREEZE POLICY (3.09.88.2): chặn xóa nếu phiếu thuộc kỳ đã khóa (gồm cả chi dự kiến — R4).
-  //   Giữ cả check _locked cũ (khóa đích danh phiếu) để tương thích ngược.
+  // v3.06.31 + FREEZE POLICY (v3.10.01): chặn xóa nếu phiếu thuộc kỳ đã khóa (gồm cả chi dự kiến — R4).
   if(t._locked && !t._isBudget){
     toast('🔒 Phiếu đã KHÓA (kỳ '+String(t._lockedPeriod||String(t.date).slice(0,7))+' đã gửi chủ tàu) — không xóa được','bad');
     return;
@@ -43740,7 +44367,7 @@ function opMarkActual(id){
   const t=VesselService.opTransactions().find(x=>x.id===id);
   if(!t){ toast('Không tìm thấy khoản dự kiến','bad'); return; }
   if(!t._isBudget){ toast('Khoản này đã là chi thực','warn'); return; }
-  // FREEZE POLICY (3.09.88.2): chặn chuyển dự kiến→thực nếu phiếu thuộc kỳ đã khóa.
+  // FREEZE POLICY (v3.10.01): chặn chuyển dự kiến→thực nếu phiếu thuộc kỳ đã khóa.
   if(!assertOwnerReportWritable(t)) return;
   if(!isAdmin() && t.createdBy && t.createdBy!==actorName()){ toast('Chỉ admin/người tạo mới chuyển được','bad'); return; }
   const v=VesselService.opVessels().find(x=>x.id===t.vesselId);
@@ -44183,7 +44810,7 @@ function advDetailModal(id){
 }
 function editOpTx(id){
   const t=VesselService.opTransactions().find(x=>x.id===id);if(!t)return;
-  // v3.06.31 + FREEZE POLICY (3.09.88.2): chặn sửa nếu phiếu thuộc kỳ đã khóa (gồm cả chi dự kiến — R4).
+  // v3.06.31 + FREEZE POLICY (v3.10.01): chặn sửa nếu phiếu thuộc kỳ đã khóa (gồm cả chi dự kiến — R4).
   if(t._locked && !t._isBudget){
     const v=VesselService.opVessels().find(x=>x.id===t.vesselId);
     toast('🔒 Phiếu đã KHÓA (kỳ '+String(t._lockedPeriod||String(t.date).slice(0,7))+' đã gửi chủ tàu) — không sửa được','bad');
@@ -44477,7 +45104,7 @@ function saveOpConfirm(id){
   const otherFee=+document.getElementById('op-other-fee').value||0;
   const feeNote=document.getElementById('op-fee-note').value.trim();
   if(bankFee<0||otherFee<0){err.textContent='Phí không được âm';return;}
-  // FREEZE POLICY (3.09.88.2) — R6: phí phát sinh sau kỳ ĐƯỢC ghi, NHƯNG ngày phí (paidDate) phải
+  // FREEZE POLICY (v3.10.01) — R6: phí phát sinh sau kỳ ĐƯỢC ghi, NHƯNG ngày phí (paidDate) phải
   //   LỚN HƠN ngày cuối cùng của kỳ đã khóa gần nhất (không back-date vào/ trước kỳ đã đóng băng).
   if((bankFee>0||otherFee>0) && t.vesselId){
     var _lockEnd = (typeof ownerLockLastDay==='function') ? ownerLockLastDay(t.vesselId) : null;
@@ -44658,7 +45285,7 @@ function opEditCcyChanged(){
 
 function saveOpEditFull(id){
   const t=VesselService.opTransactions().find(x=>x.id===id);if(!t)return;
-  // FREEZE POLICY (3.09.88.2): chặn sửa nếu phiếu thuộc kỳ đã khóa (theo t.date hiện tại).
+  // FREEZE POLICY (v3.10.01): chặn sửa nếu phiếu thuộc kỳ đã khóa (theo t.date hiện tại).
   if(!assertOwnerReportWritable(t)) return;
   const err=document.getElementById('op-confirm-err');
   err.textContent='';
@@ -44687,7 +45314,7 @@ function saveOpEditFull(id){
   if(amount<=0){err.textContent='Số tiền > 0';return;}
   if(!paidDate){err.textContent='Nhập ngày thanh toán';return;}
   if(bankFee<0||otherFee<0){err.textContent='Phí không được âm';return;}
-  // FREEZE POLICY (3.09.88.2): không cho dời NGÀY MỚI vào kỳ đã khóa (chống back-date vào kỳ đóng băng).
+  // FREEZE POLICY (v3.10.01): không cho dời NGÀY MỚI vào kỳ đã khóa (chống back-date vào kỳ đóng băng).
   if(typeof isOwnerPeriodLocked==='function' && isOwnerPeriodLocked(vesselId, date)){
     err.textContent='🔒 Ngày '+String(date).slice(0,7)+' thuộc kỳ đã KHÓA của tàu — không được ghi/dời giao dịch vào kỳ này.';return;
   }
@@ -45353,7 +45980,7 @@ function opSaveNccPayment(id){
   const _of=+(document.getElementById('op-ncc-otherfee')||{}).value||0;
   const _fn=((document.getElementById('op-ncc-feenote')||{}).value||'').trim();
   if(_bf<0||_of<0){ toast('Phí không được âm','bad'); return; }
-  // FREEZE POLICY (3.09.88.2) — R6: phí phát sinh sau kỳ ĐƯỢC ghi, nhưng NGÀY (date đợt) phải
+  // FREEZE POLICY (v3.10.01) — R6: phí phát sinh sau kỳ ĐƯỢC ghi, nhưng NGÀY (date đợt) phải
   //   LỚN HƠN ngày cuối kỳ đã khóa gần nhất (không back-date vào/ trước kỳ đã đóng băng).
   if((_bf>0||_of>0) && t.vesselId){
     var _lockEndN = (typeof ownerLockLastDay==='function') ? ownerLockLastDay(t.vesselId) : null;
@@ -45942,6 +46569,8 @@ function renderNccDebt(){
   if(!rows.length){ block.innerHTML='<div class="empty">Không có công nợ NCC khớp bộ lọc</div>'; return; }
   // v3.07.57: gom theo vendor; TRONG mỗi vendor tách theo NGOẠI TỆ GỐC (không quy đổi).
   const _locN=(n,c)=>(+n||0).toLocaleString('vi-VN');
+  // v3.09.89: chuẩn hóa ccy — "VNĐ" (có Đ) và "VND" là CÙNG một đồng → gộp, tránh tách 2 thẻ.
+  const _ncy=(t)=>String((t&&t.ccy)||'VND').trim().replace('VNĐ','VND').toUpperCase();
   const ccyOrder=(c)=>({VND:0,USD:1,EUR:2,SGD:3,GBP:4}[c]!=null?{VND:0,USD:1,EUR:2,SGD:3,GBP:4}[c]:9);
   const grp=new Map();
   rows.forEach(t=>{
@@ -45949,7 +46578,7 @@ function renderNccDebt(){
     if(!grp.has(key)) grp.set(key, {vendor:key, items:[], byCcy:{}});
     const g=grp.get(key);
     g.items.push(t);
-    const c=t.ccy||'VND';
+    const c=_ncy(t);
     if(!g.byCcy[c]) g.byCcy[c]={total:0, paid:0, remain:0};
     g.byCcy[c].total += opNccTotal(t);
     g.byCcy[c].paid  += opPaidTotal(t);
@@ -45978,8 +46607,8 @@ function renderNccDebt(){
   groups.forEach(g=>{
     const gCcys=Object.keys(g.byCcy).sort((a,b)=>ccyOrder(a)-ccyOrder(b));
     const remStr=gCcys.filter(c=>Math.abs(g.byCcy[c].remain)>0.001).map(c=>`<b style="color:${g.byCcy[c].remain>0.001?'var(--bad)':'var(--good)'};font-family:var(--font-mono)">${_locN(g.byCcy[c].remain,c)} ${c}</b>`).join(' · ')||'<b style="color:var(--good)">0</b>';
-    const itemRows=g.items.sort((a,b)=>{ const ca=ccyOrder(a.ccy||'VND'), cb=ccyOrder(b.ccy||'VND'); if(ca!==cb)return ca-cb; return String(b.date||'').localeCompare(String(a.date||'')); }).map(t=>{
-      const ccy=t.ccy||'VND';
+    const itemRows=g.items.sort((a,b)=>{ const ca=ccyOrder(_ncy(a)), cb=ccyOrder(_ncy(b)); if(ca!==cb)return ca-cb; return String(b.date||'').localeCompare(String(a.date||'')); }).map(t=>{
+      const ccy=_ncy(t);
       const st=opWfState(t);
       const rem=opNccRemaining(t);
       const stChip=opWfStatus(t)==='rejected'?'<span class="chip chip-bad" style="font-size:9px">Từ chối</span>':`<span class="chip ${st.chip}" style="font-size:9px">${st.short}</span>`;
@@ -46022,7 +46651,7 @@ function nccDebtExportExcel(){
   list.sort((a,b)=>String(b.date||'').localeCompare(String(a.date||'')));
   list.forEach(t=>{
     aoa.push([t.date||'', vName(t.vesselId), t.vendor||'', t.desc||'', t.invoiceNo||'',
-      opNccTotal(t), opPaidTotal(t), opNccRemaining(t), t.ccy||'VND',
+      opNccTotal(t), opPaidTotal(t), opNccRemaining(t), String(t.ccy||'VND').trim().replace('VNĐ','VND').toUpperCase(),
       (opWfState(t).label), (t.reportedValue!=null&&t.reportedValue!=='')?(+t.reportedValue||0):'(chưa chốt)', t.createdBy||'']);
   });
   const wb=XLSX.utils.book_new();
@@ -46204,6 +46833,7 @@ function openOpReportModal(){
     </div>`;
   const foot=`<button class="btn-sec" onclick="closeModal()">Hủy</button>
               ${canSignOwnerReport()?'<button class="btn-sec" style="border-color:#1c3a5c;color:#1c3a5c" onclick="signLockOwnerReport()" title="Ký duyệt + KHÓA số kỳ này cho các tàu đã chọn — không ai nhập/sửa thêm.">🔒 Ký &amp; khóa kỳ</button>':''}
+              ${isAdmin()?'<button class="btn-sec" style="border-color:var(--accent);color:var(--accent)" onclick="promptUnlockOwnerReport()" title="MỞ KHÓA kỳ (tháng của Từ ngày) cho các tàu đang chọn — chỉ ADMIN. Sau khi mở, kỳ này lại sửa được.">🔓 Mở khóa kỳ</button>':''}
               <button class="btn-primary" onclick="generateOpReport()">📄 Xuất PDF</button>`;
   openModal('Báo cáo Thu/Chi hộ — Xuất PDF',body,foot);
 }
@@ -46222,8 +46852,15 @@ function opReportSetMonth(){
    Sau khi khóa: không ai nhập/sửa/xóa bút toán thu-chi hộ của tàu+kỳ đó. */
 function signLockOwnerReport(){
   if(!canSignOwnerReport()){ toast('Bạn không có quyền ký & khóa báo cáo chủ tàu','bad'); return; }
-  const month=(document.getElementById('rep-month')||{}).value||'';
-  if(!/^\d{4}-\d{2}$/.test(month)){ toast('Chọn THÁNG báo cáo trước khi khóa','bad'); return; }
+  // v3.10.01 — LẤY THÁNG THEO "Từ ngày" (tháng đang xem), KHÔNG lấy ô "chọn nhanh tháng" (rep-month)
+  //   để tránh khóa nhầm tháng. Bắt buộc Từ ngày & Đến ngày CÙNG 1 tháng.
+  var _from=(document.getElementById('rep-from')||{}).value||'';
+  var _to=(document.getElementById('rep-to')||{}).value||'';
+  const month=String(_from).slice(0,7);
+  if(!/^\d{4}-\d{2}$/.test(month)){ toast('Chọn "Từ ngày" thuộc THÁNG cần khóa','bad'); return; }
+  if(_to && String(_to).slice(0,7)!==month){
+    toast('Khóa theo 1 THÁNG: "Từ ngày" và "Đến ngày" phải cùng tháng '+month+'. Dùng ô "chọn nhanh tháng" để đặt đúng khoảng.','bad'); return;
+  }
   const vids=Array.from(document.querySelectorAll('#modal input[data-vessel-id]:checked')).map(c=>c.dataset.vesselId);
   if(!vids.length){ toast('Chọn ít nhất 1 tàu để khóa','bad'); return; }
   const names=vids.map(id=>{const v=VesselService.opVessels().find(x=>x.id===id);return v?v.name:'?';}).join(', ');
@@ -46295,8 +46932,21 @@ function signLockOwnerReport(){
   }, onFail:(rr)=>{ toast('⚠ CHƯA khóa được — '+(rr.error||'')+'. Giữ nguyên.','bad'); }});
 }
 /* Mở khóa kỳ (chỉ admin/BOD) — trường hợp đặc biệt cần sửa lại. */
+/* v3.10.01 — MỞ KHÓA từ modal báo cáo (CHỈ ADMIN). Lấy tháng theo rep-from (tháng đang xem)
+   + các tàu đang chọn → mở khóa từng tàu qua unlockOwnerReport (đã hỏi xác nhận + lý do + log). */
+function promptUnlockOwnerReport(){
+  if(!isAdmin()){ toast('Chỉ ADMIN mới mở khóa kỳ báo cáo chủ tàu','bad'); return; }
+  var from=(document.getElementById('rep-from')||{}).value||'';
+  var month=String(from).slice(0,7);
+  if(!/^\d{4}-\d{2}$/.test(month)){ toast('Chọn "Từ ngày" thuộc THÁNG cần mở khóa','bad'); return; }
+  var vids=Array.from(document.querySelectorAll('#modal input[data-vessel-id]:checked')).map(function(c){return c.dataset.vesselId;});
+  if(!vids.length){ toast('Chọn ít nhất 1 tàu để mở khóa','bad'); return; }
+  var locked=vids.filter(function(id){ return !!ownerReportLockFor(id, month); });
+  if(!locked.length){ toast('Các tàu đã chọn KHÔNG có kỳ '+month+' đang khóa','warn'); return; }
+  locked.forEach(function(id){ unlockOwnerReport(id, month); });
+}
 function unlockOwnerReport(vesselId, period){
-  if(!(isBOD()||isAdmin())){ toast('Chỉ admin/BOD mở khóa được','bad'); return; }
+  if(!isAdmin()){ toast('Chỉ ADMIN mới mở khóa kỳ báo cáo chủ tàu','bad'); return; }
   const v=VesselService.opVessels().find(x=>x.id===vesselId);
   if(!confirm('Mở khóa kỳ '+period+' của '+(v?v.name:'tàu')+'?\nSau khi mở, bút toán kỳ này lại sửa được. Số đã gửi chủ tàu có thể thay đổi — cân nhắc kỹ.')) return;
   const reason=prompt('Lý do mở khóa (bắt buộc — để ghi log):','')||'';
