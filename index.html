@@ -13129,7 +13129,7 @@ function applyRoleUI(){
           if(typeof checkForUpdate==='function'){
             checkForUpdate().then(noReload=>{ if(noReload!==false){ try{ _postLoginGreet(); }catch(e){ console.warn('[greet gate]',e&&e.message); }
               // v3.10.03: tự dọn snapshot 1 lần (sau khi login+bootstrap ổn định, delay để không đua bootstrap).
-              try{ setTimeout(function(){ _autoSnapshotCleanup(); _processRemoteCommands(); }, 8000); }catch(_){}
+              try{ setTimeout(function(){ _migrateLegacyTombstones(); _autoSnapshotCleanup(); _processRemoteCommands(); }, 8000); }catch(_){}
             } })
               .catch(()=>{ try{ _postLoginGreet(); }catch(e){} });
           } else { _postLoginGreet(); }
@@ -15161,9 +15161,8 @@ function _hrmDedupExecute(){
     // 3. XÓA khỏi S.hrEmployees
     const idSet=new Set(toRemoveIds);
     S.hrEmployees = (S.hrEmployees||[]).filter(e=>!idSet.has(e.id));
-    // 4. ghi deletedIds (đồng bộ tombstone → máy khác cũng xóa)
-    if(!Array.isArray(S.deletedIds)) S.deletedIds=[];
-    toRemoveIds.forEach(id=>{ if(!S.deletedIds.includes(id)) S.deletedIds.push(id); });
+    // 4. ghi deletedIds ĐÚNG FORMAT {id,at,field} qua markDeleted → merge tôn trọng bia mộ, chống hồi sinh.
+    if(typeof markDeleted==='function') markDeleted(toRemoveIds, 'hrEmployees');
     // 5. audit
     if(typeof logAuditEvent==='function') logAuditEvent('hrm_dedup',{count:toRemoveIds.length, note:'Dọn hồ sơ NV trùng (import nhiều lần)'});
     saveState();
@@ -15171,6 +15170,46 @@ function _hrmDedupExecute(){
     closeModal();
     toast('✓ Đã xóa '+toRemoveIds.length+' hồ sơ trùng. Backup đã lưu.','good');
   }catch(e){ toast('Lỗi dọn trùng: '+(e&&e.message),'bad'); console.error(e); }
+}
+
+
+/* v3.10.03 — MIGRATION tombstone legacy: chuẩn hóa deletedIds về format {id,at,field}.
+   Các bia mộ cũ có thể là: (a) string thẳng 'id' (format sai từ dedup cũ);
+   (b) object {id,at} thiếu field. Migrate GIỮ LỊCH SỬ (không xóa), bổ sung field nếu suy ra được.
+   Chạy 1 lần (cờ tombMigrationDone). Tôn trọng nguyên tắc: KHÔNG mất lịch sử xóa. */
+function _migrateLegacyTombstones(){
+  try{
+    if(localStorage.getItem('tombMigrationDone')==='true') return {done:false, code:'ALREADY_DONE'};
+    if(!Array.isArray(S.deletedIds)) { localStorage.setItem('tombMigrationDone','true'); return {done:false, code:'NO_TOMBSTONES'}; }
+    const now=new Date().toISOString();
+    let migrated=0, kept=0;
+    const seen=new Set();
+    const out=[];
+    S.deletedIds.forEach(d=>{
+      if(d==null) return;
+      let obj;
+      if(typeof d==='string' || typeof d==='number'){
+        // format SAI (string thẳng) → chuẩn hóa thành {id,at}. KHÔNG gán field (không biết chắc) → áp toàn cục (an toàn hơn).
+        obj={ id:String(d), at:now, _legacyMigrated:true };
+        migrated++;
+      } else if(typeof d==='object' && d.id!=null){
+        obj={ id:String(d.id), at:d.at||now };
+        if(d.field) obj.field=d.field;
+        if(d._legacyMigrated) obj._legacyMigrated=true;
+        kept++;
+      } else return;
+      // khử trùng theo id+field
+      const key=obj.id+'|'+(obj.field||'');
+      if(seen.has(key)) return;
+      seen.add(key);
+      out.push(obj);
+    });
+    S.deletedIds=out;
+    localStorage.setItem('tombMigrationDone','true');
+    console.log('[tomb-migrate] chuẩn hóa '+migrated+' bia mộ string (legacy) + giữ '+kept+' object. Tổng: '+out.length);
+    if(migrated>0) saveState();
+    return {done:true, code:'MIGRATED', migrated, kept, total:out.length};
+  }catch(e){ console.warn('[tomb-migrate] lỗi (bỏ qua):', e&&e.message); return {done:false, code:'ERROR', reason:e&&e.message}; }
 }
 
 function openDeployStatus(){
