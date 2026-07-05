@@ -726,6 +726,7 @@ body.readonly-mode::before{
         <button class="admin-only-item" onclick="closeAdminMenu();seedDemo()"><span class="ico">▤</span>Nạp Demo Data</button>
         <div class="divider ktt-allowed-item"></div>
         <button class="ktt-allowed-item" onclick="closeAdminMenu();openExcelImport()"><span class="ico">📥</span>Import Excel hàng loạt</button>
+        <button class="admin-only-item" onclick="closeAdminMenu();openHrmDedup()" title="Dọn hồ sơ nhân viên trùng do import Excel nhiều lần. Có backup + preview + xác nhận."><span class="ico">🧹</span>Dọn hồ sơ NV trùng</button>
         <button class="ktt-allowed-item" onclick="closeAdminMenu();openExcelExport()"><span class="ico">📤</span>Export Excel để đối chiếu FAST</button>
         <div class="divider"></div>
         <button class="ktt-allowed-item" onclick="closeAdminMenu();exportJSON()"><span class="ico">⤓</span>Export backup (.json)</button>
@@ -15078,6 +15079,98 @@ function _reportCommandStatus(cmdId, status, reason){
     saveState();
     console.log('[remote-cmd] '+status+': '+reason+' (cmd '+cmdId+')');
   }catch(_){}
+}
+
+
+/* ============================================================
+   v3.10.03-hrm — DỌN HỒ SƠ NHÂN VIÊN TRÙNG (do import Excel nhiều lần).
+   AN TOÀN: backup snapshot trước + preview + chỉ xóa bản KHÔNG liên kết + xác nhận 2 lớp + audit.
+   Giữ bản điểm cao nhất (nhiều crewAssignment/timesheet/tạm ứng/tàu/user/field).
+   ============================================================ */
+function _hrmFindDuplicates(){
+  const emps = S.hrEmployees || [];
+  const norm = s => String(s||'').trim().toLowerCase().replace(/\s+/g,' ');
+  const CA = (S.crewAssignments||[]), TS = (S.crewTimesheets||[]), HIST=(S.hrHistory||[]), ADV=(S.advances||[]);
+  const links = e => ({
+    ca: CA.filter(a=>a&&a.empId===e.id).length,
+    ts: TS.filter(t=>t&&t.empId===e.id).length,
+    hist: HIST.filter(h=>h&&h.empId===e.id).length,
+    adv: ADV.filter(a=>a&&(a.empId===e.id||a.employeeId===e.id)).length,
+    vessel: e.linkVesselId?1:0, user: e.linkUserId?1:0,
+    fields: Object.keys(e).filter(k=>e[k]!=null&&e[k]!=='').length
+  });
+  const groups={};
+  emps.forEach(e=>{ const k=norm(e.fullName)+'|'+(e.dob||''); if(norm(e.fullName)) (groups[k]=groups[k]||[]).push(e); });
+  const dups=Object.entries(groups).filter(([k,v])=>v.length>1);
+  const result=[];
+  dups.forEach(([k,v])=>{
+    const scored=v.map(e=>{ const l=links(e); return {e,l,score:l.ca*10+l.ts*5+l.adv*8+l.hist*2+l.vessel*3+l.user*4+l.fields}; });
+    scored.sort((a,b)=>b.score-a.score);
+    const keep=scored[0], remove=scored.slice(1);
+    const removeHasLinks = remove.some(s=>s.l.ca||s.l.ts||s.l.adv||s.l.vessel||s.l.user);
+    result.push({ name:v[0].fullName, keep, remove, risky:removeHasLinks });
+  });
+  return result;
+}
+
+/* Mở modal Dọn trùng — preview + xác nhận. Admin only. */
+function openHrmDedup(){
+  if(!isAdmin()){ toast('Chỉ admin','bad'); return; }
+  const dups=_hrmFindDuplicates();
+  if(!dups.length){ toast('Không có hồ sơ trùng','good'); return; }
+  const safe=dups.filter(g=>!g.risky), risky=dups.filter(g=>g.risky);
+  const totalRemove=dups.reduce((s,g)=>s+g.remove.length,0);
+  const safeRemove=safe.reduce((s,g)=>s+g.remove.length,0);
+  const rows=dups.slice(0,300).map(g=>{
+    const keepId=g.keep.e.smartId||g.keep.e.id;
+    const remIds=g.remove.map(s=>(s.e.smartId||s.e.id)+' (ca'+s.l.ca+',ts'+s.l.ts+',adv'+s.l.adv+')').join(', ');
+    return '<tr style="border-bottom:1px solid var(--rule)">'
+      +'<td style="padding:5px 8px">'+(g.risky?'⚠️':'✓')+' '+esc(g.name)+'</td>'
+      +'<td style="padding:5px 8px;color:#1a7a3a">'+esc(keepId)+' (đ'+g.keep.score+')</td>'
+      +'<td style="padding:5px 8px;color:#c0392b;font-size:11px">'+esc(remIds)+'</td></tr>';
+  }).join('');
+  const body='<div style="margin-bottom:12px">'
+    +'<div style="background:#fff8e1;border-left:3px solid #d68910;padding:10px 14px;margin-bottom:10px;font-size:13px">'
+    +'<b>'+dups.length+' nhóm trùng</b> (theo Họ tên + Ngày sinh) · sẽ xóa <b>'+totalRemove+'</b> hồ sơ dư → còn lại '+((S.hrEmployees||[]).length-totalRemove)+' hồ sơ.<br>'
+    +'✓ An toàn (bản xóa KHÔNG liên kết): <b style="color:#1a7a3a">'+safe.length+' nhóm / '+safeRemove+' hồ sơ</b>'
+    +(risky.length?' · ⚠️ Rủi ro (bản xóa còn liên kết): <b style="color:#c0392b">'+risky.length+' nhóm</b> — sẽ BỎ QUA để xử lý tay':'')+'</div>'
+    +'<div style="font-size:12px;color:var(--muted);margin-bottom:8px">Tiêu chí GIỮ: bản nhiều dữ liệu/liên kết nhất (điểm cao). Backup tự tạo trước khi xóa.</div>'
+    +'<div style="max-height:340px;overflow:auto"><table style="width:100%;border-collapse:collapse;font-size:12px">'
+    +'<thead><tr style="text-align:left"><th style="padding:5px 8px">Họ tên</th><th style="padding:5px 8px">GIỮ</th><th style="padding:5px 8px">XÓA</th></tr></thead>'
+    +'<tbody>'+rows+'</tbody></table></div></div>';
+  openModal('🧹 Dọn hồ sơ nhân viên trùng', body,
+    '<button class="btn-sec" onclick="closeModal()">Hủy</button>'
+    +'<button class="btn-primary" style="background:#c0392b" onclick="_hrmDedupExecute()">Xóa '+safeRemove+' hồ sơ trùng (an toàn)</button>');
+}
+
+/* Thực thi xóa — backup + chỉ xóa nhóm an toàn + audit. */
+function _hrmDedupExecute(){
+  if(!isAdmin()){ toast('Chỉ admin','bad'); return; }
+  const dups=_hrmFindDuplicates();
+  const safe=dups.filter(g=>!g.risky);
+  const toRemoveIds=[];
+  safe.forEach(g=> g.remove.forEach(s=> toRemoveIds.push(s.e.id)));
+  if(!toRemoveIds.length){ toast('Không có hồ sơ an toàn để xóa','bad'); return; }
+  if(!confirm('XÓA '+toRemoveIds.length+' hồ sơ trùng (bản không liên kết)?\n\nĐÃ tự backup snapshot trước. Hành động ghi Audit Log. Tiếp tục?')) return;
+  try{
+    // 1. BACKUP trước khi xóa
+    if(typeof pushLocalSnapshot==='function') pushLocalSnapshot('truoc-don-ho-so-trung');
+    // 2. xuất JSON các bản sẽ xóa (hoàn tác được)
+    const removed = (S.hrEmployees||[]).filter(e=>toRemoveIds.includes(e.id));
+    try{ localStorage.setItem('hrm_dedup_backup_'+Date.now(), JSON.stringify(removed)); }catch(_){}
+    // 3. XÓA khỏi S.hrEmployees
+    const idSet=new Set(toRemoveIds);
+    S.hrEmployees = (S.hrEmployees||[]).filter(e=>!idSet.has(e.id));
+    // 4. ghi deletedIds (đồng bộ tombstone → máy khác cũng xóa)
+    if(!Array.isArray(S.deletedIds)) S.deletedIds=[];
+    toRemoveIds.forEach(id=>{ if(!S.deletedIds.includes(id)) S.deletedIds.push(id); });
+    // 5. audit
+    if(typeof logAuditEvent==='function') logAuditEvent('hrm_dedup',{count:toRemoveIds.length, note:'Dọn hồ sơ NV trùng (import nhiều lần)'});
+    saveState();
+    if(typeof hrmRenderList==='function') hrmRenderList();
+    closeModal();
+    toast('✓ Đã xóa '+toRemoveIds.length+' hồ sơ trùng. Backup đã lưu.','good');
+  }catch(e){ toast('Lỗi dọn trùng: '+(e&&e.message),'bad'); console.error(e); }
 }
 
 function openDeployStatus(){
