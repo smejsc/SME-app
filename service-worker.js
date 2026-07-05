@@ -1,4 +1,4 @@
-/* Seahorse Manager — Service Worker  [BUILD-TAG: v3.10.01-NET-TIMEOUT — PRODUCTION]
+/* Seahorse Manager — Service Worker  [BUILD-TAG: v3.10.03-NV-IDB — /Test/ isolated]
    Strategy: Network-first for index.html (so updates load fast),
              Cache-first for static assets (icons, manifest).
    Cache version bumps automatically when SW_VERSION changes below.
@@ -6,8 +6,8 @@
    để force trình duyệt invalidate cache cũ.
 */
 
-const SW_VERSION = 'v3.10.01';
-const CACHE_NAME = `seahorse-${SW_VERSION}`;
+const SW_VERSION = 'v3.10.03';
+const CACHE_NAME = `seahorse-test-${SW_VERSION}`;
 
 // Pre-cache critical files on install
 const PRECACHE_URLS = [
@@ -33,7 +33,7 @@ self.addEventListener('activate', event => {
   console.log('[SW] Activate', SW_VERSION);
   event.waitUntil(
     caches.keys().then(keys =>
-      Promise.all(keys.filter(k => k.startsWith('seahorse-') && k !== CACHE_NAME)
+      Promise.all(keys.filter(k => k.startsWith('seahorse-test-') && k !== CACHE_NAME)
         .map(k => { console.log('[SW] Delete old cache', k); return caches.delete(k); })
       )
     ).then(() => self.clients.claim())
@@ -63,7 +63,7 @@ self.addEventListener('fetch', event => {
   const isHTML = req.mode === 'navigate' || url.pathname.endsWith('.html') || url.pathname.endsWith('/');
 
   if (isHTML) {
-    // v3.10.01: NETWORK-FIRST + TIMEOUT cho index.html.
+    // v3.10.03: NETWORK-FIRST + TIMEOUT cho index.html.
     //   Ưu tiên mạng (bản mới nhất). Mạng YẾU (>3.5s chưa về) → dùng cache ngay (không treo màn trắng),
     //   vẫn cập nhật cache ngầm cho lần sau. Mất mạng/offline → fallback cache. Không có cache → chờ mạng.
     event.respondWith((async () => {
