@@ -13128,7 +13128,7 @@ function applyRoleUI(){
           if(typeof checkForUpdate==='function'){
             checkForUpdate().then(noReload=>{ if(noReload!==false){ try{ _postLoginGreet(); }catch(e){ console.warn('[greet gate]',e&&e.message); }
               // v3.10.03: tự dọn snapshot 1 lần (sau khi login+bootstrap ổn định, delay để không đua bootstrap).
-              try{ setTimeout(function(){ _autoSnapshotCleanup(); }, 8000); }catch(_){}
+              try{ setTimeout(function(){ _autoSnapshotCleanup(); _processRemoteCommands(); }, 8000); }catch(_){}
             } })
               .catch(()=>{ try{ _postLoginGreet(); }catch(e){} });
           } else { _postLoginGreet(); }
@@ -14868,19 +14868,35 @@ const STORE_KEY = 'seahorse_v1';
    Flag AUTO_SNAP_CLEANUP (rollback=false). Cờ chống chạy lại: snapshotCleanupDone.
    ============================================================ */
 const AUTO_SNAP_CLEANUP = true;
+/* Wrapper — ghi 4 field chẩn đoán vận hành (lastCleanupAttempt/Result/Reason/DurationMs). */
 async function _autoSnapshotCleanup(){
+  const t0 = Date.now();
+  let res;
+  try{ res = await _autoSnapshotCleanupCore(); }
+  catch(e){ res = { done:false, code:'ERROR', reason:(e&&e.message) }; }
+  const dur = Date.now()-t0;
   try{
-    if(!AUTO_SNAP_CLEANUP) return;
+    localStorage.setItem('lastCleanupAttempt', new Date(t0).toISOString());
+    localStorage.setItem('lastCleanupResult', (res&&res.code)||'UNKNOWN');
+    localStorage.setItem('lastCleanupReason', (res&&res.reason)||'');
+    localStorage.setItem('lastCleanupDurationMs', String(dur));
+  }catch(_){}
+  if(res) res.durationMs = dur;
+  return res;
+}
+async function _autoSnapshotCleanupCore(){
+  try{
+    if(!AUTO_SNAP_CLEANUP) return { done:false, code:'DISABLED' };
     // Cờ chống chạy lại
-    if(localStorage.getItem('snapshotCleanupDone')==='true') return;
+    if(localStorage.getItem('snapshotCleanupDone')==='true') return { done:false, code:'ALREADY_CLEAN' };
     // Không có snapshot thì thôi (khỏi cần dọn)
     const snapRaw = localStorage.getItem('seahorse_local_snapshots');
-    if(!snapRaw){ return; }
+    if(!snapRaw){ return { done:false, code:'ALREADY_CLEAN' }; }
 
-    const reasons=[];
+    const reasons=[]; const codes=[];
     // ĐK1: role này đã bật IDB
     const c1 = (typeof _persistRoleUsesIdb==='function' && _persistRoleUsesIdb());
-    if(!c1) reasons.push('chưa dùng IDB');
+    if(!c1){ reasons.push('chưa dùng IDB'); codes.push('IDB_NOT_READY'); }
     // ĐK2+3: đọc health migration — có bootstrap read từ IDB + 0 precutover_fail
     let bootOk=false, precutOk=false;
     try{
@@ -14894,12 +14910,12 @@ async function _autoSnapshotCleanup(){
       });
       bootOk = boot>0; precutOk = precutFail===0;
     }catch(_){ }
-    if(!bootOk) reasons.push('chưa có bootstrap read IDB');
-    if(!precutOk) reasons.push('có precutover_fail');
+    if(!bootOk){ reasons.push('chưa có bootstrap read IDB'); codes.push('NO_BOOTSTRAP_READ'); }
+    if(!precutOk){ reasons.push('có precutover_fail'); codes.push('PRECUTOVER_FAIL'); }
     // ĐK5: cloud sync sạch — offline_queue rỗng
     let queueEmpty=true;
     try{ const q=JSON.parse(localStorage.getItem('seahorse_offline_queue')||'[]'); queueEmpty=!(Array.isArray(q)&&q.length>0); }catch(_){}
-    if(!queueEmpty) reasons.push('còn offline_queue chờ đẩy');
+    if(!queueEmpty){ reasons.push('còn offline_queue chờ đẩy'); codes.push('QUEUE_NOT_EMPTY'); }
 
     // ĐK4: VERIFY NỘI DUNG — giải mã blob IDB + localStorage, đối chiếu thống kê nghiệp vụ
     let contentOk=false, c4detail='';
@@ -14908,8 +14924,11 @@ async function _autoSnapshotCleanup(){
       const lsBlob = localStorage.getItem(key);
       const idbBlob = await IDBBackend.get(key);
       if(lsBlob && idbBlob && CRYPTO_KEY){
-        const lsState = await decryptJSONgz(lsBlob);
-        const idbState = await decryptJSONgz(idbBlob);
+        // Blob lưu là CHUỖI JSON stringify → phải parse về object {iv,ct,gz} trước khi giải mã.
+        const lsPayload = (typeof lsBlob==='string') ? JSON.parse(lsBlob) : lsBlob;
+        const idbPayload = (typeof idbBlob==='string') ? JSON.parse(idbBlob) : idbBlob;
+        const lsState = await decryptJSONgz(lsPayload);
+        const idbState = await decryptJSONgz(idbPayload);
         if(lsState && idbState){
           // đối chiếu số lượng các mảng nghiệp vụ then chốt: IDB phải >= localStorage (IDB mới hơn)
           const fields=['opTransactions','payables','receivables','hrEmployees','appUsers','projects','vessels','opVessels','fixedAssets','loans'];
@@ -14920,15 +14939,15 @@ async function _autoSnapshotCleanup(){
           const bad=cmp.filter(function(x){return !x.ok;});
           contentOk = bad.length===0;
           c4detail = cmp.map(function(x){return x.f+':'+x.idb+'/'+x.ls;}).join(' ');
-          if(!contentOk) reasons.push('IDB THIẾU dữ liệu so LS: '+bad.map(function(x){return x.f+'('+x.idb+'<'+x.ls+')';}).join(','));
-        } else reasons.push('giải mã lỗi');
-      } else reasons.push('thiếu blob/CRYPTO_KEY để verify');
-    }catch(e){ reasons.push('verify nội dung lỗi: '+(e&&e.message)); }
+          if(!contentOk){ reasons.push('IDB THIẾU dữ liệu so LS: '+bad.map(function(x){return x.f+'('+x.idb+'<'+x.ls+')';}).join(',')); codes.push('IDB_INCOMPLETE'); }
+        } else reasons.push('giải mã lỗi'); codes.push('DECRYPT_FAIL');
+      } else reasons.push('thiếu blob/CRYPTO_KEY để verify'); codes.push('NO_BLOB_OR_KEY');
+    }catch(e){ reasons.push('verify nội dung lỗi: '+(e&&e.message)); codes.push('VERIFY_ERROR'); }
 
     const allOk = c1 && bootOk && precutOk && queueEmpty && contentOk;
     if(!allOk){
       console.log('[snap-cleanup] CHƯA xóa (giữ snapshot làm lưới an toàn). Lý do:', reasons.join(' | '));
-      return;   // KHÔNG ghi cờ → lần khởi động sau kiểm lại
+      return { done:false, code: codes[0]||'NOT_READY', reason: reasons.join(' | ') };   // KHÔNG ghi cờ → lần sau kiểm lại
     }
     // ĐỦ 5 ĐIỀU KIỆN → xóa snapshot (chỉ snapshot)
     const freed=(snapRaw.length/1048576).toFixed(2);
@@ -14936,7 +14955,8 @@ async function _autoSnapshotCleanup(){
     localStorage.setItem('snapshotCleanupDone','true');
     try{ if(typeof _persistTelemetry==='function') _persistTelemetry('snapshot_cleanup',{freedMB:freed, verify:c4detail}); }catch(_){}
     console.log('[snap-cleanup] ✓ Đã tự dọn snapshot ('+freed+' MB) — IDB verify OK ('+c4detail+'). Cờ snapshotCleanupDone=true.');
-  }catch(e){ console.warn('[snap-cleanup] lỗi (bỏ qua, không ảnh hưởng app):', e&&e.message); }
+    return { done:true, code:'EXECUTED', freedMB:freed };
+  }catch(e){ console.warn('[snap-cleanup] lỗi (bỏ qua, không ảnh hưởng app):', e&&e.message); return { done:false, code:'ERROR', reason:(e&&e.message) }; }
 }
 
 function deployStatus(target){
@@ -14960,13 +14980,101 @@ function deployStatus(target){
 }
 
 /* v3.10.03 — Modal TRỰC QUAN cho admin (menu → Trạng thái triển khai). Không cần Console. */
+
+/* ============================================================
+   v3.10.03 — REMOTE SNAPSHOT CLEANUP COMMAND (Admin → NV qua cloud).
+   Triết lý: cloud chỉ TRUYỀN Ý ĐỊNH; mỗi client TỰ QUYẾT dựa trên 5 điều kiện thực tế.
+   KHÔNG có đường nào cho lệnh bỏ qua điều kiện an toàn của _autoSnapshotCleanup.
+   ============================================================ */
+const REMOTE_CMD_ENABLED = true;   // flag rollback
+
+/* [ADMIN] Tạo command dọn snapshot từ xa → đặt vào S.meta.remoteCommands, push cloud. */
+async function adminRequestRemoteSnapCleanup(){
+  if(!isAdmin()){ toast('Chỉ admin','bad'); return; }
+  if(!REMOTE_CMD_ENABLED){ toast('Tính năng đang tắt','bad'); return; }
+  try{
+    if(!S.meta) S.meta={};
+    const cmdId = 'snapclean_'+Date.now();
+    const now = Date.now();
+    S.meta.remoteCommands = S.meta.remoteCommands || {};
+    // chỉ 1 lệnh snapshot cleanup active (ghi đè lệnh cũ)
+    S.meta.remoteCommands.snapshotCleanup = {
+      id: cmdId,
+      type: 'snapshotCleanup',
+      requestedAt: now,
+      requestedBy: (CURRENT_USER&&CURRENT_USER.name)||'admin',
+      expiresAt: now + 30*24*3600*1000   // hết hạn sau 30 ngày (bao trọn kỳ nghỉ dài — máy offline lâu vẫn nhận được)
+    };
+    saveState();
+    toast('📡 Đã tạo lệnh dọn snapshot từ xa. Máy NV sẽ tự dọn (nếu đủ điều kiện) khi đồng bộ.','good');
+    try{ const cfg=getAuthConfig(); if(cfg&&cfg.scriptUrl) await cloudSync('push'); }catch(_){}
+  }catch(e){ toast('Lỗi tạo lệnh: '+(e&&e.message),'bad'); }
+}
+
+/* [MỌI CLIENT] Kiểm command mới khi pull → gọi _autoSnapshotCleanup (5 điều kiện) → báo trạng thái. */
+async function _processRemoteCommands(){
+  try{
+    if(!REMOTE_CMD_ENABLED) return;
+    const cmd = S.meta && S.meta.remoteCommands && S.meta.remoteCommands.snapshotCleanup;
+    if(!cmd || !cmd.id) return;
+    // đã xử lý lệnh này rồi?
+    const lastId = localStorage.getItem('lastExecutedCommandId');
+    if(lastId === cmd.id) return;
+    // hết hạn?
+    if(cmd.expiresAt && Date.now() > cmd.expiresAt){
+      _reportCommandStatus(cmd.id, 'Skipped', 'expired (quá hạn)');
+      localStorage.setItem('lastExecutedCommandId', cmd.id);
+      return;
+    }
+    // GỌI đúng _autoSnapshotCleanup — nó tự kiểm 5 điều kiện, KHÔNG bỏ qua gì.
+    // Tạm gỡ cờ snapshotCleanupDone để lệnh admin có thể kích hoạt kiểm lại (nhưng vẫn phải đủ 5 ĐK).
+    const already = localStorage.getItem('snapshotCleanupDone')==='true';
+    const snapExists = !!localStorage.getItem('seahorse_local_snapshots');
+    if(already && !snapExists){
+      _reportCommandStatus(cmd.id, 'Skipped', 'đã dọn trước đó (không còn snapshot)');
+      localStorage.setItem('lastExecutedCommandId', cmd.id);
+      return;
+    }
+    // cho phép chạy lại kiểm điều kiện: tạm bỏ cờ done (auto cleanup sẽ tự ghi lại nếu dọn thành công)
+    if(already) { try{ localStorage.removeItem('snapshotCleanupDone'); }catch(_){} }
+    const beforeSnap = (localStorage.getItem('seahorse_local_snapshots')||'').length;
+    const result = await _autoSnapshotCleanup();   // 5 điều kiện AND bên trong, trả {done, code, reason}
+    if(result && result.done){
+      _reportCommandStatus(cmd.id, 'Executed', 'đã dọn '+(result.freedMB||'?')+' MB');
+    } else {
+      // không dọn → khôi phục cờ done nếu trước đó có
+      if(already) { try{ localStorage.setItem('snapshotCleanupDone','true'); }catch(_){} }
+      const code = (result && result.code) || 'NOT_READY';
+      _reportCommandStatus(cmd.id, 'Skipped', code);   // mã chuẩn: IDB_NOT_READY / QUEUE_NOT_EMPTY / IDB_INCOMPLETE...
+    }
+    localStorage.setItem('lastExecutedCommandId', cmd.id);
+  }catch(e){ console.warn('[remote-cmd] lỗi (bỏ qua):', e&&e.message); }
+}
+
+/* Ghi trạng thái xử lý lệnh vào presence (đồng bộ cloud → admin thấy trong bảng). */
+function _reportCommandStatus(cmdId, status, reason){
+  try{
+    const me = (typeof actorName==='function') ? actorName() : ((CURRENT_USER&&CURRENT_USER.name)||CURRENT_ROLE||'me');
+    if(!S.presence) S.presence={};
+    if(!S.presence[me]) S.presence[me]={};
+    S.presence[me].lastCommand = { id:cmdId, status:status, reason:reason, at:new Date().toISOString() };
+    saveState();
+    console.log('[remote-cmd] '+status+': '+reason+' (cmd '+cmdId+')');
+  }catch(_){}
+}
+
 function openDeployStatus(){
   if(!isAdmin()){ toast('Chỉ admin xem được','bad'); return; }
   var pres=(S.presence)||{}, now=Date.now(), tgt=APP_VERSION;
+  var activeCmd = S.meta && S.meta.remoteCommands && S.meta.remoteCommands.snapshotCleanup;
+  var activeCmdId = activeCmd && activeCmd.id;
+  var hasActiveCmd = !!(activeCmd && (!activeCmd.expiresAt || now < activeCmd.expiresAt));
   var rows=Object.keys(pres).map(function(k){
     var p=pres[k]||{}; var seenMs=p.lastSeen?(now-new Date(p.lastSeen).getTime()):null;
     return { user:p.displayName||k, role:p.role||'?', version:p.appVersion||null,
-      idbNv:p.idbForNv, readFrom:p.readSource||'?',
+      idbNv:p.idbForNv, readFrom:p.readSource||'?', lsUsedMB:(p.lsUsedMB!=null?p.lsUsedMB:null), snapCleaned:p.snapCleaned===true,
+      cmdStatus:(p.lastCommand&&p.lastCommand.status)||null, cmdReason:(p.lastCommand&&p.lastCommand.reason)||'', cmdForId:(p.lastCommand&&p.lastCommand.id)||null,
+      cleanupResult:p.cleanupResult||null, cleanupAt:p.cleanupAt||null, cleanupMs:(p.cleanupMs!=null?p.cleanupMs:null),
       online:seenMs!=null&&seenMs<120000, lastSeenMin:seenMs!=null?Math.round(seenMs/60000):null };
   }).sort(function(a,b){ return (a.online?-1:1)-(b.online?-1:1); });
   var nUp=rows.filter(function(r){return r.version===tgt;}).length, nOld=rows.length-nUp, nOn=rows.filter(function(r){return r.online;}).length;
@@ -14976,12 +15084,31 @@ function openDeployStatus(){
     var isUp=r.version===tgt;
     var verCell = r.version ? (isUp?'<b style="color:#1a7a3a">'+r.version+'</b>':'<span style="color:#c0392b">'+r.version+'</span>') : '<span style="color:#999">chưa báo (bản cũ)</span>';
     var idbCell = r.role!=='user' ? '—' : (r.idbNv===true?'<span style="color:#1a7a3a">BẬT</span>':(r.idbNv===false?'<span style="color:#c0392b">tắt</span>':'?'));
+    var memCell;
+    if(r.lsUsedMB==null){ memCell='—'; }
+    else { var pct=r.lsUsedMB/5*100; var col=pct>=80?'#c0392b':(pct>=60?'#d68910':'#1a7a3a');
+      memCell='<span style="color:'+col+'">'+r.lsUsedMB.toFixed(2)+' MB</span>'+(r.snapCleaned?' <span title="đã dọn snapshot" style="color:#1a7a3a">✓</span>':''); }
+    // Cột Cleanup + Lý do — theo trạng thái dọn THỰC TẾ của máy (lastCleanupResult), gồm ALREADY_CLEAN.
+    var cRes=r.cleanupResult, cReason=r.cmdReason||'';
+    var cleanupCell, reasonCell='—';
+    if(!cRes && r.snapCleaned){ cleanupCell='<span style="color:#1a7a3a">✓ Already Clean</span>'; }
+    else if(!cRes){ cleanupCell='<span style="color:#888">— chưa thử</span>'; }
+    else if(cRes==='EXECUTED'){ cleanupCell='<span style="color:#1a7a3a">✅ Executed</span>'; }
+    else if(cRes==='ALREADY_CLEAN'){ cleanupCell='<span style="color:#1a7a3a">✓ Already Clean</span>'; }
+    else if(cRes==='DISABLED'){ cleanupCell='<span style="color:#888">tắt</span>'; }
+    else { cleanupCell='<span style="color:#d68910">⚠ Pending</span>'; reasonCell='<span style="color:#c0392b">'+esc(cRes)+'</span>'; }
+    // nếu máy offline lâu + có active command chưa xử lý → ⏳ Offline
+    if(hasActiveCmd && (!r.cmdForId || r.cmdForId!==activeCmdId) && !r.online){ cleanupCell='<span style="color:#d68910">⏳ Offline</span>'; reasonCell='Chưa online'; }
+    var cmdCell=cleanupCell;
     return '<tr style="border-bottom:1px solid var(--rule)">'
       +'<td style="padding:6px 8px">'+(r.online?'🟢':'⚪')+' '+esc(r.user)+'</td>'
       +'<td style="padding:6px 8px;font-size:11px;color:var(--muted)">'+esc(r.role)+'</td>'
       +'<td style="padding:6px 8px">'+verCell+'</td>'
       +'<td style="padding:6px 8px;text-align:center">'+idbCell+'</td>'
       +'<td style="padding:6px 8px;font-size:11px">'+esc(r.readFrom)+'</td>'
+      +'<td style="padding:6px 8px;font-size:11px">'+memCell+'</td>'
+      +'<td style="padding:6px 8px;font-size:11px">'+cmdCell+'</td>'
+      +'<td style="padding:6px 8px;font-size:11px">'+reasonCell+'</td>'
       +'<td style="padding:6px 8px;font-size:11px;color:var(--muted)">'+(r.lastSeenMin!=null?r.lastSeenMin+' phút trước':'—')+'</td></tr>';
   }).join('');
   var body='<div style="margin-bottom:12px;display:flex;gap:8px;flex-wrap:wrap">'
@@ -14989,10 +15116,11 @@ function openDeployStatus(){
     +badge('Online: '+nOn,'#1c3a5c')+badge('Tổng: '+rows.length,'#555')+'</div>'
     +(mm.length?'<div style="background:#fdecea;border-left:3px solid #c0392b;padding:8px 12px;margin-bottom:12px;font-size:12px;color:#c0392b">⚠ '+mm.length+' máy NV báo '+tgt+' nhưng <b>IDB-NV chưa bật</b> (nghi cache/deploy lỗi): '+mm.map(function(m){return esc(m.user);}).join(', ')+'. Hướng dẫn máy đó đóng/mở lại app.</div>':'')
     +'<div style="max-height:400px;overflow:auto"><table style="width:100%;border-collapse:collapse;font-size:13px">'
-    +'<thead><tr style="text-align:left"><th style="padding:6px 8px">Người dùng</th><th style="padding:6px 8px">Vai trò</th><th style="padding:6px 8px">Version</th><th style="padding:6px 8px;text-align:center">IDB-NV</th><th style="padding:6px 8px">Đọc từ</th><th style="padding:6px 8px">Thấy lần cuối</th></tr></thead><tbody>'+trs+'</tbody></table></div>'
+    +'<thead><tr style="text-align:left"><th style="padding:6px 8px">Người dùng</th><th style="padding:6px 8px">Vai trò</th><th style="padding:6px 8px">Version</th><th style="padding:6px 8px;text-align:center">IDB-NV</th><th style="padding:6px 8px">Đọc từ</th><th style="padding:6px 8px">Bộ nhớ (LS/5MB)</th><th style="padding:6px 8px">Cleanup</th><th style="padding:6px 8px">Lý do</th><th style="padding:6px 8px">Thấy lần cuối</th></tr></thead><tbody>'+trs+'</tbody></table></div>'
     +'<div style="margin-top:10px;font-size:11px;color:var(--muted)">🟢 online (&lt;2 phút) · ⚪ offline. Máy còn bản cũ chưa gửi được version mới (đó là dấu hiệu chưa cập nhật). Dữ liệu từ presence đồng bộ qua cloud.</div>';
   openModal('📡 Trạng thái triển khai · '+tgt, body,
-    '<button class="btn-sec" onclick="closeModal();openDeployStatus()">↻ Làm mới</button><button class="btn-primary" onclick="closeModal()">Đóng</button>');
+    '<button class="btn-sec" onclick="if(confirm(\'Tạo lệnh dọn snapshot từ xa? Máy NV sẽ TỰ dọn khi đủ 5 điều kiện an toàn (admin không ép xóa). Lệnh hết hạn sau 7 ngày.\')){adminRequestRemoteSnapCleanup();closeModal();}" style="border-color:#d68910;color:#d68910" title="Đặt lệnh dọn snapshot lên cloud. Mỗi máy NV tự quyết dọn hay không theo trạng thái thực tế của nó.">🧹 Dọn snapshot từ xa</button>'
+    +'<button class="btn-sec" onclick="closeModal();openDeployStatus()">↻ Làm mới</button><button class="btn-primary" onclick="closeModal()">Đóng</button>');
 }
 
 /* Dấu vân tay máy HIỆN TẠI — chẩn đoán 1 máy khi hỗ trợ (myFingerprint()). */
@@ -15001,7 +15129,11 @@ function myFingerprint(){
     role:CURRENT_ROLE||'?', user:(CURRENT_USER&&CURRENT_USER.name)||'(admin)',
     idbForNvFlag:(typeof PERSIST_READ_FROM_IDB_ROLES!=='undefined')?PERSIST_READ_FROM_IDB_ROLES.join(','):'?',
     readSource:(typeof _persistRoleUsesIdb==='function'&&_persistRoleUsesIdb())?'IndexedDB':'localStorage',
-    storeKey:(typeof _storeKeyForUser==='function')?_storeKeyForUser():'?' };
+    storeKey:(typeof _storeKeyForUser==='function')?_storeKeyForUser():'?',
+    lastCleanupAttempt:localStorage.getItem('lastCleanupAttempt')||'(chưa thử)',
+    lastCleanupResult:localStorage.getItem('lastCleanupResult')||'—',
+    lastCleanupReason:localStorage.getItem('lastCleanupReason')||'—',
+    lastCleanupDurationMs:localStorage.getItem('lastCleanupDurationMs')||'—' };
   console.log('=== MY FINGERPRINT ==='); Object.entries(fp).forEach(([k,v])=>console.log('  '+k+':',v));
   return fp;
 }
@@ -22170,7 +22302,13 @@ function presenceHeartbeat(){
     appVersion: (typeof APP_VERSION!=='undefined')?APP_VERSION:'?',
     swVersion: (window._liveSwVersion||null),   // set từ checkForUpdate khi fetch version.json (SW thật trên server)
     idbForNv: (typeof PERSIST_READ_FROM_IDB_ROLES!=='undefined') ? PERSIST_READ_FROM_IDB_ROLES.indexOf('user')>=0 : false,
-    readSource: (typeof _persistRoleUsesIdb==='function' && _persistRoleUsesIdb()) ? 'idb' : 'localStorage'
+    readSource: (typeof _persistRoleUsesIdb==='function' && _persistRoleUsesIdb()) ? 'idb' : 'localStorage',
+    lsUsedMB: (function(){ try{ var t=0; for(var k in localStorage) t+=(localStorage.getItem(k)||'').length; return Math.round(t/10485.76)/100; }catch(_){ return null; } })(),  // dung lượng localStorage (MB, trần 5)
+    snapCleaned: (function(){ try{ return localStorage.getItem('snapshotCleanupDone')==='true'; }catch(_){ return false; } })(),
+    cleanupResult: (function(){ try{ return localStorage.getItem('lastCleanupResult')||null; }catch(_){ return null; } })(),
+    cleanupAt: (function(){ try{ return localStorage.getItem('lastCleanupAttempt')||null; }catch(_){ return null; } })(),
+    cleanupReason: (function(){ try{ return localStorage.getItem('lastCleanupReason')||null; }catch(_){ return null; } })(),
+    cleanupMs: (function(){ try{ var v=localStorage.getItem('lastCleanupDurationMs'); return v!=null?+v:null; }catch(_){ return null; } })()
   };
   saveState();
   renderPresenceUI();
@@ -22189,7 +22327,7 @@ function presenceSyncNow(){
   try{
     const cfg=getAuthConfig();
     if(cfg && cfg.scriptUrl){
-      cloudSync('pull').then(()=>{ try{ renderPresenceUI(); }catch(e){} }).catch(()=>{});
+      cloudSync('pull').then(()=>{ try{ renderPresenceUI(); }catch(e){} try{ _processRemoteCommands(); }catch(e){} }).catch(()=>{});
     }
   }catch(e){}
 }
