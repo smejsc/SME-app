@@ -13126,7 +13126,10 @@ function applyRoleUI(){
       setTimeout(()=>{
         try{
           if(typeof checkForUpdate==='function'){
-            checkForUpdate().then(noReload=>{ if(noReload!==false){ try{ _postLoginGreet(); }catch(e){ console.warn('[greet gate]',e&&e.message); } } })
+            checkForUpdate().then(noReload=>{ if(noReload!==false){ try{ _postLoginGreet(); }catch(e){ console.warn('[greet gate]',e&&e.message); }
+              // v3.10.03: tự dọn snapshot 1 lần (sau khi login+bootstrap ổn định, delay để không đua bootstrap).
+              try{ setTimeout(function(){ _autoSnapshotCleanup(); }, 8000); }catch(_){}
+            } })
               .catch(()=>{ try{ _postLoginGreet(); }catch(e){} });
           } else { _postLoginGreet(); }
         }catch(e){ console.warn('[greet gate outer]',e&&e.message); }
@@ -14857,6 +14860,85 @@ const STORE_KEY = 'seahorse_v1';
 /* v3.10.03 — HEARTBEAT REPORT (admin gõ deployStatus() trong Console).
    Xem NHANH: máy nào đã lên bản mới, máy nào còn cũ, ai chưa online, máy NV nào bật IDB.
    Đọc từ S.presence (đã đồng bộ cloud) — KHÔNG cần hỏi từng người. */
+
+/* ============================================================
+   v3.10.03 — AUTO SNAPSHOT CLEANUP (tự động, 1 lần, an toàn cao).
+   Xóa snapshot cũ CHỈ khi ĐỦ CẢ 5 điều kiện (AND). Thiếu 1 → KHÔNG xóa.
+   Chỉ đụng 'seahorse_local_snapshots' (bản chụp phụ) — KHÔNG bao giờ đụng seahorse_v1.
+   Flag AUTO_SNAP_CLEANUP (rollback=false). Cờ chống chạy lại: snapshotCleanupDone.
+   ============================================================ */
+const AUTO_SNAP_CLEANUP = true;
+async function _autoSnapshotCleanup(){
+  try{
+    if(!AUTO_SNAP_CLEANUP) return;
+    // Cờ chống chạy lại
+    if(localStorage.getItem('snapshotCleanupDone')==='true') return;
+    // Không có snapshot thì thôi (khỏi cần dọn)
+    const snapRaw = localStorage.getItem('seahorse_local_snapshots');
+    if(!snapRaw){ return; }
+
+    const reasons=[];
+    // ĐK1: role này đã bật IDB
+    const c1 = (typeof _persistRoleUsesIdb==='function' && _persistRoleUsesIdb());
+    if(!c1) reasons.push('chưa dùng IDB');
+    // ĐK2+3: đọc health migration — có bootstrap read từ IDB + 0 precutover_fail
+    let bootOk=false, precutOk=false;
+    try{
+      const ev = JSON.parse(localStorage.getItem('seahorse_migration_health')||'[]');
+      let boot=0, precutFail=0;
+      (Array.isArray(ev)?ev:[]).forEach(function(e){
+        if(e && e.d){
+          if((e.d.src==='idb'||e.d.src==='idb-writecutover') && e.d.source==='bootstrap') boot++;
+          if(e.d.src && String(e.d.src).indexOf('precutover')>=0) precutFail++;
+        }
+      });
+      bootOk = boot>0; precutOk = precutFail===0;
+    }catch(_){ }
+    if(!bootOk) reasons.push('chưa có bootstrap read IDB');
+    if(!precutOk) reasons.push('có precutover_fail');
+    // ĐK5: cloud sync sạch — offline_queue rỗng
+    let queueEmpty=true;
+    try{ const q=JSON.parse(localStorage.getItem('seahorse_offline_queue')||'[]'); queueEmpty=!(Array.isArray(q)&&q.length>0); }catch(_){}
+    if(!queueEmpty) reasons.push('còn offline_queue chờ đẩy');
+
+    // ĐK4: VERIFY NỘI DUNG — giải mã blob IDB + localStorage, đối chiếu thống kê nghiệp vụ
+    let contentOk=false, c4detail='';
+    try{
+      const key = _storeKeyForUser();
+      const lsBlob = localStorage.getItem(key);
+      const idbBlob = await IDBBackend.get(key);
+      if(lsBlob && idbBlob && CRYPTO_KEY){
+        const lsState = await decryptJSONgz(lsBlob);
+        const idbState = await decryptJSONgz(idbBlob);
+        if(lsState && idbState){
+          // đối chiếu số lượng các mảng nghiệp vụ then chốt: IDB phải >= localStorage (IDB mới hơn)
+          const fields=['opTransactions','payables','receivables','hrEmployees','appUsers','projects','vessels','opVessels','fixedAssets','loans'];
+          const cmp=fields.map(function(f){
+            const a=(lsState[f]||[]).length, b=(idbState[f]||[]).length;
+            return {f:f, ls:a, idb:b, ok: b>=a};
+          });
+          const bad=cmp.filter(function(x){return !x.ok;});
+          contentOk = bad.length===0;
+          c4detail = cmp.map(function(x){return x.f+':'+x.idb+'/'+x.ls;}).join(' ');
+          if(!contentOk) reasons.push('IDB THIẾU dữ liệu so LS: '+bad.map(function(x){return x.f+'('+x.idb+'<'+x.ls+')';}).join(','));
+        } else reasons.push('giải mã lỗi');
+      } else reasons.push('thiếu blob/CRYPTO_KEY để verify');
+    }catch(e){ reasons.push('verify nội dung lỗi: '+(e&&e.message)); }
+
+    const allOk = c1 && bootOk && precutOk && queueEmpty && contentOk;
+    if(!allOk){
+      console.log('[snap-cleanup] CHƯA xóa (giữ snapshot làm lưới an toàn). Lý do:', reasons.join(' | '));
+      return;   // KHÔNG ghi cờ → lần khởi động sau kiểm lại
+    }
+    // ĐỦ 5 ĐIỀU KIỆN → xóa snapshot (chỉ snapshot)
+    const freed=(snapRaw.length/1048576).toFixed(2);
+    localStorage.removeItem('seahorse_local_snapshots');
+    localStorage.setItem('snapshotCleanupDone','true');
+    try{ if(typeof _persistTelemetry==='function') _persistTelemetry('snapshot_cleanup',{freedMB:freed, verify:c4detail}); }catch(_){}
+    console.log('[snap-cleanup] ✓ Đã tự dọn snapshot ('+freed+' MB) — IDB verify OK ('+c4detail+'). Cờ snapshotCleanupDone=true.');
+  }catch(e){ console.warn('[snap-cleanup] lỗi (bỏ qua, không ảnh hưởng app):', e&&e.message); }
+}
+
 function deployStatus(target){
   const pres=(S.presence)||{}, now=Date.now();
   const rows=Object.keys(pres).map(k=>{
