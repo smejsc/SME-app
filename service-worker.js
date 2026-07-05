@@ -1,4 +1,4 @@
-/* Seahorse Manager — Service Worker
+/* Seahorse Manager — Service Worker  [BUILD-TAG: v3.10.01-NET-TIMEOUT — PRODUCTION]
    Strategy: Network-first for index.html (so updates load fast),
              Cache-first for static assets (icons, manifest).
    Cache version bumps automatically when SW_VERSION changes below.
@@ -7,7 +7,7 @@
 */
 
 const SW_VERSION = 'v3.10.01';
-const CACHE_NAME = `seahorse-test-${SW_VERSION}`;
+const CACHE_NAME = `seahorse-${SW_VERSION}`;
 
 // Pre-cache critical files on install
 const PRECACHE_URLS = [
@@ -33,7 +33,7 @@ self.addEventListener('activate', event => {
   console.log('[SW] Activate', SW_VERSION);
   event.waitUntil(
     caches.keys().then(keys =>
-      Promise.all(keys.filter(k => k.startsWith('seahorse-test-') && k !== CACHE_NAME)
+      Promise.all(keys.filter(k => k.startsWith('seahorse-') && k !== CACHE_NAME)
         .map(k => { console.log('[SW] Delete old cache', k); return caches.delete(k); })
       )
     ).then(() => self.clients.claim())
@@ -63,22 +63,35 @@ self.addEventListener('fetch', event => {
   const isHTML = req.mode === 'navigate' || url.pathname.endsWith('.html') || url.pathname.endsWith('/');
 
   if (isHTML) {
-    // v3.06.00: STALE-WHILE-REVALIDATE cho index.html (app ~2.5MB).
-    //   Trả ngay bản CACHE (hiện app tức thì, không màn trắng), đồng thời tải bản mới
-    //   ngầm để cập nhật cache cho lần sau. Nếu chưa có cache (lần đầu) → tải network.
-    event.respondWith(
-      caches.match(req).then(cached => {
-        const networkFetch = fetch(req).then(res => {
-          if (res.ok) {
-            const clone = res.clone();
-            caches.open(CACHE_NAME).then(c => c.put(req, clone));
-          }
-          return res;
-        }).catch(() => cached || caches.match('./index.html'));
-        // Có cache → trả ngay (mượt); không có → chờ network
-        return cached || networkFetch;
-      })
-    );
+    // v3.10.01: NETWORK-FIRST + TIMEOUT cho index.html.
+    //   Ưu tiên mạng (bản mới nhất). Mạng YẾU (>3.5s chưa về) → dùng cache ngay (không treo màn trắng),
+    //   vẫn cập nhật cache ngầm cho lần sau. Mất mạng/offline → fallback cache. Không có cache → chờ mạng.
+    event.respondWith((async () => {
+      const cachedPromise = caches.match(req);
+      const networkPromise = fetch(req, {cache:'no-store'}).then(res => {
+        if (res.ok) {
+          const clone = res.clone();
+          caches.open(CACHE_NAME).then(c => c.put(req, clone));
+        }
+        return res;
+      });
+      // Nếu mạng chậm >3.5s: dùng cache (nếu có) để không treo; mạng vẫn chạy nền cập nhật cache.
+      const timeoutFallback = new Promise(resolve => setTimeout(async () => {
+        const c = await cachedPromise;
+        resolve(c || null);
+      }, 3500));
+      try {
+        const winner = await Promise.race([networkPromise.catch(() => null), timeoutFallback]);
+        if (winner) return winner;                       // mạng về kịp HOẶC timeout có cache
+        // tới đây: mạng chưa về + chưa có cache trong 3.5s → chờ hẳn mạng
+        const net = await networkPromise.catch(() => null);
+        if (net) return net;
+        // mạng fail hẳn → cache cuối cùng
+        return (await cachedPromise) || caches.match('./index.html');
+      } catch (e) {
+        return (await cachedPromise) || caches.match('./index.html');
+      }
+    })());
   } else {
     // Cache-first for assets
     event.respondWith(

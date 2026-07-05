@@ -3623,6 +3623,58 @@ let CURRENT_USER=null;               // user object if role==='user'
 //   (15341/15350 của Phase 2b) NHẤT QUÁN, không tách binding. Mặc định false = auto-sync bật (như cũ).
 window._suppressAutoSync = window._suppressAutoSync || false;
 
+/* v3.10.01 — CẬP NHẬT NGAY (nút bấm cho doanh nghiệp, không cần Ctrl+Shift+R).
+   Gọi registration.update() → chờ SW mới activate (nếu có) → reload. */
+async function applyUpdateNow(targetVer){
+  try{ toast('🔄 Đang cập nhật lên bản mới'+(targetVer?' v'+targetVer:'')+'...','good'); }catch(e){}
+  // lưu + sync trước để không mất dữ liệu
+  try{ if(CRYPTO_KEY && typeof saveStateEncrypted==='function'){ await saveStateEncrypted(); } }catch(e){}
+  try{
+    const cfg=(typeof getAuthConfig==='function')?getAuthConfig():null;
+    if(CRYPTO_KEY && cfg && cfg.scriptUrl && navigator.onLine){
+      await Promise.race([ cloudSync('push'), new Promise(r=>setTimeout(r,8000)) ]);
+    }
+  }catch(e){}
+  try{
+    if('serviceWorker' in navigator){
+      const reg=await navigator.serviceWorker.getRegistration();
+      if(reg){
+        await Promise.race([
+          new Promise(async resolve=>{
+            try{
+              await reg.update();
+              if(reg.waiting){ try{ reg.waiting.postMessage('SKIP_WAITING'); }catch(e){} return resolve(); }
+              const w=reg.installing;
+              if(w){ w.addEventListener('statechange',()=>{ if(w.state==='installed'||w.state==='activated'){ try{ w.postMessage('SKIP_WAITING'); }catch(e){} resolve(); } }); }
+              else resolve();
+            }catch(e){ resolve(); }
+          }),
+          new Promise(r=>setTimeout(r,6000))
+        ]);
+      }
+    }
+  }catch(e){}
+  // xóa guard để reload không bị chặn
+  try{ sessionStorage.removeItem('_updateReloadGuard'); }catch(e){}
+  setTimeout(()=>{ window.location.reload(); }, 300);
+}
+/* v3.10.01 — Banner CỐ ĐỊNH khi có bản mới nhưng chưa áp dụng được (SW còn phục vụ bản cũ).
+   KHÔNG âm thầm chạy code cũ — hiện nút "Cập nhật ngay". */
+function showUpdateBanner(targetVer){
+  try{
+    if(document.getElementById('sme-update-banner')) return;   // đã hiện
+    var bar=document.createElement('div');
+    bar.id='sme-update-banner';
+    bar.style.cssText='position:fixed;left:0;right:0;bottom:0;z-index:99999;background:#1c3a5c;color:#fff;'
+      +'padding:10px 14px;display:flex;align-items:center;justify-content:center;gap:12px;'
+      +'font-family:inherit;font-size:13px;box-shadow:0 -2px 10px rgba(0,0,0,.25)';
+    bar.innerHTML='<span>🔄 Có bản mới <b>v'+(targetVer||'')+'</b> — bấm để cập nhật (không mất dữ liệu đang nhập).</span>'
+      +'<button id="sme-update-now-btn" style="background:#e0a43b;color:#1c3a5c;border:none;border-radius:6px;'
+      +'padding:6px 14px;font-weight:700;cursor:pointer;font-family:inherit;font-size:13px">Cập nhật ngay</button>';
+    document.body.appendChild(bar);
+    document.getElementById('sme-update-now-btn').addEventListener('click',function(){ applyUpdateNow(targetVer); });
+  }catch(e){ dlog('[update] banner lỗi:', e&&e.message); }
+}
 /* Check version.json on GitHub Pages. If remote > local, auto-reload. */
 async function checkForUpdate(){
   try{
@@ -3637,8 +3689,9 @@ async function checkForUpdate(){
       try{
         const guard=JSON.parse(sessionStorage.getItem('_updateReloadGuard')||'null');
         if(guard && guard.v===data.version && (Date.now()-guard.t)<45000){
-          dlog('[update] bỏ qua reload lặp cho v'+data.version+' (vừa thử '+Math.round((Date.now()-guard.t)/1000)+'s trước)');
-          return true;   // không reload nữa → cho phép chào
+          dlog('[update] reload lặp không đưa lên v'+data.version+' (SW còn phục vụ bản cũ) → hiện banner Cập nhật ngay thay vì âm thầm chạy code cũ');
+          showUpdateBanner(data.version);   // v3.10.01: KHÔNG âm thầm — cho user nút cập nhật
+          return true;   // không auto-reload lặp, nhưng đã cảnh báo rõ + có nút
         }
       }catch(e){}
       // New version available — reload nhẹ nhàng (SW tự cập nhật cache)
@@ -15209,7 +15262,7 @@ async function persistHealthSnapshot(){
   try{
     (rec.events||[]).forEach(function(e){
       if(e.e==='read_source' && e.d){
-        if(e.d.src==='idb'){ src_idb++; if(e.d.source==='bootstrap') src_idb_bootstrap++; }
+        if(e.d.src==='idb' || e.d.src==='idb-writecutover'){ src_idb++; if(e.d.source==='bootstrap') src_idb_bootstrap++; }
         else if(e.d.src==='ls-fallback-empty') src_ls_empty++;
         else if(e.d.src==='ls-fallback-error') src_ls_err++;
         else if(e.d.src==='ls-precutover-fail') src_ls_precut++;
