@@ -711,6 +711,7 @@ body.readonly-mode::before{
         <button class="it-admin-item" onclick="closeAdminMenu();openITAccountAdmin()" title="Quản trị tài khoản (IT): khóa/mở/reset mật khẩu/cấp-thu App User. Không xem dữ liệu nghiệp vụ."><span class="ico">🛡</span>Quản trị tài khoản (IT)</button>
         <button class="it-admin-item" onclick="closeAdminMenu();showSystemAuditLog()" title="Nhật ký toàn hệ thống (Audit Log) — ai đăng nhập/sửa/duyệt/xóa, phân quyền, reset MK. Bất biến, không sửa/xóa."><span class="ico">📜</span>Audit Log (Nhật ký hệ thống)</button>
         <button class="it-admin-item" onclick="closeAdminMenu();openITSystemMonitor()" title="Giám sát hệ thống: trạng thái Email/Notification/Backup/đồng bộ/kết nối/SSO."><span class="ico">🖥</span>Giám sát hệ thống</button>
+        <button class="it-admin-item" onclick="closeAdminMenu();openDeployStatus()" title="Trạng thái triển khai: máy nào đã lên bản mới, còn cũ, chưa online, IDB-NV bật chưa — không cần hỏi từng người."><span class="ico">📡</span>Trạng thái triển khai</button>
         <button class="admin-only-item" onclick="closeAdminMenu();openAdminChecklist()"><span class="ico">✅</span>Checklist vận hành</button>
         <button class="ktt-allowed-item" onclick="closeAdminMenu();openDupChecker()" title="Quét chứng từ trùng MỌI nơi (Phải trả / Phải thu / Thu-Chi hộ — gồm cả bản không có số HĐ) — xem, sửa, xóa từng bản; KHÔNG tự động xóa"><span class="ico">🔍</span>Kiểm tra chứng từ trùng</button>
         <button class="ktt-allowed-item" onclick="closeAdminMenu();openAmountAuditTool()" title="Quét MỌI phiếu (Phải trả / Phải thu / Thu-Chi hộ) tìm Tổng (sau VAT) bị lệch bất thường so với (chưa VAT + VAT) — hậu quả lỗi parse số. Liệt kê để rà & sửa; KHÔNG tự sửa."><span class="ico">🧮</span>Quét số tiền bất thường</button>
@@ -3683,6 +3684,8 @@ async function checkForUpdate(){
     if(!res.ok) return true;
     const data=await res.json();
     if(!data || !data.version) return true;
+    // v3.10.03 — HEARTBEAT: lưu swVersion thật trên server (từ version.json) để presence báo cáo.
+    try{ window._liveSwVersion = data.swVersion || data.version || null; }catch(_){}
     if(versionGT(data.version, APP_VERSION)){
       // v3.06.00: CHẶN VÒNG LẶP RELOAD — nếu vừa reload để lên đúng version này <45s trước
       //   mà vẫn thấy bản cũ (SW chưa kịp phục vụ bản mới), KHÔNG reload lại để tránh loop trắng.
@@ -14851,6 +14854,75 @@ const STORE_KEY = 'seahorse_v1';
    phải bản thiếu → mất dự án/TSCĐ/tàu...
    Khắc phục: admin dùng key chung (đầy đủ); MỖI NV dùng key RIÊNG theo tên user.
    → state đã lọc của NV KHÔNG bao giờ đè bản đầy đủ của admin trên cùng máy. */
+/* v3.10.03 — HEARTBEAT REPORT (admin gõ deployStatus() trong Console).
+   Xem NHANH: máy nào đã lên bản mới, máy nào còn cũ, ai chưa online, máy NV nào bật IDB.
+   Đọc từ S.presence (đã đồng bộ cloud) — KHÔNG cần hỏi từng người. */
+function deployStatus(target){
+  const pres=(S.presence)||{}, now=Date.now();
+  const rows=Object.keys(pres).map(k=>{
+    const p=pres[k]||{}; const seenMs=p.lastSeen?(now-new Date(p.lastSeen).getTime()):null;
+    return { user:p.displayName||k, role:p.role||'?', version:p.appVersion||'(cũ,chưa báo)',
+      sw:p.swVersion||'?', idbNv:p.idbForNv===true?'BẬT':(p.idbForNv===false?'tắt':'?'),
+      readFrom:p.readSource||'?', online:seenMs!=null&&seenMs<120000,
+      lastSeenMin:seenMs!=null?Math.round(seenMs/60000):null };
+  });
+  const tgt=target||APP_VERSION;
+  console.log('=== DEPLOYMENT STATUS (từ presence · target '+tgt+') ===');
+  console.log('Tổng máy:', rows.length, '| ✓ đã lên '+tgt+':', rows.filter(r=>r.version===tgt).length,
+    '| ⚠ bản cũ:', rows.filter(r=>r.version!==tgt).length, '| 🟢 online:', rows.filter(r=>r.online).length);
+  console.table(rows.map(r=>({'Người dùng':r.user,'Vai trò':r.role,'Version':r.version,'IDB-NV':r.idbNv,
+    'Đọc từ':r.readFrom,'Online':r.online?'🟢':'⚪','Thấy cách':r.lastSeenMin!=null?r.lastSeenMin+'ph':'—'})));
+  const mm=rows.filter(r=>r.version===tgt && r.role==='user' && r.idbNv!=='BẬT');
+  if(mm.length) console.warn('⚠ '+mm.length+' máy NV báo '+tgt+' nhưng IDB-NV CHƯA bật (nghi cache/deploy lỗi):', mm.map(m=>m.user));
+  return rows;
+}
+
+/* v3.10.03 — Modal TRỰC QUAN cho admin (menu → Trạng thái triển khai). Không cần Console. */
+function openDeployStatus(){
+  if(!isAdmin()){ toast('Chỉ admin xem được','bad'); return; }
+  var pres=(S.presence)||{}, now=Date.now(), tgt=APP_VERSION;
+  var rows=Object.keys(pres).map(function(k){
+    var p=pres[k]||{}; var seenMs=p.lastSeen?(now-new Date(p.lastSeen).getTime()):null;
+    return { user:p.displayName||k, role:p.role||'?', version:p.appVersion||null,
+      idbNv:p.idbForNv, readFrom:p.readSource||'?',
+      online:seenMs!=null&&seenMs<120000, lastSeenMin:seenMs!=null?Math.round(seenMs/60000):null };
+  }).sort(function(a,b){ return (a.online?-1:1)-(b.online?-1:1); });
+  var nUp=rows.filter(function(r){return r.version===tgt;}).length, nOld=rows.length-nUp, nOn=rows.filter(function(r){return r.online;}).length;
+  var mm=rows.filter(function(r){return r.version===tgt && r.role==='user' && r.idbNv!==true;});
+  var badge=function(txt,color){return '<span style="display:inline-block;padding:2px 8px;border-radius:10px;background:'+color+';color:#fff;font-size:11px;font-weight:600">'+txt+'</span>';};
+  var trs=rows.map(function(r){
+    var isUp=r.version===tgt;
+    var verCell = r.version ? (isUp?'<b style="color:#1a7a3a">'+r.version+'</b>':'<span style="color:#c0392b">'+r.version+'</span>') : '<span style="color:#999">chưa báo (bản cũ)</span>';
+    var idbCell = r.role!=='user' ? '—' : (r.idbNv===true?'<span style="color:#1a7a3a">BẬT</span>':(r.idbNv===false?'<span style="color:#c0392b">tắt</span>':'?'));
+    return '<tr style="border-bottom:1px solid var(--rule)">'
+      +'<td style="padding:6px 8px">'+(r.online?'🟢':'⚪')+' '+esc(r.user)+'</td>'
+      +'<td style="padding:6px 8px;font-size:11px;color:var(--muted)">'+esc(r.role)+'</td>'
+      +'<td style="padding:6px 8px">'+verCell+'</td>'
+      +'<td style="padding:6px 8px;text-align:center">'+idbCell+'</td>'
+      +'<td style="padding:6px 8px;font-size:11px">'+esc(r.readFrom)+'</td>'
+      +'<td style="padding:6px 8px;font-size:11px;color:var(--muted)">'+(r.lastSeenMin!=null?r.lastSeenMin+' phút trước':'—')+'</td></tr>';
+  }).join('');
+  var body='<div style="margin-bottom:12px;display:flex;gap:8px;flex-wrap:wrap">'
+    +badge('Đã lên '+tgt+': '+nUp,'#1a7a3a')+badge('Bản cũ hơn: '+nOld,nOld>0?'#c0392b':'#888')
+    +badge('Online: '+nOn,'#1c3a5c')+badge('Tổng: '+rows.length,'#555')+'</div>'
+    +(mm.length?'<div style="background:#fdecea;border-left:3px solid #c0392b;padding:8px 12px;margin-bottom:12px;font-size:12px;color:#c0392b">⚠ '+mm.length+' máy NV báo '+tgt+' nhưng <b>IDB-NV chưa bật</b> (nghi cache/deploy lỗi): '+mm.map(function(m){return esc(m.user);}).join(', ')+'. Hướng dẫn máy đó đóng/mở lại app.</div>':'')
+    +'<div style="max-height:400px;overflow:auto"><table style="width:100%;border-collapse:collapse;font-size:13px">'
+    +'<thead><tr style="text-align:left"><th style="padding:6px 8px">Người dùng</th><th style="padding:6px 8px">Vai trò</th><th style="padding:6px 8px">Version</th><th style="padding:6px 8px;text-align:center">IDB-NV</th><th style="padding:6px 8px">Đọc từ</th><th style="padding:6px 8px">Thấy lần cuối</th></tr></thead><tbody>'+trs+'</tbody></table></div>'
+    +'<div style="margin-top:10px;font-size:11px;color:var(--muted)">🟢 online (&lt;2 phút) · ⚪ offline. Máy còn bản cũ chưa gửi được version mới (đó là dấu hiệu chưa cập nhật). Dữ liệu từ presence đồng bộ qua cloud.</div>';
+  openModal('📡 Trạng thái triển khai · '+tgt, body,
+    '<button class="btn-sec" onclick="closeModal();openDeployStatus()">↻ Làm mới</button><button class="btn-primary" onclick="closeModal()">Đóng</button>');
+}
+
+/* Dấu vân tay máy HIỆN TẠI — chẩn đoán 1 máy khi hỗ trợ (myFingerprint()). */
+function myFingerprint(){
+  const fp={ appVersion:(typeof APP_VERSION!=='undefined')?APP_VERSION:'?', swVersionLive:window._liveSwVersion||'(chưa fetch)',
+    role:CURRENT_ROLE||'?', user:(CURRENT_USER&&CURRENT_USER.name)||'(admin)',
+    idbForNvFlag:(typeof PERSIST_READ_FROM_IDB_ROLES!=='undefined')?PERSIST_READ_FROM_IDB_ROLES.join(','):'?',
+    readSource:(typeof _persistRoleUsesIdb==='function'&&_persistRoleUsesIdb())?'IndexedDB':'localStorage',
+    storeKey:(typeof _storeKeyForUser==='function')?_storeKeyForUser():'?' };
+  console.log('=== MY FINGERPRINT ==='); Object.entries(fp).forEach(([k,v])=>console.log('  '+k+':',v));
+  return fp;
+}
 function _storeKeyForUser(){
   try{
     if(CURRENT_ROLE==='admin' || !CURRENT_USER || !CURRENT_USER.name) return STORE_KEY;
@@ -22011,7 +22083,12 @@ function presenceHeartbeat(){
     role: CURRENT_ROLE||'user',
     displayName: (CURRENT_USER&&CURRENT_USER.name)|| (CURRENT_ROLE==='admin'?'Admin':me),
     device: getDeviceInfo(),
-    sessionStart: SESSION_START_TS?new Date(SESSION_START_TS).toISOString():null
+    sessionStart: SESSION_START_TS?new Date(SESSION_START_TS).toISOString():null,
+    // v3.10.03 — HEARTBEAT: dấu vân tay triển khai (theo dõi máy nào đã cập nhật, KHÔNG cần hỏi từng người).
+    appVersion: (typeof APP_VERSION!=='undefined')?APP_VERSION:'?',
+    swVersion: (window._liveSwVersion||null),   // set từ checkForUpdate khi fetch version.json (SW thật trên server)
+    idbForNv: (typeof PERSIST_READ_FROM_IDB_ROLES!=='undefined') ? PERSIST_READ_FROM_IDB_ROLES.indexOf('user')>=0 : false,
+    readSource: (typeof _persistRoleUsesIdb==='function' && _persistRoleUsesIdb()) ? 'idb' : 'localStorage'
   };
   saveState();
   renderPresenceUI();
