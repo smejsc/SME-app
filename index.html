@@ -783,6 +783,7 @@ body.readonly-mode::before{
   </div>
   <button class="nav-item" data-page="operations" data-fin-group="1"><span class="num">06</span>QL vận hành tàu</button>
   <button class="nav-item" data-page="approval" id="nav-approval" data-fin-group="1"><span class="num">07</span>Phê duyệt</button>
+  <button class="nav-item" data-page="mobile_approval" id="nav-mobile-approval" data-fin-group="1" style="display:none"><span class="num">📱</span>Duyệt nhanh <span id="nav-ma-badge"></span></button>
   <button class="nav-item" data-page="nsnn" data-fin-group="1"><span class="num">10</span>NSNN</button>
 
   <!-- ════ B1: GOM NHÓM 3 📋 Ngân sách (plan/rates BOD-only, tự ẩn với NV qua JS 11294) ════ -->
@@ -2397,6 +2398,17 @@ body.readonly-mode::before{
 </section>
 
 <!-- ============ APPROVAL (Phê duyệt hàng loạt) ============ -->
+<!-- ============ MOBILE APPROVAL PA1 (v3.10.07) — 1 VIEW của AP, tái dùng openPayableModal ============ -->
+<section class="page" id="page-mobile_approval">
+  <div class="page-head">
+    <div>
+      <div class="page-title">📱 Duyệt nhanh <span class="it">(AP)</span></div>
+      <div class="page-sub">Phiếu Phải trả đang chờ bạn xử lý — chạm để xem chứng từ &amp; Duyệt/Từ chối. Tối ưu cho điện thoại.</div>
+    </div>
+    <div class="page-meta"><span id="ma-admin-switch"></span></div>
+  </div>
+  <div id="ma-list" style="max-width:640px;margin:0 auto"></div>
+</section>
 <section class="page" id="page-approval">
   <div class="page-head">
     <div>
@@ -3483,7 +3495,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.10.05';            // bumped on each release
+const APP_VERSION='3.10.07';            // bumped on each release
 /* Debug logging: dlog() chỉ in khi DEBUG_MODE bật (mặc định TẮT ở production để
    tránh nhiễu/lộ cấu trúc nội bộ qua DevTools). Bật bằng: localStorage.DEBUG_MODE='1'.
    console.warn/error GIỮ NGUYÊN (cảnh báo & lỗi vận hành luôn hiện). */
@@ -9713,6 +9725,38 @@ const WF_STATES={
 };
 function wfState(r){return r&&r.status?(WF_STATES[r.status]||WF_STATES.draft):WF_STATES.draft;}
 function wfStatus(r){return (r&&r.status)||'draft';}
+/* v3.10.07 — PURE HELPER: danh sách phiếu AP "chờ NGƯỜI ĐANG ĐĂNG NHẬP xử lý".
+   KHÔNG chứa logic nghiệp vụ mới — chỉ tổ hợp các primitive sẵn có:
+     wfStatus(r) + canCheckAcc()/canApproveL1()/canApproveL2()/isAdmin() + AccountingService.payables().
+   Quy tắc khớp cấp = ĐÚNG cấp mà wfApprove* sẽ cho phép (một nguồn sự thật về quyền/trạng thái):
+     pending_acc→KT, pending_l1→L1, pending_l2→L2. Admin: tất cả 3 cấp.
+   SOD: ẩn phiếu do chính mình tạo (wfApprove* sẽ chặn → không hiển thị để tránh bấm rồi bị từ chối).
+   opts.level (tùy chọn): 'pending_acc'|'pending_l1'|'pending_l2' để admin "chuyển vai" xem đúng 1 cấp.
+   Dùng chung cho PA1; nếu nơi khác cần "AP chờ tôi" thì gọi lại helper này (tránh logic trùng). */
+function apPendingForMe(opts){
+  opts = opts || {};
+  const admin = (typeof isAdmin==='function') && isAdmin();
+  const okAcc = admin || ((typeof canCheckAcc==='function') && canCheckAcc());
+  const okL1  = admin || ((typeof canApproveL1==='function') && canApproveL1());
+  const okL2  = admin || ((typeof canApproveL2==='function') && canApproveL2());
+  const me = (typeof actorName==='function') ? actorName() : '';
+  const wantLevel = opts.level || '';   // rỗng = mọi cấp mình có quyền
+  const src = (typeof AccountingService!=='undefined' && AccountingService.payables) ? AccountingService.payables() : (S.payables||[]);
+  const out = [];
+  src.forEach(r=>{
+    const s = wfStatus(r);
+    if(wantLevel && s!==wantLevel) return;
+    let mine=false;
+    if(s==='pending_acc' && okAcc) mine=true;
+    else if(s==='pending_l1' && okL1) mine=true;
+    else if(s==='pending_l2' && okL2) mine=true;
+    if(!mine) return;
+    // SOD: không tự xử lý phiếu mình tạo (trừ admin — wfApprove* cho admin bypass)
+    if(!admin && r.createdBy && r.createdBy===me) return;
+    out.push(r);
+  });
+  return out;
+}
 /* v3.02.64: TRẠNG THÁI HỒ SƠ THỐNG NHẤT (cho NV nhìn 1 kiểu trên mọi tab chi).
    Chỉ đổi NHÃN hiển thị — KHÔNG động cơ chế duyệt (AP 4 cấp / Chi hộ 2 bước vẫn chạy như cũ).
    Mốc: Nháp → KT đang kiểm → Chờ KTT duyệt → Chờ chi tiền → Đã TT.
@@ -14892,6 +14936,15 @@ const AUTO_SNAP_CLEANUP = true;
    Badge số lượng + entry điều hướng (tái dùng 100% filter ap-filter-status + renderAR).
    Chỉ hiện cho KT/Admin (canCheckAcc||canConfirmPayment). Rollback = đặt false. */
 const FLAG_KT_QUEUE_NAV = true;
+/* v3.10.06 — Import HRM chống trùng: khi smartId rỗng, khớp dự phòng theo CCCD (tự gộp)
+   rồi tên+DOB (chỉ cảnh báo "nghi trùng" trong preview, KT tự quyết Gộp/Bỏ qua/Tạo mới).
+   Mặc định "Bỏ qua". Rollback = đặt false (về logic cũ: chỉ khớp smartId). */
+const FLAG_HRM_DEDUP_IMPORT = true;
+/* v3.10.07 — Mobile Approval PA1: trang mobile-first liệt kê phiếu AP "chờ tôi xử lý",
+   chạm → openPayableModal() (duyệt/từ chối bằng nút sẵn có). Chỉ 1 VIEW của AP: tái dùng
+   100% workflow/permission/audit/modal. Không module/backend/logic nghiệp vụ mới.
+   Rollback = đặt false. */
+const FLAG_MOBILE_APPROVAL = true;
 /* Wrapper — ghi 4 field chẩn đoán vận hành (lastCleanupAttempt/Result/Reason/DurationMs). */
 async function _autoSnapshotCleanup(){
   // GUARD context: nếu chưa login đầy đủ (role null / chưa có CRYPTO_KEY) → KHÔNG chạy, KHÔNG ghi đè
@@ -61904,6 +61957,7 @@ function canAccessTab(tabId){
   if(tabId==='plan') return !!CURRENT_USER.isBOD;
   if(tabId==='rates') return !!CURRENT_USER.isBOD;
   if(tabId==='approval') return canCheckAcc()||canApproveL1()||canApproveL2();
+  if(tabId==='mobile_approval') return (typeof FLAG_MOBILE_APPROVAL!=='undefined'&&FLAG_MOBILE_APPROVAL) && (canCheckAcc()||canApproveL1()||canApproveL2());
   if(tabId==='advances') return true;  // v3.02.96: Tạm ứng NV — mở cho MỌI NV đăng nhập (tạo tạm ứng của mình; duyệt vẫn cần KTT/Admin + SOD)
   if(tabId==='cashflow') return canCheckAcc()||canApproveL1()||canApproveL2();  // v1.37.1: KT viên + L1 + L2 + admin
   // v3.07.46: Ngân hàng + NSNN = SỔ TỔNG HỢP chung → chỉ KT/KTT/L1/L2/admin/BOD.
@@ -62183,13 +62237,75 @@ function hrmImportEmployees(inputEl){
   reader.readAsArrayBuffer(file);
 }
 
+/* v3.10.06 — Chuẩn hóa CCCD/passport: chỉ giữ chữ+số, in hoa (bỏ khoảng trắng, dấu chấm...). */
+function _hrmNormId(s){ return String(s==null?'':s).replace(/[^0-9a-zA-Z]/g,'').toUpperCase(); }
+/* v3.10.06 — Tìm hồ sơ khớp cho 1 dòng import.
+   Trả về {emp, how}: how = 'smartId' | 'idNo' | 'nameDob' | null.
+   - smartId: khớp mã (ưu tiên #1, hành vi cũ).
+   - idNo: smartId rỗng nhưng CCCD trùng → định danh duy nhất, an toàn để gộp.
+   - nameDob: smartId rỗng + không CCCD, trùng tên+DOB → CHỈ cảnh báo, không tự gộp.
+   Khi FLAG tắt: chỉ khớp smartId (về hành vi cũ). */
+function _hrmFindMatch(r, emps){
+  const list = emps || HRService.employees();
+  const sid = String(r.smartId||'').trim().toUpperCase();
+  if(sid){
+    const bySid = list.find(e=>String(e.smartId||'').trim().toUpperCase()===sid);
+    if(bySid) return {emp:bySid, how:'smartId'};
+    return {emp:null, how:null}; // có mã nhưng chưa tồn tại → tạo mới (như cũ)
+  }
+  // smartId rỗng — chỉ dùng lưới dự phòng khi flag bật
+  if(typeof FLAG_HRM_DEDUP_IMPORT==='undefined' || !FLAG_HRM_DEDUP_IMPORT) return {emp:null, how:null};
+  // (2) CCCD/passport
+  const nid = _hrmNormId(r.idNo);
+  if(nid){
+    const byId = list.find(e=>_hrmNormId(e.idNo)===nid && _hrmNormId(e.idNo)!=='');
+    if(byId) return {emp:byId, how:'idNo'};
+  }
+  // (3) tên + DOB (chỉ cảnh báo)
+  const nm = _ciNorm(r.fullName), db = String(r.dob||'').trim();
+  if(nm && db){
+    const byNameDob = list.find(e=>_ciNorm(e.fullName||e.name||'')===nm && String(e.dob||'').trim()===db);
+    if(byNameDob) return {emp:byNameDob, how:'nameDob'};
+  }
+  return {emp:null, how:null};
+}
+/* v3.10.06: KT chọn hành động cho dòng nghi trùng trong preview (skip/merge/new). */
+function _hrmSetSuspAction(idx, val){
+  if(_hrmImportRows && _hrmImportRows[idx]) _hrmImportRows[idx]._importAction=val;
+}
 function hrmImportPreview(rows){
-  const existing=new Set(HRService.employees().map(e=>String(e.smartId||'').trim().toUpperCase()));
   let nNew=0,nUpd=0;
-  const body=rows.map(r=>{
-    const up=r.smartId && existing.has(r.smartId.toUpperCase());
-    if(up) nUpd++; else nNew++;
-    return `<tr style="border-bottom:1px solid var(--rule)">
+  const emps=HRService.employees();
+  let nSusp=0;   // v3.10.06: số dòng nghi trùng (tên+DOB, chưa quyết)
+  const body=rows.map((r,idx)=>{
+    // v3.10.06: khớp qua _hrmFindMatch (smartId → CCCD → tên+DOB). Lưu quyết định vào chính row để apply tái dùng.
+    const m=_hrmFindMatch(r, emps);
+    r._matchHow=m.how; r._matchEmpId=m.emp?m.emp.id:null;
+    let ttCell, rowStyle='border-bottom:1px solid var(--rule)';
+    if(m.how==='smartId' || m.how==='idNo'){
+      nUpd++;
+      const via = m.how==='idNo' ? ' <span style="font-size:9px;color:var(--muted)">(khớp CCCD)</span>' : '';
+      ttCell=`<span class="chip" style="background:rgba(214,158,46,.18);color:#8a6d00;font-size:10px">cập nhật</span>${via}`;
+      r._importAction='update';
+    } else if(m.how==='nameDob'){
+      nSusp++;
+      rowStyle='border-bottom:1px solid var(--rule);background:rgba(214,158,46,.08)';
+      // mặc định "Bỏ qua" (an toàn nhất — không tạo, không gộp)
+      r._importAction='skip';
+      const oldE=m.emp, oldInfo=esc((oldE.fullName||oldE.name||'')+' · '+(oldE.smartId||'?'));
+      ttCell=`<div style="font-size:10px;color:#8a5a1e;font-weight:700">⚠ Nghi trùng</div>`
+        +`<div style="font-size:9px;color:var(--muted)" title="Hồ sơ cũ">${oldInfo}</div>`
+        +`<select onchange="_hrmSetSuspAction(${idx},this.value)" style="font-size:10px;margin-top:3px;padding:2px 4px;border:1px solid var(--rule);border-radius:5px">`
+          +`<option value="skip" selected>Bỏ qua</option>`
+          +`<option value="merge">Gộp vào hồ sơ cũ</option>`
+          +`<option value="new">Vẫn tạo mới</option>`
+        +`</select>`;
+    } else {
+      nNew++;
+      ttCell=`<span class="chip" style="background:rgba(74,107,44,.18);color:#3a5520;font-size:10px">mới</span>`;
+      r._importAction='new';
+    }
+    return `<tr style="${rowStyle}">
       <td class="mono" style="font-size:11px">${esc(r.smartId)}</td>
       <td style="font-size:12px"><b>${esc(r.fullName)}</b></td>
       <td style="font-size:11px">${esc(r.title)}</td>
@@ -62198,9 +62314,10 @@ function hrmImportPreview(rows){
       <td class="mono" style="font-size:10px">${esc(r.idNo||'—')}</td>
       <td class="mono" style="font-size:10px">${esc(r.phone||'—')}</td>
       <td style="font-size:10px" title="${esc((r.bankAccNo||'')+' · '+(r.bankName||''))}">${r.bankAccNo?('<b>'+esc(r.bankAccNo)+'</b><br><span style="color:var(--muted)">'+esc(_bankShort(r.bankName))+'</span>'+(()=>{const o=_bankAccOwner(r._bankRaw,r.fullName);return o&&o!==r.fullName?'<br><span style="color:#8a5a1e">CTK: '+esc(o)+'</span>':'';})()):'<span style="color:var(--bad)">⚠ thiếu</span>'}</td>
-      <td class="c">${up?'<span class="chip" style="background:rgba(214,158,46,.18);color:#8a6d00;font-size:10px">cập nhật</span>':'<span class="chip" style="background:rgba(74,107,44,.18);color:#3a5520;font-size:10px">mới</span>'}</td></tr>`;
+      <td class="c">${ttCell}</td></tr>`;
   }).join('');
-  const html=`<div style="font-size:12px;color:var(--muted);margin-bottom:8px">Đọc được <b>${rows.length}</b> nhân viên: <b style="color:#3a5520">${nNew} mới</b>, <b style="color:#8a6d00">${nUpd} cập nhật</b> (mã SME đã có). Bấm <b>Nạp</b> để áp dụng — mã đã có sẽ được cập nhật thông tin từ Excel, KHÔNG tạo trùng.<br><span style="font-size:11px">Các cột đọc được: họ tên, ngày sinh, giới tính, CCCD + ngày/nơi cấp, quốc tịch, địa chỉ, SĐT, email, liên hệ khẩn, ngày ký HĐ, loại HĐ, hết hạn HĐLĐ/Visa/Work Permit/Chứng chỉ/Hộ chiếu, bộ phận + viết tắt, số TK + tên ngân hàng + chủ TK, học vấn/số HĐ/BHXH (gộp ghi chú).</span></div>
+  const suspNote = nSusp?`<br><span style="color:#8a5a1e;font-weight:700">⚠ ${nSusp} dòng nghi trùng</span> (trùng tên + ngày sinh, không có mã/CCCD) — mặc định <b>Bỏ qua</b>. Chọn "Gộp" hoặc "Tạo mới" nếu chắc chắn.`:'';
+  const html=`<div style="font-size:12px;color:var(--muted);margin-bottom:8px">Đọc được <b>${rows.length}</b> nhân viên: <b style="color:#3a5520">${nNew} mới</b>, <b style="color:#8a6d00">${nUpd} cập nhật</b> (mã SME đã có). Bấm <b>Nạp</b> để áp dụng — mã đã có sẽ được cập nhật thông tin từ Excel, KHÔNG tạo trùng.${suspNote}<br><span style="font-size:11px">Các cột đọc được: họ tên, ngày sinh, giới tính, CCCD + ngày/nơi cấp, quốc tịch, địa chỉ, SĐT, email, liên hệ khẩn, ngày ký HĐ, loại HĐ, hết hạn HĐLĐ/Visa/Work Permit/Chứng chỉ/Hộ chiếu, bộ phận + viết tắt, số TK + tên ngân hàng + chủ TK, học vấn/số HĐ/BHXH (gộp ghi chú).</span></div>
     <div class="tbl-scroll" style="max-height:420px"><table class="tbl" style="font-size:12px">
       <thead><tr><th>Mã SME</th><th>Họ tên</th><th>Chức danh</th><th>Bộ phận</th><th>Ngày sinh</th><th>CCCD</th><th>SĐT</th><th>NH</th><th class="c">TT</th></tr></thead>
       <tbody>${body}</tbody></table></div>`;
@@ -62302,7 +62419,7 @@ function _hrmMatchVessel(name){
 function hrmImportApply(){
   const rows=_hrmImportRows; if(!rows||!rows.length){ closeModal(); return; }
   if(!Array.isArray(S.hrEmployees)) S.hrEmployees=[];
-  let nNew=0,nUpd=0,nLink=0,nAssign=0,nTerm=0;
+  let nNew=0,nUpd=0,nLink=0,nAssign=0,nTerm=0,nSkip=0;   // v3.10.06: nSkip = dòng nghi trùng bị bỏ qua
   const _nowIso=new Date().toISOString();
   // v3.09.82: gán tàu (linkVesselId) + tạo QĐ điều động + xử lý nghỉ việc cho 1 hồ sơ sau import.
   const _hrmPostImport=(emp,r)=>{
@@ -62354,7 +62471,16 @@ function hrmImportApply(){
       onboardDate:r.onboardDate, contractNo:r.contractNo
     };
     const _importNote = r.noteFull || (r.workplace?('Nơi làm việc: '+r.workplace):'');   // v3.07.23: note từ import (gộp, không đè)
-    const ex=HRService.employees().find(e=>String(e.smartId||'').trim().toUpperCase()===String(r.smartId||'').trim().toUpperCase() && r.smartId);
+    // v3.10.06: quyết định từ preview (skip/update/merge/new). Fallback logic cũ (chỉ smartId) nếu row chưa gắn action.
+    const _act = r._importAction || (r.smartId && HRService.employees().find(e=>String(e.smartId||'').trim().toUpperCase()===String(r.smartId||'').trim().toUpperCase()) ? 'update' : 'new');
+    if(_act==='skip'){ nSkip++; return; }   // nghi trùng, KT chọn Bỏ qua → không tạo, không gộp
+    // xác định hồ sơ đích để cập nhật/gộp: ưu tiên _matchEmpId đã khớp trong preview; fallback theo smartId
+    let ex=null;
+    if(_act==='update' || _act==='merge'){
+      ex = (r._matchEmpId && HRService.employees().find(e=>e.id===r._matchEmpId))
+        || (r.smartId && HRService.employees().find(e=>String(e.smartId||'').trim().toUpperCase()===String(r.smartId||'').trim().toUpperCase() && r.smartId))
+        || null;
+    }
     if(ex){
       // cập nhật — chỉ ghi đè field có giá trị trong Excel (không xoá dữ liệu cũ bằng ô trống)
       Object.keys(fields).forEach(k=>{ if(fields[k]) ex[k]=fields[k]; });
@@ -62391,7 +62517,7 @@ function hrmImportApply(){
   saveState();
   closeModal();
   renderHRM();
-  toast(`Đã import: ${nNew} mới, ${nUpd} cập nhật ✓ · gán tàu ${nLink} · QĐ điều động ${nAssign}${nTerm?' · đã nghỉ '+nTerm:''}`,'good');
+  toast(`Đã import: ${nNew} mới, ${nUpd} cập nhật ✓ · gán tàu ${nLink} · QĐ điều động ${nAssign}${nTerm?' · đã nghỉ '+nTerm:''}${nSkip?' · bỏ qua '+nSkip+' nghi trùng':''}`,'good');
 }
 
 let _hrmView='dash';
@@ -64151,6 +64277,69 @@ function hrmAttDelete(id){
 }
 
 
+/* v3.10.07 — PA1 Mobile Approval: 1 VIEW của AP. KHÔNG logic nghiệp vụ mới.
+   Danh sách: apPendingForMe() (pure helper). Chạm phiếu: openPayableModal() (modal sẵn có,
+   đã có nút Duyệt/Từ chối đúng quyền+trạng thái). Đóng modal → renderAll refresh danh sách. */
+function _maShowNav(){
+  try{
+    const el=document.getElementById('nav-mobile-approval'); if(!el) return;
+    const on=(typeof FLAG_MOBILE_APPROVAL!=='undefined'&&FLAG_MOBILE_APPROVAL)
+      && ((typeof canCheckAcc==='function'&&canCheckAcc())||(typeof canApproveL1==='function'&&canApproveL1())||(typeof canApproveL2==='function'&&canApproveL2()));
+    el.style.display = on ? '' : 'none';
+    // badge số lượng trên nav
+    const b=document.getElementById('nav-ma-badge');
+    if(b){ const n=on?apPendingForMe().length:0; b.innerHTML = n?`<span style="background:#b8472e;color:#fff;border-radius:9px;padding:0 6px;font-size:11px;margin-left:4px;font-weight:700">${n}</span>`:''; }
+  }catch(e){ console.warn('[_maShowNav]', e&&e.message); }
+}
+let _maLevel='';   // admin "chuyển vai": '' = mọi cấp, hoặc 1 cấp cụ thể
+function renderMobileApproval(){
+  const box=document.getElementById('ma-list'); if(!box) return;
+  try{
+    // admin switch (chuyển vai xem theo cấp)
+    const sw=document.getElementById('ma-admin-switch');
+    if(sw){
+      if(typeof isAdmin==='function' && isAdmin()){
+        const opt=(v,lbl)=>`<button class="btn-sec" style="font-size:11px;${_maLevel===v?'background:var(--accent);color:#fff':''}" onclick="_maSetLevel('${v}')">${lbl}</button>`;
+        sw.innerHTML='<span style="font-size:10px;color:var(--muted);margin-right:4px">Xem cấp:</span>'
+          +opt('','Tất cả')+opt('pending_acc','KT kiểm')+opt('pending_l1','L1')+opt('pending_l2','L2');
+      } else sw.innerHTML='';
+    }
+    const rows=apPendingForMe({level:_maLevel});
+    const _lvlLabel={pending_acc:'Chờ KT kiểm', pending_l1:'Chờ L1 duyệt', pending_l2:'Chờ L2 duyệt'};
+    if(!rows.length){
+      box.innerHTML='<div style="text-align:center;padding:40px 16px;color:var(--muted)"><div style="font-size:40px">✅</div><div style="margin-top:8px;font-size:14px">Không có phiếu nào chờ bạn xử lý.</div></div>';
+      return;
+    }
+    const head=`<div style="font-size:15px;font-weight:700;padding:8px 4px 12px">🧾 Chờ tôi xử lý (${rows.length})</div>`;
+    const cards=rows.map(r=>{
+      const st=wfStatus(r);
+      const amt=(typeof fmtCcy==='function')
+        ? fmtCcy(r.amountGross||r.amount||0, r.ccy||'VND')
+        : (r.amountGross||r.amount||0);
+      const who=esc(r.partner||r.vendor||r.desc||'—');
+      const code=esc(r.docNo||r.invoiceNo||r.id||'');
+      const when=(r.updatedAt||r.issueDate||'').toString().slice(0,16).replace('T',' ');
+      const badge=`<span class="chip chip-warn" style="font-size:9px">${_lvlLabel[st]||st}</span>`;
+      return `<div onclick="maOpen('${r.id}')" style="cursor:pointer;border:1px solid var(--rule);border-radius:12px;padding:12px 14px;margin-bottom:10px;background:var(--paper);display:flex;flex-direction:column;gap:4px;box-shadow:0 1px 3px rgba(0,0,0,.05)">
+        <div style="display:flex;justify-content:space-between;align-items:center">
+          <span style="font-family:var(--font-mono);font-size:12px;color:var(--muted)">${code}</span>${badge}
+        </div>
+        <div style="font-weight:700;font-size:15px">${who}</div>
+        <div style="display:flex;justify-content:space-between;align-items:baseline">
+          <span style="font-size:16px;font-weight:700;color:var(--accent)">${amt}</span>
+          <span style="font-size:11px;color:var(--muted)">${when}</span>
+        </div>
+      </div>`;
+    }).join('');
+    box.innerHTML=head+cards;
+  }catch(e){ box.innerHTML='<div style="color:var(--bad);padding:16px">Lỗi hiển thị: '+esc(e&&e.message||'')+'</div>'; console.warn('[renderMobileApproval]',e); }
+}
+function _maSetLevel(v){ _maLevel=v; renderMobileApproval(); }
+function maOpen(id){
+  // tái dùng modal AP sẵn có (xem nội dung + chứng từ + lịch sử + nút Duyệt/Từ chối theo quyền)
+  if(typeof openPayableModal==='function') openPayableModal(id);
+  else if(typeof toast==='function') toast('Không mở được phiếu','bad');
+}
 function renderAll(opts){
   try{ _applyOpTabLabel(); }catch(e){}  // v3.06.00 nhãn tab Thu-Chi hộ động
   try{ if(document.getElementById('page-periodic') && document.getElementById('page-periodic').classList.contains('active')) renderPeriodic(); }catch(e){}
@@ -64246,6 +64435,8 @@ function renderAll(opts){
     if(isAdmin()) renderSalaryFund();
   }
   maybe('approval', renderApprovalList);
+  try{ _maShowNav(); }catch(e){}  // v3.10.07: bật/ẩn nav Duyệt nhanh theo flag+quyền
+  maybe('mobile_approval', renderMobileApproval);  // v3.10.07: PA1
   maybe('fixed_assets', renderFixedAssets);
   maybe('tools', renderTools);
   if(canAccessTab('operations') && (renderAllTabs || activePageId==='operations')){
