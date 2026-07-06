@@ -1384,6 +1384,8 @@ body.readonly-mode::before{
   <div class="section collapsible">
     <div class="section-head">
       <div class="section-title"><span class="tag">↗</span>Sổ phải trả</div>
+      <!-- v3.10.05 P1: 2 hàng đợi KT — render bằng renderKtQueueBar() theo FLAG_KT_QUEUE_NAV + quyền KT/Admin -->
+      <div id="kt-queue-bar" style="width:100%"></div>
       <div style="display:flex;gap:14px;align-items:center;flex-wrap:wrap;width:100%">
         <!-- NHÓM LỌC -->
         <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;flex:1;min-width:280px;background:rgba(0,0,0,.025);border:1px solid var(--rule);border-radius:10px;padding:6px 8px">
@@ -3481,7 +3483,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.10.04';            // bumped on each release
+const APP_VERSION='3.10.05';            // bumped on each release
 /* Debug logging: dlog() chỉ in khi DEBUG_MODE bật (mặc định TẮT ở production để
    tránh nhiễu/lộ cấu trúc nội bộ qua DevTools). Bật bằng: localStorage.DEBUG_MODE='1'.
    console.warn/error GIỮ NGUYÊN (cảnh báo & lỗi vận hành luôn hiện). */
@@ -14886,6 +14888,10 @@ const STORE_KEY = 'seahorse_v1';
    Flag AUTO_SNAP_CLEANUP (rollback=false). Cờ chống chạy lại: snapshotCleanupDone.
    ============================================================ */
 const AUTO_SNAP_CLEANUP = true;
+/* v3.10.05 — P1: 2 hàng đợi KT (🧾 Chờ KT kiểm · 💰 Chờ chi tiền) ở đầu tab Phải trả.
+   Badge số lượng + entry điều hướng (tái dùng 100% filter ap-filter-status + renderAR).
+   Chỉ hiện cho KT/Admin (canCheckAcc||canConfirmPayment). Rollback = đặt false. */
+const FLAG_KT_QUEUE_NAV = true;
 /* Wrapper — ghi 4 field chẩn đoán vận hành (lastCleanupAttempt/Result/Reason/DurationMs). */
 async function _autoSnapshotCleanup(){
   // GUARD context: nếu chưa login đầy đủ (role null / chưa có CRYPTO_KEY) → KHÔNG chạy, KHÔNG ghi đè
@@ -35627,7 +35633,38 @@ function renderThuHoSection(){
       ${ins.length>12?`<div style="font-size:10px;color:var(--muted);margin-top:6px;font-style:italic">Hiện 12 khoản gần nhất / ${ins.length}. Xem đầy đủ ở Sổ Thu/Chi hộ bên dưới.</div>`:''}
     </div>`;
 }
+/* v3.10.05 — P1: render thanh 2 hàng đợi KT ở đầu tab Phải trả.
+   Tái dùng 100%: đếm từ S.payables qua wfStatus()/arRemaining() (không state/API mới),
+   điều hướng bằng cách set ap-filter-status + renderAR() (không màn hình/danh sách thứ hai).
+   Chỉ hiện khi FLAG_KT_QUEUE_NAV bật + (canCheckAcc||canConfirmPayment — đã cover admin). */
+function ktQueueGo(status){
+  try{
+    var sel=document.getElementById('ap-filter-status');
+    if(sel){ sel.value=status; }
+    renderAR();
+  }catch(e){ console.warn('[ktQueueGo]', e&&e.message); }
+}
+function renderKtQueueBar(){
+  var bar=document.getElementById('kt-queue-bar');
+  if(!bar) return;
+  try{
+    var show = (typeof FLAG_KT_QUEUE_NAV!=='undefined' && FLAG_KT_QUEUE_NAV)
+            && ((typeof canCheckAcc==='function'&&canCheckAcc()) || (typeof canConfirmPayment==='function'&&canConfirmPayment()));
+    if(!show){ bar.innerHTML=''; return; }
+    var pay=Array.isArray(S.payables)?S.payables:[];
+    var nCheck=pay.filter(function(r){ return wfStatus(r)==='pending_acc'; }).length;
+    var nPay=pay.filter(function(r){ return wfStatus(r)==='approved' && arRemaining(r)>0.0001; }).length;
+    function badge(n,bg){ return n? '<span style="background:'+bg+';color:#fff;border-radius:9px;padding:1px 7px;font-size:11px;margin-left:4px;font-weight:700">'+n+'</span>' : '<span style="color:var(--muted);margin-left:4px;font-size:11px">0</span>'; }
+    bar.innerHTML =
+      '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:6px 0 2px">'
+      + '<span style="font-size:10px;font-weight:700;letter-spacing:.06em;color:var(--muted);text-transform:uppercase">Hàng đợi KT</span>'
+      + '<button class="btn-sec" style="font-size:12px" onclick="ktQueueGo(\'pending_acc\')" title="Hồ sơ chờ KT kiểm tra đầu vào">🧾 Chờ KT kiểm'+badge(nCheck,'#b8730a')+'</button>'
+      + '<button class="btn-sec" style="font-size:12px" onclick="ktQueueGo(\'ap_pending_pay\')" title="Hồ sơ đã duyệt, chờ chi tiền">💰 Chờ chi tiền'+badge(nPay,'#1f7a4d')+'</button>'
+      + '</div>';
+  }catch(e){ bar.innerHTML=''; console.warn('[renderKtQueueBar]', e&&e.message); }
+}
 function renderAR(){
+  try{ renderKtQueueBar(); }catch(e){ console.warn('[kt-queue-bar]',e&&e.message); }  // v3.10.05 P1
   try{ renderReturnedSection('ap'); }catch(e){ console.warn('[returned ap]',e&&e.message); }  // v3.06.29
   try{ renderProvisionalSection('ap'); }catch(e){ console.warn('[prov ap]',e&&e.message); }  // v3.06.00
   // KPIs split: AR-specific in page-receivables, AP-specific in page-payables
@@ -36460,7 +36497,7 @@ function renderArAp(kind){
       })()}</td>
       <td class="c" style="line-height:1.5">
         ${arLifecycleBadge(r)}
-        ${wfS==='approved'?`<div style="margin-top:3px"><span class="chip ${st.cls}" style="font-size:10px">${st.label}</span></div>`:''}
+        ${(wfS==='approved' && st.key!=='paid')?`<div style="margin-top:3px"><span class="chip ${st.cls}" style="font-size:10px">${st.label}</span></div>`:''}
         ${tickCell}
       </td>
       <td><div class="row-actions">${actionBtns.join('')}</div></td>
