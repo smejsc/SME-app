@@ -3495,7 +3495,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.10.07';            // bumped on each release
+const APP_VERSION='3.10.08';            // bumped on each release
 /* Debug logging: dlog() chỉ in khi DEBUG_MODE bật (mặc định TẮT ở production để
    tránh nhiễu/lộ cấu trúc nội bộ qua DevTools). Bật bằng: localStorage.DEBUG_MODE='1'.
    console.warn/error GIỮ NGUYÊN (cảnh báo & lỗi vận hành luôn hiện). */
@@ -46330,7 +46330,10 @@ function _opApVirtualTx(){
       amount:gross, ccy, fxToUsd:fx, amountUsd,
       vatPercent:+p.vatPercent||0, vatAmount:0,        // VAT đã gộp vào amount(gross)
       _netRaw:net, _vatRaw:vat,                          // giữ để hiển thị "net · vat" minh bạch
-      paid:(pd>0.0001), paidDate:'', bankFee:0, otherFee:0,
+      paid:(pd>0.0001), paidDate:'', 
+      // v3.10.08: mang TỔNG phí NH (bankFee+otherFee) từ các đợt thanh toán AP → hiện cột "Phí NH" khi xuất Excel.
+      bankFee:(Array.isArray(p.payments)?p.payments.reduce((s,pay)=>s+(+pay.bankFee||0),0):0),
+      otherFee:(Array.isArray(p.payments)?p.payments.reduce((s,pay)=>s+(+pay.otherFee||0),0):0),
       // v3.04.12: AP có khoanCat = VẾ THỰC CHI khoán → đánh dấu khoanRole='chi'
       //   để báo cáo chủ tàu GIẤU + không trừ số dư (chi thực không đòi chủ tàu),
       //   chỉ theo dõi riêng để đối chiếu chênh với vế 'doi'.
@@ -46736,6 +46739,14 @@ function opExportExcel(){
     return true;
   }).forEach(t=>{
     const gross=(+t.amount||0)+((t.type==='OUT')?(+t.vatAmount||0):0);
+    // v3.10.08: Phí NH (bankFee+otherFee) nguyên tệ; Quy đổi USD = (giá trị + phí) ra USD.
+    const feeRaw=(+t.bankFee||0)+(+t.otherFee||0);
+    const usdVal=(typeof opTxUsd==='function')?opTxUsd(t):(+t.amountUsd||gross);
+    const feeUsd=(typeof toUsd==='function')?toUsd(feeRaw, t.ccy||'USD'):0;
+    const usdTotal=(+usdVal||0)+(+feeUsd||0);
+    // Bộ phận: ưu tiên field lưu sẵn, fallback tra theo tên NV. Ngày lập = createdAt (khác cột Ngày giao dịch).
+    const dept=t.createdByDept || (typeof lookupUserDeptName==='function'?lookupUserDeptName(t.createdBy):'') || '—';
+    const madeDate=(t.createdAt||'').slice(0,10);
     const row=[
       t.type==='IN'?'Thu hộ':(t._isBudget?'Dự kiến chi':'Chi hộ'),
       t.date||'',
@@ -46743,8 +46754,12 @@ function opExportExcel(){
       t.desc||'',
       (t.invoiceNo||t.contractNo||''),
       gross,
+      feeRaw,
       t.ccy||'',
+      usdTotal,
       t.createdBy||'',
+      dept,
+      madeDate,
       opStt(t)
     ];
     // v3.06.00: ĐÃ CHI THỰC TẾ → bảng chính; DỰ KIẾN CHI → bảng riêng (khớp dòng tổng Trang 1 Statement).
@@ -46756,15 +46771,18 @@ function opExportExcel(){
   //   BỎ phần "AP toàn công ty" trước đây — nó kéo cả công nợ không liên quan tàu QL hộ vào file (SAI phạm vi).
 
   if(!rows.length && !budgetExcelRows.length){ toast('Không có giao dịch thu/chi hộ nào khớp bộ lọc','warn'); return; }
-  rows.sort((a,b)=>(a[1]||'').localeCompare(b[1]||''));
-  budgetExcelRows.sort((a,b)=>(a[1]||'').localeCompare(b[1]||''));
+  // v3.10.08: sắp theo TÊN NV (cột 9) rồi NGÀY giao dịch (cột 1) — NV gom nhóm, dễ đối chiếu khi in.
+  const _sortByNv=(a,b)=>((a[9]||'').localeCompare(b[9]||'')) || ((a[1]||'').localeCompare(b[1]||''));
+  rows.sort(_sortByNv);
+  budgetExcelRows.sort(_sortByNv);
 
   // ---- build sheet ----
   const title=[`SỔ THU / CHI HỘ TÀU QUẢN LÝ HỘ — SEAHORSE MARINE & ENERGY JSC`];
   const sub=[`Phạm vi: ${fV?((VesselService.opVessels().find(v=>v.id===fV)||{}).name||''):'Tất cả tàu QL hộ'}`
     +` · Tháng: ${fM||'Tất cả'} · Người nhập: ${_seeAll?(fC||'Tất cả'):me}`
     +` · Xuất: ${todayISO()} bởi ${me}`];
-  const header=['Nguồn','Ngày','Nhà cung cấp','Diễn giải','Số HĐ/Hóa đơn','Giá trị','Tiền tệ','NV nhập','Tình trạng hồ sơ'];
+  const header=['Nguồn','Ngày','Nhà cung cấp','Diễn giải','Số HĐ/Hóa đơn','Giá trị','Phí NH','Tiền tệ','Quy đổi USD','NV nhập','Bộ phận','Ngày lập','Tình trạng hồ sơ'];
+  const _LASTCOL=12;   // 13 cột (0-based cột cuối = 12)
   // Bảng 1: ĐÃ PHÁT SINH (thu hộ + chi hộ thực). Bảng 2: DỰ KIẾN CHI (chưa phát sinh) — khớp dòng tổng Trang 1 Statement.
   let aoa=[title,sub,[],['I. CÁC KHOẢN ĐÃ PHÁT SINH (đã chi thực tế / thu thực)'],header,...rows];
   let _budgetHeaderRowIdx=-1;
@@ -46777,23 +46795,25 @@ function opExportExcel(){
   }
 
   const ws=XLSX.utils.aoa_to_sheet(aoa);
-  ws['!cols']=[{wch:9},{wch:11},{wch:24},{wch:42},{wch:16},{wch:15},{wch:7},{wch:16},{wch:18}];
+  ws['!cols']=[{wch:9},{wch:11},{wch:24},{wch:42},{wch:16},{wch:15},{wch:12},{wch:7},{wch:15},{wch:16},{wch:18},{wch:11},{wch:18}];
   ws['!merges']=[
-    {s:{r:0,c:0},e:{r:0,c:8}},
-    {s:{r:1,c:0},e:{r:1,c:8}},
-    {s:{r:3,c:0},e:{r:3,c:8}}  // tiêu đề "I. CÁC KHOẢN ĐÃ PHÁT SINH"
+    {s:{r:0,c:0},e:{r:0,c:_LASTCOL}},
+    {s:{r:1,c:0},e:{r:1,c:_LASTCOL}},
+    {s:{r:3,c:0},e:{r:3,c:_LASTCOL}}  // tiêu đề "I. CÁC KHOẢN ĐÃ PHÁT SINH"
   ];
   // merge tiêu đề "II. DỰ KIẾN CHI" nếu có (hàng = _budgetHeaderRowIdx-1, 0-based)
-  if(_budgetHeaderRowIdx>=0){ ws['!merges'].push({s:{r:_budgetHeaderRowIdx-1,c:0},e:{r:_budgetHeaderRowIdx-1,c:8}}); }
+  if(_budgetHeaderRowIdx>=0){ ws['!merges'].push({s:{r:_budgetHeaderRowIdx-1,c:0},e:{r:_budgetHeaderRowIdx-1,c:_LASTCOL}}); }
   ws['!freeze']={xSplit:0,ySplit:5};
-  // auto-filter trên hàng header bảng 1 (giờ ở hàng index 4 → A5:I5)
+  // auto-filter trên hàng header bảng 1 (hàng index 4 → A5:M5, 13 cột)
   const lastRow1=5+rows.length;
-  ws['!autofilter']={ref:`A5:I${lastRow1}`};
-  // format cột Giá trị (F) dạng số có phân cách — cho TẤT CẢ dòng dữ liệu (bảng 1 + bảng 2 dự kiến)
+  ws['!autofilter']={ref:`A5:M${lastRow1}`};
+  // v3.10.08: format số có phân cách cho cột Giá trị (F), Phí NH (G), Quy đổi USD (I) — mọi dòng dữ liệu.
+  const _numCols=['F','G','I'];
   for(let r=0;r<aoa.length;r++){
-    const cellRef='F'+(r+1);
-    const cell=ws[cellRef];
-    if(cell && typeof cell.v==='number'){ cell.t='n'; cell.z='#,##0'; }
+    _numCols.forEach(col=>{
+      const cell=ws[col+(r+1)];
+      if(cell && typeof cell.v==='number'){ cell.t='n'; cell.z = (col==='I')?'#,##0.00':'#,##0'; }
+    });
   }
   const wb=XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb,ws,'Thu-Chi hộ tàu QL');
