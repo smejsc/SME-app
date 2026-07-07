@@ -3497,7 +3497,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.10.10';            // bumped on each release
+const APP_VERSION='3.10.20';            // bumped on each release
 /* Debug logging: dlog() chỉ in khi DEBUG_MODE bật (mặc định TẮT ở production để
    tránh nhiễu/lộ cấu trúc nội bộ qua DevTools). Bật bằng: localStorage.DEBUG_MODE='1'.
    console.warn/error GIỮ NGUYÊN (cảnh báo & lỗi vận hành luôn hiện). */
@@ -7041,6 +7041,17 @@ function userEditorModal(initial,idx){
           }).join('')}
         </div>
       </div>
+      <div style="margin-top:8px">
+        <div style="font-size:11px;color:var(--muted);letter-spacing:.08em;text-transform:uppercase;font-weight:600;margin-bottom:6px">💰 Quỹ tiền mặt phụ trách</div>
+        <div style="border:1px solid var(--rule);padding:8px 14px;background:var(--paper-2)">
+          <div style="font-size:11px;color:var(--muted);font-style:italic;margin-bottom:6px">Tick quỹ NV được phép xem/quản lý. Chỉ áp dụng khi admin BẬT chế độ phân quyền quỹ. KT/KTT/admin luôn thấy tất cả quỹ. Thuyền trưởng thấy quỹ tàu mình theo tàu được gán.</div>
+          ${AccountingService.cashFunds().length===0?'<div style="color:var(--muted)">Chưa có quỹ nào. Tạo ở tab Ngân quỹ trước.</div>':AccountingService.cashFunds().map(fd=>{
+            const checked=(initial.assignedFundIds||[]).includes(fd.id)?'checked':'';
+            const ftLabel={VESSEL:'Tàu',OFFICE:'Văn phòng',PROJECT:'Dự án',OTHER:'Khác'}[fd.fundType]||fd.fundType||'';
+            return `<label style="display:inline-flex;align-items:center;gap:6px;padding:4px 12px 4px 0;cursor:pointer"><input type="checkbox" data-fund="${fd.id}" ${checked}> <span>💰 ${esc(fd.name)} <span style="color:var(--muted);font-size:11px">(${esc(ftLabel)})</span></span></label>`;
+          }).join('')}
+        </div>
+      </div>
       <div style="${staffBasicMode?'display:none':''}"><!-- v3.06.00: ẩn quyền đặc biệt ở tab Nhân viên (IT) -->
       <div style="margin-top:8px">
         <div style="font-size:11px;color:var(--muted);letter-spacing:.08em;text-transform:uppercase;font-weight:600;margin-bottom:6px">Quyền đặc biệt</div>
@@ -7351,6 +7362,7 @@ function editUser(idx){
     assignedVesselIds:u.assignedVesselIds||[],
     assignedProjectIds:u.assignedProjectIds||[],
     assignedOpVesselIds:u.assignedOpVesselIds||[],
+    assignedFundIds:u.assignedFundIds||[],
     isViewer:!!u.isViewer,
     departmentId:u.departmentId||'',
     companyId:u.companyId||'',
@@ -8502,6 +8514,7 @@ async function saveUser(idx){
   const assignedVesselIds=Array.from(document.querySelectorAll('input[data-vessel]:checked')).map(c=>c.dataset.vessel);
   const assignedProjectIds=Array.from(document.querySelectorAll('input[data-project]:checked')).map(c=>c.dataset.project);
   const assignedOpVesselIds=Array.from(document.querySelectorAll('input[data-opvessel]:checked')).map(c=>c.dataset.opvessel);
+  const assignedFundIds=Array.from(document.querySelectorAll('input[data-fund]:checked')).map(c=>c.dataset.fund);  // v3.10.18
   const viewerReports=Array.from(document.querySelectorAll('input[data-viewer-report]:checked')).map(c=>c.dataset.viewerReport);
   const viewerSegments=Array.from(document.querySelectorAll('input[data-viewer-segment]:checked')).map(c=>c.dataset.viewerSegment);
   const viewerVesselIds=Array.from(document.querySelectorAll('input[data-viewer-vessel]:checked')).map(c=>c.dataset.viewerVessel);
@@ -8551,6 +8564,7 @@ async function saveUser(idx){
       u.assignedVesselIds=isViewer?[]:assignedVesselIds;
       u.assignedProjectIds=isViewer?[]:assignedProjectIds;
       u.assignedOpVesselIds=isViewer?[]:assignedOpVesselIds;
+      u.assignedFundIds=isViewer?[]:assignedFundIds;   // v3.10.18
       u.email=email;
       u.phone=phone;
       u.gender=gender;
@@ -8621,6 +8635,7 @@ async function saveUser(idx){
         assignedVesselIds:(_emptyPerm||isViewer)?[]:assignedVesselIds,
         assignedProjectIds:(_emptyPerm||isViewer)?[]:assignedProjectIds,
         assignedOpVesselIds:(_emptyPerm||isViewer)?[]:assignedOpVesselIds,
+        assignedFundIds:(_emptyPerm||isViewer)?[]:assignedFundIds,
         isViewer:_emptyPerm?false:isViewer,
         viewerReports:(_emptyPerm||!isViewer)?[]:viewerReports,
         viewerSegments:(_emptyPerm||!isViewer)?[]:viewerSegments,
@@ -9895,6 +9910,15 @@ function canApproveL2(){
 function canApproveFund(){
   if(CURRENT_ROLE==='admin') return true;
   return !!(CURRENT_USER && CURRENT_USER.canApproveFund);
+}
+/* v3.10.18 — Manager quỹ chỉ DUYỆT được quỹ trong phạm vi mình thấy (khi FLAG_FUND_SCOPE bật).
+   Flag tắt → như cũ (canApproveFund áp mọi quỹ). */
+function canApproveFundFor(fundId){
+  if(!canApproveFund()) return false;
+  if(CURRENT_ROLE==='admin') return true;
+  if(typeof FLAG_FUND_SCOPE==='undefined' || !FLAG_FUND_SCOPE) return true;   // flag tắt: như cũ
+  if(CURRENT_USER && (CURRENT_USER.canManageUsers || CURRENT_USER.canCheckAcc)) return true;
+  try{ return (typeof visibleCashFunds==='function') && visibleCashFunds().some(f=>f.id===fundId); }catch(e){ return true; }
 }
 /* v1.35: KT viên (HANG) kiểm tra hồ sơ trước khi đẩy lên L1 */
 function canCheckAcc(){
@@ -11345,6 +11369,18 @@ function visibleCashFunds(){
   if(CURRENT_USER && (CURRENT_USER.canManageUsers || CURRENT_USER.canCheckAcc)) return all;
   if(typeof canApproveL1==='function' && canApproveL1()) return all;
   if(typeof canApproveL2==='function' && canApproveL2()) return all;
+  // v3.10.18 — PHÂN QUYỀN QUỸ đích danh (chỉ khi FLAG_FUND_SCOPE bật)
+  if(typeof FLAG_FUND_SCOPE!=='undefined' && FLAG_FUND_SCOPE){
+    const fundIds=(CURRENT_USER&&Array.isArray(CURRENT_USER.assignedFundIds))?CURRENT_USER.assignedFundIds:[];
+    const vesselIds=(CURRENT_USER&&Array.isArray(CURRENT_USER.assignedVesselIds))?CURRENT_USER.assignedVesselIds:[];
+    const fundSet=new Set(fundIds), vSet=new Set(vesselIds);
+    return all.filter(f=>{
+      if(fundSet.has(f.id)) return true;                                  // quỹ được gán đích danh
+      if(f.fundType==='VESSEL' && f.vesselId && vSet.has(f.vesselId)) return true; // quỹ tàu mình (thuyền trưởng)
+      return false;                                                        // không gán → không thấy
+    });
+  }
+  // FLAG tắt → hành vi CŨ (backward compat): siết theo tàu như trước.
   const a=CURRENT_USER&&CURRENT_USER.assignedVesselIds;
   if(!Array.isArray(a) || a.length===0) return all; // không gán tàu → không siết
   const set=new Set(a);
@@ -13073,6 +13109,7 @@ function applyRoleUI(){
     const navEl = document.getElementById('nav');
     if(navEl) navEl.classList.toggle('nav--grouped', !!_isMgr);
   }catch(e){}
+  try{ if(typeof FLAG_NAV_V2!=='undefined' && FLAG_NAV_V2) _applyNavV2(); }catch(e){ console.warn('[nav-v2]',e&&e.message); }
   // v3.06.98: GOM NHÓM — với BOD/L1+ (cấp quản lý), ẩn các tab lẻ thuộc nhóm "Tài chính Kế toán"
   //   (Công nợ, Ngân quỹ, QL vận hành tàu, Phê duyệt, NSNN) khỏi nav chính → vào qua tab gom.
   //   NV thường GIỮ NGUYÊN nav cũ (dùng module phần hành riêng lẻ).
@@ -13418,6 +13455,18 @@ function updateSyncStatus(state,note){
   else if(state==='synced'){ _syncPendingPush=false; }
 }
 
+/* v3.10.20 — FORCE PULL (chỉ admin): bỏ qua cluster-guard 1 lần rồi pull.
+   Dùng khi admin CHẮC CHẮN cloud đúng và muốn nạp về dù 1 cụm giảm mạnh (vd đã xóa hợp lệ).
+   Có xác nhận 2 bước để tránh bấm nhầm. */
+async function adminForcePull(){
+  if(typeof isAdmin==='function' && !isAdmin()){ try{ toast('Chỉ admin dùng được Force Pull','bad'); }catch(_){} return; }
+  if(!confirm('⚠ FORCE PULL — bỏ qua bảo vệ chống nạp rỗng\n\nTải về từ cloud VÀ bỏ qua guard chặn cụm giảm mạnh.\n\nChỉ dùng khi bạn CHẮC CHẮN cloud đúng (đã kiểm cloud có đủ dữ liệu).\nNếu không chắc → bấm Hủy.\n\nTiếp tục Force Pull?')) return;
+  window._forcePullOverride=true;
+  try{ toast('Force Pull — đang tải về (bỏ qua guard)…'); }catch(_){}
+  try{ await cloudSync('pull',{interactive:true}); }
+  catch(e){ window._forcePullOverride=false; try{ toast('Force Pull lỗi: '+(e&&e.message||e),'bad'); }catch(_){} }
+}
+
 async function cloudSync(mode, opts){
   opts=opts||{};
   const _interactive=!!opts.interactive;  // true khi do người bấm nút Sync
@@ -13554,6 +13603,32 @@ async function cloudSync(mode, opts){
         console.warn('[pull merge] fallback to cloud:', e&&e.message);
         _pullMerged = filteredCloud;  // nếu merge lỗi → an toàn dùng cloud (như cũ)
       }
+      // v3.10.20 — GUARD PULL THEO CỤM (FLAG_PULL_CLUSTER_GUARD).
+      // Chặn 1 cụm nghiệp vụ quan trọng bị nạp về ~rỗng (lỗi mảnh chunk cloud hỏng → cụm đó =0
+      // dù tổng record vẫn cao → guard tổng ở trên không phát hiện). Với mỗi cụm: nếu local>=5
+      // VÀ merged<local*0.2 VÀ (local-merged)>=10 → GIỮ local cụm đó, KHÔNG cho merged đè.
+      // Admin bấm Force Pull (_forcePullOverride=true) thì bỏ qua guard 1 lần.
+      try{
+        if(typeof FLAG_PULL_CLUSTER_GUARD!=='undefined' && FLAG_PULL_CLUSTER_GUARD && !window._forcePullOverride){
+          const _guardFields=['hrEmployees','hrHistory','hrAttendance','payrollPeriods','payChangeRequests','payables','receivables','opTransactions','loans','cashFunds','bankAccounts'];
+          const _blocked=[];
+          _guardFields.forEach(f=>{
+            const _ln=Array.isArray(_localBeforePull[f])?_localBeforePull[f].length:0;
+            const _mn=Array.isArray(_pullMerged[f])?_pullMerged[f].length:0;
+            if(_ln>=5 && _mn < _ln*0.2 && (_ln-_mn)>=10){
+              // GIỮ local cụm này — không cho merged đè về ~rỗng
+              _pullMerged[f]=_localBeforePull[f];
+              _blocked.push(f+' ('+_mn+'→giữ '+_ln+')');
+            }
+          });
+          if(_blocked.length){
+            console.error('[pull cluster-guard] CHẶN nạp rỗng, giữ local các cụm:', _blocked.join(', '));
+            try{ logAuditEvent('pull_cluster_guard',{blocked:_blocked}); }catch(_){}
+            if(_interactive){ try{ toast('⚠ Bảo vệ dữ liệu: cloud thiếu bất thường ở '+_blocked.length+' cụm ('+_blocked.join(', ')+') — đã GIỮ bản máy, không nạp rỗng. Nếu chắc cloud đúng, dùng Force Pull (admin).','bad'); }catch(_){} }
+          }
+        }
+        if(window._forcePullOverride){ window._forcePullOverride=false; console.warn('[pull] Force Pull: bỏ qua cluster-guard 1 lần'); }
+      }catch(_gErr){ console.warn('[pull cluster-guard] lỗi, bỏ qua guard an toàn:', _gErr&&_gErr.message); }
       S=_pullMerged;
       S.auditLog = localAuditLog;  // restore local audit log
       S.presence = mergedPresence; // v2.72.0: giữ presence đã gộp
@@ -14973,6 +15048,22 @@ const FLAG_MOBILE_APPROVAL = true;
    Chỉ áp dụng opExportExcel ở Phase A. Fallback: thư viện chưa sẵn/lỗi → export SheetJS trơn cũ.
    Rollback = đặt false (op export về trơn). */
 const FLAG_EXCEL_STYLE = true;
+/* v3.10.18 — PHÂN QUYỀN QUỸ đích danh. false = giữ hành vi cũ (mọi NV thấy quỹ như trước);
+   true = SIẾT: chỉ admin/KTT(canManageUsers)/KT(canCheckAcc) thấy tất cả; NV thấy quỹ được gán
+   (assignedFundIds) hoặc quỹ VESSEL của tàu mình (isCaptain+assignedVesselIds); NV không gán → không thấy quỹ.
+   Deploy với false → admin gán quỹ cho NV → BẬT true. Rollback = đặt false. */
+const FLAG_FUND_SCOPE = false;
+/* v3.10.19 — TÁI CẤU TRÚC NAV. false = nav cũ; true = nav mới (gom Lương vào Nhân sự;
+   Ngân sách + Quỹ lương vào Báo cáo; bỏ nhóm Ngân sách; Thư viện + Quản lý người dùng vào Admin Menu).
+   Rollback = đặt false. */
+const FLAG_NAV_V2 = false;
+/* v3.10.20 — GUARD PULL THEO CỤM. Chặn 1 cụm nghiệp vụ quan trọng bị nạp về ~rỗng khi pull
+   (lỗi mảnh chunk cloud hỏng → 1 cụm giải mã ra 0 dù tổng record vẫn cao → guard tổng không thấy).
+   Điều kiện chặn 1 cụm (cả 3 cùng đúng): local>=5 VÀ merged < local*0.2 VÀ (local-merged)>=10.
+   Khi chặn: GIỮ local cụm đó (không cho merged đè về ~0) + ghi audit + cảnh báo admin.
+   Admin có Force Pull (_forcePullOverride) để bỏ qua guard khi thật sự cần.
+   true = bật bảo vệ (khuyến nghị production). Rollback = đặt false. */
+const FLAG_PULL_CLUSTER_GUARD = true;
 /* Wrapper — ghi 4 field chẩn đoán vận hành (lastCleanupAttempt/Result/Reason/DurationMs). */
 async function _autoSnapshotCleanup(){
   // GUARD context: nếu chưa login đầy đủ (role null / chưa có CRYPTO_KEY) → KHÔNG chạy, KHÔNG ghi đè
@@ -23920,6 +24011,91 @@ function segmentChip(seg){
 }
 
 /* ===== NAV ===== */
+/* v3.10.19 — TÁI CẤU TRÚC NAV (chỉ chạy khi FLAG_NAV_V2 bật). Idempotent: chạy nhiều lần vẫn đúng.
+   A. Nhóm Nhân sự: bỏ "Nhân viên"(staff) + thêm 4 mục Lương (onclick modal, song song Admin Menu).
+   B. Nhóm Báo cáo: bỏ "Thư viện" + thêm Ngân sách(plan/rates) + Quỹ lương(salary_fund).
+   C. Bỏ nhóm Ngân sách khỏi nav.
+   D. Thêm "Quản lý người dùng"(staff) + "Thư viện"(library) vào Admin Menu. */
+function _applyNavV2(){
+  const $=(s,r)=>(r||document).querySelector(s);
+  // ---- A. Nhóm Nhân sự ----
+  const hrMenu=$('#submenu-hr');
+  if(hrMenu && !hrMenu.dataset.navv2){
+    // bỏ "Nhân viên"(staff) khỏi nhóm Nhân sự
+    const staffBtn=$('button[data-page="staff"]', hrMenu); if(staffBtn) staffBtn.remove();
+    // thêm 4 mục Lương (onclick mở modal, giữ đúng quyền qua class)
+    const payItems=[
+      {ico:'⚖️', label:'Tham số lương', fn:'openPayrollConfig', cls:'payroll-config-item'},
+      {ico:'🧮', label:'Payroll Engine', fn:'openPayrollEngine', cls:'payroll-config-item'},
+      {ico:'📅', label:'Kỳ lương', fn:'openPayrollPeriods', cls:'payroll-operate-item'},
+      {ico:'🔐', label:'Duyệt thay đổi lương', fn:'openPayChangeRequests', cls:'bod-payroll-item'}
+    ];
+    payItems.forEach(it=>{
+      const b=document.createElement('button');
+      b.className='nav-sub-item '+it.cls;
+      b.setAttribute('onclick', it.fn+'()');
+      b.innerHTML='<span class="sub-dot"></span>'+it.ico+' '+it.label;
+      hrMenu.appendChild(b);
+    });
+    hrMenu.dataset.navv2='1';
+  }
+  // A2. Ẩn/hiện 4 mục Lương trong nav theo ĐÚNG quyền (giống Admin Menu) — chạy MỖI lần.
+  try{
+    const _isAdm=isAdmin();
+    const _canPay=_isAdm||((typeof canConfigPayroll==='function')&&canConfigPayroll());
+    const _canOp=_isAdm||((typeof canOperatePayroll==='function')&&canOperatePayroll());
+    const _isBodLike=_isAdm||!!(CURRENT_USER&&(CURRENT_USER.isBOD||CURRENT_USER.isCEO));
+    if(hrMenu){
+      hrMenu.querySelectorAll('.payroll-config-item').forEach(el=>el.style.display=_canPay?'':'none');
+      hrMenu.querySelectorAll('.payroll-operate-item').forEach(el=>el.style.display=_canOp?'':'none');
+      hrMenu.querySelectorAll('.bod-payroll-item').forEach(el=>el.style.display=_isBodLike?'':'none');
+    }
+  }catch(e){}
+  // ---- B. Nhóm Báo cáo ----
+  const repMenu=$('#submenu-reporting');
+  if(repMenu && !repMenu.dataset.navv2){
+    // tách "Thư viện" khỏi Báo cáo (KHÔNG xóa — phần E chuyển thành tab lẻ)
+    const libBtn=$('button[data-page="library"]', repMenu); if(libBtn) libBtn.remove();  // gỡ khỏi submenu; E tạo lại tab lẻ
+    // chuyển Ngân sách (plan/rates) từ nhóm budget vào Báo cáo
+    const budMenu=$('#submenu-budget');
+    if(budMenu){ Array.from(budMenu.querySelectorAll('button[data-page]')).forEach(b=>repMenu.appendChild(b)); }
+    // chuyển Quỹ lương (salary_fund) từ nhóm BOD vào Báo cáo
+    const salFund=$('button[data-page="salary_fund"]'); if(salFund) repMenu.appendChild(salFund);
+    repMenu.dataset.navv2='1';
+  }
+  // ---- C. Ẩn nhóm Ngân sách khỏi nav ----
+  const budGroup=$('button[data-group="budget"]'); if(budGroup && budGroup.parentElement) budGroup.parentElement.style.display='none';
+  // ---- D. Admin Menu: thêm "Quản lý người dùng" (IT quản lý) ----
+  const settingsBtn=$('.manage-users-item');
+  if(settingsBtn && settingsBtn.parentElement && !settingsBtn.parentElement.dataset.navv2staff){
+    const b=document.createElement('button');
+    b.className='it-admin-item';
+    b.setAttribute('onclick','closeAdminMenu();navigateToPage(\'staff\')');
+    b.innerHTML='<span class="ico">👤</span>Quản lý người dùng';
+    settingsBtn.parentElement.insertBefore(b, settingsBtn.nextSibling);
+    settingsBtn.parentElement.dataset.navv2staff='1';
+  }
+  // ---- E. Thư viện: tab lẻ riêng trên nav (mọi NV thấy) ----
+  const navEl2=document.getElementById('nav');
+  if(navEl2 && !navEl2.dataset.navv2lib){
+    // lấy nút library gốc (đã tách khỏi Báo cáo ở bước B) nếu còn, hoặc tạo mới
+    let libBtn2=navEl2.querySelector('button[data-page="library"]');
+    if(!libBtn2){
+      libBtn2=document.createElement('button');
+      libBtn2.className='nav-item';
+      libBtn2.setAttribute('data-page','library');
+      libBtn2.innerHTML='<span class="num">📚</span>Thư viện';
+    } else {
+      // chuyển từ sub-item thành tab lẻ
+      libBtn2.className='nav-item';
+      libBtn2.innerHTML='<span class="num">📚</span>Thư viện';
+    }
+    // đặt sau nhóm Dự án (trước NOTE/bod nếu có)
+    const bodGrp=document.getElementById('nav-group-bod');
+    if(bodGrp) navEl2.insertBefore(libBtn2, bodGrp); else navEl2.appendChild(libBtn2);
+    navEl2.dataset.navv2lib='1';
+  }
+}
 function navigateToPage(pageId){
   // SECURITY GUARD: use centralized permission system
   if(CURRENT_ROLE==='user' && CURRENT_USER){
@@ -32689,6 +32865,7 @@ function acFundClearInfo(fundId, batchId){
 
 function approveFundClear(fundId, batchId){
   const can=acCanApproveFund({canApproveFund:canApproveFund()}); if(!can.ok){ toast(can.reason,'bad'); return; }
+  if(!canApproveFundFor(fundId)){ toast('🔒 Bạn không được gán quản lý quỹ này — không duyệt được.','bad'); return; }
   const info=acFundClearInfo(fundId, batchId); if(!info.ok){ toast(info.reason,'bad'); return; }
   const f=info.fund, recs=info.recs, total=info.total, ccy=info.ccy;
   if(!confirm(`Duyệt phiếu hoàn ứng (${recs.length} khoản · ${fmtCcy(total,ccy)})?\n\nDuyệt xong sẽ TRỪ QUỸ + ghi chi phí vào P&L.`)) return;
@@ -32721,6 +32898,7 @@ function approveFundClear(fundId, batchId){
 }
 function rejectFundClear(fundId, batchId){
   if(!canApproveFund()){ toast('Chỉ Manager quỹ (hoặc admin) được từ chối','bad'); return; }
+  if(!canApproveFundFor(fundId)){ toast('🔒 Bạn không được gán quản lý quỹ này — không từ chối được.','bad'); return; }
   const recs=AccountingService.payables().filter(r=>r._batchId===batchId && r._fundPending);
   if(!recs.length){ toast('Không tìm thấy phiếu chờ duyệt','bad'); return; }
   if(!confirm(`Từ chối & HỦY phiếu hoàn ứng này (${recs.length} khoản)? Phiếu sẽ bị xóa, quỹ giữ nguyên.`)) return;
@@ -35518,6 +35696,49 @@ function _loanCreatePrepayFeeAP(loan, prepay){
    Gom mọi phiếu đang ở trạng thái bị trả về (step-back): rejected (về NV),
    hoặc đang ở pending_acc/pending_l1 do bị cấp trên trả về (cờ _rejectBackTo).
    Màu cam/đỏ nhạt — phân biệt với vàng của "chi dự kiến". */
+/* v3.10.16 — Lọc NCC + số tiền (đích danh, tolerance 0.5%) DÙNG CHUNG cho section
+   "Hồ sơ bị trả về" + "Chi dự kiến" (cả AP lẫn op). Tái dùng pattern _apprPassNccAmt.
+   secId: id gốc section (vd 'ap-returned') → ô lọc là <secId>-fncc / <secId>-famt. */
+function _secPassNccAmt(item, secId){
+  const pf=((document.getElementById(secId+'-fncc')||{}).value||'').trim().toLowerCase();
+  const aRaw=(document.getElementById(secId+'-famt')||{}).value;
+  const aTgt=(aRaw!==''&&aRaw!=null)?_unformatNumber(aRaw):null;
+  if(pf){
+    const hay=((item.who||'')+' '+(item.desc||'')).toLowerCase();
+    if(!hay.includes(pf)) return false;
+  }
+  if(aTgt!=null && !isNaN(aTgt) && aTgt>0){
+    const v=Math.abs(+item.amount||0);
+    const diff=Math.abs(v-aTgt);
+    const tol=Math.max(1, aTgt*0.005);
+    if(diff>tol) return false;
+  }
+  return true;
+}
+/* HTML 2 ô lọc (NCC + số tiền) đặt trong .section-head — click ô không gập section (listener đã bỏ qua input). */
+function _secFilterControls(secId, reRenderFn){
+  const oi=`_secOnFilterInput('${secId}');${reRenderFn}`;
+  return `<div style="display:flex;gap:6px;align-items:center" onclick="event.stopPropagation()">
+    <input type="text" id="${secId}-fncc" placeholder="🔎 Lọc NCC…" oninput="${oi}" value="${esc((document.getElementById(secId+'-fncc')||{}).value||'')}" style="padding:4px 8px;border:1px solid var(--rule);background:var(--paper);font-size:11px;width:130px">
+    <input type="text" id="${secId}-famt" placeholder="Số tiền…" oninput="${oi}" value="${esc((document.getElementById(secId+'-famt')||{}).value||'')}" style="padding:4px 8px;border:1px solid var(--rule);background:var(--paper);font-size:11px;width:90px;text-align:right">
+  </div>`;
+}
+/* Giữ focus + đưa con trỏ về cuối ô lọc sau khi section re-render (oninput làm render lại cả section). */
+let _secLastFocus=null;
+function _secRestoreFilterFocus(secId){
+  try{
+    const act=document.activeElement;
+    // lưu id ô đang gõ TRƯỚC khi innerHTML ghi đè — nhưng vì đã ghi đè, dùng _secLastFocus đặt bởi oninput
+    if(_secLastFocus && _secLastFocus.indexOf(secId)===0){
+      const el=document.getElementById(_secLastFocus);
+      if(el){ el.focus(); const v=el.value; el.value=''; el.value=v; }  // con trỏ về cuối
+    }
+  }catch(e){}
+}
+/* Gọi từ oninput để nhớ ô đang gõ, rồi mới render. */
+function _secOnFilterInput(secId, reFn){
+  _secLastFocus = (document.activeElement && document.activeElement.id) || null;
+}
 function renderReturnedSection(kind){
   const isAp = (kind==='ap');
   const host = document.getElementById(isAp?'ap-returned-section':'op-returned-section');
@@ -35552,7 +35773,11 @@ function renderReturnedSection(kind){
       at:(t.rejectedAt||''), _t:t, isAp:false
     }));
   }
-  if(!items.length){ host.innerHTML=''; return; }
+  const secId = isAp ? 'ap-returned' : 'op-returned';
+  const reFn = isAp ? "renderReturnedSection('ap')" : "renderReturnedSection('op')";
+  const totalCount = items.length;
+  if(!totalCount){ host.innerHTML=''; return; }   // không có phiếu trả về → ẩn hẳn
+  items = items.filter(it=>_secPassNccAmt(it, secId));   // v3.10.16: lọc NCC + số tiền
   items.sort((a,b)=>String(b.at).localeCompare(String(a.at)) || String(b.date).localeCompare(String(a.date)));
   const rows=items.map(it=>{
     const updBtn = it.isAp
@@ -35570,17 +35795,21 @@ function renderReturnedSection(kind){
     </tr>`;
   }).join('');
   const titleTxt = isAp ? 'HỒ SƠ BỊ TRẢ VỀ (Phải trả)' : 'HỒ SƠ BỊ TRẢ VỀ (chi hộ)';
+  const shown=items.length, cntTxt=(shown!==totalCount)?(shown+'/'+totalCount):String(totalCount);
   host.innerHTML=`
-    <div class="section" style="border:1.5px solid #b8472e;border-radius:8px;background:rgba(184,71,46,.05);padding:12px 14px;margin-bottom:14px">
-      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
-        <div style="font-size:13px;font-weight:700;color:#8c2f1c">&#8617; ${titleTxt} <span style="font-size:11px;font-weight:400;color:var(--muted)">(${items.length} phiếu cần xử lý lại)</span></div>
-        <span class="chip" style="font-size:10px;background:rgba(184,71,46,.14);color:#b8472e">&#9888; ${items.length} chờ sửa</span>
+    <div class="section collapsible" style="border:1.5px solid #b8472e;border-radius:8px;background:rgba(184,71,46,.05);padding:12px 14px;margin-bottom:14px">
+      <div class="section-head" style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;gap:10px;flex-wrap:wrap">
+        <div class="section-title" style="font-size:13px;font-weight:700;color:#8c2f1c">&#8617; ${titleTxt} <span style="font-size:11px;font-weight:400;color:var(--muted)">(${cntTxt} phiếu cần xử lý lại)</span></div>
+        ${_secFilterControls(secId, reFn)}
       </div>
+      <div class="section-body">
       <div style="font-size:11px;color:var(--muted);margin-bottom:8px;font-style:italic">Phiếu bị cấp duyệt trả về để sửa. Mở phiếu, chỉnh theo lý do bên dưới rồi gửi lại — phiếu đi tiếp từ cấp đã trả về.</div>
       <div class="tbl-wrap" style="overflow-x:auto"><table class="tbl" style="min-width:680px;font-size:12px"><thead><tr>
         <th>Ngày</th><th>Đối tác</th><th>Diễn giải</th><th class="r">Số tiền</th><th>Trạng thái</th><th>Lý do trả về</th><th class="c">Thao tác</th>
-      </tr></thead><tbody>${rows}</tbody></table></div>
+      </tr></thead><tbody>${rows||`<tr><td colspan="7" style="text-align:center;color:var(--muted);padding:10px;font-size:11px">Không có phiếu khớp bộ lọc</td></tr>`}</tbody></table></div>
+      </div>
     </div>`;
+  _secRestoreFilterFocus(secId);
 }
 /* v3.06.00 — SECTION "CHI DỰ KIẾN CẦN CẬP NHẬT" (AP _isProvisional + Chi hộ _isBudget).
    Mục đích: NV luôn thấy các khoản chi dự kiến chưa hoàn tất để cập nhật tiến độ hồ sơ/thanh toán. */
@@ -35615,7 +35844,11 @@ function renderProvisionalSection(kind){
                amount:+t.amount||0, ccy:t.ccy||'USD', vesselId:t.vesselId, needs, done:false, _t:t };
     });
   }
-  if(!items.length){ host.innerHTML=''; return; }
+  const secId = isAp ? 'ap-provisional' : 'op-budget';
+  const reFn = isAp ? "renderProvisionalSection('ap')" : "renderProvisionalSection('op')";
+  const totalCount = items.length;
+  if(!totalCount){ host.innerHTML=''; return; }   // không có khoản dự kiến → ẩn hẳn
+  items = items.filter(it=>_secPassNccAmt(it, secId));   // v3.10.16: lọc NCC + số tiền
   // sắp xếp: chưa xong lên trước, rồi theo ngày
   items.sort((a,b)=>(a.done-b.done)|| String(a.date).localeCompare(String(b.date)));
   const nPending=items.filter(i=>!i.done).length;
@@ -35637,17 +35870,21 @@ function renderProvisionalSection(kind){
     </tr>`;
   }).join('');
   const titleTxt = isAp ? 'CHI DỰ KIẾN (Phải trả dự kiến) cần cập nhật' : 'CHI DỰ KIẾN (chi hộ) cần cập nhật';
+  const shown=items.length, cntTxt=(shown!==totalCount)?(shown+'/'+totalCount):String(totalCount);
   host.innerHTML=`
-    <div class="section" style="border:1.5px solid #c5a64a;border-radius:8px;background:rgba(197,166,74,.05);padding:12px 14px;margin-bottom:14px">
-      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
-        <div style="font-size:13px;font-weight:700;color:#7a5f10">⏳ ${titleTxt} <span style="font-size:11px;font-weight:400;color:var(--muted)">(${items.length} khoản${nPending?', '+nPending+' chưa đủ hồ sơ':''})</span></div>
-        ${nPending?`<span class="chip chip-warn" style="font-size:10px">⚠ ${nPending} cần xử lý</span>`:'<span class="chip chip-good" style="font-size:10px">✓ tất cả đủ hồ sơ</span>'}
+    <div class="section collapsible" style="border:1.5px solid #c5a64a;border-radius:8px;background:rgba(197,166,74,.05);padding:12px 14px;margin-bottom:14px">
+      <div class="section-head" style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;gap:10px;flex-wrap:wrap">
+        <div class="section-title" style="font-size:13px;font-weight:700;color:#7a5f10">⏳ ${titleTxt} <span style="font-size:11px;font-weight:400;color:var(--muted)">(${cntTxt} khoản${nPending?', '+nPending+' chưa đủ hồ sơ':''})</span></div>
+        ${_secFilterControls(secId, reFn)}
       </div>
+      <div class="section-body">
       <div style="font-size:11px;color:var(--muted);margin-bottom:8px;font-style:italic">Các khoản chi đã ghi nhận dự kiến (vào P&L/số dư) nhưng chưa hoàn tất hồ sơ. NV cập nhật: số hóa đơn, tiến độ thanh toán, hoặc chuyển sang chi thực khi có chứng từ.</div>
       <div class="tbl-wrap" style="overflow-x:auto"><table class="tbl" style="min-width:640px;font-size:12px"><thead><tr>
         <th>Ngày</th><th>Đối tác / HĐ</th><th>Diễn giải</th><th class="r">Số tiền</th><th>Cần cập nhật</th><th class="c">Thao tác</th>
-      </tr></thead><tbody>${rows}</tbody></table></div>
+      </tr></thead><tbody>${rows||`<tr><td colspan="6" style="text-align:center;color:var(--muted);padding:10px;font-size:11px">Không có khoản khớp bộ lọc</td></tr>`}</tbody></table></div>
+      </div>
     </div>`;
+  _secRestoreFilterFocus(secId);
 }
 /* v3.06.00 — Nhãn tên các tàu QL hộ (động) cho tiêu đề tab. */
 function opVesselNamesLabel(){
@@ -45688,6 +45925,12 @@ function confirmOpPayment(id){
   const v=VesselService.opVessels().find(v=>v.id===t.vesselId);
   const ccy=v?v.ccy:'VND';
   const isUnconfirm = t.paid;
+  // v3.10.17 — SINGLE FREEZE POLICY: KHÔNG cho BỎ xác nhận TT nếu phiếu thuộc kỳ đã khóa
+  //   (bỏ xác nhận sẽ mở đường sửa lại giá trị đã chốt gửi chủ tàu).
+  if(isUnconfirm && (t._locked || isOwnerPeriodLocked(t.vesselId, t.date))){
+    toast('🔒 Kỳ '+String(t._lockedPeriod||String(t.date).slice(0,7))+' đã KHÓA — không bỏ xác nhận thanh toán. Mở khóa kỳ trước nếu thật sự cần sửa.','bad');
+    return;
+  }
   if(isUnconfirm){
     // Allow toggle off if accidentally marked
     if(!confirm('Bỏ xác nhận đã thanh toán cho bút toán này? Phí NH và phí khác sẽ được giữ lại để xem lại.')) return;
@@ -45826,6 +46069,12 @@ function editOpFees(id){
   // After confirmation: only this editor can change the record (full content + fees).
   const t=VesselService.opTransactions().find(x=>x.id===id);if(!t)return;
   if(!t.paid){toast('Bút toán chưa xác nhận thanh toán','bad');return;}
+  // v3.10.17 — SINGLE FREEZE POLICY: phiếu thuộc kỳ ĐÃ KHÓA (đã ký gửi chủ tàu) hoặc đã _locked
+  //   KHÔNG được sửa giá trị qua đây. Chỉ bổ sung chứng từ (nút 📎) / phí NH sau kỳ.
+  if(t._locked || isOwnerPeriodLocked(t.vesselId, t.date)){
+    toast('🔒 Kỳ '+String(t._lockedPeriod||String(t.date).slice(0,7))+' đã KHÓA (đã gửi chủ tàu) — không sửa giá trị. Chỉ bổ sung chứng từ (nút 📎).','bad');
+    return;
+  }
   const v=VesselService.opVessels().find(v=>v.id===t.vesselId);
   const ccy=v?v.ccy:'VND';
   const vesselOpts=VesselService.opVessels().map(x=>`<option value="${x.id}" ${x.id===t.vesselId?'selected':''}>${x.name} · ${x.owner||''}</option>`).join('');
@@ -46121,6 +46370,9 @@ function renderOpInputRecent(){
       const vName=v?v.name:'?';
       const ccy=t.ccy||(v&&v.ccy?v.ccy:'VND');
       const isBudget=!!t._isBudget;
+      // v3.10.17: cờ khóa dùng chung — khóa cứng phiếu (_locked) HOẶC kỳ đã ký khóa (ownerReportLocks).
+      const _lk = !!(t._locked) || isOwnerPeriodLocked(t.vesselId, t.date);
+      const _lockBadge = _lk ? '<span class="chip" style="font-size:9px;background:rgba(184,71,46,.16);color:#b8472e;font-weight:700" title="Kỳ đã ký &amp; khóa gửi chủ tàu — giá trị đã chốt, chỉ bổ sung chứng từ">🔒 Đã khóa</span> ' : '';
       const _rowUsd=(typeof opTxUsd==='function')?opTxUsd(t):(+t.amountUsd||0);  // v3.06.00
       const _isUsdRow=(ccy==='USD');
       const hd=`${t.contractNo?'HĐ:'+esc(t.contractNo):''}${t.contractNo&&t.invoiceNo?' · ':''}${t.invoiceNo?'HD:'+esc(t.invoiceNo):''}${!t.contractNo&&!t.invoiceNo?'—':''}`;
@@ -46141,8 +46393,9 @@ function renderOpInputRecent(){
         const _remChip=(_paid>0.001 && _rem>0.001)?`<span class="chip" style="font-size:9px;background:var(--warn);color:#fff" title="Đã trả một phần — còn nợ">còn ${_rem.toLocaleString('vi-VN')}</span>`:'';
         statusCell = _stChip + (_remChip?' '+_remChip:'') + ' ' + paidChip;
       }
+      statusCell = _lockBadge + statusCell;   // v3.10.17: badge 🔒 đầu ô Trạng thái khi đã khóa
       const _nAtt=Array.isArray(t.attachments)?t.attachments.length:0;
-      const _locked=isOwnerPeriodLocked(t.vesselId,t.date);
+      const _locked=_lk;   // v3.10.17: dùng cờ khóa chung (gồm _locked cứng + kỳ đã khóa)
       const docBtn=`<button class="icon-btn" title="${_locked?'Kỳ đã khóa — chỉ bổ sung chứng từ':'Chứng từ đính kèm'}" onclick="openOpTxDocsAfterLock('${t.id}')" style="${_nAtt>0?'color:var(--accent)':''}">📎${_nAtt>0?`<span style="font-size:9px">${_nAtt}</span>`:''}</button>`;
       const _fromAp=!!t._fromAp;   // v3.06.00: bút toán ảo từ phiếu AP gắn tàu
       const actCell = _fromAp
@@ -46774,6 +47027,15 @@ function opExportExcel(){
   const fN=((document.getElementById('op-filter-partner')||{}).value||'').trim().toLowerCase();
   const fV=(document.getElementById('op-filter-vessel')||{}).value||'';
 
+  // v3.10.12: tên file có nghĩa: "Theo dõi thu-chi hộ Tàu <tên/Tất cả tàu> Tháng <tháng/Tất cả tháng>.xlsx".
+  //   Giữ dấu tiếng Việt + khoảng trắng; chỉ lọc ký tự cấm của hệ điều hành (/ \ : * ? " < > |).
+  const _opExcelFileName=()=>{
+    const vName = fV ? ((VesselService.opVessels().find(v=>v.id===fV)||{}).name || '') : '';
+    const vPart = vName ? ('Tàu '+vName) : 'Tất cả tàu';
+    const mPart = fM ? ('Tháng '+fM) : 'Tất cả tháng';
+    return (`Theo dõi thu-chi hộ ${vPart} ${mPart}`).replace(/[\/\\:*?"<>|]/g,'_').trim()+'.xlsx';
+  };
+
   // ---- TÌNH TRẠNG HỒ SƠ thống nhất (giống badge trong app) ----
   const opStt=t=>{
     if(t._fromAp){ const ap=AccountingService.payableById(t._apId); if(ap){ if(arRemaining(ap)<=0.001) return 'Đã TT'; return wfStatus(ap)==='approved'?'Chờ chi tiền':'Chờ KTT duyệt'; } return '—'; }
@@ -46870,7 +47132,7 @@ function opExportExcel(){
   // ===== v3.10.09 Phase A: nếu style sẵn sàng → build sheet ĐẸP qua ExcelExporter rồi return =====
   if(ExcelExporter.ready()){
     try{
-      _opExportExcelStyled({title:title[0], sub:sub[0], header, rows, budgetRows:budgetExcelRows, fM});
+      _opExportExcelStyled({title:title[0], sub:sub[0], header, rows, budgetRows:budgetExcelRows, fM, fname:_opExcelFileName()});
       toast(`Đã xuất ${rows.length} đã chi thực + ${budgetExcelRows.length} dự kiến chi ra Excel ✓`,'good');
       return;
     }catch(e){
@@ -46901,7 +47163,7 @@ function opExportExcel(){
   }
   const wb=XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb,ws,'Thu-Chi hộ tàu QL');
-  const fname=`ThuChiHo_TauQL_${fM||'TatCa'}`.replace(/[^\w\-]/g,'_')+'.xlsx';
+  const fname=_opExcelFileName();
   XLSX.writeFile(wb,fname);
   toast(`Đã xuất ${rows.length} đã chi thực + ${budgetExcelRows.length} dự kiến chi ra Excel`,'good');
 }
@@ -46964,7 +47226,7 @@ function _opExportExcelStyled(P){
   ws['!rows']=aoa.map((_,r)=> meta.headerRows.includes(r)?{hpt:26}:(r===0?{hpt:26}:{hpt:15}));
   const wb=XS.utils.book_new();
   XS.utils.book_append_sheet(wb,ws,'Thu-Chi hộ tàu QL');
-  const fname=`ThuChiHo_TauQL_${P.fM||'TatCa'}`.replace(/[^\\w\\-]/g,'_')+'.xlsx';
+  const fname=P.fname || (`Theo dõi thu-chi hộ ${P.fM?('Tháng '+P.fM):'Tất cả tháng'}`.replace(/[\/\\:*?"<>|]/g,'_')+'.xlsx');
   XS.writeFile(wb,fname);
 }
 function renderOpTxList(){
@@ -54636,10 +54898,73 @@ function renderNsnnVatOutput(){
   h+='</tbody>';
   tEl.innerHTML=h;
 }
+/* v3.10.13 Phase C — build bảng kê GTGT CÓ STYLE (dùng XLSXStyle + ExcelExporter).
+   Dùng chung cho đầu ra + đầu vào. Chỉ gọi khi ExcelExporter.ready(). 15 cột.
+   Cột số (0-based): H(7) Chưa VAT, I(8) %VAT, J(9) Tiền VAT, K(10) Sau VAT. */
+function _vatExportExcelStyled(P){
+  const XS=window.XLSXStyle, EE=ExcelExporter;
+  const header=['STT','Số hóa đơn','Ngày HĐ',P.partnerLabel,'MST','Địa chỉ','Diễn giải','Tiền chưa VAT','%VAT','Tiền VAT','Tổng sau VAT','Tiền tệ','Trạng thái','Người nhập','Bộ phận'];
+  const NCOL=header.length, LAST=NCOL-1;
+  const colL=(i)=>XS.utils.encode_col(i);
+  const NUM={7:'#,##0;(#,##0);"–"', 9:'#,##0;(#,##0);"–"', 10:'#,##0;(#,##0);"–"'};
+  const PCT={8:'0%'};
+  const ALIGN=(c)=>{ if(c===7||c===8||c===9||c===10) return 'right'; if(c===0||c===1||c===2||c===11) return 'center'; return 'left'; };
+  const aoa=[]; const merges=[]; let hdrRow;
+  // tiêu đề
+  aoa.push([EE.title(P.title)]); merges.push({s:{r:0,c:0},e:{r:0,c:LAST}});
+  aoa.push([EE.sub(P.sub)]); merges.push({s:{r:1,c:0},e:{r:1,c:LAST}});
+  aoa.push([]);
+  hdrRow=aoa.length;
+  aoa.push(header.map((h,c)=>EE.headerCell(h,ALIGN(c))));
+  const dataStart=aoa.length;
+  P.rows.forEach((d,i)=>{
+    const zebra=(i%2===1)?EE.colors.zebra:'FFFFFF';
+    const vals=[i+1,d.invoiceNo,d.issueDate,d.vendorName,d.taxCode,d.address,d.desc,
+      d.net, (d.vatPercent||0)/100, d.vatAmount, d.gross, d.ccy,
+      (VAT_STATUS_LABEL[d.status]||d.status), d.createdBy, d.createdByDept];
+    aoa.push(vals.map((v,c)=>{
+      const o={bg:zebra, align:ALIGN(c), wrap:(c===5||c===6)};
+      if(NUM[c]) o.num=NUM[c];
+      if(PCT[c]) o.num=PCT[c];
+      return EE.dataCell(v,o);
+    }));
+  });
+  const dataEnd=aoa.length-1;
+  // TỔNG CỘNG (SUM cột H, J, K)
+  const tc=[]; for(let c=0;c<NCOL;c++){
+    if(c===6) tc.push(EE.totalCell('TỔNG CỘNG',{align:'right'}));
+    else if(c===7||c===9||c===10) tc.push(EE.totalCell(null,{align:'right',num:'#,##0',formula:`SUM(${colL(c)}${dataStart+1}:${colL(c)}${dataEnd+1})`}));
+    else tc.push(EE.totalCell(null,{}));
+  }
+  aoa.push(tc);
+  const ws=XS.utils.aoa_to_sheet(aoa);
+  ws['!cols']=[{wch:5},{wch:16},{wch:12},{wch:30},{wch:15},{wch:30},{wch:28},{wch:15},{wch:8},{wch:15},{wch:16},{wch:8},{wch:18},{wch:16},{wch:18}];
+  ws['!merges']=merges;
+  ws['!freeze']={xSplit:0,ySplit:hdrRow+1};
+  ws['!autofilter']={ref:`A${hdrRow+1}:${colL(LAST)}${dataEnd+1}`};
+  ws['!rows']=aoa.map((_,r)=> r===hdrRow?{hpt:26}:(r===0?{hpt:26}:{hpt:15}));
+  const wb=XS.utils.book_new();
+  XS.utils.book_append_sheet(wb,ws,P.sheetName);
+  XS.writeFile(wb,P.fname);
+}
 function nsnnVatOutputExportExcel(){
   const opt=_nsnnVatOutOpts();
   const rows=vatGatherRowsOutput(opt).map(vatRowData);
   if(!rows.length){ toast('Không có dữ liệu để xuất','warn'); return; }
+  // v3.10.13 Phase C: nếu style sẵn sàng → build đẹp rồi return; ngược lại fallback trơn.
+  if(ExcelExporter.ready()){
+    try{
+      _vatExportExcelStyled({
+        title:'BẢNG KÊ HÓA ĐƠN GTGT ĐẦU RA — THÁNG '+opt.month,
+        sub:'Công ty: '+((S.companyInfo&&S.companyInfo.name)||'Seahorse Marine & Energy JSC')+'  ·  Xuất: '+new Date().toLocaleString('vi-VN')+'  ·  Người xuất: '+actorName(),
+        partnerLabel:'Tên khách hàng', rows,
+        sheetName:'GTGT dau ra '+opt.month, fname:`Bang-ke-GTGT-dau-ra-${opt.month}.xlsx`
+      });
+      try{ logAuditEvent('vat_export',{month:opt.month,rows:rows.length,via:'nsnn-output-excel-styled'}); }catch(e){}
+      toast(`✓ Đã xuất ${rows.length} hóa đơn GTGT đầu ra`,'good');
+      return;
+    }catch(e){ console.warn('[vatOutput] style fail → fallback trơn:', e&&e.message); }
+  }
   const aoa=[
     ['BẢNG KÊ HÓA ĐƠN GTGT ĐẦU RA — THÁNG '+opt.month],
     ['Công ty: '+((S.companyInfo&&S.companyInfo.name)||'Seahorse Marine & Energy JSC')],
@@ -54670,6 +54995,20 @@ function nsnnVatExportExcel(){
   const opt=_nsnnVatOpts();
   const rows=vatGatherRows(opt).map(vatRowData);
   if(!rows.length){ toast('Không có dữ liệu để xuất','warn'); return; }
+  // v3.10.13 Phase C: style nếu sẵn sàng, else fallback trơn.
+  if(ExcelExporter.ready()){
+    try{
+      _vatExportExcelStyled({
+        title:'BẢNG KÊ HÓA ĐƠN GTGT ĐẦU VÀO — THÁNG '+opt.month,
+        sub:'Công ty: '+((S.companyInfo&&S.companyInfo.name)||'Seahorse Marine & Energy JSC')+'  ·  Xuất: '+new Date().toLocaleString('vi-VN')+'  ·  Người xuất: '+actorName(),
+        partnerLabel:'Tên NCC', rows,
+        sheetName:'GTGT dau vao '+opt.month, fname:`Bang-ke-GTGT-${opt.month}.xlsx`
+      });
+      try{ logAuditEvent('vat_export',{month:opt.month,rows:rows.length,via:'nsnn-excel-styled'}); }catch(e){}
+      toast(`✓ Đã xuất ${rows.length} hóa đơn GTGT`,'good');
+      return;
+    }catch(e){ console.warn('[vatInput] style fail → fallback trơn:', e&&e.message); }
+  }
   const aoa=[
     ['BẢNG KÊ HÓA ĐƠN GTGT ĐẦU VÀO — THÁNG '+opt.month],
     ['Công ty: '+((S.companyInfo&&S.companyInfo.name)||'Seahorse Marine & Energy JSC')],
@@ -54898,6 +55237,11 @@ function renderNSNN(){
   _nsnnRenderOverview(yr);
   _nsnnRenderByMonth(yr);
   _nsnnRenderRecords(yr);
+  // v3.10.15 Fix 1: refresh bảng kê GTGT (đầu vào + đầu ra) khi tab NSNN render lại
+  //   (vd sau khi xóa/sửa AR/AP → renderAll → maybe('nsnn', renderNSNN) → bảng VAT tự cập nhật).
+  //   Chỉ RE-RENDER hiển thị; KHÔNG đổi logic gom dữ liệu / tính VAT. try/catch: bảng có thể chưa mở.
+  try{ if(typeof renderNsnnVat==='function') renderNsnnVat(); }catch(e){ console.warn('[nsnn-refresh vat-in]',e&&e.message); }
+  try{ if(typeof renderNsnnVatOutput==='function') renderNsnnVatOutput(); }catch(e){ console.warn('[nsnn-refresh vat-out]',e&&e.message); }
 }
 
 function _nsnnRenderOverview(yr){
@@ -58029,30 +58373,88 @@ function assetExportPdf(which){
 }
 
 /* v1.86.0: Xuất sổ Phải thu / Phải trả ra Excel — tôn trọng filter trạng thái + công ty đang chọn */
+/* v3.10.14 Phase C — build sổ Công nợ AR/AP CÓ STYLE (XLSXStyle + ExcelExporter). 8 cột.
+   Cột số (0-based): F(5) Trước thuế, G(6) Thuế suất %, H(7) Sau thuế. */
+function _arExportExcelStyled(P){
+  const XS=window.XLSXStyle, EE=ExcelExporter;
+  const header=[P.partnerLabel,'MST','Số hóa đơn','Diễn giải','Loại tiền gốc','Giá trị trước thuế','Thuế suất','Tổng sau thuế'];
+  const NCOL=header.length, LAST=NCOL-1, colL=(i)=>XS.utils.encode_col(i);
+  const ALIGN=(c)=>{ if(c===5||c===7) return 'right'; if(c===6||c===4) return 'center'; return 'left'; };
+  const aoa=[]; const merges=[]; let hdrRow;
+  aoa.push([EE.title(P.title)]); merges.push({s:{r:0,c:0},e:{r:0,c:LAST}});
+  aoa.push([EE.sub(P.sub)]); merges.push({s:{r:1,c:0},e:{r:1,c:LAST}});
+  aoa.push([]);
+  hdrRow=aoa.length;
+  aoa.push(header.map((h,c)=>EE.headerCell(h,ALIGN(c))));
+  const dataStart=aoa.length;
+  P.rows.forEach((r,i)=>{
+    const zebra=(i%2===1)?EE.colors.zebra:'FFFFFF';
+    const vals=[r.partner, r.mst, r.invoiceNo, r.desc, r.ccyLabel, r.net, (r.vatPct||0)/100, r.tot];
+    aoa.push(vals.map((v,c)=>{
+      const o={bg:zebra, align:ALIGN(c), wrap:(c===3)};
+      if(c===5||c===7) o.num='#,##0;(#,##0);"–"';
+      if(c===6) o.num='0%';
+      return EE.dataCell(v,o);
+    }));
+  });
+  const dataEnd=aoa.length-1;
+  const tc=[]; for(let c=0;c<NCOL;c++){
+    if(c===0) tc.push(EE.totalCell('TỔNG CỘNG',{align:'left'}));
+    else if(c===5||c===7) tc.push(EE.totalCell(null,{align:'right',num:'#,##0',formula:`SUM(${colL(c)}${dataStart+1}:${colL(c)}${dataEnd+1})`}));
+    else tc.push(EE.totalCell(null,{}));
+  }
+  aoa.push(tc);
+  const ws=XS.utils.aoa_to_sheet(aoa);
+  ws['!cols']=[{wch:34},{wch:15},{wch:16},{wch:42},{wch:12},{wch:18},{wch:10},{wch:18}];
+  ws['!merges']=merges;
+  ws['!freeze']={xSplit:0,ySplit:hdrRow+1};
+  ws['!autofilter']={ref:`A${hdrRow+1}:${colL(LAST)}${dataEnd+1}`};
+  ws['!rows']=aoa.map((_,r)=> r===hdrRow?{hpt:26}:(r===0?{hpt:26}:{hpt:15}));
+  const wb=XS.utils.book_new();
+  XS.utils.book_append_sheet(wb,ws,P.sheetName);
+  XS.writeFile(wb,P.fname);
+}
 function arExportExcel(kind){
   const isAp = kind==='ap';
   if(typeof XLSX==='undefined'){ toast('Thư viện Excel chưa sẵn sàng','bad'); return; }
   const rows = _arExportRows(kind);
   if(!rows.length){ toast('Chưa có dữ liệu để xuất','bad'); return; }
-  // v3.03.79: bố cục 8 cột — NCC/KH · MST · Số HĐ · Diễn giải · Loại tiền gốc · Trước thuế · Thuế suất · Tổng sau thuế
-  const data = rows.map(r=>{
+  // chuẩn hóa dữ liệu 1 lần (dùng cho cả nhánh style lẫn trơn)
+  const norm = rows.map(r=>{
     const net=+r.amountNet||+r.amount||0, tot=+r.amountGross||+r.amount||0;
-    // thuế suất: ưu tiên vatPercent đã lưu; nếu thiếu, suy ra từ vat/net
     let vatPct = (r.vatPercent!=null) ? +r.vatPercent : 0;
     if(!vatPct && net>0 && (+r.vatAmount||0)>0) vatPct = Math.round((+r.vatAmount/net)*100);
-    // MST: tra danh mục NCC theo tên đối tác
     let mst='';
     try{ const v=(typeof findVendor==='function')?findVendor(r.partner):null; mst=(v&&v.taxCode)||r.vendorTaxCode||''; }catch(e){ mst=r.vendorTaxCode||''; }
     const ccy=(r.ccy||'').toUpperCase();
+    return { partner:r.partner||'', mst, invoiceNo:r.invoiceNo||'', desc:r.desc||'',
+      ccyLabel:(ccy && ccy!=='VND')?ccy:'', net, vatPct, tot };
+  });
+  // v3.10.14 Phase C: style nếu sẵn sàng, else fallback trơn.
+  if(ExcelExporter.ready()){
+    try{
+      _arExportExcelStyled({
+        title:(isAp?'SỔ CÔNG NỢ PHẢI TRẢ (AP)':'SỔ CÔNG NỢ PHẢI THU (AR)')+' — SEAHORSE MARINE & ENERGY JSC',
+        sub:'Xuất: '+new Date().toLocaleString('vi-VN')+'  ·  Người xuất: '+actorName(),
+        partnerLabel:(isAp?'Tên NCC':'Tên KH'), rows:norm,
+        sheetName:(isAp?'Phai tra':'Phai thu'),
+        fname:(isAp?'So-cong-no-Phai-tra-':'So-cong-no-Phai-thu-')+new Date().toISOString().slice(0,10)+'.xlsx'
+      });
+      toast('✓ Đã xuất '+norm.length+' dòng ra Excel','good');
+      return;
+    }catch(e){ console.warn('[arExport] style fail → fallback trơn:', e&&e.message); }
+  }
+  // ----- fallback trơn (nguyên bản) -----
+  const data = norm.map(r=>{
     const o={};
-    o[isAp?'Tên NCC':'Tên KH'] = r.partner||'';
-    o['MST'] = mst;
-    o['Số hóa đơn'] = r.invoiceNo||'';
-    o['Diễn giải'] = r.desc||'';
-    o['Loại tiền gốc'] = (ccy && ccy!=='VND') ? ccy : '';   // trống nếu là VNĐ
-    o['Giá trị trước thuế'] = net;
-    o['Thuế suất'] = vatPct/100;   // lưu dạng tỷ lệ → format % bên dưới
-    o['Tổng sau thuế'] = tot;
+    o[isAp?'Tên NCC':'Tên KH'] = r.partner;
+    o['MST'] = r.mst;
+    o['Số hóa đơn'] = r.invoiceNo;
+    o['Diễn giải'] = r.desc;
+    o['Loại tiền gốc'] = r.ccyLabel;
+    o['Giá trị trước thuế'] = r.net;
+    o['Thuế suất'] = r.vatPct/100;
+    o['Tổng sau thuế'] = r.tot;
     return o;
   });
   const ws=XLSX.utils.json_to_sheet(data);
@@ -58066,7 +58468,7 @@ function arExportExcel(kind){
   ws['!cols']=[{wch:34},{wch:15},{wch:16},{wch:42},{wch:12},{wch:18},{wch:10},{wch:18}];
   const wb=XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, isAp?'Phai tra':'Phai thu');
-  const fname=(isAp?'Bang-ke-Phai-tra-':'Bang-ke-Phai-thu-')+new Date().toISOString().slice(0,10)+'.xlsx';
+  const fname=(isAp?'So-cong-no-Phai-tra-':'So-cong-no-Phai-thu-')+new Date().toISOString().slice(0,10)+'.xlsx';
   XLSX.writeFile(wb, fname);
   toast('✓ Đã xuất '+data.length+' dòng ra Excel');
 }
@@ -62111,8 +62513,8 @@ function canAccessTab(tabId){
   if(NV_CORE_TABS.includes(tabId)) return true;
   // v3.06.00/3.08.42: tab Nhân viên — admin (đã return true ở trên), người có QL NV, HOẶC IT (quản lý tài khoản).
   if(tabId==='staff') return !!CURRENT_USER.canManageUsers || (typeof isITRole==='function' && isITRole());
-  // v3.06.00: tab Thư viện (niên giám) — chỉ admin (đã return true ở trên); NV thường không thấy.
-  if(tabId==='library') return false;
+  // v3.06.00: tab Thư viện (niên giám). Cũ: chỉ admin. v3.10.19 (khi FLAG_NAV_V2 bật): mọi NV đăng nhập được xem (tài liệu chung).
+  if(tabId==='library') return (typeof FLAG_NAV_V2!=='undefined' && FLAG_NAV_V2) ? true : false;
   // v3.03.77/82/83: Khóa tab quản trị.
   //   periodic (01) + projects (02): KTT (canManageUsers) HOẶC BOD.
   //   plan (Kế hoạch) + rates (Đơn giá): thuộc nhóm NOTE → CHỈ BOD (KTT không thấy). Tab 07 giữ nguyên.
