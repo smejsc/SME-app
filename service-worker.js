@@ -1,4 +1,4 @@
-/* Seahorse Manager — Service Worker  [BUILD-TAG: v3.10.08-NV-IDB — PRODUCTION]
+/* Seahorse Manager — Service Worker  [BUILD-TAG: v3.10.10-NV-IDB — PRODUCTION]
    Strategy: Network-first for index.html (so updates load fast),
              Cache-first for static assets (icons, manifest).
    Cache version bumps automatically when SW_VERSION changes below.
@@ -6,7 +6,7 @@
    để force trình duyệt invalidate cache cũ.
 */
 
-const SW_VERSION = 'v3.10.08';
+const SW_VERSION = 'v3.10.10';
 const CACHE_NAME = `seahorse-${SW_VERSION}`;
 
 // Pre-cache critical files on install
@@ -15,7 +15,8 @@ const PRECACHE_URLS = [
   './index.html',
   './manifest.json',
   './icon-192.png',
-  './icon-512.png'
+  './icon-512.png',
+  './lib/xlsx-js-style.min.js'   // v3.10.09 Phase A: self-host thư viện style (cache để dùng offline)
 ];
 
 self.addEventListener('install', event => {

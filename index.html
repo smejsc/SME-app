@@ -533,6 +533,8 @@ body.readonly-mode::before{
 </style>
 <!-- SheetJS for Excel import/export -->
 <script src="https://cdn.sheetjs.com/xlsx-0.20.1/package/dist/xlsx.full.min.js"></script>
+<!-- v3.10.09 Phase A: xlsx-js-style self-host (repo /lib) — nạp ĐỘC LẬP vào window.XLSXStyle, KHÔNG ghi đè window.XLSX (SheetJS). Chỉ dùng cho export có style (opExportExcel). Fallback: nếu file không tải được → export dùng SheetJS trơn như cũ. -->
+<script src="./lib/xlsx-js-style.min.js"></script>
 </head>
 <body>
 
@@ -673,8 +675,8 @@ body.readonly-mode::before{
     </div>
   </div>
   <div class="topbar-actions">
-    <button class="btn btn-ghost" id="pwa-install-btn" onclick="pwaInstall()" title="Cài Seahorse như app" style="display:none;border:1px solid rgba(246,241,232,.4);padding:4px 10px">
-      <span style="font-size:13px">⊕</span> Cài app
+    <button class="btn btn-ghost" id="pwa-install-btn" onclick="pwaInstall()" title="Tải về máy / Cài Seahorse như app trên điện thoại &amp; máy tính" style="border:1px solid rgba(246,241,232,.4);padding:4px 10px">
+      <span style="font-size:13px">⊕</span> Tải về máy
     </button>
     <div class="sync-status" id="sync-status" title="Trạng thái đồng bộ — dữ liệu luôn lưu trên máy"><span class="dot"></span><span id="sync-label">Lưu cục bộ</span></div>
     <div class="presence-wrap" id="presence-wrap" style="position:relative">
@@ -3495,7 +3497,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.10.08';            // bumped on each release
+const APP_VERSION='3.10.10';            // bumped on each release
 /* Debug logging: dlog() chỉ in khi DEBUG_MODE bật (mặc định TẮT ở production để
    tránh nhiễu/lộ cấu trúc nội bộ qua DevTools). Bật bằng: localStorage.DEBUG_MODE='1'.
    console.warn/error GIỮ NGUYÊN (cảnh báo & lỗi vận hành luôn hiện). */
@@ -3602,6 +3604,16 @@ window.addEventListener('appinstalled', () => {
   toast('✓ Đã cài Seahorse Manager lên thiết bị!');
 });
 
+// v3.10.10: nút "Tải về máy" LUÔN hiển thị (pwaInstall() đã xử lý đủ Android/iOS/đã-cài).
+//   Chỉ ẩn khi app ĐANG chạy ở chế độ standalone (đã cài rồi → không cần nút).
+window.addEventListener('DOMContentLoaded', () => {
+  try{
+    const isStandalone = window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone;
+    const btn = document.getElementById('pwa-install-btn');
+    if (btn && isStandalone) btn.style.display = 'none';
+  }catch(_){}
+});
+
 async function pwaInstall() {
   if (!_pwaInstallPrompt) {
     // Already installed or browser doesn't support
@@ -3626,6 +3638,18 @@ async function pwaInstall() {
       return;
     }
     toast('Trình duyệt chưa sẵn sàng để cài. Thử Chrome/Edge mới nhất.', 'bad');
+    // v3.10.10: desktop Chrome/Edge — hướng dẫn cài thủ công qua icon trên thanh địa chỉ.
+    openModal('💻 Tải Seahorse về máy tính',
+      `<div style="font-size:13px;line-height:1.6">
+        <p>Để cài Seahorse như một ứng dụng trên máy tính (Chrome / Edge):</p>
+        <ol style="padding-left:18px">
+          <li>Nhìn lên <b>thanh địa chỉ</b> trình duyệt (bên phải).</li>
+          <li>Bấm biểu tượng <b>Cài đặt</b> (hình màn hình có mũi tên ⊕, hoặc biểu tượng cài ứng dụng).</li>
+          <li>Chọn <b>"Cài đặt" / "Install"</b> → Seahorse mở trong cửa sổ riêng như app.</li>
+        </ol>
+        <p style="color:var(--muted)">Nếu không thấy biểu tượng: mở menu trình duyệt (⋮) → tìm <b>"Cài Seahorse Manager…"</b> / <b>"Install Seahorse Manager…"</b>.</p>
+      </div>`,
+      '<button class="btn-sec" onclick="closeModal()">Đóng</button>');
     return;
   }
   _pwaInstallPrompt.prompt();
@@ -14945,6 +14969,10 @@ const FLAG_HRM_DEDUP_IMPORT = true;
    100% workflow/permission/audit/modal. Không module/backend/logic nghiệp vụ mới.
    Rollback = đặt false. */
 const FLAG_MOBILE_APPROVAL = true;
+/* v3.10.09 Phase A — Excel có style (màu/khung/đậm) qua xlsx-js-style self-host.
+   Chỉ áp dụng opExportExcel ở Phase A. Fallback: thư viện chưa sẵn/lỗi → export SheetJS trơn cũ.
+   Rollback = đặt false (op export về trơn). */
+const FLAG_EXCEL_STYLE = true;
 /* Wrapper — ghi 4 field chẩn đoán vận hành (lastCleanupAttempt/Result/Reason/DurationMs). */
 async function _autoSnapshotCleanup(){
   // GUARD context: nếu chưa login đầy đủ (role null / chưa có CRYPTO_KEY) → KHÔNG chạy, KHÔNG ghi đè
@@ -46693,6 +46721,51 @@ function _opClearFilters(){
 /* v3.02.66: BẢN KIỂM TRA CHO NV — Excel gọn, gộp AP (Sổ Phải trả) + Thu/Chi hộ (tab 06).
    Cột: Nguồn · Ngày · NCC · Diễn giải · Số HĐ/HĐ · Giá trị · Tiền tệ · NV nhập · Tình trạng hồ sơ.
    Theo BỘ LỌC tab 06 (tàu/tháng/người nhập/tìm) cho phần Chi hộ; AP lọc theo tháng+người nhập tương ứng. */
+/* ============ v3.10.09 Phase A — ExcelExporter: helper style dùng chung ============
+   Tô màu/khung/đậm cho file Excel qua xlsx-js-style (window.XLSXStyle).
+   An toàn: mọi hàm kiểm _xlsxStyleReady() trước; nếu chưa sẵn → caller tự fallback SheetJS trơn.
+   Đây là KHUÔN tái dùng cho Phase C (các báo cáo khác). Không chứa logic nghiệp vụ. */
+function _xlsxStyleReady(){
+  return (typeof FLAG_EXCEL_STYLE!=='undefined' && FLAG_EXCEL_STYLE)
+      && (typeof window!=='undefined') && window.XLSXStyle
+      && window.XLSXStyle.utils && typeof window.XLSXStyle.writeFile==='function';
+}
+const ExcelExporter = (function(){
+  // Bảng màu thương hiệu Seahorse (navy + gold)
+  const C = {
+    navyD:'16293F', navy:'1F3A5F', sectI:'2E5A87', sectII:'8A6D1F',
+    zebra:'E8EEF5', total:'D9E2EC', green:'1F7A4D', red:'9C3A2E', grey:'6B7280', white:'FFFFFF'
+  };
+  const FONT='Calibri';
+  const _thin={style:'thin',color:{rgb:'B8C4D0'}};
+  const borderAll={top:_thin,bottom:_thin,left:_thin,right:_thin};
+  function st(o){ return o; }
+  function title(text){ return {v:text,t:'s',s:{fill:{fgColor:{rgb:C.navyD}},font:{name:FONT,bold:true,color:{rgb:C.white},sz:14},alignment:{horizontal:'center',vertical:'center'}}}; }
+  function sub(text){ return {v:text,t:'s',s:{fill:{fgColor:{rgb:C.navy}},font:{name:FONT,italic:true,color:{rgb:C.white},sz:9},alignment:{horizontal:'center',vertical:'center'}}}; }
+  function sectionBar(text,which){ return {v:text,t:'s',s:{fill:{fgColor:{rgb:which==='II'?C.sectII:C.sectI}},font:{name:FONT,bold:true,color:{rgb:C.white},sz:11},alignment:{horizontal:'left',vertical:'center'}}}; }
+  function headerCell(text,align){ return {v:text,t:'s',s:{fill:{fgColor:{rgb:C.navy}},font:{name:FONT,bold:true,color:{rgb:C.white},sz:10},alignment:{horizontal:align||'left',vertical:'center',wrapText:true},border:borderAll}}; }
+  function dataCell(v,opts){
+    opts=opts||{};
+    const s={font:{name:FONT,sz:9,bold:!!opts.bold,color:{rgb:opts.color||'000000'}},
+             alignment:{horizontal:opts.align||'left',vertical:'center',wrapText:!!opts.wrap},
+             border:borderAll};
+    if(opts.bg) s.fill={fgColor:{rgb:opts.bg}};
+    if(opts.num) s.numFmt=opts.num;
+    const t = (typeof v==='number')?'n':'s';
+    return {v:(v==null?'':v),t,s};
+  }
+  function totalCell(v,opts){
+    opts=opts||{};
+    const s={fill:{fgColor:{rgb:C.total}},font:{name:FONT,bold:true,sz:10,color:{rgb:C.navy}},
+             alignment:{horizontal:opts.align||'left',vertical:'center'},border:borderAll};
+    if(opts.num) s.numFmt=opts.num;
+    if(opts.formula) return {t:'n',f:opts.formula,s};
+    const t=(typeof v==='number')?'n':'s';
+    return {v:(v==null?'':v),t,s};
+  }
+  return { C, colors:C, title, sub, sectionBar, headerCell, dataCell, totalCell,
+    ready:_xlsxStyleReady };
+})();
 function opExportExcel(){
   if(typeof XLSX==='undefined'){ toast('Thiếu thư viện Excel','bad'); return; }
   const me=actorName();
@@ -46794,6 +46867,17 @@ function opExportExcel(){
     budgetExcelRows.forEach(r=>aoa.push(r));
   }
 
+  // ===== v3.10.09 Phase A: nếu style sẵn sàng → build sheet ĐẸP qua ExcelExporter rồi return =====
+  if(ExcelExporter.ready()){
+    try{
+      _opExportExcelStyled({title:title[0], sub:sub[0], header, rows, budgetRows:budgetExcelRows, fM});
+      toast(`Đã xuất ${rows.length} đã chi thực + ${budgetExcelRows.length} dự kiến chi ra Excel ✓`,'good');
+      return;
+    }catch(e){
+      console.warn('[opExportExcel] style fail → fallback trơn:', e&&e.message);
+    }
+  }
+
   const ws=XLSX.utils.aoa_to_sheet(aoa);
   ws['!cols']=[{wch:9},{wch:11},{wch:24},{wch:42},{wch:16},{wch:15},{wch:12},{wch:7},{wch:15},{wch:16},{wch:18},{wch:11},{wch:18}];
   ws['!merges']=[
@@ -46820,6 +46904,68 @@ function opExportExcel(){
   const fname=`ThuChiHo_TauQL_${fM||'TatCa'}`.replace(/[^\w\-]/g,'_')+'.xlsx';
   XLSX.writeFile(wb,fname);
   toast(`Đã xuất ${rows.length} đã chi thực + ${budgetExcelRows.length} dự kiến chi ra Excel`,'good');
+}
+/* v3.10.09 Phase A — build sheet Sổ Thu/Chi hộ CÓ STYLE (dùng XLSXStyle + ExcelExporter).
+   Chỉ gọi khi ExcelExporter.ready(). Dữ liệu/cột/sort đã tính sẵn ở opExportExcel (không đổi). */
+function _opExportExcelStyled(P){
+  const XS=window.XLSXStyle, EE=ExcelExporter;
+  const NCOL=P.header.length, LAST=NCOL-1;
+  const colL=(i)=>XS.utils.encode_col(i);
+  const aoa=[]; const meta={merges:[], headerRows:[]};
+  const NUM_COLS={5:'#,##0;(#,##0);"–"', 6:'#,##0;(#,##0);"–"', 8:'#,##0.00;(#,##0.00);"–"'};
+  const ALIGN=(c)=>{ if(c===5||c===6||c===8) return 'right'; if(c===0||c===1||c===4||c===7||c===11) return 'center'; return 'left'; };
+  function pushTitle(t){ const r=aoa.length; aoa.push([EE.title(t)]); meta.merges.push({s:{r,c:0},e:{r,c:LAST}}); }
+  function pushSub(t){ const r=aoa.length; aoa.push([EE.sub(t)]); meta.merges.push({s:{r,c:0},e:{r,c:LAST}}); }
+  function pushSection(t,which){ const r=aoa.length; aoa.push([EE.sectionBar(t,which)]); meta.merges.push({s:{r,c:0},e:{r,c:LAST}}); }
+  function pushHeader(){ const r=aoa.length; aoa.push(P.header.map((h,c)=>EE.headerCell(h,ALIGN(c)))); meta.headerRows.push(r); }
+  function pushDataRows(dataRows){
+    dataRows.forEach((row,i)=>{
+      const zebra=(i%2===1)?EE.colors.zebra:'FFFFFF';
+      const src=row[0];
+      const srcColor = src==='Thu hộ'?EE.colors.green : (src==='Dự kiến chi'?EE.colors.grey : EE.colors.red);
+      const cells=row.map((v,c)=>{
+        const o={bg:zebra, align:ALIGN(c), wrap:(c===2||c===3)};
+        if(NUM_COLS[c]) o.num=NUM_COLS[c];
+        if(c===0){ o.bold=true; o.color=srcColor; }
+        if(c===8 && src==='Thu hộ') o.color=EE.colors.green;
+        return EE.dataCell(v,o);
+      });
+      aoa.push(cells);
+    });
+  }
+  function pushTotal(startRow, endRow){
+    const cells=[]; for(let c=0;c<NCOL;c++){
+      if(c===0) cells.push(EE.totalCell('TỔNG CỘNG',{align:'left'}));
+      else if(c===5||c===6) cells.push(EE.totalCell(null,{align:'right',num:'#,##0',formula:`SUM(${colL(c)}${startRow+1}:${colL(c)}${endRow+1})`}));
+      else if(c===8) cells.push(EE.totalCell(null,{align:'right',num:'#,##0.00',formula:`SUM(${colL(c)}${startRow+1}:${colL(c)}${endRow+1})`}));
+      else cells.push(EE.totalCell(null,{}));
+    }
+    aoa.push(cells);
+  }
+  pushTitle(P.title); pushSub(P.sub); aoa.push([]);
+  pushSection('I.  CÁC KHOẢN ĐÃ PHÁT SINH  (đã chi thực tế / thu thực)','I');
+  pushHeader();
+  const i1=aoa.length; pushDataRows(P.rows); const i1end=aoa.length-1;
+  pushTotal(i1,i1end);
+  const hdrRow1=meta.headerRows[0];
+  if(P.budgetRows && P.budgetRows.length){
+    aoa.push([]);
+    pushSection('II.  CÁC KHOẢN DỰ KIẾN CHI  (chưa phát sinh — khớp Trang 1 Statement)','II');
+    pushHeader();
+    const i2=aoa.length; pushDataRows(P.budgetRows); const i2end=aoa.length-1;
+    pushTotal(i2,i2end);
+  }
+  const ws=XS.utils.aoa_to_sheet(aoa);
+  ws['!cols']=[{wch:9},{wch:11},{wch:24},{wch:42},{wch:16},{wch:15},{wch:12},{wch:7},{wch:15},{wch:16},{wch:18},{wch:11},{wch:18}];
+  ws['!merges']=meta.merges;
+  ws['!freeze']={xSplit:0,ySplit:hdrRow1+1};
+  const lastRow1=hdrRow1+P.rows.length;
+  ws['!autofilter']={ref:`A${hdrRow1+1}:${colL(LAST)}${lastRow1+1}`};
+  ws['!rows']=aoa.map((_,r)=> meta.headerRows.includes(r)?{hpt:26}:(r===0?{hpt:26}:{hpt:15}));
+  const wb=XS.utils.book_new();
+  XS.utils.book_append_sheet(wb,ws,'Thu-Chi hộ tàu QL');
+  const fname=`ThuChiHo_TauQL_${P.fM||'TatCa'}`.replace(/[^\\w\\-]/g,'_')+'.xlsx';
+  XS.writeFile(wb,fname);
 }
 function renderOpTxList(){
   // Scope: NV chỉ thấy giao dịch của tàu QL hộ được gán
