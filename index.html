@@ -3497,7 +3497,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.10.20';            // bumped on each release
+const APP_VERSION='3.10.23';            // bumped on each release
 /* Debug logging: dlog() chỉ in khi DEBUG_MODE bật (mặc định TẮT ở production để
    tránh nhiễu/lộ cấu trúc nội bộ qua DevTools). Bật bằng: localStorage.DEBUG_MODE='1'.
    console.warn/error GIỮ NGUYÊN (cảnh báo & lỗi vận hành luôn hiện). */
@@ -13851,7 +13851,13 @@ async function cloudSync(mode, opts){
       const payloadJson = JSON.stringify(payload);
       const origSize = payloadJson.length;
 
-      let finalBody = JSON.stringify({action:'save', key:'data', payload});
+      // v3.10.22: gửi kèm COUNTS (không mã hóa) để backend HRM-shrink-guard chống push HRM=0 đè cloud.
+      //   Backend không giải mã được payload → dựa counts client gửi để chặn máy lỗi push nhân sự rỗng.
+      const _pushCounts = {
+        hrEmployees: (toEncrypt.hrEmployees||[]).length,
+        payables: (toEncrypt.payables||[]).length
+      };
+      let finalBody = JSON.stringify({action:'save', key:'data', payload, counts:_pushCounts});
       let finalSize = finalBody.length;
       let compressionInfo = ` (payload ${_fmtBytes(finalSize)}${payload.gz?' • nén trước mã hóa':''})`;
       dlog('[sync push] payload:', _fmtBytes(finalSize), payload.gz?'(gz trước mã hóa)':'(không nén)');
@@ -19442,6 +19448,17 @@ function mergeStateByFields(cloudFull, localFull, fields){
       let arr=Object.values(byId).sort((a,b)=>String(a.ts||'').localeCompare(String(b.ts||'')));
       if(arr.length>500) arr=arr.slice(-500);  // v2.99.96
       merged[f]=arr;
+    } else if(f==='ownerReportLocks'){
+      // v3.10.23 — FIX GỐC: ownerReportLocks là mảng KHÔNG có 'id' → mergeByID bỏ qua, nhánh else cũ
+      //   giữ LOCAL → khi admin MỞ KHÓA (xóa lock), máy NV không nhận được (giữ lock cũ) → NV bị
+      //   FREEZE kỳ đã mở. LOCK CHỈ ADMIN SỬA:
+      //   • ADMIN: giữ LOCAL (admin là nguồn tạo/xóa lock — không để cloud đè mất thao tác vừa làm).
+      //   • NV: lấy CLOUD (nhận nguyên trạng lock từ admin — mọi mở/khóa của admin lan xuống).
+      if(CURRENT_ROLE==='admin'){
+        merged[f] = (localFull[f]!==undefined) ? localFull[f] : cloudFull[f];
+      } else {
+        merged[f] = (cloudFull[f]!==undefined) ? cloudFull[f] : localFull[f];
+      }
     } else {
       // Non-record-array field (scalar, config, etc) → local overrides
       merged[f]=localFull[f];
@@ -64195,7 +64212,7 @@ function hrmViewEmployee(id){
   if(!hrmCanSeeAll() && !hrmMyEmpIds().includes(id)){ toast('Bạn chỉ được xem hồ sơ của chính mình','bad'); return; }
   const row=(label,val)=> val ? `<div style="display:flex;gap:8px;padding:3px 0"><div style="width:150px;color:var(--muted);font-size:12px">${label}</div><div style="flex:1;font-size:13px">${hrmEsc(val)}</div></div>` : '';
   const sec=(title,inner)=> inner.trim() ? `<div style="margin-bottom:14px"><h4 style="margin:0 0 6px;font-size:13px;border-bottom:1px solid var(--rule);padding-bottom:4px">${title}</h4>${inner}</div>` : '';
-  const linkedUser = e.linkUserId ? (((getAuthConfig()||{}).users||[]).find(u=>u.id===e.linkUserId)||{}).name : '';
+  const linkedUser = e.linkUserId ? (((getAuthConfig()||{}).users||[]).find(u=>u.id===e.linkUserId || u.name===e.linkUserId)||{}).name : '';
 
   const basic=sec('Thông tin cơ bản',
     row('Smart-ID', e.smartId)+row('Họ tên', e.fullName)+row('Giới tính', e.gender)+
@@ -64418,7 +64435,14 @@ function hrmEditEmployee(id){
   const vessels=VesselService.vessels().concat(VesselService.opVessels().filter(ov=>!VesselService.vessels().some(v=>v.id===ov.id)));
   const vesselOpt=`<option value="">— Không gán tàu —</option>`+vessels.map(v=>`<option value="${v.id}"${v.id===e.linkVesselId?' selected':''}>${hrmEsc(v.name||v.code||v.id)}</option>`).join('');
   const users=(getAuthConfig()||{}).users||[];
-  const userOpt=`<option value="">— Không liên kết —</option>`+users.map(u=>`<option value="${u.id}"${u.id===e.linkUserId?' selected':''}>${hrmEsc(u.name)} (${hrmEsc(u.email||'')})</option>`).join('');
+  const userOpt=`<option value="">— Không liên kết —</option>`+users.map(u=>{
+    // v3.10.21 FIX: users KHÔNG có field id (định danh bằng name). CŨ so u.id===e.linkUserId →
+    //   khi cả hai undefined thì undefined===undefined=true → chọn nhầm user đầu cho MỌI NV chưa liên kết.
+    //   MỚI: value dùng name (định danh thật); chỉ 'selected' khi linkUserId CÓ giá trị thật và khớp id/name.
+    const uid = u.id || u.name;
+    const sel = !!(e.linkUserId && (u.id===e.linkUserId || u.name===e.linkUserId));
+    return `<option value="${hrmEsc(uid)}"${sel?' selected':''}>${hrmEsc(u.name)} (${hrmEsc(u.email||'')})</option>`;
+  }).join('');
   const managerOpt=`<option value="">— Không —</option>`+HRService.employees().filter(x=>x.id!==id).map(x=>`<option value="${x.id}"${x.id===e.managerId?' selected':''}>${hrmEsc(x.fullName)} (${hrmEsc(x.smartId)})</option>`).join('');
 
   const fld=(label,fid,val,type)=>`<div style="flex:1;min-width:160px"><label style="font-size:11px;color:var(--muted);display:block;margin-bottom:2px">${label}</label><input id="${fid}" type="${type||'text'}" value="${hrmEsc(val||'')}" style="width:100%;padding:6px 8px;border:1px solid var(--rule);border-radius:6px;font-size:13px"></div>`;
