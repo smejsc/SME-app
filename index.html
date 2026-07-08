@@ -3497,7 +3497,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.10.23';            // bumped on each release
+const APP_VERSION='3.10.26';            // bumped on each release
 /* Debug logging: dlog() chỉ in khi DEBUG_MODE bật (mặc định TẮT ở production để
    tránh nhiễu/lộ cấu trúc nội bộ qua DevTools). Bật bằng: localStorage.DEBUG_MODE='1'.
    console.warn/error GIỮ NGUYÊN (cảnh báo & lỗi vận hành luôn hiện). */
@@ -15070,6 +15070,20 @@ const FLAG_NAV_V2 = false;
    Admin có Force Pull (_forcePullOverride) để bỏ qua guard khi thật sự cần.
    true = bật bảo vệ (khuyến nghị production). Rollback = đặt false. */
 const FLAG_PULL_CLUSTER_GUARD = true;
+/* v3.10.24 — TỰ ĐỘNG NHẬN "ĐÃ NỘP NSNN" TỪ PHIẾU CHI THUẾ.
+   Phiếu AP có loại chi phí = thuế (expenseType có nsnnType) + đã thanh toán (payments)
+   → tự cộng vào "Đã nộp" của loại thuế tương ứng trong bảng NSNN, theo NĂM của ngày chi thực.
+   Tách dòng: nếu kỳ thuế (taxPeriod) thuộc năm TRƯỚC năm chi → gộp riêng "nộp cho kỳ cũ".
+   true = bật auto. Rollback = đặt false (quay về chỉ tính từ S.taxes.records nhập tay). */
+const FLAG_TAX_PAID_AUTO = true;
+/* v3.10.26 — CHI PHÍ TÀU THEO ĐOẠN KHAI THÁC:
+   Khi lưu phiếu AP gắn TÀU CÔNG TY + ngày, app tra đoạn khai thác phủ ngày đó:
+   • đoạn onhire/transit (có dự án) → TỰ ĐIỀN projectId của đoạn (chỉ khi phiếu CHƯA gắn dự án tay — không đè)
+   • đoạn standby/offjob/csb → gắn nhãn segPhase (chi phí vào P&L tàu, tách được theo trường hợp)
+   • đoạn dock → KHÔNG đụng (chi phí dock theo quy tắc CapEx hiện hành, không vào P&L)
+   • tàu QL hộ → KHÔNG áp (VESSEL_MGMT không vào P&L — nguyên tắc khóa)
+   Rollback = false. */
+const FLAG_AP_PROJECT_FROM_SEGMENT = true;
 /* Wrapper — ghi 4 field chẩn đoán vận hành (lastCleanupAttempt/Result/Reason/DurationMs). */
 async function _autoSnapshotCleanup(){
   // GUARD context: nếu chưa login đầy đủ (role null / chưa có CRYPTO_KEY) → KHÔNG chạy, KHÔNG ghi đè
@@ -25690,6 +25704,7 @@ const EVENT_TYPES=[
   {key:'standby',label:'Standby',short:'SB',chip:'chip-3',billable:false},
   {key:'dock',label:'Dock',short:'DK',chip:'chip-4',billable:false},
   {key:'offjob',label:'Không việc (Off-job)',short:'OFF',chip:'chip-5',billable:false},
+  {key:'csb',label:'Commercial Standby (chờ việc)',short:'CSB',chip:'chip-5',billable:false},   // v3.10.26: chờ việc thương mại — tổng hợp ngày rơi vào cột OFF (fallback), chi phí vào P&L tàu
   {key:'mob',label:'Mobilization',short:'MOB',chip:'chip-2',billable:false,wantPorts:true},
   {key:'demob',label:'Demobilization',short:'DMB',chip:'chip-2',billable:false,wantPorts:true}
 ];
@@ -25723,6 +25738,35 @@ function eventDurationDays(e){
   const ms=new Date(e.endAt).getTime()-new Date(e.startAt).getTime();
   if(ms<=0) return 0;
   return ms/(1000*60*60*24);
+}
+/* v3.10.26 — Tra đoạn khai thác phủ 1 ngày của tàu công ty (đoạn đang mở coi như phủ tới hiện tại). */
+function _segForVesselDate(vesselId, dateStr){
+  if(!vesselId||!dateStr) return null;
+  const t=new Date(dateStr).getTime(); if(!t) return null;
+  return (VesselService.events()||[]).find(x=>{
+    if(!x || x.vesselId!==vesselId || !x.startAt) return false;
+    const s=new Date(x.startAt).getTime();
+    const e=x.endAt?new Date(x.endAt).getTime():Date.now();  // đoạn đang mở → phủ tới hiện tại
+    return t>=s && t<=e;
+  })||null;
+}
+/* v3.10.26 — Tự gán dự án/nhãn trường hợp cho phiếu AP tàu công ty theo đoạn khai thác.
+   Quy tắc (Sếp duyệt): onhire/transit → điền projectId đoạn (KHÔNG đè gắn tay);
+   standby/offjob/csb → gắn segPhase (P&L tàu, tách theo trường hợp); dock → không đụng (CapEx);
+   tàu QL hộ (opVessel) → không áp. */
+function _segAutoAssign(record, list){
+  if(typeof FLAG_AP_PROJECT_FROM_SEGMENT==='undefined' || !FLAG_AP_PROJECT_FROM_SEGMENT) return;
+  if(list!=='payables' || !record || !record.vesselId) return;
+  // chỉ tàu CÔNG TY (S.vessels) — tàu QL hộ (S.opVessels) không áp
+  if(!(S.vessels||[]).some(v=>v.id===record.vesselId)) return;
+  const seg=_segForVesselDate(record.vesselId, record.issueDate||record.date);
+  if(!seg) return;
+  if(seg.type==='onhire'||seg.type==='transit'){
+    if(!record.projectId && seg.projectId){ record.projectId=seg.projectId; record._projectFromSeg=seg.id; }
+  } else if(seg.type==='standby'||seg.type==='offjob'||seg.type==='csb'){
+    record.segPhase=seg.type;   // nhãn trường hợp — P&L tàu tách theo dock/standby/chờ việc
+  }
+  // dock: không đụng (chi phí dock theo quy tắc CapEx, không vào P&L)
 }
 function fmtDays(d){
   if(!d) return '0';
@@ -26482,11 +26526,19 @@ async function onhireWizardStep1(){
     </div>
     <div style="flex:1;min-width:280px;display:grid;gap:9px;align-content:start">
       <div style="font-size:11px;color:var(--muted)">Thông tin biên bản (sửa/bổ sung nếu cần)</div>
-      <div class="field"><label>Tàu *</label><select id="ohw-vessel">${vOpts}</select></div>
-      <div class="field"><label>Loại chứng từ *</label><select id="ohw-type">
+      <div class="field"><label>Tàu *</label><select id="ohw-vessel" onchange="_ohwSyncRole()">${vOpts}</select></div>
+      <div class="field"><label>Loại chứng từ *</label><select id="ohw-type" onchange="_ohwSyncRole()">
         <option value="onhire"${ex.type==='onhire'?' selected':''}>ON-HIRE (vào thuê)</option>
         <option value="offjob"${ex.type==='offjob'?' selected':''}>OFF-HIRE (kết thúc thuê)</option>
-        <option value="mob"${ex.type==='mob'?' selected':''}>MOB (huy động)</option></select></div>
+        <option value="mob"${ex.type==='mob'?' selected':''}>MOB (huy động)</option>
+        <option value="demob"${ex.type==='demob'?' selected':''}>DEMOB (giải thể)</option></select></div>
+      <div class="field"><label>Vai trò biên bản *</label><select id="ohw-role" onchange="this._touched=true;_ohwSyncRole()">
+        <option value="open">Ⓐ MỞ đoạn mới (mốc bắt đầu)</option>
+        <option value="close">Ⓑ ĐÓNG đoạn đang mở (mốc kết thúc)</option></select>
+        <div style="font-size:10px;color:var(--muted);margin-top:2px">Ⓐ tạo đoạn mới từ mốc này · Ⓑ điền mốc kết thúc cho đoạn đang mở → đoạn hoàn chỉnh vào tổng hợp</div></div>
+      <div class="field" id="ohw-openseg-wrap" style="display:none"><label>Đoạn đang mở cần đóng *</label><select id="ohw-openseg"></select></div>
+      <div class="field" id="ohw-project-wrap" style="display:none"><label>Dự án (đoạn làm việc) *</label><select id="ohw-project"></select>
+        <div style="font-size:10px;color:var(--muted);margin-top:2px">Chọn 1 lần khi mở đoạn — chi phí tàu trong đoạn tính vào P&L dự án. Không đổi theo file import sau.</div></div>
       <div style="display:flex;gap:8px">
         <div class="field" style="flex:1"><label>Ngày *</label><input type="date" id="ohw-date" value="${d}"></div>
         <div class="field" style="width:104px"><label>Giờ</label><input type="time" id="ohw-time" value="${t}"></div></div>
@@ -26504,6 +26556,39 @@ async function onhireWizardStep1(){
   try{ if(typeof setModalWide==='function') setModalWide(true); else { const m=document.getElementById('modal'); if(m) m.classList.add('modal-wide'); } }catch(e){}
   // render PDF preview (canvas) — KHÔNG chặn form nếu lỗi
   _onhireWizardRenderPdf(item.file);
+  setTimeout(_ohwSyncRole, 60);   // v3.10.26: đồng bộ vai trò/đoạn mở/dự án lần đầu
+}
+/* v3.10.26 — đồng bộ hiển thị theo Vai trò biên bản (Ⓐ mở / Ⓑ đóng đoạn):
+   • gợi ý vai trò theo loại chứng từ (onhire/mob → Ⓐ; offjob/demob → Ⓑ) nếu người dùng chưa tự chọn
+   • Ⓑ: liệt kê các đoạn ĐANG MỞ (endAt trống) của tàu để chọn đóng
+   • Ⓐ + onhire: hiện dòng DỰ ÁN (lọc theo tàu) — bắt buộc, chọn 1 lần, không đổi theo import sau */
+function _ohwSyncRole(){
+  const g=id=>document.getElementById(id);
+  const typeEl=g('ohw-type'), roleEl=g('ohw-role');
+  if(!typeEl||!roleEl) return;
+  const type=typeEl.value||'onhire';
+  if(!roleEl._touched){ roleEl.value=(type==='offjob'||type==='demob')?'close':'open'; }
+  const role=roleEl.value;
+  const vid=(g('ohw-vessel')||{}).value||'';
+  const wrap=g('ohw-openseg-wrap'), segSel=g('ohw-openseg');
+  if(wrap&&segSel){
+    if(role==='close'){
+      wrap.style.display='';
+      const open=(VesselService.events()||[]).filter(x=>x && x.vesselId===vid && x.startAt && !x.endAt);
+      segSel.innerHTML=open.length
+        ? open.map(x=>`<option value="${x.id}">${esc(evtType(x.type).label)} · từ ${esc(String(x.startAt).replace('T',' '))}</option>`).join('')
+        : '<option value="">— Tàu này không có đoạn đang mở —</option>';
+    } else wrap.style.display='none';
+  }
+  const pw=g('ohw-project-wrap'), pSel=g('ohw-project');
+  if(pw&&pSel){
+    if(role==='open' && type==='onhire'){
+      pw.style.display='';
+      const cur=pSel.value;
+      const prjs=(S.projects||[]).filter(p=>p && (!p.vesselId || p.vesselId===vid));
+      pSel.innerHTML='<option value="">— Chọn dự án —</option>'+prjs.map(p=>`<option value="${p.id}"${p.id===cur?' selected':''}>${esc(p.code||p.name||'')}</option>`).join('');
+    } else pw.style.display='none';
+  }
 }
 
 /* render PDF ra canvas trong #ohw-pdf */
@@ -26541,7 +26626,19 @@ function _onhireWizardCollect(){
   if(_do>0) fuelStart.do={qty:_do,unit:g('ohw-do-u')||'liter',phuyLiters:200,unitPrice:0,priceCcy:'USD'};
   if(_lo>0) fuelStart.lo={qty:_lo,unit:'liter',phuyLiters:200,unitPrice:0,priceCcy:'USD'};
   if(_fw>0) fuelStart.fw={qty:_fw,unit:g('ohw-fw-u')||'m3',phuyLiters:200,unitPrice:0,priceCcy:'USD'};
-  return {vid, type, startAt:date+'T'+time, fuelStart, note:g('ohw-note')};
+  // v3.10.26 — vai trò Ⓐ/Ⓑ + đoạn đang mở + dự án
+  const role=g('ohw-role')||'open';
+  const openSegId=g('ohw-openseg')||'';
+  const projectId=g('ohw-project')||'';
+  if(role==='close'){
+    if(!openSegId) return {err:'Chọn đoạn đang mở cần đóng (tàu này chưa có đoạn đang mở?)'};
+    const seg=(VesselService.events()||[]).find(x=>x.id===openSegId);
+    if(!seg) return {err:'Không tìm thấy đoạn đang mở'};
+    if(seg.endAt) return {err:'Đoạn này đã có mốc kết thúc'};
+    if(new Date(date+'T'+time) <= new Date(seg.startAt)) return {err:'Mốc kết thúc phải SAU mốc bắt đầu đoạn ('+String(seg.startAt).replace('T',' ')+')'};
+  }
+  if(role==='open' && type==='onhire' && !projectId) return {err:'Đoạn làm việc (On-hire) phải chọn Dự án'};
+  return {vid, type, startAt:date+'T'+time, fuelStart, note:g('ohw-note'), role, openSegId, projectId};
 }
 
 /* BƯỚC 2 — Preview & Confirm */
@@ -26573,7 +26670,27 @@ function onhireWizardSave(){
   const d=window._ohwDraft; if(!d){ toast('Thiếu dữ liệu','bad'); return; }
   const item=window._ohwQueue[window._ohwIndex];
   const ex=window._ohwExtract||{};
-  const ev={ id:uid(), vesselId:d.vid, type:d.type, startAt:d.startAt, endAt:'', projectId:'', portFrom:'', portTo:'',
+  if(d.role==='close'){
+    // v3.10.26 — Ⓑ ĐÓNG đoạn đang mở: điền endAt + fuelEnd → đoạn hoàn chỉnh vào tổng hợp.
+    //   KHÔNG đổi projectId của đoạn (dự án chọn 1 lần lúc mở — không biến động theo import).
+    const seg=(VesselService.events()||[]).find(x=>x.id===d.openSegId);
+    if(!seg){ toast('Không tìm thấy đoạn đang mở','bad'); return; }
+    if(seg.endAt){ toast('Đoạn này đã đóng rồi','bad'); return; }
+    if(new Date(d.startAt)<=new Date(seg.startAt)){ toast('Mốc kết thúc phải sau mốc bắt đầu đoạn','bad'); return; }
+    seg.endAt=d.startAt;
+    seg.fuelEnd=d.fuelStart||{};   // ROB của biên bản này = ROB tại mốc kết thúc
+    seg.notes=((seg.notes||'')+' · Đóng đoạn (Wizard) từ: '+(item?item.name:'')+(d.note?(' · '+d.note):'')).slice(0,300);
+    try{ if(typeof touchRecord==='function') touchRecord(seg); }catch(_){}
+    try{ if(typeof syncEventsToOnhires==='function') syncEventsToOnhires(); }catch(e){}
+    try{ logAuditEvent('onhire_close_segment', {file:(item?item.name:''), vesselId:d.vid, eventId:seg.id, endAt:d.startAt}); }catch(e){}
+    saveState();
+    toast('✓ Đã ĐÓNG đoạn '+(evtType(seg.type).short||seg.type)+' — '+fmtDays(eventDurationDays(seg))+' ngày','good');
+    renderAll();
+    _onhireWizardNext();
+    return;
+  }
+  // Ⓐ MỞ đoạn mới (mốc bắt đầu) — kèm DỰ ÁN nếu là đoạn làm việc
+  const ev={ id:uid(), vesselId:d.vid, type:d.type, startAt:d.startAt, endAt:'', projectId:(d.projectId||''), portFrom:'', portTo:'',
     notes:('Manual Import (Wizard) từ: '+(item?item.name:'')+(d.note?(' · '+d.note):'')).slice(0,200),
     fuelStart:d.fuelStart, fuelEnd:{}, fuelPumped:{},
     createdAt:new Date().toISOString(), createdBy:(typeof actorName==='function'?actorName():''),
@@ -26581,9 +26698,9 @@ function onhireWizardSave(){
   VesselService.addEvent(ev);
   try{ if(typeof syncEventsToOnhires==='function') syncEventsToOnhires(); }catch(e){}
   // AUDIT: ghi rõ Manual Import (KHÁC auto)
-  try{ logAuditEvent('onhire_manual_import', {file:(item?item.name:''), vesselId:d.vid, type:d.type, startAt:d.startAt, extractMethod:(ex._method||'manual'), eventId:ev.id}); }catch(e){}
+  try{ logAuditEvent('onhire_manual_import', {file:(item?item.name:''), vesselId:d.vid, type:d.type, startAt:d.startAt, projectId:(d.projectId||''), extractMethod:(ex._method||'manual'), eventId:ev.id}); }catch(e){}
   saveState();
-  toast('✓ Đã lưu (Manual) đoạn '+(evtType(d.type).short||d.type),'good');
+  toast('✓ Đã MỞ đoạn '+(evtType(d.type).short||d.type)+' (đang diễn ra — chờ mốc kết thúc)','good');
   renderAll();
   _onhireWizardNext();
 }
@@ -32213,11 +32330,12 @@ async function cashImportReadExcel(inputEl, fundId){
     const cash=parseDetailSheet(shCash);
     const car=parseDetailSheet(shCar);
     // đọc sheet TOTAL để lấy tồn trước + ứng + các dòng tổng để đối chiếu
-    let totalSheet={openingBalance:0, advances:0, chiCash:0, chiInvoice:0, chiCar:0, closing:0, advanceDate:''};
+    let totalSheet={openingBalance:0, advances:0, chiCash:0, chiInvoice:0, chiCar:0, closing:0, advanceDate:'', otherReceipts:[]};
     if(shTotal){
       const aoa=XLSX.utils.sheet_to_json(wb.Sheets[shTotal],{header:1,defval:''});
       aoa.forEach(r=>{
-        const desc=norm(r.find(c=>typeof c==='string' && norm(c).length>3)||'');
+        const rawDesc=r.find(c=>typeof c==='string' && norm(c).length>3)||'';
+        const desc=norm(rawDesc);
         // Lấy số TIỀN: >1000 NHƯNG loại số trông giống ngày serial Excel (20000–60000) để không nhầm ngày Ứng quỹ thành tiền.
         const nums=r.map(c=>Math.round((+String(c||'').replace(/[^\d.-]/g,''))||0))
                     .filter(n=>n>1000 && !(n>=20000 && n<=60000));
@@ -32228,6 +32346,14 @@ async function cashImportReadExcel(inputEl, fundId){
         else if(desc.includes('tien mat')) totalSheet.chiCash=amt;          // "chi phi tien mat"
         else if(desc.includes('xe')) totalSheet.chiCar=amt;                 // "chi phi xe"
         else if(desc.includes('ton quy thang')&&!desc.includes('truoc')) totalSheet.closing=amt;
+        // v3.10.26 — KHOẢN THU KHÁC VÀO QUỸ (Hoàn quỹ / Nhập quỹ / Thu...): dòng có tiền ở bảng TOTAL
+        //   nhưng KHÔNG phải Ứng quỹ, không phải tồn/tổng → ghi nhận là THU vào quỹ (direction IN),
+        //   diễn giải giữ ĐÚNG nội dung Excel. Không phải tạm ứng, KHÔNG vào P&L.
+        else if(amt>0 && rawDesc && !desc.includes('tong cong') && !desc.includes('ton quy')){
+          const serial=r.map(c=>+c).find(n=>n>=20000 && n<=60000);
+          const dateISO=serial?new Date(Math.round((serial-25569)*86400*1000)).toISOString().slice(0,10):'';
+          totalSheet.otherReceipts.push({desc:String(rawDesc).trim(), amount:amt, date:dateISO});
+        }
       });
     }
     // v3.06.00: gán nhóm + index ổn định cho từng dòng để sửa loại CP trong preview
@@ -32270,7 +32396,8 @@ function cashImportShowPreview(){
   const allOk=recon.every(r=>Math.abs(r.detail-r.total)<1);
   // phương trình quỹ
   const totalChi=D.cash.total+D.inv.total+D.car.total;
-  const calcClosing=D.totalSheet.openingBalance+D.totalSheet.advances-totalChi;
+  const _othIn=(D.totalSheet.otherReceipts||[]).reduce((s,x)=>s+(+x.amount||0),0);   // v3.10.26: thu khác vào quỹ
+  const calcClosing=D.totalSheet.openingBalance+D.totalSheet.advances+_othIn-totalChi;
   const closingOk=Math.abs(calcClosing-D.totalSheet.closing)<1;
   // bảng chi tiết mỗi nhóm (gộp theo loại chi phí đoán được)
   const groupByType=(rows)=>{
@@ -32328,7 +32455,7 @@ function cashImportShowPreview(){
         <tbody>${reconRows}</tbody>
       </table>
       <div style="padding:8px 12px;background:${closingOk?'rgba(45,106,106,.08)':'rgba(184,71,46,.08)'};border-radius:4px;margin-bottom:6px;font-size:12px">
-        <b>Phương trình quỹ:</b> Tồn trước ${fmt(D.totalSheet.openingBalance)} + Ứng ${fmt(D.totalSheet.advances)} − Tổng chi ${fmt(totalChi)} = <b>${fmt(calcClosing)}</b>
+        <b>Phương trình quỹ:</b> Tồn trước ${fmt(D.totalSheet.openingBalance)} + Ứng ${fmt(D.totalSheet.advances)}${_othIn>0?` + Thu khác ${fmt(_othIn)}`:''} − Tổng chi ${fmt(totalChi)} = <b>${fmt(calcClosing)}</b>
         ${closingOk?` <span style="color:var(--good)">✓ khớp tồn cuối ${fmt(D.totalSheet.closing)}</span>`:` <span style="color:var(--bad);font-weight:700">✗ TOTAL ghi tồn cuối ${fmt(D.totalSheet.closing)} (lệch ${fmt(calcClosing-D.totalSheet.closing)})</span>`}
       </div>
       <div style="padding:8px 12px;border-radius:4px;margin-bottom:10px;font-weight:600;text-align:center;${allOk&&closingOk?'background:rgba(45,106,106,.12);color:var(--good)':'background:rgba(184,71,46,.12);color:var(--bad)'}">
@@ -32406,6 +32533,15 @@ function cashImportWrite(){
         _cashDetails:rows.map(r=>({date:r.date,desc:r.desc,invoiceNo:r.invoiceNo,amount:r.amount,note:r.note})),
         recordedBy:me2,recordedAt:now2});
     });
+    // v3.10.26 — GHI KHOẢN THU KHÁC VÀO QUỸ (từ bảng TOTAL: Hoàn quỹ/Nhập quỹ/Thu...):
+    //   direction IN, diễn giải GIỮ ĐÚNG nội dung Excel, KHÔNG phải tạm ứng, KHÔNG vào P&L.
+    (D.totalSheet.otherReceipts||[]).forEach(rc=>{
+      AccountingService.addCashTxn({id:uid(),fundId:f.id,date:(rc.date||importMonth+'-01'),direction:'IN',amount:+rc.amount||0,ccy,
+        category:'Thu khác',desc:String(rc.desc||'Thu vào quỹ (import)').slice(0,200),
+        sourceType:'cash_import_receipt',sourceId:'CASHIMP-RC-'+importMonth,
+        recordedBy:me,recordedAt:nowIso});
+      f.balance=(+f.balance||0)+(+rc.amount||0);
+    });
     f.balance=(+f.balance||0)-totalChi;
     touchRecord(f);
     }, {action:'cash_import_money', fields:['cashFunds','cashTxns'], onOk:()=>{
@@ -32477,6 +32613,15 @@ function cashImportWrite(){
     AccountingService.addCashTxn({id:uid(),fundId:f.id,date:(rows[0].date||importMonth+'-01'),direction:'OUT',amount:sum,ccy,
       category:'Chi '+((et&&et.label)||code),desc:'Nhập sổ quỹ '+importMonth+' · '+((et&&et.label)||code)+' ('+rows.length+' khoản)',
       sourceType:'cash_import',sourceId:batchId,recordedBy:me,recordedAt:nowIso});
+  });
+  // v3.10.26 — GHI KHOẢN THU KHÁC VÀO QUỸ (từ bảng TOTAL: Hoàn quỹ/Nhập quỹ/Thu...):
+  //   direction IN, diễn giải GIỮ ĐÚNG nội dung Excel, KHÔNG phải tạm ứng, KHÔNG vào P&L.
+  (D.totalSheet.otherReceipts||[]).forEach(rc=>{
+    AccountingService.addCashTxn({id:uid(),fundId:f.id,date:(rc.date||importMonth+'-01'),direction:'IN',amount:+rc.amount||0,ccy,
+      category:'Thu khác',desc:String(rc.desc||'Thu vào quỹ (import)').slice(0,200),
+      sourceType:'cash_import_receipt',sourceId:'CASHIMP-RC-'+importMonth,
+      recordedBy:me,recordedAt:nowIso});
+    f.balance=(+f.balance||0)+(+rc.amount||0);
   });
   f.balance=(+f.balance||0)-totalChi;
   touchRecord(f);
@@ -41401,6 +41546,7 @@ async function _mrSave(targetStatus){
         desc: (l.desc||'').trim(),
         invoiceNo: (l.invoiceNo||'').trim(),
         expenseType: (l.expenseType||'').trim(),           // NEW v1.30 (AP)
+        taxPeriod: (l.taxPeriod||s.taxPeriod||'').trim(),   // v3.10.24: kỳ thuế (YYYY/YYYY-MM) cho phiếu chi thuế — để tách "nộp cho kỳ cũ"
         revenueType: (l.revenueType||'').trim(),           // NEW v1.30.4 (AR)
         isPO: isExpensePO(l.expenseType),                  // NEW v1.30: derived
         isBODOnly: isExpenseBODOnly(l.expenseType) || isRevenueBODOnly(l.revenueType), // v1.30.4: BOD from either type
@@ -41458,6 +41604,8 @@ async function _mrSave(targetStatus){
         noteHeader: (s.noteHeader||'').trim(),
         _lateReason: _lateReasonMr||'', _lateDays: _lateDaysMr||0  // v3.06.00: lý do nhập trễ
       };
+      // v3.10.26 — TỰ GÁN theo ĐOẠN KHAI THÁC (chỉ AP + tàu CÔNG TY + chưa gắn dự án tay):
+      try{ if(typeof _segAutoAssign==='function') _segAutoAssign(record, list); }catch(_){}
       S[list].push(record);
       created++;
     });
@@ -55197,6 +55345,44 @@ function _nsnnSumManual(period){
 }
 
 /* === Sum manual tax PAID for a period === */
+/* v3.10.24 — map expenseType.code → nsnnType (loại thuế NSNN). Đọc từ catalog expenseTypes. */
+function _expenseCodeToNsnnType(code){
+  if(!code) return null;
+  const et=(S.expenseTypes||[]).find(t=>t.code===code);
+  return (et && et.nsnnType) ? et.nsnnType : null;
+}
+/* v3.10.24 — cộng "đã nộp NSNN" TỪ PHIẾU CHI THUẾ (AP loại thuế đã thanh toán).
+   Trả {byType:{PIT:x,...}, byTypePrevPeriod:{PIT:y,...}} — dòng năm hiện tại + dòng nộp cho kỳ cũ.
+   period = 'YYYY' (năm). Tính theo NĂM của NGÀY CHI THỰC (payment.date). Tách kỳ cũ theo taxPeriod. */
+function _nsnnSumPaidFromAP(period){
+  const out={byType:{}, byTypePrev:{}};
+  if(typeof FLAG_TAX_PAID_AUTO==='undefined' || !FLAG_TAX_PAID_AUTO) return out;
+  const isYearOnly=/^\d{4}$/.test(period);
+  const yr=String(period).slice(0,4);
+  (AccountingService.payables()||[]).forEach(r=>{
+    if(!r || !r.expenseType) return;
+    const nt=_expenseCodeToNsnnType(r.expenseType);
+    if(!nt) return;   // không phải phiếu thuế
+    // kỳ thuế của phiếu: taxPeriod (nếu nhập) → năm; mặc định = năm ngày hóa đơn
+    const taxYr=String(r.taxPeriod||r.issueDate||r.date||'').slice(0,4);
+    // duyệt từng lần chi (payment) — tính theo NĂM ngày chi thực
+    (r.payments||[]).forEach(p=>{
+      const payYr=String(p.date||'').slice(0,4);
+      const inPeriod = isYearOnly ? (payYr===yr) : (String(p.date||'').slice(0,7)===period);
+      if(!inPeriod) return;
+      const amt=toDisplay(+p.amount||0, r.ccy||'VND');
+      // tách: kỳ thuế < năm chi → "nộp cho kỳ cũ"
+      if(taxYr && taxYr<payYr){
+        out.byTypePrev[nt]=(out.byTypePrev[nt]||0)+amt;
+      } else {
+        out.byType[nt]=(out.byType[nt]||0)+amt;
+      }
+    });
+  });
+  return out;
+}
+
+
 function _nsnnSumPaid(period){
   _nsnnInit();
   const isYearOnly = /^\d{4}$/.test(period);
@@ -55210,6 +55396,14 @@ function _nsnnSumPaid(period){
     if(!matchPeriod(r)) return;
     out[r.type] = (out[r.type]||0) + toDisplay(_nsnnRecPaid(r), r.ccy||'VND');
   });
+  // v3.10.24 — cộng thêm ĐÃ NỘP từ phiếu chi thuế AP (theo năm ngày chi)
+  try{
+    const ap=_nsnnSumPaidFromAP(period);
+    Object.keys(ap.byType).forEach(t=>{ out[t]=(out[t]||0)+ap.byType[t]; });
+    // dòng nộp-cho-kỳ-cũ: gộp vào cùng loại (vẫn là tiền đã nộp trong năm), nhưng lưu riêng để hiển thị tách
+    Object.keys(ap.byTypePrev).forEach(t=>{ out[t]=(out[t]||0)+ap.byTypePrev[t]; });
+    out._apPrevPeriod=ap.byTypePrev;  // để render tách dòng "nộp cho kỳ cũ"
+  }catch(e){ console.warn('[nsnn paid from AP] lỗi:', e&&e.message); }
   return out;
 }
 
@@ -55334,6 +55528,20 @@ function _nsnnRenderOverview(yr){
     </tr>`;
   });
   html+=`<tr class="total"><td>TỔNG ${yr}</td><td class="r">${fmt(totalDue)}</td><td class="r">${fmt(totalPaid)}</td><td class="r" style="color:${remaining>0?'var(--bad)':'var(--good)'}">${fmt(remaining)}</td><td></td></tr>`;
+  // v3.10.24 — dòng tách: khoản đã nộp TRONG NĂM này nhưng CHO KỲ THUẾ CŨ (năm trước)
+  try{
+    const prev=(paid&&paid._apPrevPeriod)||{};
+    const prevKeys=Object.keys(prev).filter(k=>prev[k]>0);
+    if(prevKeys.length){
+      let prevTotal=0;
+      prevKeys.forEach(k=>{ prevTotal+=prev[k]; });
+      html+=`<tr><td colspan="5" style="padding-top:10px;font-size:11px;color:var(--muted);font-style:italic">Trong đó — đã nộp trong ${yr} cho KỲ THUẾ NĂM TRƯỚC (nộp bổ sung):</td></tr>`;
+      prevKeys.forEach(k=>{
+        const m=NSNN_TAX_TYPES[k]||{label:k,icon:'•',color:'#888'};
+        html+=`<tr><td style="padding-left:24px"><span style="font-size:12px">↳ ${m.icon} ${esc(m.label)} <span style="color:var(--muted);font-size:10px">(kỳ cũ)</span></span></td><td class="r num">—</td><td class="r num" style="color:var(--warn)">${fmt(prev[k])}</td><td class="r num">—</td><td><span class="chip" style="font-size:9px">Phiếu chi</span></td></tr>`;
+      });
+    }
+  }catch(e){}
   html+='</tbody>';
   sumEl.innerHTML=html;
 }
@@ -59653,9 +59861,13 @@ function openApprovalOrderPdf(level){
   const want = isL1 ? 'pending_l1' : 'pending_l2';
   // v3.06.50: CHỈ lấy các phiếu KTT/L2 ĐÃ TÍCH CHỌN ở Danh sách bút toán chờ duyệt
   //   (APPROVAL_SELECTED). Nếu chưa tích gì → báo nhắc chọn trước.
-  let rows=_arExportRows('ap').filter(r=>wfStatus(r)===want && APPROVAL_SELECTED.has(r.id));
+  // v3.10.26 — FIX: dùng scopedRecords TRỰC TIẾP thay _arExportRows('ap'). _arExportRows áp BỘ LỌC
+  //   của TRANG PHẢI TRẢ (ap-filter-creator/status/vendor...) — màn Duyệt là màn khác, bộ lọc còn
+  //   dính từ lần lọc trước làm 3 phiếu đã tích bị loại → báo sai "Không có phiếu nào ở cấp L2".
+  const _apprSrc=scopedRecords(S.payables||[]).filter(r=>r && !r._cashClear);
+  let rows=_apprSrc.filter(r=>wfStatus(r)===want && APPROVAL_SELECTED.has(r.id));
   if(!rows.length){
-    const totalAtLevel=_arExportRows('ap').filter(r=>wfStatus(r)===want).length;
+    const totalAtLevel=_apprSrc.filter(r=>wfStatus(r)===want).length;
     if(totalAtLevel===0){ toast('Không có phiếu nào đang ở cấp '+(isL1?'Trình ký (L1)':'Duyệt chi (L2)'),'warn'); return; }
     toast('Hãy TÍCH CHỌN các phiếu cần '+(isL1?'trình thanh toán (L2)':'duyệt chi')+' ở danh sách trước, rồi bấm lại.','warn'); return;
   }
@@ -63902,7 +64114,11 @@ function hrmRenderDash(){
   if(bar){
     // đếm có bao nhiêu NV sẽ đổi nhóm nếu đoán lại
     let wouldChange=0;
-    emps.forEach(e=>{ const g=_hrmGuessType(e.dept,e.title||e.position); if(g!==(e.type||'office')) wouldChange++; });
+    emps.forEach(e=>{ const g=_hrmGuessType(e.dept,e.title||e.position); const cur=e.type||'office';
+      // v3.10.25: KHÔNG coi là "nhầm" khi guess hạ cấp expert_om/expert → office/crew
+      //   (CN Quảng Ngãi gồm cả chuyên gia lẫn NV thường, guess không phân biệt được — giữ phân loại thủ công).
+      const isDowngradeExpert=(cur==='expert_om'||cur==='expert')&&(g==='office'||g==='crew');
+      if(g!==cur && !isDowngradeExpert) wouldChange++; });
     if(wouldChange>0 && hrmCanSeeAll()){
       bar.innerHTML=`<div style="background:#fff7ec;border:1px solid #f0d9b5;border-radius:8px;padding:8px 12px;display:flex;align-items:center;gap:10px;flex-wrap:wrap">
         <span>⚠ Có <b>${wouldChange}</b> nhân sự có thể đang xếp nhầm nhóm (theo phòng ban / chức danh).</span>
@@ -63939,22 +64155,49 @@ function hrmReclassifyPreview(){
   const changes=[];
   emps.forEach(e=>{
     const g=_hrmGuessType(e.dept, e.title||e.position);
-    if(g!==(e.type||'office')) changes.push({e, from:(e.type||'office'), to:g});
+    const cur=(e.type||'office');
+    // v3.10.25: không coi hạ cấp expert_om/expert → office/crew là "cần đổi"
+    const isDowngradeExpert=(cur==='expert_om'||cur==='expert')&&(g==='office'||g==='crew');
+    if(g!==cur && !isDowngradeExpert) changes.push({e, from:cur, to:g});
   });
   if(!changes.length){ toast('Không có nhân sự nào cần đổi nhóm','good'); return; }
-  const typeLabel={office:'Văn phòng', crew:'Thuyền viên', expert:'Chuyên gia'};
-  const cntTo={office:0,crew:0,expert:0}; changes.forEach(c=>cntTo[c.to]++);
-  const sample=changes.slice(0,12).map(c=>`<tr><td style="padding:3px 8px;font-size:11px">${hrmEsc(c.e.fullName||c.e.name||'')}</td><td style="padding:3px 8px;font-size:11px;color:var(--muted)">${hrmEsc(c.e.dept||'')}</td><td style="padding:3px 8px;font-size:11px;color:var(--muted)">${hrmEsc(c.e.title||c.e.position||'')}</td><td style="padding:3px 8px;font-size:11px">${typeLabel[c.from]} → <b>${typeLabel[c.to]}</b></td></tr>`).join('');
-  const body=`<div style="font-size:12px;margin-bottom:10px">Hệ thống đề xuất phân loại lại <b>${changes.length}</b> nhân sự (theo phòng ban + chức danh):</div>
+  const typeLabel={office:'Văn phòng', crew:'Thuyền viên', expert:'Chuyên gia', expert_om:'Chuyên gia O&M'};
+  const cntTo={office:0,crew:0,expert:0,expert_om:0}; changes.forEach(c=>cntTo[c.to]++);
+  // v3.10.25: mỗi dòng có DROPDOWN chọn nhóm + nút LƯU NGAY từng người
+  const _grpOpts=(sel)=>Object.keys(typeLabel).map(k=>`<option value="${k}"${k===sel?' selected':''}>${typeLabel[k]}</option>`).join('');
+  const sample=changes.slice(0,50).map(c=>`<tr id="reclass-row-${hrmEsc(c.e.id)}">
+    <td style="padding:3px 8px;font-size:11px">${hrmEsc(c.e.fullName||c.e.name||'')}</td>
+    <td style="padding:3px 8px;font-size:11px;color:var(--muted)">${hrmEsc(c.e.dept||'')}</td>
+    <td style="padding:3px 8px;font-size:11px;color:var(--muted)">${hrmEsc(c.e.title||c.e.position||'')}</td>
+    <td style="padding:3px 8px;font-size:11px">${typeLabel[c.from]} →</td>
+    <td style="padding:3px 8px"><select id="reclass-sel-${hrmEsc(c.e.id)}" style="font-size:11px;padding:2px 4px;border:1px solid var(--rule);border-radius:4px">${_grpOpts(c.to)}</select></td>
+    <td style="padding:3px 8px"><button class="btn-sec" style="font-size:10px;padding:2px 8px" onclick="hrmReclassifyOne('${hrmEsc(c.e.id)}')">💾 Lưu</button></td>
+  </tr>`).join('');
+  const body=`<div style="font-size:12px;margin-bottom:10px">Hệ thống đề xuất phân loại lại <b>${changes.length}</b> nhân sự (theo phòng ban + chức danh). <b>Sửa nhóm từng người</b> ở cột chọn rồi bấm 💾 Lưu, hoặc "Áp dụng tất cả" theo đề xuất:</div>
     <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px;font-size:12px">
       ${cntTo.office?`<span class="chip" style="background:#eaf2e9;color:#27ae60">→ Văn phòng: ${cntTo.office}</span>`:''}
       ${cntTo.crew?`<span class="chip" style="background:#fff3e0;color:#e67e22">→ Thuyền viên: ${cntTo.crew}</span>`:''}
       ${cntTo.expert?`<span class="chip" style="background:#f3eafa;color:#8e44ad">→ Chuyên gia: ${cntTo.expert}</span>`:''}
+      ${cntTo.expert_om?`<span class="chip" style="background:#e0f2f0;color:#16a085">→ Chuyên gia O&M: ${cntTo.expert_om}</span>`:''}
     </div>
-    <div class="tbl-scroll" style="max-height:300px"><table style="width:100%;border-collapse:collapse;border:1px solid var(--rule)"><thead><tr style="background:var(--rule);font-size:11px;text-align:left"><th style="padding:4px 8px">Họ tên</th><th style="padding:4px 8px">Phòng ban</th><th style="padding:4px 8px">Chức danh</th><th style="padding:4px 8px">Đổi nhóm</th></tr></thead><tbody>${sample}</tbody></table></div>
-    ${changes.length>12?`<div style="font-size:11px;color:var(--muted);margin-top:6px">… và ${changes.length-12} người khác.</div>`:''}
-    <div style="font-size:11px;color:var(--muted);margin-top:8px">Nếu có trường hợp đặc biệt, HR có thể sửa tay từng hồ sơ sau khi áp dụng.</div>`;
-  openModal('🔧 Phân loại lại nhóm nhân sự', body, `<button class="btn-ghost" onclick="closeModal()">Hủy</button><button class="btn-primary" onclick="hrmReclassifyApply()">✓ Áp dụng (${changes.length})</button>`);
+    <div class="tbl-scroll" style="max-height:340px"><table style="width:100%;border-collapse:collapse;border:1px solid var(--rule)"><thead><tr style="background:var(--rule);font-size:11px;text-align:left"><th style="padding:4px 8px">Họ tên</th><th style="padding:4px 8px">Phòng ban</th><th style="padding:4px 8px">Chức danh</th><th style="padding:4px 8px">Hiện tại</th><th style="padding:4px 8px">Chọn nhóm</th><th style="padding:4px 8px"></th></tr></thead><tbody>${sample}</tbody></table></div>
+    ${changes.length>50?`<div style="font-size:11px;color:var(--muted);margin-top:6px">… và ${changes.length-50} người khác (áp dụng tất cả để xử lý hết).</div>`:''}`;
+  openModal('🔧 Phân loại lại nhóm nhân sự', body, `<button class="btn-ghost" onclick="closeModal()">Đóng</button><button class="btn-primary" onclick="hrmReclassifyApply()">✓ Áp dụng tất cả theo đề xuất (${changes.length})</button>`);
+}
+/* v3.10.25: lưu nhóm cho MỘT nhân viên ngay trong bảng cảnh báo. */
+function hrmReclassifyOne(empId){
+  if(!hrmCanSeeAll()){ toast('Không có quyền','bad'); return; }
+  const e=HRService.employees().find(x=>x.id===empId); if(!e){ toast('Không tìm thấy NV','bad'); return; }
+  const selEl=document.getElementById('reclass-sel-'+empId); if(!selEl) return;
+  const newType=selEl.value;
+  const typeLabel={office:'Văn phòng', crew:'Thuyền viên', expert:'Chuyên gia', expert_om:'Chuyên gia O&M'};
+  e.type=newType;
+  try{ if(typeof touchRecord==='function') touchRecord(e); }catch(_){}
+  try{ logAuditEvent('hrm_reclassify_one',{id:empId, type:newType}); }catch(_){}
+  saveState();
+  const row=document.getElementById('reclass-row-'+empId);
+  if(row){ row.style.background='#eaf2e9'; row.innerHTML=`<td colspan="6" style="padding:5px 8px;font-size:11px;color:#27ae60">✓ Đã lưu: ${hrmEsc(e.fullName||e.name||'')} → <b>${typeLabel[newType]}</b></td>`; }
+  if(typeof hrmRenderDash==='function') hrmRenderDash();
 }
 function hrmReclassifyApply(){
   if(!hrmCanSeeAll()){ toast('Không có quyền','bad'); return; }
@@ -63962,12 +64205,18 @@ function hrmReclassifyApply(){
   let n=0;
   emps.forEach(e=>{
     const g=_hrmGuessType(e.dept, e.title||e.position);
-    if(g!==(e.type||'office')){ e.type=g; n++; }
+    const cur=e.type||'office';
+    // v3.10.25: KHÔNG HẠ CẤP chuyên gia đã set thủ công. CN Quảng Ngãi gồm CẢ chuyên gia O&M
+    //   lẫn NV Việt Nam khác → guess (theo phòng ban) KHÔNG phân biệt được → nếu để đè sẽ
+    //   biến expert_om/expert đã phân loại đúng thành 'office'. Chỉ áp guess khi KHÔNG hạ cấp.
+    const _rank={office:0, crew:1, expert:2, expert_om:3};
+    const isDowngradeExpert = (cur==='expert_om' || cur==='expert') && (g==='office' || g==='crew');
+    if(g!==cur && !isDowngradeExpert){ e.type=g; n++; }
   });
   try{ logAuditEvent('hrm_reclassify',{count:n}); }catch(e){}
   saveState();
   closeModal();
-  toast(`Đã phân loại lại ${n} nhân sự ✓`,'good');
+  toast(`Đã phân loại lại ${n} nhân sự ✓ (giữ nguyên chuyên gia đã phân loại)`,'good');
   if(typeof hrmRenderDash==='function') hrmRenderDash();
 }
 
@@ -64477,7 +64726,14 @@ function hrmEditEmployee(id){
     ${rowWrap(fld('Người liên hệ khẩn cấp','hrm-f-emergencyContact',e.emergencyContact))}
     <h4 style="font-size:13px;margin:10px 0 6px">Thông tin công việc</h4>
     ${_hrmPositionBlockHtml(e)}
-    ${rowWrap(fld('Chức danh','hrm-f-title',e.title)+sel('Phòng ban','hrm-f-dept',opt([''].concat(HRM_DEPTS),e.dept))+fld('Bộ phận','hrm-f-division',e.division))}
+    ${rowWrap(fld('Chức danh','hrm-f-title',e.title)+sel('Phòng ban','hrm-f-dept',(()=>{
+      // v3.10.25: dropdown Phòng ban dùng DANH MỤC THẬT (HRService.departments) — lưu TÊN phòng ban.
+      //   Trước đây dùng HRM_DEPTS cứng (8 mục), không khớp danh mục app (7 phòng: BOD/KT/HCNS/QLT/TMHD/BDA/CN-QN).
+      const _depts=(HRService.departments()||[]).map(d=>d.name).filter(Boolean);
+      // giữ tương thích: nếu dept hiện tại của NV không nằm trong danh mục (data cũ) → vẫn hiện để không mất
+      if(e.dept && !_depts.some(n=>n===e.dept)) _depts.push(e.dept);
+      return opt([''].concat(_depts), e.dept);
+    })())+fld('Bộ phận','hrm-f-division',e.division))}
     ${rowWrap(sel('Tàu công tác','hrm-f-vessel',vesselOpt)+sel('Quản lý trực tiếp','hrm-f-manager',managerOpt))}
     ${rowWrap(fld('Ngày vào làm','hrm-f-startDate',e.startDate,'date')+fld('Ngày thử việc','hrm-f-probationDate',e.probationDate,'date')+fld('Ngày ký HĐ','hrm-f-contractSignDate',e.contractSignDate,'date'))}
     ${rowWrap(sel('Loại hợp đồng','hrm-f-contractType',opt([''].concat(HRM_CONTRACT_TYPES),e.contractType))+fld('Ngày hết hạn HĐLĐ','hrm-f-contractEndDate',e.contractEndDate,'date')+sel('Liên kết tài khoản đăng nhập','hrm-f-linkUser',userOpt))}
