@@ -3497,7 +3497,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.10.26';            // bumped on each release
+const APP_VERSION='3.10.27';            // bumped on each release
 /* Debug logging: dlog() chỉ in khi DEBUG_MODE bật (mặc định TẮT ở production để
    tránh nhiễu/lộ cấu trúc nội bộ qua DevTools). Bật bằng: localStorage.DEBUG_MODE='1'.
    console.warn/error GIỮ NGUYÊN (cảnh báo & lỗi vận hành luôn hiện). */
@@ -32336,9 +32336,15 @@ async function cashImportReadExcel(inputEl, fundId){
       aoa.forEach(r=>{
         const rawDesc=r.find(c=>typeof c==='string' && norm(c).length>3)||'';
         const desc=norm(rawDesc);
-        // Lấy số TIỀN: >1000 NHƯNG loại số trông giống ngày serial Excel (20000–60000) để không nhầm ngày Ứng quỹ thành tiền.
-        const nums=r.map(c=>Math.round((+String(c||'').replace(/[^\d.-]/g,''))||0))
-                    .filter(n=>n>1000 && !(n>=20000 && n<=60000));
+        // Lấy số TIỀN: CHỈ từ cell kiểu SỐ hoặc chuỗi THUẦN SỐ. v3.10.27 — KHÔNG bóc digits từ cell chữ
+        //   ("THÁNG 1/2026"→12026, "Vinmec 9/2025"→92025 từng bị bắt nhầm thành tiền Thu khác).
+        //   Vẫn loại số trông giống ngày serial Excel (20000–60000).
+        const nums=r.map(c=>{
+          if(typeof c==='number') return Math.round(c);
+          const s=String(c||'').trim();
+          if(/^[\d.,\s]+$/.test(s) && /\d/.test(s)) return Math.round(+s.replace(/[^\d]/g,''))||0;
+          return 0;
+        }).filter(n=>n>1000 && !(n>=20000 && n<=60000));
         const amt=nums.length?nums[0]:0;
         if(desc.includes('ton quy thang truoc')) totalSheet.openingBalance=amt;
         else if(desc.includes('ung quy')) totalSheet.advances+=amt;
@@ -32648,7 +32654,9 @@ function cashImportFilesModal(fundId){
       <td style="padding:7px 9px;font-family:monospace;font-size:12px">${esc(x.month||'—')}</td>
       <td style="padding:7px 9px;font-size:12px">${esc(x.fileName||'—')}<div style="font-size:10px;color:var(--muted)">${x.size?((x.size/1024).toFixed(0)+' KB'):''}</div></td>
       <td style="padding:7px 9px;font-size:11px;color:var(--muted)">${esc(x.importedBy||'')}<div>${x.importedAt?esc(_fmtDOnly(x.importedAt)):''}</div></td>
-      <td style="padding:7px 9px;text-align:right">${x.url?`<a href="${esc(x.url)}" target="_blank" rel="noopener" class="btn-sec" style="font-size:11px;padding:4px 10px;text-decoration:none">📂 Mở đối chiếu</a>`:'<span style="color:var(--muted);font-size:11px">không có link</span>'}</td>
+      <td style="padding:7px 9px;text-align:right;white-space:nowrap">${x.url?`<a href="${esc(x.url)}" target="_blank" rel="noopener" class="btn-sec" style="font-size:11px;padding:4px 10px;text-decoration:none">📂 Mở đối chiếu</a>`:'<span style="color:var(--muted);font-size:11px">không có link</span>'}
+        ${isAdmin()?` <button class="btn-sec" style="font-size:11px;padding:4px 8px;border-color:var(--bad);color:var(--bad)" onclick="cashImportUndoBatch('${fundId}','${esc(x.batchId||'')}','${esc(x.month||'')}')" title="Xóa TOÀN BỘ đợt import này: giao dịch quỹ + phiếu hoàn ứng (giảm P&L) + tính lại số dư">🗑 Xóa đợt</button> <button class="btn-sec" style="font-size:11px;padding:4px 8px" onclick="cashImportDeleteFile('${fundId}','${esc(x.id||'')}')" title="Chỉ xóa record file khỏi danh sách (không đụng dữ liệu sổ; file trên Drive tự xóa tay nếu cần)">🗑 Xóa file</button>`:''}
+      </td>
     </tr>`).join('');
     body=`<div style="font-size:12px;color:var(--muted);margin-bottom:8px">Các file Excel sổ quỹ đã nhập cho quỹ <b>${esc(f.name)}</b> — bấm "Mở đối chiếu" để xem bản gốc trên Drive.</div>
       <div class="tbl-scroll" style="max-height:50vh"><table style="width:100%;border-collapse:collapse;font-size:12px;border:1px solid var(--rule)">
@@ -32656,6 +32664,57 @@ function cashImportFilesModal(fundId){
         <tbody>${rows}</tbody></table></div>`;
   }
   openModal('📎 File sổ quỹ đã nhập — '+esc(f.name), body, `<button class="btn-ghost" onclick="viewCashLedger('${fundId}')">← Về sổ quỹ</button><button class="btn-sec" onclick="closeModal()">Đóng</button>`);
+}
+/* v3.10.26 — XÓA ĐỢT IMPORT sổ quỹ (admin): xóa giao dịch quỹ + phiếu hoàn ứng của đợt (tombstone,
+   chống hồi sinh qua sync), TÍNH LẠI số dư từ giao dịch còn lại (storage là nguồn sự thật).
+   §9: rescue-backup vào localStorage + confirm nêu rõ tác động trước khi xóa. */
+function cashImportUndoBatch(fundId, batchId, month){
+  if(!isAdmin()){ toast('Chỉ Admin được xóa đợt import','bad'); return; }
+  const fund=AccountingService.cashFunds().find(x=>x.id===fundId); if(!fund){ toast('Không tìm thấy quỹ','bad'); return; }
+  const mo=String(month||'').slice(0,7);
+  const txs=(S.cashTxns||[]).filter(t=>t && t.fundId===fundId && /cash_import/.test(t.sourceType||'')
+    && ((batchId && t.sourceId===batchId) || (mo && String(t.date||'').slice(0,7)===mo)));
+  const aps=(S.payables||[]).filter(p=>p && p._cashClear && p._cashFundId===fundId
+    && ((batchId && p._batchId===batchId) || (mo && String(p.issueDate||'').slice(0,7)===mo)));
+  if(!txs.length && !aps.length){ toast('Không tìm thấy dữ liệu của đợt này (đã xóa trước đó?)','warn'); return; }
+  const apSum=aps.reduce((s,p)=>s+(+p.amount||0),0);
+  if(!confirm('XÓA đợt import '+(mo||batchId)+' của quỹ "'+fund.name+'"?\n\n'
+    +'• '+txs.length+' giao dịch quỹ sẽ xóa\n'
+    +'• '+aps.length+' phiếu hoàn ứng sẽ xóa (P&L giảm '+apSum.toLocaleString('vi-VN')+')\n'
+    +'• Số dư quỹ được TÍNH LẠI từ giao dịch còn lại\n\nCó bản cứu hộ trước khi xóa. Tiếp tục?')) return;
+  // rescue-copy trước khi xóa (§9)
+  try{ localStorage.setItem('seahorse_rescue_cashImportUndo', JSON.stringify({at:new Date().toISOString(), fundId, batchId, month:mo,
+    txs:txs.map(t=>JSON.parse(JSON.stringify(t))), aps:aps.map(p=>JSON.parse(JSON.stringify(p)))})); }catch(e){}
+  commitMutation(()=>{
+    try{ markDeleted(txs.map(t=>t.id), 'cashTxns'); }catch(e){}
+    try{ markDeleted(aps.map(p=>p.id), 'payables'); }catch(e){}
+    S.cashTxns=(S.cashTxns||[]).filter(t=>!txs.some(x=>x.id===t.id));
+    S.payables=(S.payables||[]).filter(p=>!aps.some(x=>x.id===p.id));
+    // số dư = tính lại từ giao dịch còn lại của quỹ (nguồn sự thật)
+    let bal=0; (S.cashTxns||[]).forEach(t=>{ if(t.fundId===fundId) bal+=(t.direction==='IN'?1:-1)*(+t.amount||0); });
+    fund.balance=bal;
+    try{ touchRecord(fund); }catch(e){}
+  }, {action:'cash_import_undo', fields:['cashFunds','cashTxns','payables'], onOk:()=>{
+    try{ logAuditEvent('cash_import_undo',{fund:fundId, batchId, month:mo, txs:txs.length, aps:aps.length}); }catch(e){}
+    toast('✓ Đã xóa đợt import '+(mo||'')+' ('+txs.length+' GD + '+aps.length+' phiếu) — số dư đã tính lại','good');
+    renderAll(); viewCashLedger(fundId);
+  }});
+}
+/* v3.10.26 — XÓA RECORD FILE Excel khỏi danh sách "File đã nhập" (admin). KHÔNG đụng dữ liệu sổ;
+   file trên Drive không tự xóa (xóa tay trên Drive nếu cần). */
+function cashImportDeleteFile(fundId, fileId){
+  if(!isAdmin()){ toast('Chỉ Admin được xóa','bad'); return; }
+  const fund=AccountingService.cashFunds().find(x=>x.id===fundId); if(!fund) return;
+  const files=fund.importFiles||[];
+  const rec=files.find(x=>String(x.id||'')===String(fileId));
+  if(!rec){ toast('Không thấy record file','warn'); return; }
+  if(!confirm('Xóa record file "'+(rec.fileName||'')+'" ('+(rec.month||'')+') khỏi danh sách?\n\nChỉ xóa record trong app — KHÔNG đụng dữ liệu sổ quỹ. File trên Drive (nếu còn) xóa tay.')) return;
+  fund.importFiles=files.filter(x=>String(x.id||'')!==String(fileId));
+  try{ touchRecord(fund); }catch(e){}
+  try{ logAuditEvent('cash_import_file_deleted',{fund:fundId, file:rec.fileName||'', month:rec.month||''}); }catch(e){}
+  saveState();
+  toast('✓ Đã xóa record file','good');
+  cashImportFilesModal(fundId);
 }
 /* v3.02.37: Thêm/sửa/xóa giao dịch quỹ tiền mặt THỦ CÔNG (điều chỉnh số dư quỹ). */
 function _cashTxnModal(fundId, dir, t){
