@@ -806,11 +806,11 @@ body.readonly-mode::before{
     </div>
   </div>
 
-  <!-- ════ B1: GOM NHÓM 6 🚢 Hoạt động tàu (operations để Bước 2 — còn data-fin-group) ════ -->
+  <!-- ════ B1: GOM NHÓM 6 🚢 Quản lý hoạt động tàu — v3.10.30: mỗi tàu 1 hàng, mở Trung tâm QL tàu ════ -->
   <div class="nav-group">
-    <button class="nav-item nav-group-btn" data-group="vesselops"><span class="num">🚢</span>Hoạt động tàu <span class="caret">▾</span></button>
+    <button class="nav-item nav-group-btn" data-group="vesselops"><span class="num">🚢</span>Quản lý hoạt động tàu <span class="caret">▾</span></button>
     <div class="nav-submenu" id="submenu-vesselops">
-      <button class="nav-sub-item" data-page="vessels"><span class="sub-dot"></span>ON-OFFHIRE / Đội tàu</button>
+      <!-- v3.10.30: danh sách tàu render động bởi renderVesselOpsSubmenu() — mỗi tàu 1 hàng -->
     </div>
   </div>
 
@@ -3497,7 +3497,7 @@ body.readonly-mode::before{
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.10.27';            // bumped on each release
+const APP_VERSION='3.10.32';            // bumped on each release
 /* Debug logging: dlog() chỉ in khi DEBUG_MODE bật (mặc định TẮT ở production để
    tránh nhiễu/lộ cấu trúc nội bộ qua DevTools). Bật bằng: localStorage.DEBUG_MODE='1'.
    console.warn/error GIỮ NGUYÊN (cảnh báo & lỗi vận hành luôn hiện). */
@@ -13119,6 +13119,18 @@ function applyRoleUI(){
       if(_finGrouped) el.style.display='none';
     });
   }catch(e){}
+  // v3.10.30: dựng danh sách tàu động cho nhóm "Quản lý hoạt động tàu" (mỗi tàu 1 hàng) —
+  //   PHẢI chạy TRƯỚC logic ẩn group rỗng bên dưới, nếu không group sẽ bị ẩn nhầm.
+  //   Gate quyền: giữ nguyên như trang vessels cũ — user phải có tab 'vessels' hoặc 'operations'
+  //   (admin/không giới hạn tabs thấy hết). Người không có quyền → submenu rỗng → group tự ẩn.
+  try{
+    const _canOps = !user || !allowedTabs || allowedTabs.includes('vessels') || allowedTabs.includes('operations') || allowedTabs.includes('op_input');
+    const _opsBox=document.getElementById('submenu-vesselops');
+    if(_opsBox){
+      if(_canOps && typeof renderVesselOpsSubmenu==='function'){ renderVesselOpsSubmenu(); }
+      else { _opsBox.innerHTML=''; }
+    }
+  }catch(e){ console.warn('[vesselops-submenu]',e&&e.message); }
   // Hide group parent button if all submenu children are hidden
   document.querySelectorAll('.nav-group').forEach(g=>{
     if(g.id === 'nav-group-bod') return;  // BOD group handled above
@@ -23904,6 +23916,7 @@ function openModal(title,bodyHtml,footHtml){
   }catch(e){}
 }
 function closeModal(){
+  try{ _vohVid=null; }catch(e){}  // v3.10.30: clear cờ modal khai thác tàu (tránh bung lại nhầm)
   const _m=document.getElementById('modal');
   if(_m) _m.classList.remove('show');
   // v3.09.49 RUNTIME AUDIT: XÓA nội dung modal khi đóng → không để id "ma" của form cũ
@@ -25581,6 +25594,123 @@ function openVesselNotifs(vidArg){
   openModal('📢 Thông báo của tàu', `<div style="font-size:11px;color:var(--muted);margin-bottom:10px">Kết quả xử lý đề nghị/phiếu của tàu và thông báo từ công ty.</div>${rows}`, `<button class="btn-ghost" onclick="closeModal()">Đóng</button>`);
 }
 
+/* v3.10.30: MODAL KHAI THÁC (On/Off-Hire) RIÊNG CỦA 1 TÀU.
+   Bê phần khai báo on-offhire của tàu vào ngay Trung tâm quản lý tàu — khai báo tại chỗ.
+   Đọc trực tiếp VesselService (không phụ thuộc DOM filter của trang vessels).
+   Thao tác thêm/sửa gọi modal chuẩn openEventModal/openDailyReportModal (có preset vesselId)
+   → KHÔNG nhân bản logic on-offhire (tránh drift). Sau khi lưu, các modal chuẩn tự gọi
+   renderEvents/renderDailyReports (cập nhật trang nền); ta refresh lại modal này qua _vohRefresh. */
+let _vohVid=null;
+/* v3.10.30: Dựng submenu "Quản lý hoạt động tàu" — mỗi tàu 1 hàng. Click → Trung tâm QL tàu (Hub).
+   Quyền: admin/KTT/BOD thấy hết; thuyền trưởng/NV chỉ thấy tàu được gán (userAssignedVesselIds).
+   Tất cả tàu (gồm quản lý hộ AFALINA/KATRAN). Không dùng data-page (nút mở modal, không đổi trang). */
+function renderVesselOpsSubmenu(){
+  const box=document.getElementById('submenu-vesselops'); if(!box) return;
+  let vessels=VesselService.vessels().slice();
+  // Lọc theo quyền tàu được gán (nếu là NV có giới hạn) — admin/không giới hạn thấy hết.
+  try{
+    if(typeof userAssignedVesselIds==='function'){
+      const allowed=userAssignedVesselIds();
+      // userAssignedVesselIds trả full list cho admin/KTT; chỉ lọc khi thực sự bị giới hạn.
+      if(Array.isArray(allowed) && allowed.length && allowed.length<vessels.length){
+        const set=new Set(allowed); vessels=vessels.filter(v=>set.has(v.id));
+      }
+    }
+  }catch(e){}
+  // sắp xếp: tàu công ty trước, theo tên
+  vessels.sort((a,b)=>String(a.name||'').localeCompare(String(b.name||'')));
+  if(!vessels.length){ box.innerHTML='<div style="padding:8px 14px;font-size:11px;color:var(--muted);font-style:italic">Chưa có tàu</div>'; return; }
+  box.innerHTML=vessels.map(v=>{
+    const tag=v.type==='SERVICE'?'DV':'KT';
+    return `<button class="nav-sub-item" onclick="openVesselHub('${v.id}')" title="Mở Trung tâm quản lý tàu ${esc(v.name)}"><span class="sub-dot"></span>${esc(v.name)} <span style="font-size:9px;opacity:.6">${tag}</span></button>`;
+  }).join('');
+}
+function openVesselOnHire(vid){
+  const v=VesselService.vessels().find(x=>x.id===vid); if(!v){ toast('Không tìm thấy tàu','bad'); return; }
+  _vohVid=vid;
+  openModal('🛳 Khai thác On/Off-Hire — '+esc(v.name), _vohBody(vid),
+    `<button class="btn-ghost" onclick="openVesselHub('${vid}')">← Trung tâm QL tàu</button>
+     <button class="btn-primary" onclick="openEventModal(null,'${vid}');">+ Thêm đoạn khai thác</button>`);
+}
+function _vohRefresh(){ if(!_vohVid) return; const el=document.getElementById('voh-container'); if(el) el.innerHTML=_vohBody(_vohVid,true); }
+function _vohBody(vid, inner){
+  const v=VesselService.vessels().find(x=>x.id===vid); if(!v) return '';
+  const _showVal=(typeof canSeeFuelPrice==='function')?canSeeFuelPrice():true;
+  const evs=VesselService.events().filter(e=>e.vesselId===vid).sort((a,b)=>new Date(a.startAt||0)-new Date(b.startAt||0));
+  const reps=VesselService.dailyReports().filter(r=>r.vesselId===vid).sort((a,b)=>String(b.date||'').localeCompare(String(a.date||'')));
+  // ---- Bảng đoạn khai thác ----
+  let evRows;
+  if(!evs.length){ evRows='<tr><td class="empty" colspan="'+(_showVal?9:8)+'">Chưa có đoạn nào — bấm "+ Thêm đoạn khai thác"</td></tr>'; }
+  else {
+    // cảnh báo gap
+    const warns=[];
+    for(let i=1;i<evs.length;i++){ const p=evs[i-1],c=evs[i]; if(!p.endAt||!c.startAt) continue;
+      const d=new Date(c.startAt).getTime()-new Date(p.endAt).getTime(); if(d>60000) warns.push(`Khoảng trống ${fmtDays(d/(864e5))} giữa ${fmtDateTime(p.endAt)} và ${fmtDateTime(c.startAt)}`); }
+    evRows=evs.map(e=>{
+      const t=evtType(e.type);
+      const proj=e.projectId?S.projects.find(p=>p.id===e.projectId):null;
+      const days=eventDurationDays(e);
+      const cs={do:eventConsumption(e,'do'),lo:eventConsumption(e,'lo'),fw:eventConsumption(e,'fw')};
+      const vd={do:eventConsumptionValueDetail(e,'do'),lo:eventConsumptionValueDetail(e,'lo'),fw:eventConsumptionValueDetail(e,'fw')};
+      const val=vd.do.valueUsd+vd.lo.valueUsd+vd.fw.valueUsd;
+      const _shortWarn=vd.do.warnShort||vd.lo.warnShort||vd.fw.warnShort;
+      const _valCell = _shortWarn
+        ? `<span title="Tiêu thụ vượt (tồn đầu + bơm) — phần vượt chưa có đơn giá, KHÔNG tính vào giá trị. Kiểm tra lại số liệu nhiên liệu." style="color:var(--warn)">${val?fmt(val):'0'} ⚠</span>`
+        : (val?fmt(val):'—');
+      const ctx=[]; if(proj) ctx.push(`<b>${esc(proj.code)}</b> ${esc(proj.name)}`);
+      if(e.portFrom||e.portTo) ctx.push(`<span style="color:var(--muted)">⚓ ${esc(e.portFrom||'?')} → ${esc(e.portTo||'?')}</span>`);
+      if(e.notes) ctx.push(`<span style="color:var(--muted);font-style:italic">${esc(e.notes)}</span>`);
+      return `<tr>
+        <td><span class="chip ${t.chip}">${t.short}</span></td>
+        <td class="mono" style="font-size:11px">${fmtDateTime(e.startAt)}</td>
+        <td class="mono" style="font-size:11px">${fmtDateTime(e.endAt)}</td>
+        <td class="r mono" style="font-size:11px">${fmtDays(days)}</td>
+        <td style="font-size:11px">${ctx.join(' · ')||'—'}</td>
+        <td class="r mono" style="font-size:11px">${cs.do?fmtNum(cs.do):'—'}</td>
+        <td class="r mono" style="font-size:11px">${cs.lo?fmtNum(cs.lo):'—'}</td>
+        <td class="r mono" style="font-size:11px">${cs.fw?fmtNum(cs.fw):'—'}</td>
+        ${_showVal?`<td class="r mono" style="font-size:11px">${_valCell}</td>`:''}
+        <td class="r"><button class="icon-btn" title="Sửa" onclick="openEventModal('${e.id}','${vid}')">✎</button></td>
+      </tr>`;
+    }).join('');
+    if(warns.length) evRows=`<tr><td colspan="${_showVal?10:9}" style="padding:6px 14px;background:rgba(196,138,57,.1);font-size:11px;color:var(--warn);font-family:var(--font-mono)">⚠ ${warns.join(' · ')}</td></tr>`+evRows;
+  }
+  // ---- Bảng báo cáo ngày ----
+  let drRows;
+  if(!reps.length){ drRows='<tr><td class="empty" colspan="5">Chưa có báo cáo ngày</td></tr>'; }
+  else {
+    drRows=reps.slice(0,60).map(r=>{
+      const fe=(fk)=>{ const f=(r.fuelEnd&&r.fuelEnd[fk])||{}; return f.qty?fmtNum(f.qty)+' '+(f.unit==='phuy'?'phuy':(f.unit||'')):'—'; };
+      return `<tr>
+        <td class="mono" style="font-size:11px">${esc(r.date||'')}</td>
+        <td class="r mono" style="font-size:11px">${fe('do')}</td>
+        <td class="r mono" style="font-size:11px">${fe('lo')}</td>
+        <td class="r mono" style="font-size:11px">${fe('fw')}</td>
+        <td class="r"><button class="icon-btn" title="Sửa" onclick="openDailyReportModal('${r.id}','${vid}')">✎</button></td>
+      </tr>`;
+    }).join('');
+  }
+  const html=`
+    <div style="font-size:11px;color:var(--muted);font-style:italic;margin-bottom:10px">Toàn bộ đoạn khai thác (On/Off-hire/Standby/Dock…) và báo cáo ngày của <b>${esc(v.name)}</b>. Khai báo trực tiếp tại đây.</div>
+    <div style="display:flex;justify-content:space-between;align-items:center;margin:14px 0 6px">
+      <div style="font-family:var(--font-display);font-weight:600;font-size:13px"><span class="tag">⊕</span> Lịch khai thác theo đoạn (${evs.length})</div>
+      <button class="btn-sec" style="font-size:11px" onclick="openEventModal(null,'${vid}')">+ Thêm đoạn</button>
+    </div>
+    <div class="tbl-scroll"><table class="tbl" style="font-size:12px"><thead><tr>
+      <th>Loại</th><th>Bắt đầu</th><th>Kết thúc</th><th class="r">T.gian</th><th>Dự án / Cảng / Ghi chú</th>
+      <th class="r">DO</th><th class="r">LO</th><th class="r">FW</th>${_showVal?'<th class="r">Giá trị</th>':''}<th></th>
+    </tr></thead><tbody>${evRows}</tbody></table></div>
+
+    <div style="display:flex;justify-content:space-between;align-items:center;margin:18px 0 6px">
+      <div style="font-family:var(--font-display);font-weight:600;font-size:13px"><span class="tag">☼</span> Báo cáo hàng ngày (${reps.length}${reps.length>60?' — hiện 60 gần nhất':''})</div>
+      <button class="btn-sec" style="font-size:11px" onclick="openDailyReportModal(null,'${vid}')">+ Thêm BC ngày</button>
+    </div>
+    <div class="tbl-scroll"><table class="tbl" style="font-size:12px"><thead><tr>
+      <th>Ngày</th><th class="r">DO cuối ngày</th><th class="r">LO</th><th class="r">FW</th><th></th>
+    </tr></thead><tbody>${drRows}</tbody></table></div>`;
+  return inner ? html : `<div id="voh-container">${html}</div>`;
+}
+
 /* v3.08.57 (Module tàu — Màn QL tàu tập trung): 1 màn xem tổng quan 1 tàu —
    hồ sơ, thuyền viên, chứng chỉ, kho, email, lịch sử khai thác. Mỗi mục có nút mở chi tiết (hàm sẵn có). */
 function openVesselHub(vid){
@@ -25625,7 +25755,7 @@ function openVesselHub(vid){
       ${card('👥','Thuyền viên',crew.length+' người trên tàu (QĐ điều động + hồ sơ NS).','Xem danh sách',`closeModal();openVesselCrewList('${vid}')`)}
       ${card('📜','Chứng chỉ / Đăng kiểm',nCert+' chứng chỉ'+(nCertDue?' · <b style=\"color:#b8730a\">'+nCertDue+' cần chú ý</b>':''),'Quản lý chứng chỉ',`closeModal();openVesselCerts('${vid}')`,nCertDue?'#b8730a':'')}
       ${card('📦','Kho vật tư',wh?(nStock+' mặt hàng tồn'):'Chưa có kho gắn tàu này.','Mở kho',`closeModal();openStockDocs()`)}
-      ${card('🛳','Khai thác (On/Off-Hire)',events.length+' đoạn · '+nReports+' báo cáo ngày.','Xem khai thác',`closeModal();navTo('vessels')`)}
+      ${card('🛳','Khai thác (On/Off-Hire)',events.length+' đoạn · '+nReports+' báo cáo ngày.','Xem khai thác',`openVesselOnHire('${vid}')`)}
       ${card('📧','Email tàu',v.vesselEmail?hrmEsc(v.vesselEmail):'Chưa cấu hình email tàu.','Gửi chứng từ',`closeModal();sendVesselDocEmail('${vid}')`)}
       ${card('📢','Thông báo',(typeof vesselNotifUnread==='function'&&vesselNotifUnread(vid))?('<b style=\"color:#c0392b\">'+vesselNotifUnread(vid)+' chưa đọc</b>'):'Kết quả xử lý đề nghị/phiếu của tàu.','Xem thông báo',`closeModal();openVesselNotifs('${vid}')`)}
     </div>`;
@@ -25768,6 +25898,100 @@ function _segAutoAssign(record, list){
   }
   // dock: không đụng (chi phí dock theo quy tắc CapEx, không vào P&L)
 }
+
+/* v3.10.31 (yêu cầu Sếp): khi ĐOẠN KHAI THÁC bị sửa/xóa → AP tự gán theo đoạn phải cập nhật theo.
+   CHÍNH SÁCH (Sếp chốt):
+   - CHỈ đụng AP có dấu vết TỰ GÁN (_projectFromSeg hoặc segPhase). AP gán tay: KHÔNG đụng.
+   - Gán lại theo đoạn MỚI phủ đúng ngày HĐ của AP (onhire/transit→projectId; standby/offjob/csb→segPhase;
+     dock hoặc KHÔNG còn đoạn phủ→gỡ về rỗng).
+   - Preview trước, xác nhận mới áp; áp xong touchRecord từng AP.
+   Hàm THUẦN (không đụng DOM/state) — trả danh sách thay đổi để preview + test. */
+function _segRecomputeApChanges(vesselId){
+  const out=[];
+  if(!vesselId) return out;
+  if(!(S.vessels||[]).some(v=>v.id===vesselId)) return out;   // chỉ tàu công ty
+  const aps=(S.payables||[]).filter(r=>r && r.vesselId===vesselId
+      && (r._projectFromSeg || r.segPhase));                    // CHỈ AP tự gán
+  aps.forEach(r=>{
+    const seg=_segForVesselDate(vesselId, r.issueDate||r.date);
+    // Trạng thái đích theo đoạn mới phủ ngày
+    let newProject=null, newFromSeg=null, newPhase=null;
+    if(seg){
+      if(seg.type==='onhire'||seg.type==='transit'){ newProject=seg.projectId||null; newFromSeg=seg.projectId?seg.id:null; }
+      else if(seg.type==='standby'||seg.type==='offjob'||seg.type==='csb'){ newPhase=seg.type; }
+      // dock: để null hết (gỡ)
+    }
+    // Chỉ tính là "thay đổi" nếu projectId auto HOẶC segPhase khác đi.
+    const curProject = r._projectFromSeg ? (r.projectId||'') : '';   // projectId auto hiện tại
+    const curPhase   = r.segPhase || '';
+    const changed = (curProject !== (newProject||'')) || (curPhase !== (newPhase||''));
+    if(!changed) return;
+    out.push({
+      id:r.id, ref:r, partner:r.partner||'', issueDate:r.issueDate||r.date||'',
+      amount:(+r.amountNet||+r.amount||0), ccy:r.ccy||'USD',
+      oldProjectId:r._projectFromSeg?(r.projectId||''):'', oldPhase:curPhase,
+      newProjectId:newProject||'', newFromSeg:newFromSeg||'', newPhase:newPhase||'',
+      segType: seg?seg.type:'(không còn đoạn phủ)'
+    });
+  });
+  return out;
+}
+function _projNameById(pid){ if(!pid) return '—'; const p=(S.projects||[]).find(x=>x.id===pid); return p?((p.code?p.code+' · ':'')+ (p.name||'')):pid; }
+function _phaseLabel(ph){ return ph? ({standby:'Standby',offjob:'Off-job',csb:'Chờ việc (CSB)'}[ph]||ph) : ''; }
+
+/* Áp các thay đổi (sau khi Sếp xác nhận). Ghi projectId/_projectFromSeg/segPhase + touchRecord. */
+function _segApplyApChanges(changes){
+  let n=0;
+  (changes||[]).forEach(c=>{
+    const r=c.ref || (S.payables||[]).find(x=>x.id===c.id);
+    if(!r) return;
+    // projectId & cờ auto
+    if(c.newProjectId){ r.projectId=c.newProjectId; r._projectFromSeg=c.newFromSeg||''; }
+    else { // gỡ liên kết dự án auto (KHÔNG đụng nếu là gán tay — nhưng vào đây nghĩa là AP auto)
+      if(r._projectFromSeg){ r.projectId=''; }
+      r._projectFromSeg='';
+    }
+    // segPhase
+    if(c.newPhase){ r.segPhase=c.newPhase; } else { delete r.segPhase; }
+    try{ touchRecord(r); }catch(e){}
+    n++;
+  });
+  if(n>0){
+    try{ logAuditEvent('ap_reassign_from_segment',{vessel:changes[0]&&changes[0].ref&&changes[0].ref.vesselId, count:n}); }catch(e){}
+    saveState();
+    try{ renderAll(); }catch(e){}
+  }
+  return n;
+}
+
+/* Preview + xác nhận. Gọi sau khi lưu đoạn (nếu có thay đổi). */
+function _segPreviewApReassign(vesselId, afterVid){
+  const changes=_segRecomputeApChanges(vesselId);
+  if(!changes.length) return false;   // không có gì để làm
+  const rows=changes.map(c=>{
+    const oldTxt = c.oldProjectId? _projNameById(c.oldProjectId) : (c.oldPhase? ('⟨'+_phaseLabel(c.oldPhase)+'⟩') : '—');
+    const newTxt = c.newProjectId? _projNameById(c.newProjectId) : (c.newPhase? ('⟨'+_phaseLabel(c.newPhase)+'⟩') : '<span style="color:var(--bad)">— gỡ liên kết —</span>');
+    return `<tr>
+      <td style="padding:6px 10px;font-size:11px">${esc(c.issueDate)}</td>
+      <td style="padding:6px 10px;font-size:11px">${esc(c.partner)||'—'}</td>
+      <td class="r mono" style="padding:6px 10px;font-size:11px">${fmt(toDisplay(c.amount,c.ccy))}</td>
+      <td style="padding:6px 10px;font-size:11px;color:var(--muted)">${oldTxt}</td>
+      <td style="padding:6px 10px;font-size:11px">→ ${newTxt} <span style="font-size:9px;opacity:.6">(${esc(c.segType)})</span></td>
+    </tr>`;
+  }).join('');
+  const body=`
+    <div style="font-size:12px;color:var(--muted);margin-bottom:10px">Đoạn khai thác vừa thay đổi. <b>${changes.length}</b> phiếu chi (AP) <b>tự gán theo đoạn</b> của tàu này cần cập nhật lại dự án/nhãn cho khớp. Phiếu gán tay không bị ảnh hưởng.</div>
+    <div class="tbl-scroll"><table class="tbl" style="font-size:12px;width:100%"><thead><tr>
+      <th style="text-align:left">Ngày HĐ</th><th style="text-align:left">Nhà cung cấp</th><th class="r">Số tiền</th><th style="text-align:left">Dự án/nhãn cũ</th><th style="text-align:left">Cập nhật thành</th>
+    </tr></thead><tbody>${rows}</tbody></table></div>
+    <div style="font-size:10px;color:var(--muted);font-style:italic;margin-top:8px">"— gỡ liên kết —": ngày HĐ không còn đoạn onhire/transit phủ (rơi vào dock hoặc trống) → AP về trạng thái chưa gán dự án.</div>`;
+  // lưu tạm để nút xác nhận dùng
+  window._pendingSegReassign=changes;
+  const foot=`<button class="btn-ghost" onclick="window._pendingSegReassign=null;${afterVid?`openVesselOnHire('${afterVid}')`:'closeModal()'}">Bỏ qua (giữ nguyên)</button>
+    <button class="btn-primary" onclick="(function(){const c=window._pendingSegReassign;window._pendingSegReassign=null;const n=_segApplyApChanges(c);toast('Đã cập nhật '+n+' phiếu AP theo đoạn ✓','good');${afterVid?`openVesselOnHire('${afterVid}')`:'closeModal()'};})()">✓ Áp cập nhật (${changes.length})</button>`;
+  openModal('🔗 Cập nhật dự án cho phiếu AP theo đoạn', body, foot);
+  return true;
+}
 function fmtDays(d){
   if(!d) return '0';
   if(d<1) return (d*24).toFixed(1)+'h';
@@ -25804,19 +26028,50 @@ function toLiters(q,unit,phuyL){
   if(unit==='phuy') return q*(+phuyL||0);
   return q;
 }
+/* v3.10.32 (Sếp chốt): ĐỊNH GIÁ NHIÊN LIỆU TIÊU THỤ THEO FIFO.
+   Mô hình dữ liệu 1 đoạn có 2 lớp giá: tồn đầu (fuelStart.unitPrice) + bơm (fuelPumped.price).
+   FIFO chuẩn: tiêu thụ rút TỒN ĐẦU trước (giá tồn đầu), hết mới rút phần BƠM (giá bơm).
+   Tồn cuối = phần bơm còn lại (dầu cũ đã đốt hết trước). Nếu tiêu thụ > tồn đầu+bơm (nhập lệch):
+   phần VƯỢT không tự đoán giá — trả cờ warnShort để UI cảnh báo (không lấp bằng giá đoán).
+   Hàm THUẦN — nhận số lít + đơn giá USD/L của 2 lớp, trả {valueUsd, warnShort, shortL}. Test được. */
+function _fifoFuelValue(startL, startPriceUsdL, pumpedL, pumpPriceUsdL, consumedL){
+  startL=+startL||0; pumpedL=+pumpedL||0; consumedL=+consumedL||0;
+  startPriceUsdL=+startPriceUsdL||0; pumpPriceUsdL=+pumpPriceUsdL||0;
+  if(consumedL<=0) return {valueUsd:0, warnShort:false, shortL:0};
+  let remain=consumedL, value=0;
+  // Lớp 1: tồn đầu
+  const fromStart=Math.min(remain, startL);
+  value += fromStart*startPriceUsdL; remain -= fromStart;
+  // Lớp 2: bơm
+  const fromPump=Math.min(remain, pumpedL);
+  value += fromPump*pumpPriceUsdL; remain -= fromPump;
+  // Phần vượt (nhập lệch): KHÔNG tự đoán giá
+  const warnShort = remain > 0.0001;
+  return {valueUsd:value, warnShort, shortL: warnShort?remain:0};
+}
+/* Quy đơn giá 1 lớp → USD/lít (xử lý VND→USD + đơn vị chọn → lít). */
+function _fuelUnitPriceUsdPerL(layer){
+  const l=layer||{};
+  const fx=+S.fxRate||25000;
+  const raw = (l.unitPrice!=null && l.unitPrice!=='') ? (+l.unitPrice||0) : (+l.price||0);
+  const priceUsd = (l.priceCcy==='VND') ? (raw/fx) : raw;
+  const unitToL = toLiters(1, l.unit, l.phuyLiters) || 1;   // giá theo đơn-vị-chọn → theo lít
+  return priceUsd/unitToL;
+}
 function eventConsumptionValue(e,fuelKey){
-  // Returns value in USD. If priceCcy is VND, divide by fxRate.
+  // v3.10.32: FIFO. Trả USD (số). Chi tiết cảnh báo lấy qua eventConsumptionValueDetail.
+  return eventConsumptionValueDetail(e,fuelKey).valueUsd;
+}
+function eventConsumptionValueDetail(e,fuelKey){
+  const s=e.fuelStart&&e.fuelStart[fuelKey]||{};
   const p=e.fuelPumped&&e.fuelPumped[fuelKey]||{};
   const consumedL=eventConsumption(e,fuelKey);
-  if(!consumedL) return 0;
-  // Convert price to USD-per-liter
-  const fx=+S.fxRate||25000;
-  const rawPrice=+p.price||0;
-  const priceInUsd = (p.priceCcy==='VND') ? (rawPrice/fx) : rawPrice;
-  // Convert from price-per-chosen-unit → price-per-liter
-  const unitToL=toLiters(1,p.unit,p.phuyLiters)||1;
-  const pricePerL=priceInUsd/unitToL;
-  return consumedL*pricePerL;
+  if(!consumedL || consumedL<=0) return {valueUsd:0, warnShort:false, shortL:0};
+  const startL = toLiters(s.qty, s.unit, s.phuyLiters);
+  const pumpedL = toLiters(p.qty, p.unit, p.phuyLiters);
+  const startPriceUsdL = _fuelUnitPriceUsdPerL(s);
+  const pumpPriceUsdL  = _fuelUnitPriceUsdPerL(p);
+  return _fifoFuelValue(startL, startPriceUsdL, pumpedL, pumpPriceUsdL, consumedL);
 }
 
 /* ============================================================
@@ -25884,15 +26139,15 @@ function reconcileEventWithDaily(e){
   return out;
 }
 
-function openEventModal(eventId){
+function openEventModal(eventId, presetVesselId){
   const isEdit=!!eventId;
   let e=isEdit?VesselService.events().find(x=>x.id===eventId):defaultEvent();
   const _canPrice=canSeeFuelPrice(); // v3.03.33: crew không thấy ô đơn giá/giá trị
   if(isEdit && !e){toast('Không tìm thấy','bad');return;}
   if(!isEdit){
-    // Default vessel: use the one currently filtered, else last event's vessel, else first vessel
+    // v3.10.30: ưu tiên vesselId truyền vào (modal khai thác của 1 tàu). Nếu không có → đọc filter DOM (hành vi cũ).
     const filterEl=document.getElementById('ev-filter-vessel');
-    const filterVid=filterEl?filterEl.value:'';
+    const filterVid=presetVesselId || (filterEl?filterEl.value:'');
     if(filterVid){
       e.vesselId=filterVid;
     } else {
@@ -26234,8 +26489,21 @@ function saveEvent(eid,isEdit){
   syncEventsToOnhires();
   saveState();
   toast('Đã lưu đoạn');
+  const _reopenVoh=_vohVid;  // v3.10.30: chụp trước vì closeModal() sẽ clear _vohVid
   closeModal();
   renderAll();
+  // v3.10.31: SỬA đoạn có thể làm AP tự gán theo đoạn lệch dự án → hiện preview cập nhật (nếu có).
+  //   Chỉ chạy khi SỬA (isEdit) — đoạn mới thêm chưa có AP nào trỏ vào. Preview tự lo mở lại modal khai thác.
+  let _shownReassign=false;
+  try{
+    if(isEdit && typeof _segPreviewApReassign==='function'){
+      _shownReassign=_segPreviewApReassign(vesselId, _reopenVoh||null);
+    }
+  }catch(e){ console.warn('[seg-reassign]',e&&e.message); }
+  // Nếu KHÔNG hiện preview → giữ hành vi cũ: mở lại modal Khai thác của tàu (nếu đang thao tác trong đó).
+  if(!_shownReassign){
+    try{ if(_reopenVoh){ setTimeout(()=>{ if(typeof openVesselOnHire==='function') openVesselOnHire(_reopenVoh); },60); } }catch(e){}
+  }
 }
 
 /* v3.08.56 (Module tàu — mục 7): BIÊN BẢN ON-HIRE / OFF-HIRE.
@@ -26859,10 +27127,16 @@ function _extractDateTime(T){
 function deleteEvent(eid){
   const e=VesselService.events().find(x=>x.id===eid);if(!e)return;
   if(!confirm('Xóa đoạn '+evtType(e.type).label+' ('+fmtDateTime(e.startAt)+')?')) return;
+  const _vid=e.vesselId;                       // v3.10.31: nhớ tàu để re-assign AP sau khi xóa
+  const _reopenVoh=_vohVid;                     // chụp trước closeModal (nó clear _vohVid)
   S.events=VesselService.events().filter(x=>x.id!==eid);
   markDeleted(eid);
   syncEventsToOnhires();
   saveState();closeModal();toast('Đã xóa');renderAll();
+  // v3.10.31: xóa đoạn → AP tự gán có thể mất đoạn phủ → hiện preview cập nhật (nếu có).
+  let _shown=false;
+  try{ if(typeof _segPreviewApReassign==='function') _shown=_segPreviewApReassign(_vid, _reopenVoh||null); }catch(err){ console.warn('[seg-reassign-del]',err&&err.message); }
+  if(!_shown){ try{ if(_reopenVoh){ const _v=_reopenVoh; setTimeout(()=>{ if(typeof openVesselOnHire==='function') openVesselOnHire(_v); },60); } }catch(_){} }
 }
 
 /* Aggregate events back into legacy onhires (per vessel/year/month) so old reports keep working */
@@ -27347,15 +27621,15 @@ function openFuelTracking(vid){
   openModal('⛽ Theo dõi nhiên liệu — '+(v?esc(v.name):'')+' (30 ngày gần nhất)', body, `<button class="btn-ghost" onclick="closeModal()">Đóng</button>`);
 }
 
-function openDailyReportModal(repId){
+function openDailyReportModal(repId, presetVesselId){
   const isEdit=!!repId;
   let r=isEdit?VesselService.dailyReports().find(x=>x.id===repId):defaultDailyReport();
   if(isEdit&&!r){toast('Không tìm thấy báo cáo','bad');return;}
   if(!isEdit){
-    // mặc định: tàu đang lọc, ngày hôm nay — chỉ trong tàu được gán
+    // v3.10.30: ưu tiên vesselId truyền vào (modal khai thác 1 tàu), else đọc filter DOM (hành vi cũ).
     const _allowed=(typeof userAssignedVesselIds==='function')?userAssignedVesselIds():VesselService.vessels().map(v=>v.id);
     const fEl=document.getElementById('dr-filter-vessel');
-    const filterVid=(fEl&&fEl.value)||'';
+    const filterVid=presetVesselId || (fEl&&fEl.value)||'';
     r.vesselId=(filterVid && _allowed.includes(filterVid)) ? filterVid : (_allowed[0]||'');
     r.date=todayISO();
   }
@@ -27449,9 +27723,11 @@ function saveDailyReport(repId){
   if(typeof touchRecord==='function') touchRecord(r);
   saveState();
   try{ logAuditEvent('daily_report_'+(repId?'edit':'add'),{vessel:vesselId,date}); }catch(e){}
+  const _reopenVoh=_vohVid;  // v3.10.30: chụp trước closeModal
   closeModal();
   renderDailyReports();
   toast('Đã lưu báo cáo ngày');
+  try{ if(_reopenVoh){ setTimeout(()=>{ if(typeof openVesselOnHire==='function') openVesselOnHire(_reopenVoh); },60); } }catch(e){}
 }
 function deleteDailyReport(repId){
   const r=VesselService.dailyReports().find(x=>x.id===repId);
