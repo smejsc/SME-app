@@ -6,7 +6,7 @@
    để force trình duyệt invalidate cache cũ.
 */
 
-const SW_VERSION = 'v3.12.35';
+const SW_VERSION = 'v3.12.36';
 const CACHE_NAME = `seahorse-${SW_VERSION}`;
 
 // Pre-cache critical files on install
@@ -64,34 +64,30 @@ self.addEventListener('fetch', event => {
   const isHTML = req.mode === 'navigate' || url.pathname.endsWith('.html') || url.pathname.endsWith('/');
 
   if (isHTML) {
-    // v3.10.03: NETWORK-FIRST + TIMEOUT cho index.html.
-    //   Ưu tiên mạng (bản mới nhất). Mạng YẾU (>3.5s chưa về) → dùng cache ngay (không treo màn trắng),
-    //   vẫn cập nhật cache ngầm cho lần sau. Mất mạng/offline → fallback cache. Không có cache → chờ mạng.
+    // v3.12.35 — CACHE-FIRST + CẬP NHẬT NỀN (stale-while-revalidate) cho index.html.
+    //   FIX "mở app chậm": trước đây network-first chờ mạng tải 5.2MB (tới 3.5s) MỖI lần mở
+    //   dù cache có bản y hệt. Giờ: có cache → phục vụ NGAY (mở tức thì, cả offline/mạng yếu),
+    //   fetch nền cập nhật cache cho lần sau. BẢN MỚI vẫn được phát hiện như cũ qua
+    //   version.json (không cache) + checkForUpdate (auto chạy lúc boot) → auto-reload,
+    //   lúc reload cache đã được fetch nền cập nhật → lên bản mới nhanh. SW_VERSION bump
+    //   khi release vẫn xóa cache cũ + precache bản mới như trước.
     event.respondWith((async () => {
-      const cachedPromise = caches.match(req);
-      const networkPromise = fetch(req, {cache:'no-store'}).then(res => {
+      const cached = await caches.match(req);
+      const networkUpdate = fetch(req, {cache:'no-store'}).then(res => {
         if (res.ok) {
           const clone = res.clone();
           caches.open(CACHE_NAME).then(c => c.put(req, clone));
         }
         return res;
-      });
-      // Nếu mạng chậm >3.5s: dùng cache (nếu có) để không treo; mạng vẫn chạy nền cập nhật cache.
-      const timeoutFallback = new Promise(resolve => setTimeout(async () => {
-        const c = await cachedPromise;
-        resolve(c || null);
-      }, 3500));
-      try {
-        const winner = await Promise.race([networkPromise.catch(() => null), timeoutFallback]);
-        if (winner) return winner;                       // mạng về kịp HOẶC timeout có cache
-        // tới đây: mạng chưa về + chưa có cache trong 3.5s → chờ hẳn mạng
-        const net = await networkPromise.catch(() => null);
-        if (net) return net;
-        // mạng fail hẳn → cache cuối cùng
-        return (await cachedPromise) || caches.match('./index.html');
-      } catch (e) {
-        return (await cachedPromise) || caches.match('./index.html');
+      }).catch(() => null);
+      if (cached) {
+        // Có cache → trả ngay; mạng chạy nền cập nhật (không await)
+        return cached;
       }
+      // Chưa có cache (lần cài đầu) → chờ mạng; fail → thử cache index chung
+      const net = await networkUpdate;
+      if (net) return net;
+      return caches.match('./index.html');
     })());
   } else {
     // Cache-first for assets
