@@ -1006,7 +1006,7 @@ span.chip.chip-fixed{display:inline-flex;align-items:center;gap:4px}
        hẳn tab "Dự án & tiến độ" cũ, tab đó VẪN GIỮ NGUYÊN khóa cũ trong Báo cáo, không đụng gì):
        tab MỚI HOÀN TOÀN, chứa đúng nội dung đã chuyển từ Danh mục (form Tạo dự án + Danh sách/Sửa/
        Xóa) — dùng cơ chế tick quyền bình thường (canAccessTab('project_data')), không khóa cứng
-       KTT/BOD như tab cũ. */
+       KTT/BOD như tab cũ. -->
   <button class="nav-item" data-page="project_data"><span class="num">📐</span>Dự án</button>
   <!-- v3.10.55 (Sếp): hub TCKT thành NHÓM DROPDOWN — các mục trên dashboard thành tab cho gọn.
        Hiện/ẩn cùng cơ chế _finGrouped (chỉ admin dùng giao diện gom; NV giữ nav cũ). -->
@@ -3848,7 +3848,7 @@ const WH_TYPES = {
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.20.118';
+const APP_VERSION='3.20.120';
 /* HOTFIX 3.12.17-email: CHẶN TRIỆT ĐỂ gửi email TỰ ĐỘNG (mất kiểm soát — spam quota Google).
    Email phải do NV được phân quyền CHỦ ĐỘNG chọn gửi. Cờ này:
    (1) chặn auto-SCAN tạo email (hrmScanExpiries/vesselCertScanExpiries);
@@ -51527,9 +51527,21 @@ function whKuGroupPick(items, pickedIdx){
   if(!picked.length) return {ok:false, reason:'Chưa tick món nào'};
   const lenders=[...new Set(picked.map(it=>String(it.lender||'').trim()))];
   if(lenders.length>1) return {ok:false, reason:'Các món đã chọn thuộc '+lenders.length+' ngân hàng khác nhau ('+lenders.join(' · ')+') — mỗi khế ước chỉ một ngân hàng'};
-  const ccys=[...new Set(picked.map(it=>it.ccy||'VND'))];
-  if(ccys.length>1) return {ok:false, reason:'Các món đã chọn có '+ccys.length+' loại tiền ('+ccys.join(' · ')+') — mỗi khế ước chỉ một loại tiền'};
-  return {ok:true, picked, lender:lenders[0], ccy:ccys[0], total:picked.reduce((s,it)=>s+(+it.amount||0),0)};
+  /* v3.20.120 (Sếp xác nhận: vay VNĐ thật, RUB chỉ là hình thức chi — bỏ ràng buộc "cùng loại tiền"):
+     cho gộp NHIỀU loại tiền tệ khác nhau vào 1 khế ước, miễn cùng ngân hàng — khế ước gộp ra LUÔN LÀ
+     VNĐ. Khoản ngoại tệ BẮT BUỘC đã có tỷ giá (điền qua "VNĐ tương đương" ở màn này) mới gộp được —
+     thiếu thì chặn, liệt kê rõ đúng khoản nào còn thiếu để NV quay lại điền trước. */
+  const missingFx=[];
+  const vndAmt=(it)=>{
+    if((it.ccy||'VND')==='VND') return +it.amount||0;
+    const r=_loanPayRec(it); const p=r&&(r.payments||[])[it.idx];
+    const rate=p?(+p.fxRate||0):0;
+    if(rate<=0){ missingFx.push((it.partner||'')+' ('+it.amount.toLocaleString('vi-VN')+' '+it.ccy+')'); return 0; }
+    return Math.round(rate*it.amount);
+  };
+  const totals=picked.map(vndAmt);
+  if(missingFx.length) return {ok:false, reason:'Chưa điền "VNĐ tương đương" cho: '+missingFx.join(', ')+' — điền xong mới gộp được.'};
+  return {ok:true, picked, lender:lenders[0], ccy:'VND', total:totals.reduce((s,v)=>s+v,0)};
 }
 /* v3.18.62: đợt GIẢI NGÂN nằm ở CẢ payables (AP) lẫn opTransactions (chi hộ). Quét chung qua helper —
    item mang src:'ap'|'op' để các màn KUNN tìm lại đúng bản ghi. */
@@ -51554,38 +51566,44 @@ function kuDraftItemsAll(){
 function kuDraftOrganize(){
   const {drafts, items}=kuDraftItemsAll();
   if(!items.length){ toast('Không còn khoản giải ngân nào trong khế ước nháp','warn'); return; }
-  /* v3.20.118 (Sếp: "làm sao để thêm tỷ giá cho đồng RUB?" — hỏi ngay tại màn này): các khoản giải
-     ngân CŨ (trước khi có ô tỷ giá ở bước ghi giải ngân, v3.20.106) chưa có pay.fxRate lưu kèm — màn
-     Tạo KUNN cuối cùng chỉ CẢNH BÁO thiếu, chưa có chỗ nhập ngay. Thêm cột "Tỷ giá → VND" NGAY TẠI
-     ĐÂY cho các khoản không phải VNĐ — nhập xong lưu thẳng vào đúng payment gốc (p.fxRate), bước Tạo
-     KUNN sau sẽ tự đọc đúng, không cần "bù tay" vào tổng nữa. */
+  /* v3.20.120 (Sếp xác nhận: vay VNĐ thật — RUB chỉ là hình thức chi cụ thể, không phải bản chất
+     khoản nợ ngân hàng → quy đổi hẳn về VNĐ là ĐÚNG, không làm sai lệch chênh lệch tỷ giá thật vì
+     không có khoản nợ ngoại tệ thật nào để theo dõi tiếp): đổi ô "Tỷ giá → VND" thành "VNĐ tương
+     đương" — NV gõ ĐÚNG số tiền VNĐ đã thấy trên sao kê ngân hàng (không cần tự tính tỷ giá NH), app
+     tự suy ngược ra tỷ giá = VNĐ tương đương ÷ số tiền ngoại tệ, lưu y hệt vào p.fxRate như trước
+     (mọi chỗ đọc fxRate phía sau không cần đổi gì). Đồng thời BỎ ràng buộc "cùng loại tiền" khi gộp
+     (whKuGroupPick) — cho tick nhiều loại tiền tệ khác nhau, miễn cùng 1 ngân hàng; khế ước gộp ra
+     luôn là VNĐ (cộng đúng: khoản gốc VNĐ + khoản ngoại tệ đã quy đổi theo VNĐ tương đương đã điền). */
   const fxItems=items.map((it,i)=>({...it, _fx:(()=>{ try{ const r=_loanPayRec(it); const p=r&&(r.payments||[])[it.idx]; return p?(+p.fxRate||0):0; }catch(e){ return 0; } })()}));
   const body=`
-    <div style="font-size:11px;color:var(--muted);margin-bottom:8px">Tick các món thuộc <b>cùng một khế ước thật</b> (cùng ngân hàng, cùng loại tiền) rồi bấm <b>Tạo khế ước</b>. Lặp lại để chia thành nhiều KUNN. Sau đó ✎ điền số KUNN · lãi suất · kỳ hạn trên từng khế ước.</div>
-    <div style="font-size:11px;color:var(--muted);margin-bottom:8px">Khoản ngoại tệ chưa có tỷ giá (ghi trước bản cập nhật) → điền vào cột "Tỷ giá → VND" ngay tại đây, lưu thẳng vào phiếu gốc — không cần bù tay lúc Tạo KUNN nữa.</div>
+    <div style="font-size:11px;color:var(--muted);margin-bottom:8px">Tick các món thuộc <b>cùng một khế ước thật</b> (cùng ngân hàng — nhiều loại tiền tệ khác nhau vẫn gộp chung được, vì bản chất là vay VNĐ) rồi bấm <b>Tạo khế ước</b>. Lặp lại để chia thành nhiều KUNN. Sau đó ✎ điền số KUNN · lãi suất · kỳ hạn trên từng khế ước.</div>
+    <div style="font-size:11px;color:var(--muted);margin-bottom:8px">Khoản ngoại tệ → điền vào cột "VNĐ tương đương" đúng số tiền VNĐ đã thấy trên sao kê ngân hàng (không cần tự tính tỷ giá) — app tự suy ra tỷ giá, lưu thẳng vào phiếu gốc. Phải điền xong mới gộp được khoản đó.</div>
     <label style="font-size:12px;display:block;margin-bottom:6px"><input type="checkbox" id="ko-all" onchange="document.querySelectorAll('.ko-ck').forEach(c=>c.checked=this.checked)"> <b>Chọn tất cả</b> (${items.length} món)</label>
     <div class="tbl-scroll" style="max-height:340px;overflow:auto"><table class="table" style="font-size:12px;width:100%">
-      <thead><tr><th></th><th>Ngân hàng</th><th>Ngày</th><th>Phiếu / NCC</th><th style="text-align:right">Số tiền</th><th>Tỷ giá → VND</th><th>Đang ở nháp</th></tr></thead>
-      <tbody>${fxItems.map((it,i)=>`<tr>
+      <thead><tr><th></th><th>Ngân hàng</th><th>Ngày</th><th>Phiếu / NCC</th><th style="text-align:right">Số tiền</th><th>VNĐ tương đương</th><th>Đang ở nháp</th></tr></thead>
+      <tbody>${fxItems.map((it,i)=>{
+        const vnd=it.ccy==='VND'?it.amount:Math.round((it._fx||0)*it.amount);
+        return `<tr>
         <td><input type="checkbox" class="ko-ck" id="ko-ck-${i}"></td>
         <td style="font-size:11px">${esc(it.lender)}</td>
         <td style="font-family:var(--font-mono);font-size:11px">${esc(it.date)}</td>
         <td style="font-size:11px">${esc(it.partner)}${it.invoiceNo?' · '+esc(it.invoiceNo):''}</td>
         <td class="num" style="text-align:right">${it.amount.toLocaleString('vi-VN')} ${esc(it.ccy)}</td>
-        <td>${it.ccy==='VND'?'<span style="color:var(--muted)">—</span>':`<input type="number" step="any" value="${it._fx||''}" placeholder="VD: 1 ${esc(it.ccy)} ≈ ... VND" style="width:130px;font-size:11px;padding:3px" onchange="_koSetFxRate(${i},this.value)">`}</td>
+        <td>${it.ccy==='VND'?'<span style="color:var(--muted)">—</span>':`<input type="number" step="any" value="${vnd||''}" placeholder="VD: theo sao kê NH" style="width:150px;font-size:11px;padding:3px" onchange="_koSetVndEquiv(${i},this.value)"> <span style="font-size:10px;color:var(--muted)">VNĐ</span>`}</td>
         <td style="font-size:10px;color:var(--muted)">${esc((drafts.find(d=>d.id===it.loanId)||{}).startDate||'')}</td>
-      </tr>`).join('')}</tbody></table></div>
+      </tr>`;}).join('')}</tbody></table></div>
     <div id="ko-err" style="color:var(--bad);font-size:13px;min-height:14px;margin-top:6px"></div>`;
   openModal('📑 Chia các khoản giải ngân thành khế ước (KUNN)', body,
     `<button class="btn-ghost" onclick="closeModal()">Đóng</button>
      <button class="btn-primary" onclick="kuDraftOrganizeSave()">➕ Tạo khế ước từ các món đã chọn</button>`);
   window._kuOrgItems=items;
 }
-function _koSetFxRate(i, val){
+function _koSetVndEquiv(i, val){
   const items=window._kuOrgItems||[]; const it=items[i]; if(!it) return;
-  const rate=+val||0;
+  const vnd=+val||0;
+  const rate=(+it.amount>0)?(vnd/it.amount):0;
   const r=_loanPayRec(it); const p=r&&(r.payments||[])[it.idx];
-  if(p){ p.fxRate=rate; try{ touchRecord(r); }catch(e){} try{ saveState(); }catch(e){} toast('✓ Đã lưu tỷ giá '+rate.toLocaleString('vi-VN')+' cho khoản '+(it.partner||''),'good'); }
+  if(p){ p.fxRate=rate; try{ touchRecord(r); }catch(e){} try{ saveState(); }catch(e){} toast('✓ Đã lưu — '+it.amount.toLocaleString('vi-VN')+' '+it.ccy+' ≈ '+vnd.toLocaleString('vi-VN')+' VNĐ (tỷ giá suy ra: '+rate.toLocaleString('vi-VN')+')','good'); }
 }
 function kuDraftOrganizeSave(){
   const err=document.getElementById('ko-err'); if(err) err.textContent='';
@@ -51599,7 +51617,13 @@ function kuDraftOrganizeSave(){
   commitMutation(()=>{
     const tmpl=AccountingService.loans().find(x=>x.id===srcIds[0]);
     let dest;
-    if(allOfOne){ dest=tmpl; }
+    if(allOfOne){
+      dest=tmpl;
+      /* v3.20.120: dù không tạo khế ước mới, vẫn phải áp đúng quy đổi VNĐ (trước đây bỏ sót — nháp
+         100% ngoại tệ chọn trọn vẹn 1 mình sẽ KHÔNG được quy đổi gì cả nếu thiếu dòng này). */
+      dest.ccy=g.ccy; dest.principal=g.total;
+      try{ touchRecord(dest); }catch(e){}
+    }
     else{
       dest={ id:'LOAN-'+uid().slice(-6), bankName:tmpl.bankName, lender:g.lender, loanType:'unscheduled', contractNo:'',
         principal:0, ccy:g.ccy, interestRate:0, termMonths:0, startDate:g.picked[0].date||tmpl.startDate, endDate:'',
