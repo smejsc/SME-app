@@ -975,6 +975,7 @@ span.chip.chip-fixed{display:inline-flex;align-items:center;gap:4px}
         <button class="ktt-allowed-item" onclick="closeAdminMenu();openDupChecker()" title="Quét chứng từ trùng MỌI nơi (Phải trả / Phải thu / Thu-Chi hộ — gồm cả bản không có số HĐ) — xem, sửa, xóa từng bản; KHÔNG tự động xóa"><span class="ico">🔍</span>Kiểm tra chứng từ trùng</button>
         <button class="ktt-allowed-item" onclick="closeAdminMenu();openAmountAuditTool()" title="Quét MỌI phiếu (Phải trả / Phải thu / Thu-Chi hộ) tìm Tổng (sau VAT) bị lệch bất thường so với (chưa VAT + VAT) — hậu quả lỗi parse số. Liệt kê để rà &amp; sửa; KHÔNG tự sửa."><span class="ico">🧮</span>Quét số tiền bất thường</button>
         <button class="admin-only-item" onclick="closeAdminMenu();openHrmDedup()" title="Dọn hồ sơ nhân viên trùng do import Excel nhiều lần. Có backup + preview + xác nhận."><span class="ico">🧹</span>Dọn hồ sơ NV trùng</button>
+        <button class="admin-only-item" onclick="closeAdminMenu();openFeeCcyAudit()" title="v3.20.114: rà các khoản Thu-Chi hộ ghi phí ngân hàng USD/EUR bất thường (nghi bị nhầm tiền tệ do lỗi mặc định sai trước đây) — chỉ liệt kê, không tự sửa."><span class="ico">🔍</span>Rà phí NH nhầm tiền tệ</button>
         <div class="menu-group-head">📧 Email</div>
         <button class="admin-only-item" onclick="closeAdminMenu();openEmailHistory()" title="Lịch sử email hệ thống đã gửi — tìm kiếm, xem lại nội dung, trạng thái."><span class="ico">📧</span>Lịch sử Email</button>
         <button class="admin-only-item" onclick="closeAdminMenu();openEmailDrafts()" title="Bản nháp email đã lưu — mở để sửa và gửi sau."><span class="ico">📝</span>Bản nháp Email</button>
@@ -3847,7 +3848,7 @@ const WH_TYPES = {
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.20.113';
+const APP_VERSION='3.20.115';
 /* HOTFIX 3.12.17-email: CHẶN TRIỆT ĐỂ gửi email TỰ ĐỘNG (mất kiểm soát — spam quota Google).
    Email phải do NV được phân quyền CHỦ ĐỘNG chọn gửi. Cờ này:
    (1) chặn auto-SCAN tạo email (hrmScanExpiries/vesselCertScanExpiries);
@@ -66375,6 +66376,40 @@ function _canConfirmOpTT(){
   if(typeof canConfirmPayment==='function' && canConfirmPayment()) return true;
   return false;
 }
+/* v3.20.114 (Sếp: "rà và liệt kê đúng các khoản nghi ngờ để Sếp xác nhận từng khoản trước khi sửa
+   dữ liệu — không tự động sửa hàng loạt"): CHỈ LIỆT KÊ, không tự sửa gì. Dấu hiệu nghi ngờ: phí ngân
+   hàng (bankFee+otherFee) ghi bằng USD/EUR nhưng SỐ LỚN BẤT THƯỜNG cho 1 khoản phí chuyển tiền thật
+   (phí NH thông thường vài chục USD/EUR, không phải hàng nghìn/chục nghìn) — đúng dấu hiệu của số
+   tiền lẽ ra là VNĐ bị lưu nhầm tiền tệ do lỗi mặc định sai (đã vá ở form, xem ghi chú trên). */
+function openFeeCcyAudit(){
+  if(!isAdmin()){ toast('Chỉ admin','bad'); return; }
+  const THRESH=200;   // phí NH thật hiếm khi vượt 200 USD/EUR cho 1 lần chuyển
+  const rows=(VesselService.opTransactions()||[]).filter(t=>{
+    if(!t || t._deleted) return false;
+    const fc=t.feeCcy||''; if(fc!=='USD' && fc!=='EUR') return false;
+    const fee=(+t.bankFee||0)+(+t.otherFee||0);
+    return fee>THRESH;
+  }).sort((a,b)=>((+b.bankFee||0)+(+b.otherFee||0))-((+a.bankFee||0)+(+a.otherFee||0)));
+  const body=rows.length?`
+    <div style="font-size:11px;color:var(--muted);margin-bottom:8px">Liệt kê các khoản Thu-Chi hộ ghi phí ngân hàng bằng USD/EUR vượt ${THRESH} — bất thường cho 1 khoản phí chuyển tiền thật, nghi số tiền lẽ ra là VNĐ bị lưu nhầm tiền tệ. <b>CHƯA sửa gì</b> — bấm vào từng dòng để mở lại, tự kiểm và sửa đúng tiền tệ nếu đúng là nhầm.</div>
+    <table class="table" style="font-size:12px;width:100%">
+      <thead><tr><th>Tàu/Diễn giải</th><th>Ngày</th><th>Tiền GD</th><th style="text-align:right">Phí NH ghi nhận</th><th></th></tr></thead>
+      <tbody>${rows.map(t=>{
+        const v=(VesselService.opVessels()||[]).find(x=>x.id===t.vesselId);
+        const fee=(+t.bankFee||0)+(+t.otherFee||0);
+        return `<tr style="border-top:1px solid var(--rule)">
+          <td>${esc((v&&v.name)||'?')} <span style="color:var(--muted)">· ${esc((t.desc||t.vendor||'').slice(0,40))}</span></td>
+          <td style="font-family:var(--font-mono);font-size:11px">${esc(t.date||t.paidDate||'')}</td>
+          <td>${esc(t.ccy||'')}</td>
+          <td style="text-align:right;font-family:monospace;color:var(--bad);font-weight:600">${fee.toLocaleString('vi-VN')} ${esc(t.feeCcy)}</td>
+          <td><button class="btn-sec" style="font-size:11px" onclick="closeModal();confirmOpPayment('${t.id}')">Mở kiểm tra</button></td>
+        </tr>`;
+      }).join('')}</tbody>
+    </table>`
+    : '<div class="empty" style="padding:24px;text-align:center;color:var(--good)">✓ Không thấy khoản nào nghi ngờ (phí USD/EUR vượt '+THRESH+')</div>';
+  openModal('🔍 Rà phí ngân hàng nghi nhầm tiền tệ ('+rows.length+')', body,
+    `<button class="btn-sec" onclick="closeModal()">Đóng</button>`);
+}
 function confirmOpPayment(id){
   if(!_canConfirmOpTT()){
     toast('Bạn không có quyền xác nhận thanh toán (cần quyền KT viên) — liên hệ admin','bad');
@@ -66640,7 +66675,15 @@ function editOpFees(id){
       <div class="field">
         <label>Tiền tệ của phí</label>
         <select id="op-fee-ccy" onchange="opFeeCcyChanged()">
-          ${OP_CURRENCIES.map(c=>`<option value="${c}" ${c===(t.feeCcy||t.ccy||'VND')?'selected':''}>${c}</option>`).join('')}
+          <!-- v3.20.114 (Sếp: "phí ngân hàng ở phê duyệt đang mặc định theo tiền giao dịch (USD/EUR)
+               — điền số VNĐ mà nhảy sang USD/EUR, tài khoản MB âm sâu"): TÌM RA GỐC — mặc định trước
+               (t.feeCcy||t.ccy||'VND') tự chọn ĐÚNG tiền giao dịch khi feeCcy chưa lưu; giao dịch
+               USD/EUR → ô này tự chọn sẵn USD/EUR, NV không để ý gõ số theo đầu VNĐ vào đó → hiểu
+               nhầm số VNĐ thành USD/EUR, trừ sai tài khoản. Mọi form phí khác trong app (Bảng kê,
+               AP thường, Tạm ứng) đều mặc định VNĐ sẵn kèm ghi chú "phí NH thường thu VNĐ" — form
+               này bị sót. Bỏ hẳn fallback theo t.ccy — luôn mặc định VNĐ trừ khi feeCcy đã lưu sẵn
+               (sửa hồ sơ cũ, giữ đúng lựa chọn cũ của NV). -->
+          ${OP_CURRENCIES.map(c=>`<option value="${c}" ${c===(t.feeCcy||'VND')?'selected':''}>${c}</option>`).join('')}
         </select>
       </div>
       <div class="field">
@@ -75019,11 +75062,16 @@ function whMergeQuoteRows(rows, parsed, anchorApId, label, invoiceNo){
      không đổi) — không xóa dòng chi tiết đã có từ lần trước. */
   const apRefRows=(rows||[]).filter(r=>r.isApRef);
   let targetApId=null;
+  /* v3.20.115 (Sếp: "Hóa đơn tại AP: 37, số trên hóa đơn import 00037: app tự cho không khớp"): TÌM
+     RA LỖI — so khớp trước đây là SO CHUỖI Y HỆT TỪNG KÝ TỰ, "37" khác "00000037" (đúng chuẩn hóa
+     đơn điện tử có số 0 đứng đầu) nên báo không khớp dù là cùng 1 số. Chuẩn hóa: bỏ ký tự không phải
+     chữ/số, rồi bỏ số 0 thừa ở đầu — "37" và "00000037" giờ khớp đúng. */
+  const _normInv=s=>String(s||'').replace(/[^a-z0-9]/gi,'').replace(/^0+(?=.)/,'').toLowerCase();
   if(apRefRows.length<=1){
     targetApId=(apRefRows[0]||{apId:anchorApId}).apId||anchorApId;
   } else {
-    const inv=String(invoiceNo||'').trim().toLowerCase();
-    const match=inv?apRefRows.find(r=>String(r.invoiceNo||'').trim().toLowerCase()===inv):null;
+    const inv=_normInv(invoiceNo);
+    const match=inv?apRefRows.find(r=>_normInv(r.invoiceNo)===inv):null;
     if(!match){
       return { rows, error:'Số hóa đơn "'+(invoiceNo||'(trống)')+'" trong file không khớp với dòng AP nào trên phiếu ('+apRefRows.length+' dòng AP, mỗi dòng 1 số hóa đơn khác nhau) — kiểm lại số hóa đơn trong file, hoặc sửa đúng "Số hóa đơn" trên dòng AP tương ứng rồi import lại.' };
     }
@@ -75169,7 +75217,7 @@ function _usiRender(){
         <td style="padding:5px 6px;text-align:right;font-size:11px">${isManual?`<input type="number" value="${r.price||0}" style="width:88px;font-size:11px;padding:3px;text-align:right;border:1px solid var(--rule)" onchange="_usiSet(${i},'price',+this.value||0);_usiRecalcRow(${i})">`:(r.price?(+r.price).toLocaleString('vi-VN'):'—')}</td>
         <td style="padding:5px 6px;text-align:right;font-size:11px;font-weight:600">${(r.amount||0).toLocaleString('vi-VN')}</td>
         <td style="padding:5px 6px;text-align:right;font-size:11px;${r.received?'color:#1e7d44;font-weight:600':'color:var(--muted)'}">${r.received||'—'}</td>
-        <td style="padding:5px 6px"><input type="number" value="${r.orderedQty}" placeholder="SL" title="Số lượng theo đúng đơn hàng / báo giá" style="width:64px;font-size:11px;padding:4px;text-align:right" ${r.picked?'':'disabled'} onchange="_usiSet(${i},'orderedQty',this.value);${isManual?`_usiRecalcRow(${i})`:''}">${isManual?`<input value="${esc(r.unit||'')}" placeholder="ĐVT" style="width:44px;font-size:11px;padding:4px;margin-left:2px" onchange="_usiSet(${i},'unit',this.value)">`:(r.unit?` <span style="font-size:10px;color:var(--muted)">${esc(r.unit)}</span>`:'')}</td>
+        <td style="padding:5px 6px"><div style="display:flex;gap:2px;align-items:center"><input type="number" value="${r.orderedQty}" placeholder="SL" title="Số lượng theo đúng đơn hàng / báo giá" style="width:48px;font-size:11px;padding:4px;text-align:right;flex-shrink:0" ${r.picked?'':'disabled'} onchange="_usiSet(${i},'orderedQty',this.value);${isManual?`_usiRecalcRow(${i})`:''}">${isManual?`<input value="${esc(r.unit||'')}" placeholder="ĐVT" style="width:38px;font-size:11px;padding:4px;flex-shrink:0" onchange="_usiSet(${i},'unit',this.value)">`:(r.unit?`<span style="font-size:10px;color:var(--muted);white-space:nowrap">${esc(r.unit)}</span>`:'')}</div></td>
         <td style="padding:5px 6px">${r.code?`<input value="${esc(r.code)}" list="usi-codes" title="Mã FAST — app đã tự khớp theo tên, kiểm lại nếu cần" style="width:110px;font-size:11px;padding:4px;font-family:monospace" ${r.picked?'':'disabled'} onchange="_usiSet(${i},'code',this.value)">`:`<input value="${esc(r.code)}" list="usi-codes" placeholder="Chưa khớp — tự chọn" style="width:110px;font-size:11px;padding:4px;color:#b8730a" ${r.picked?'':'disabled'} onchange="_usiSet(${i},'code',this.value)">`}${r.srcCode?`<div style="font-size:9.5px;color:var(--muted)">mã NCC: ${esc(r.srcCode)}</div>`:''} <button class="icon-btn" style="font-size:10px" title="Xóa dòng này" onclick="_usiRemoveRow(${i})">✕</button></td>
       </tr>`;
     });
