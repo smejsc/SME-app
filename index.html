@@ -3848,7 +3848,7 @@ const WH_TYPES = {
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.20.116';
+const APP_VERSION='3.20.117';
 /* HOTFIX 3.12.17-email: CHẶN TRIỆT ĐỂ gửi email TỰ ĐỘNG (mất kiểm soát — spam quota Google).
    Email phải do NV được phân quyền CHỦ ĐỘNG chọn gửi. Cờ này:
    (1) chặn auto-SCAN tạo email (hrmScanExpiries/vesselCertScanExpiries);
@@ -14229,6 +14229,7 @@ function wfReturnToDraft(r){
   const _isAp=(S.payables||[]).some(x=>x&&x.id===r.id);
   const _sign=_isAp?1:-1;   // AP: hoàn tác khoản ĐÃ CHI → cộng lại; AR: hoàn tác khoản ĐÃ THU → trừ lại
   const _payRev=[];
+  const _hadPayments=(r.payments||[]).length>0;
   (r.payments||[]).forEach(p=>{
     if(!p || p._feeOnly) return;
     const amt=+p.amount||0;
@@ -14252,15 +14253,26 @@ function wfReturnToDraft(r){
         acc.balance=(+acc.balance||0)+(_sign*restore);
         try{ touchRecord(acc); }catch(e){}
         _payRev.push((_sign>0?'cộng lại ':'trừ lại ')+fmtOrig(restore,acc.ccy)+(_sign>0?' vào TK ':' khỏi TK ')+(acc.bankName||acc.accountNo||acc.id));
+      } else {
+        _payRev.push('⚠ '+fmtOrig(amt,p.ccy||r.ccy)+' gắn TK ngân hàng đã xóa/không tìm thấy — KHÔNG tự hoàn tác được số dư, Admin tự kiểm tay');
       }
+    } else {
+      /* v3.20.117 (Sếp: "chưa xử lý được" — 4 phiếu vẫn 0đ sau khi trả về nháp với bản vá trước):
+         TÌM RA LỖI TRONG CHÍNH BẢN VÁ TRƯỚC — payments[] CHỈ được xóa khi tìm được cách hoàn tác cụ
+         thể (khế ước hoặc TK ngân hàng); khoản không thuộc 2 loại đó (tiền mặt, method lạ/thiếu
+         bankAccountId) bị BỎ QUA HOÀN TOÀN — không đẩy vào _payRev, nên "if(_payRev.length)" phía
+         dưới không chạy, payments[] KHÔNG BAO GIỜ được xóa. Sửa: liệt kê cảnh báo cho mọi khoản
+         không rõ cách hoàn tác, và QUAN TRỌNG NHẤT — payments[] LUÔN được xóa khi có payments (đổi
+         điều kiện từ _payRev.length sang _hadPayments, xem dưới). */
+      _payRev.push('⚠ '+fmtOrig(amt,p.ccy||r.ccy)+' (hình thức "'+(p.method||'?')+'") không rõ cách hoàn tác tự động — Admin tự kiểm có cần chỉnh số dư ở đâu không');
     }
   });
-  if(_payRev.length){
+  if(_hadPayments){
     r.payments=[];
     r.dueAmount=0;   // về nháp = chưa đề xuất gì, mặc định "trả hết" cho lần đề xuất sau
     if(Array.isArray(r.paymentOrders)) r.paymentOrders.forEach(o=>{ if(o && o.status==='paid'){ o.status='approved'; o._reversedByReturnDraft=new Date().toISOString(); } });
     try{ logAuditEvent('wf_return_draft_payments_reversed',{id:r.id, partner:r.partner, detail:_payRev, actor:actorName()}); }catch(e){}
-    toast('Đã trả về Nháp — hoàn tác '+_payRev.length+' dòng thanh toán cũ:\n'+_payRev.join('\n'), 'warn');
+    toast('Đã trả về Nháp — dọn sạch dòng thanh toán cũ'+(_payRev.length?(':\n'+_payRev.join('\n')):''), 'warn');
   }
   r.status='draft';
   touchRecord(r);  // v2.61.0: timestamp cho sync
