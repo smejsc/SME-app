@@ -3867,7 +3867,7 @@ const WH_TYPES = {
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.20.125';
+const APP_VERSION='3.20.126';
 /* HOTFIX 3.12.17-email: CHẶN TRIỆT ĐỂ gửi email TỰ ĐỘNG (mất kiểm soát — spam quota Google).
    Email phải do NV được phân quyền CHỦ ĐỘNG chọn gửi. Cờ này:
    (1) chặn auto-SCAN tạo email (hrmScanExpiries/vesselCertScanExpiries);
@@ -35224,8 +35224,29 @@ function renderProjectData(){
   });
   const pending=all.filter(p=>lifecycle(p)==='pending');
   const active=all.filter(p=>lifecycle(p)==='active');
-  const done=all.filter(p=>lifecycle(p)==='done');
-  const rowHtml=(p, showTbtt, lc)=>{
+  /* v3.20.126 (Sếp: "Dự án đã hoàn thành: thêm cột Ngày bắt đầu-Kết thúc, sắp theo ngày gần nhất ở
+     trên - theo tàu"): dự án gắn tàu lấy ngày từ CHÍNH các đoạn TBTT của nó (sớm nhất→muộn nhất);
+     dự án không gắn tàu dùng đúng p.start/p.end sẵn có. Khối "Đã hoàn thành" sắp lại riêng: vẫn nhóm
+     theo tàu (giữ nguyên tinh thần v3.20.125), nhưng trong từng nhóm — dự án hoàn thành GẦN ĐÂY nhất
+     lên trên (thay vì theo mã dự án). */
+  const dateRangeOf=(p)=>{
+    const isVessel=String(p.segment||'').indexOf('VESSEL')===0;
+    if(isVessel){
+      const evs=evsByProject[p.id]||[];
+      if(!evs.length) return {start:'', end:''};
+      const starts=evs.map(e=>String(e.startAt||'').slice(0,10)).filter(Boolean);
+      const ends=evs.map(e=>String(e.endAt||'').slice(0,10)).filter(Boolean);
+      return {start: starts.length?starts.reduce((a,b)=>a<b?a:b):'', end: ends.length?ends.reduce((a,b)=>a>b?a:b):''};
+    }
+    return {start:p.start||'', end:p.end||''};
+  };
+  const done=all.filter(p=>lifecycle(p)==='done').sort((a,b)=>{
+    const va=vName(a), vb=vName(b);
+    if(va!==vb) return va?(vb?va.localeCompare(vb):-1):1;   // vẫn nhóm theo tàu trước
+    const ea=dateRangeOf(a).end||'', eb=dateRangeOf(b).end||'';
+    return eb.localeCompare(ea);   // trong cùng nhóm — ngày kết thúc GẦN ĐÂY nhất lên trên
+  });
+  const rowHtml=(p, showTbtt, lc, showDates)=>{
     const seg = SEGMENTS[p.segment] || {name: p.segment||'?', short:p.segment||'?', chip:''};
     const statusChip = p.archived
       ? `<span class="ds-need" data-dot="bad" style="font-size:10px" title="Đã hoàn thành bởi ${esc(p.archivedBy||'?')} lúc ${p.archivedAt?new Date(p.archivedAt).toLocaleDateString('vi-VN'):'?'}${p.archivedReason==='auto_new_project_same_vessel'?' (tự động — tạo dự án mới cùng tàu)':''}">⊘ HOÀN THÀNH</span>`
@@ -35238,24 +35259,28 @@ function renderProjectData(){
           : `<button class="icon-btn" title="Đánh dấu hoàn thành — ẩn khỏi dropdown nhập mới" onclick="toggleArchiveProject('${p.id}')" style="color:var(--warn)">⊘</button>`)
       : '';
     const tbttBtn = showTbtt ? `<button class="btn-sec" style="font-size:10px;padding:2px 8px" onclick="closeModal();openEventModal(null,'${p.vesselId||''}','${p.id}')" title="Thêm TBTT ngay — không cần vào Sửa trước">🛳 +TBTT</button>` : '';
+    const fmtD=(d)=>d?d.split('-').reverse().join('/'):'—';
+    const dateCell = showDates ? (()=>{ const r=dateRangeOf(p); return `<td class="ds-t-sub" style="font-family:var(--font-mono);font-size:11px;white-space:nowrap">${fmtD(r.start)} → ${fmtD(r.end)}</td>`; })() : '';
     return `<tr style="${(p.archived||lc==='done')?'opacity:0.55;background:var(--paper-3)':''}">
       <td class="ds-t-sub" style="font-family:var(--font-mono)"><b>${esc(p.code)}</b></td>
       <td>${esc(p.name)}</td>
       <td style="font-size:11px">${esc(p.client||'—')}</td>
       <td><span class="ds-need" style="font-size:10px">${esc(p.vesselId?(vName(p)||seg.name):seg.name)}</span></td>
       <td class="ds-t-sub" style="font-family:var(--font-mono)">${esc(p.ccy||'—')}</td>
+      ${dateCell}
       <td>${statusChip}</td>
       <td><div class="row-actions">${tbttBtn}${archiveBtn}<button class="btn-sec" style="font-size:10px;padding:2px 8px" onclick="editProject('${p.id}')">✎ Sửa</button></div></td>
     </tr>`;
   };
   const head='<thead><tr><th>Mã</th><th>Tên</th><th>Khách hàng</th><th>Mảng</th><th>CCY</th><th>Trạng thái</th><th></th></tr></thead>';
-  const fill=(tbl,cnt,list,emptyMsg,showTbtt,lc)=>{
+  const headWithDates='<thead><tr><th>Mã</th><th>Tên</th><th>Khách hàng</th><th>Mảng</th><th>CCY</th><th>Bắt đầu → Kết thúc</th><th>Trạng thái</th><th></th></tr></thead>';
+  const fill=(tbl,cnt,list,emptyMsg,showTbtt,lc,showDates)=>{
     cnt.textContent='('+list.length+')';
-    tbl.innerHTML = list.length ? (head+'<tbody>'+list.map(p=>rowHtml(p,showTbtt,lc)).join('')+'</tbody>') : ('<tr><td class="empty">'+emptyMsg+'</td></tr>');
+    tbl.innerHTML = list.length ? ((showDates?headWithDates:head)+'<tbody>'+list.map(p=>rowHtml(p,showTbtt,lc,showDates)).join('')+'</tbody>') : ('<tr><td class="empty">'+emptyMsg+'</td></tr>');
   };
-  fill(tPend, cPend, pending, 'Không có dự án nào đang chờ TBTT', true, 'pending');
-  fill(tAct, cAct, active, 'Chưa có dự án nào đang triển khai', false, 'active');
-  fill(tDone, cDone, done, 'Chưa có dự án nào hoàn thành', false, 'done');
+  fill(tPend, cPend, pending, 'Không có dự án nào đang chờ TBTT', true, 'pending', false);
+  fill(tAct, cAct, active, 'Chưa có dự án nào đang triển khai', false, 'active', false);
+  fill(tDone, cDone, done, 'Chưa có dự án nào hoàn thành', false, 'done', true);
 }
 function renderCatalog(){
   try{ expGroupsSync(); }catch(e){}   /* v3.18.71 */
