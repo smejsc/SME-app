@@ -3847,7 +3847,7 @@ const WH_TYPES = {
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.20.111';
+const APP_VERSION='3.20.113';
 /* HOTFIX 3.12.17-email: CHẶN TRIỆT ĐỂ gửi email TỰ ĐỘNG (mất kiểm soát — spam quota Google).
    Email phải do NV được phân quyền CHỦ ĐỘNG chọn gửi. Cờ này:
    (1) chặn auto-SCAN tạo email (hrmScanExpiries/vesselCertScanExpiries);
@@ -14217,6 +14217,50 @@ function wfReturnToDraft(r){
   try{ reverseAdvanceFromFund(r); }catch(e){console.warn('reverseAdvanceFromFund failed',e);}
   try{ reverseAssetFromTools(r); }catch(e){console.warn('reverseAssetFromTools failed',e);}
   try{ reverseDockFromAsset(r); }catch(e){console.warn('reverseDockFromAsset failed',e);}
+  /* v3.20.112 (Sếp: "phiếu Đã Thanh toán do lỗi cũ — trả về nháp, làm lại đến L2, vẫn thấy Đề xuất
+     TT: 0đ" — TÌM RA GỐC): hàm này TRƯỚC CHỈ đổi nhãn trạng thái về "draft", KHÔNG hề hoàn tác các
+     dòng thanh toán (payments[]) đã lỡ ghi (từ lỗi cũ khiến phiếu nhảy thẳng "Đã TT" — xem v3.20.109).
+     Payments cũ vẫn còn nguyên → còn lại vẫn tính = 0 dù nhãn đã về Nháp, làm lại từ đầu vẫn ra
+     "Đề xuất TT: 0đ" y hệt cũ. VÁ: hoàn tác ĐÚNG CÁCH từng dòng thanh toán trước khi xóa — cộng lại
+     số dư TK ngân hàng/quỹ đã bị trừ, gỡ khỏi khế ước KUNN nháp nếu có gắn — không chỉ xóa suông
+     (tránh "bốc hơi" tiền khỏi sổ ngân hàng). Khế ước đã CHỐT xong (không còn kuDraft) thì không tự
+     gỡ được (đụng vào hợp đồng vay thật) — báo rõ để Admin tự kiểm tay. */
+  const _isAp=(S.payables||[]).some(x=>x&&x.id===r.id);
+  const _sign=_isAp?1:-1;   // AP: hoàn tác khoản ĐÃ CHI → cộng lại; AR: hoàn tác khoản ĐÃ THU → trừ lại
+  const _payRev=[];
+  (r.payments||[]).forEach(p=>{
+    if(!p || p._feeOnly) return;
+    const amt=+p.amount||0;
+    if(p.method==='loan' && p.linkedLoanId){
+      const l=(typeof AccountingService!=='undefined'?AccountingService.loans():(S.loans||[])).find(x=>x&&x.id===p.linkedLoanId);
+      if(l && l.kuDraft){
+        l.principal=Math.max(0,(+l.principal||0)-amt);
+        l.principal=(String(l.ccy||'VND').toUpperCase()==='VND')?Math.round(l.principal):Math.round(l.principal*100)/100;
+        try{ touchRecord(l); }catch(e){}
+        _payRev.push('gỡ '+fmtOrig(amt,p.ccy||r.ccy)+' khỏi khế ước nháp '+(l.lender||l.bankName||l.id));
+      } else if(l){
+        _payRev.push('⚠ '+fmtOrig(amt,p.ccy||r.ccy)+' đã gắn khế ước ĐÃ CHỐT ('+(l.lender||l.bankName||l.id)+') — KHÔNG tự gỡ, Admin tự kiểm tay');
+      }
+    } else if(p.bankAccountId){
+      const acc=AccountingService.bankAccounts().find(a=>a.id===p.bankAccountId);
+      if(acc){
+        let restore=amt;
+        try{ if(typeof _arPayAmountInCcy==='function') restore=_arPayAmountInCcy(p, r.ccy||p.ccy||'VND', acc.ccy||'USD'); }catch(e){}
+        const feeAmt=(+p.bankFee||0)+(+p.otherFee||0);
+        if(feeAmt>0){ try{ restore += _arPayAmountInCcy({amount:feeAmt,fxRate:p.fxRate||0}, p.feeCcy||'VND', acc.ccy||'USD'); }catch(e){} }
+        acc.balance=(+acc.balance||0)+(_sign*restore);
+        try{ touchRecord(acc); }catch(e){}
+        _payRev.push((_sign>0?'cộng lại ':'trừ lại ')+fmtOrig(restore,acc.ccy)+(_sign>0?' vào TK ':' khỏi TK ')+(acc.bankName||acc.accountNo||acc.id));
+      }
+    }
+  });
+  if(_payRev.length){
+    r.payments=[];
+    r.dueAmount=0;   // về nháp = chưa đề xuất gì, mặc định "trả hết" cho lần đề xuất sau
+    if(Array.isArray(r.paymentOrders)) r.paymentOrders.forEach(o=>{ if(o && o.status==='paid'){ o.status='approved'; o._reversedByReturnDraft=new Date().toISOString(); } });
+    try{ logAuditEvent('wf_return_draft_payments_reversed',{id:r.id, partner:r.partner, detail:_payRev, actor:actorName()}); }catch(e){}
+    toast('Đã trả về Nháp — hoàn tác '+_payRev.length+' dòng thanh toán cũ:\n'+_payRev.join('\n'), 'warn');
+  }
   r.status='draft';
   touchRecord(r);  // v2.61.0: timestamp cho sync
   return true;
@@ -74963,33 +75007,37 @@ function whMatSmartMatch(name){
   return hit?hit.code:'';
 }
 function whMergeQuoteRows(rows, parsed, anchorApId, label, invoiceNo){
-  /* v3.20.63 (Sếp — "Import 2 hóa đơn liên tiếp: hóa đơn sau đè hóa đơn trước"): trước XÓA HẾT dòng
-     chi tiết đã đọc từ lần import trước rồi mới thêm dòng mới ("import lại → thay bộ chi tiết cũ") —
-     đúng khi sửa lại 1 file đọc sai, nhưng SAI khi cần cộng dồn 2 hóa đơn/báo giá khác nhau vào cùng
-     1 phiếu (đúng trường hợp Sếp đang gặp). Đổi sang CỘNG DỒN — giữ nguyên mọi dòng chi tiết đã đọc
-     từ các lần import trước, chỉ thêm dòng mới vào, không xóa gì cả. */
-  const existingQuote=(rows||[]).filter(r=>r.fromQuote);
-  const base=(rows||[]).filter(r=>!r.fromQuote);
-  const willHaveQuoteRows = existingQuote.length>0 || (parsed&&parsed.length>0);
-  const out=base.map(r=>Object.assign({}, r, willHaveQuoteRows?{picked:false}:{}));  // có dòng chi tiết (cũ hoặc mới) → tự bỏ tick dòng gộp, tránh nhập đôi tiền hàng
-  out.push(...existingQuote);
-  /* v3.20.92 (Sếp xác nhận: "nếu gồm nhiều hóa đơn/báo giá — dòng hàng sẽ ghi lần lượt có tổng của
-     từng hóa đơn"): TRƯỚC ĐÂY mỗi lần import NỔ RA N dòng (1 dòng/mặt hàng) — import 2-3 hóa đơn
-     liên tiếp là bảng "Dòng hàng" ngập hàng chục dòng lẫn lộn, không biết mặt hàng nào của hóa đơn
-     nào, khó đối chiếu GIÁ TRỊ (đúng mục đích màn này — "chỉ đối chiếu SL/Đơn giá/Giá trị... rồi gửi
-     vào Chờ giao hàng", KHÔNG phải màn nhập chi tiết PNK cuối). NAY: mỗi LẦN IMPORT (= đúng 1 hóa
-     đơn/báo giá) GỘP THÀNH ĐÚNG 1 DÒNG mang tổng giá trị của riêng hóa đơn đó — chi tiết từng mặt
-     hàng giữ nguyên, ẩn vào row._quoteLines (không mất gì, _usiSave() bung lại đúng khi tạo phiếu
-     chờ nhập — xem đó). Nhiều hóa đơn/báo giá import liên tiếp → nhiều dòng riêng, mỗi dòng đúng
-     tổng của hóa đơn đó — không lẫn lộn, không đè nhau (vẫn cộng dồn như v3.20.63). */
-  if(parsed&&parsed.length){
-    const matchedAny=parsed.map(it=>({...it, _matchedCode:whMatSmartMatch(it.name)}));
-    const total=matchedAny.reduce((t,it)=>t+Math.round((+it.price||0)*(+it.qty||0)),0);
-    out.push({ apId:anchorApId, desc:(label?('📄 '+label+' — '):'📄 Báo giá/HĐ — ')+matchedAny.length+' mặt hàng',
-      invoiceNo:invoiceNo||'', price:0, amount:total, fromQuote:true, picked:true, code:'', unit:'', qty:'', orderedQty:'', received:0,
-      _quoteLines:matchedAny.map(it=>({ name:it.name, code:it._matchedCode||'', srcCode:it.code||'', unit:it.unit||'', qty:it.qty, price:+it.price||0 })) });
+  /* v3.20.113 (Sếp xác nhận toàn bộ thiết kế: "Gộp 1 hóa đơn thành 1 dòng: khi tạo phiếu AP/Chi dự
+     kiến. Còn đây là phần nhập kho: tách biệt hoàn toàn" — VIẾT LẠI HOÀN TOÀN, bỏ hẳn cơ chế gộp
+     v3.20.92 ở màn này): quy tắc gộp-1-hóa-đơn-1-dòng chỉ đúng cho lúc TẠO phiếu AP/Chi dự kiến
+     (_mrCollapseIfQuoteDetail, không đụng) — màn Nhập kho theo đúng thiết kế gốc (v3.20.80: "chi
+     tiết từng mặt hàng CHỈ hiện khi NV bấm Nhập kho") phải HIỆN CHI TIẾT, không gộp thêm lần nữa.
+     Mỗi mặt hàng = 1 dòng riêng (SL/ĐVT/đơn giá/thành tiền, không VAT — nhập kho không nhập VAT),
+     neo đúng vào dòng AP tham khảo cùng SỐ HÓA ĐƠN (Phương án A đã chốt: không khớp được → báo lỗi
+     rõ, KHÔNG tự đoán/nhét bừa). Chỉ 1 dòng AP trên phiếu (đúng ca phổ biến — Chi dự kiến 1 dòng)
+     → không cần khớp số, tự gắn thẳng vào dòng đó. Vẫn CỘNG DỒN qua nhiều lần import (v3.20.63,
+     không đổi) — không xóa dòng chi tiết đã có từ lần trước. */
+  const apRefRows=(rows||[]).filter(r=>r.isApRef);
+  let targetApId=null;
+  if(apRefRows.length<=1){
+    targetApId=(apRefRows[0]||{apId:anchorApId}).apId||anchorApId;
+  } else {
+    const inv=String(invoiceNo||'').trim().toLowerCase();
+    const match=inv?apRefRows.find(r=>String(r.invoiceNo||'').trim().toLowerCase()===inv):null;
+    if(!match){
+      return { rows, error:'Số hóa đơn "'+(invoiceNo||'(trống)')+'" trong file không khớp với dòng AP nào trên phiếu ('+apRefRows.length+' dòng AP, mỗi dòng 1 số hóa đơn khác nhau) — kiểm lại số hóa đơn trong file, hoặc sửa đúng "Số hóa đơn" trên dòng AP tương ứng rồi import lại.' };
+    }
+    targetApId=match.apId;
   }
-  return out;
+  if(!parsed || !parsed.length) return { rows, error:'Không đọc được dòng chi tiết nào từ file.' };
+  const out=(rows||[]).slice();   // v3.20.63: cộng dồn, không xóa dòng chi tiết cũ
+  const matchedAny=parsed.map(it=>({...it, _matchedCode:whMatSmartMatch(it.name)}));
+  matchedAny.forEach(it=>{
+    out.push({ apId:targetApId, invoiceNo:invoiceNo||'', desc:it.name, unit:it.unit||'',
+      price:+it.price||0, qty:it.qty, orderedQty:it.qty, amount:Math.round((+it.price||0)*(+it.qty||0)*100)/100,
+      fromQuote:true, picked:true, code:it._matchedCode||'', srcCode:it.code||'', received:0 });
+  });
+  return { rows:out };
 }
 /* v3.15.58 B1d (Sếp 14/8, thiết kế lại): chi phí nhập kho (vận chuyển/thuế NK/hải quan...)
    phát sinh SAU, là AP RIÊNG của NCC khác → điểm gắn nằm ở màn NV TẠO AP CHI PHÍ:
@@ -75066,7 +75114,7 @@ function openStockInUnified(apId){
     date:(_sugDate||new Date().toISOString().slice(0,10)),
     contractNo:String(records[0].contractNo||''), contractDate:'', invoiceNoHdr:String(records[0].invoiceNo||''),
     rows:records.map(r=>({ apId:r.id, desc:r.desc||'', invoiceNo:r.invoiceNo||'', amount:+r.amountGross||+r.amount||0,
-      picked:false, code:'', qty:'', orderedQty:'',
+      picked:false, code:'', qty:'', orderedQty:'', isApRef:true,   /* v3.20.113: dòng AP chỉ để THAM KHẢO/khớp — không cộng tổng */
       received:(recv['ap:'+r.id]||recv['ds:'+whNormName(r.desc||'')]||0) })),
     priorDocs:prior.map(d=>({docNo:d.docNo,status:d.status,date:d.date,n:(d.lines||[]).length})) };
   _usiRender();
@@ -75076,26 +75124,63 @@ function _usiRender(){
   const allowed=stockAllowedWarehouses();
   const whOpts=allowed.map(w=>`<option value="${w.id}" ${s.warehouseId===w.id?'selected':''}>${esc(w.name)}</option>`).join('');
   const matCodes=InventoryService.materials().filter(m=>m.status!=='merged').map(m=>`<option value="${esc(m.code)}">${esc(m.name)}</option>`).join('');
-  const allPicked=s.rows.length>0&&s.rows.every(r=>r.picked);
+  /* v3.20.113 (Sếp xác nhận toàn bộ thiết kế: "gộp 1 dòng khi TẠO phiếu AP/Chi dự kiến — còn màn
+     Nhập kho tách biệt hoàn toàn, không gộp; dòng AP gốc giữ nguyên chỉ để tham khảo/khớp, không
+     cộng tổng; chi tiết mặt hàng nằm dưới đúng dòng AP cùng số hóa đơn (cha-con); tổng cuối bảng chỉ
+     tính dòng chi tiết đã tick"): thiết kế lại toàn bộ — không còn dòng "gộp 1 hóa đơn = 1 dòng" ở
+     màn này nữa (đó là việc của _mrCollapseIfQuoteDetail lúc TẠO phiếu, không đụng). Ở đây: mỗi dòng
+     AP (isApRef) hiện như 1 khối tiêu đề tham khảo (không tick, không cộng tổng) — bên dưới là các
+     dòng chi tiết mặt hàng thật (SL/ĐVT/đơn giá/thành tiền riêng từng dòng, không VAT) neo đúng theo
+     apId đã khớp lúc import (whMergeQuoteRows) hoặc lúc bấm "1 mặt hàng"/"+ Thêm dòng" thủ công. */
+  const apRows=s.rows.filter(r=>r.isApRef);
+  const chip=(txt,color)=>`<span style="font-size:9.5px;font-weight:600;padding:1px 6px;border-radius:8px;background:${color}22;color:${color}">${txt}</span>`;
+  let bodyHtml='';
+  let _sumAmt=0, _pickedCount=0, _totalDetail=0;
+  apRows.forEach(ap=>{
+    const items=s.rows.filter(r=>!r.isApRef && r.apId===ap.apId);
+    const itemSum=items.reduce((t,r)=>t+(+r.amount||0),0);
+    const diff=Math.round((itemSum-(+ap.amount||0))*100)/100;
+    const hasItems=items.length>0;
+    const mismatch=hasItems && Math.abs(diff)>1000;   // dung sai nhỏ cho làm tròn
+    bodyHtml+=`<tr style="border-top:2px solid var(--rule);background:var(--paper-3)">
+      <td style="padding:5px 6px;text-align:center;color:var(--muted)">—</td>
+      <td style="padding:6px" colspan="5">
+        <b style="font-size:12px">${esc((ap.desc||'').slice(0,70))}</b> ${chip('AP · tham khảo','#777')}${ap.invoiceNo?` <span style="font-size:10px;color:var(--muted)">HĐ: ${esc(ap.invoiceNo)}</span>`:''}
+        <span style="float:right;font-family:monospace;font-size:12px;color:var(--muted)">${(ap.amount||0).toLocaleString('vi-VN')}</span>
+      </td>
+      <td style="padding:5px 6px;text-align:right">
+        <button class="btn-sec" style="font-size:10px;padding:2px 6px" onclick="_usiAddSingleItem('${esc(ap.apId)}')" title="Phiếu này chỉ mua đúng 1 loại hàng hóa — tạo ngay 1 dòng chi tiết, sửa lại được">✓ 1 mặt hàng</button>
+        <button class="btn-sec" style="font-size:10px;padding:2px 6px" onclick="_usiAddManualLine('${esc(ap.apId)}')" title="Tự gõ tay thêm 1 dòng mặt hàng">+ Thêm dòng</button>
+      </td>
+    </tr>`;
+    if(mismatch){
+      bodyHtml+=`<tr><td></td><td colspan="6" style="padding:2px 6px 6px"><span style="font-size:10.5px;color:var(--bad)">⚠ Chi tiết vừa nhập (${itemSum.toLocaleString('vi-VN')}) lệch ${diff>0?'+':''}${diff.toLocaleString('vi-VN')} so với giá trị AP tham khảo — kiểm lại có thiếu/thừa mặt hàng không.</span></td></tr>`;
+    } else if(hasItems && Math.abs(diff)<=1000){
+      bodyHtml+=`<tr><td></td><td colspan="6" style="padding:0 6px 4px"><span style="font-size:10px;color:var(--good)">✓ Khớp với giá trị AP tham khảo</span></td></tr>`;
+    }
+    items.forEach(r=>{
+      const i=s.rows.indexOf(r);
+      _pickedCount += r.picked?1:0;
+      if(r.picked) _sumAmt += (+r.amount||0);
+      const isManual=!!r._manual;
+      bodyHtml+=`<tr style="border-top:1px solid var(--rule)">
+        <td style="padding:5px 6px;text-align:center"><input type="checkbox" ${r.picked?'checked':''} onchange="_usiPick(${i},this.checked)"></td>
+        <td style="padding:5px 6px 5px 22px;font-size:12px">${isManual?`<input value="${esc(r.desc||'')}" placeholder="Tên mặt hàng" style="width:98%;font-size:12px;padding:3px;border:1px solid var(--rule)" onchange="_usiSet(${i},'desc',this.value);_usiRecalcRow(${i})">`:esc(r.desc||'')}</td>
+        <td style="padding:5px 6px;text-align:right;font-size:11px">${isManual?`<input type="number" value="${r.price||0}" style="width:88px;font-size:11px;padding:3px;text-align:right;border:1px solid var(--rule)" onchange="_usiSet(${i},'price',+this.value||0);_usiRecalcRow(${i})">`:(r.price?(+r.price).toLocaleString('vi-VN'):'—')}</td>
+        <td style="padding:5px 6px;text-align:right;font-size:11px;font-weight:600">${(r.amount||0).toLocaleString('vi-VN')}</td>
+        <td style="padding:5px 6px;text-align:right;font-size:11px;${r.received?'color:#1e7d44;font-weight:600':'color:var(--muted)'}">${r.received||'—'}</td>
+        <td style="padding:5px 6px"><input type="number" value="${r.orderedQty}" placeholder="SL" title="Số lượng theo đúng đơn hàng / báo giá" style="width:64px;font-size:11px;padding:4px;text-align:right" ${r.picked?'':'disabled'} onchange="_usiSet(${i},'orderedQty',this.value);${isManual?`_usiRecalcRow(${i})`:''}">${isManual?`<input value="${esc(r.unit||'')}" placeholder="ĐVT" style="width:44px;font-size:11px;padding:4px;margin-left:2px" onchange="_usiSet(${i},'unit',this.value)">`:(r.unit?` <span style="font-size:10px;color:var(--muted)">${esc(r.unit)}</span>`:'')}</td>
+        <td style="padding:5px 6px">${r.code?`<input value="${esc(r.code)}" list="usi-codes" title="Mã FAST — app đã tự khớp theo tên, kiểm lại nếu cần" style="width:110px;font-size:11px;padding:4px;font-family:monospace" ${r.picked?'':'disabled'} onchange="_usiSet(${i},'code',this.value)">`:`<input value="${esc(r.code)}" list="usi-codes" placeholder="Chưa khớp — tự chọn" style="width:110px;font-size:11px;padding:4px;color:#b8730a" ${r.picked?'':'disabled'} onchange="_usiSet(${i},'code',this.value)">`}${r.srcCode?`<div style="font-size:9.5px;color:var(--muted)">mã NCC: ${esc(r.srcCode)}</div>`:''} <button class="icon-btn" style="font-size:10px" title="Xóa dòng này" onclick="_usiRemoveRow(${i})">✕</button></td>
+      </tr>`;
+    });
+    if(!hasItems){
+      bodyHtml+=`<tr><td></td><td colspan="6" style="padding:2px 6px 8px"><span style="font-size:10.5px;color:var(--muted)">Chưa có chi tiết mặt hàng — dùng nút "📄 Import chi tiết" phía trên (khớp đúng số HĐ này), hoặc 2 nút ở trên.</span></td></tr>`;
+    }
+    _totalDetail += items.length;
+  });
   const banner=s.priorDocs.length?`<div style="border:1px solid var(--warn);border-radius:6px;padding:6px 10px;margin-bottom:8px;font-size:11px;background:rgba(184,115,10,.06)">
       ⚠ Cụm hóa đơn này ĐÃ có <b>${s.priorDocs.length}</b> phiếu nhập (đợt): ${s.priorDocs.map(p=>esc(p.docNo)+' ('+(p.status==='confirmed'?'đã nhập':'chờ')+')').join(' · ')}.
       Chỉ tạo tiếp cho phần hàng VỀ THÊM — cột "Đã nhập" bên dưới cộng dồn các đợt trước, đừng nhập trùng.</div>`:'';
-  const rows=s.rows.map((r,i)=>`<tr style="border-top:1px solid var(--rule)">
-    <td style="padding:5px 6px;text-align:center"><input type="checkbox" ${r.picked?'checked':''} onchange="_usiPick(${i},this.checked)"></td>
-    <td style="padding:5px 6px;font-size:12px" title="${esc(r.desc||'')}">${r.fromQuote?'<span style="color:#1c5a8c" title="Dòng chi tiết từ báo giá/hợp đồng">📄</span> ':''}${esc((r.desc||'').slice(0,46))}${(r.desc||'').length>46?'…':''}${r.unit?` <span style="font-size:10px;color:var(--muted)">(${esc(r.unit)})</span>`:''}${r.invoiceNo?`<div style="font-size:10px;color:var(--muted)">HĐ: ${esc(r.invoiceNo)}</div>`:''}</td>
-    <td style="padding:5px 6px;text-align:right;font-size:11px;color:var(--muted)">${r.price?(+r.price).toLocaleString('vi-VN'):'—'}</td>
-    <td style="padding:5px 6px;text-align:right;font-size:11px;color:var(--muted)">${(r.amount||0).toLocaleString('vi-VN')}</td>
-    <td style="padding:5px 6px;text-align:right;font-size:11px;${r.received?'color:#1e7d44;font-weight:600':'color:var(--muted)'}">${r.received||'—'}</td>
-    <td style="padding:5px 6px">${(r._quoteLines&&r._quoteLines.length)?`<span style="font-size:10.5px;color:var(--muted)" title="Chi tiết từng mặt hàng (SL/Mã) đã đọc kèm — hiện khi tạo phiếu chờ nhập, không sửa được ở đây">${r._quoteLines.length} mặt hàng</span>`:`<input type="number" value="${r.orderedQty}" placeholder="SL đơn" title="Số lượng theo đúng đơn hàng / báo giá" style="width:76px;font-size:11px;padding:4px;text-align:right" ${r.picked?'':'disabled'} onchange="_usiSet(${i},'orderedQty',this.value)">`}</td>
-    <td style="padding:5px 6px">${(r._quoteLines&&r._quoteLines.length)?'<span style="font-size:10.5px;color:var(--muted)">— (theo từng mặt hàng)</span>':(r.code?'':`<input value="${esc(r.code)}" list="usi-codes" placeholder="Chưa khớp — tự chọn" title="App chưa khớp được mã FAST theo tên — chọn tay, hoặc để trống cho thủ kho chọn khi tạo phiếu NK" style="width:120px;font-size:11px;padding:4px;color:#b8730a" ${r.picked?'':'disabled'} onchange="_usiSet(${i},'code',this.value)">`)}${(!r._quoteLines||!r._quoteLines.length)?(r.code?`<input value="${esc(r.code)}" list="usi-codes" title="Mã FAST — app đã tự khớp theo tên, kiểm lại nếu cần" style="width:120px;font-size:11px;padding:4px;font-family:monospace" ${r.picked?'':'disabled'} onchange="_usiSet(${i},'code',this.value)">`:''):''}${r.srcCode?`<div style="font-size:9.5px;color:var(--muted)">mã NCC: ${esc(r.srcCode)}</div>`:''}</td>
-  </tr>`).join('');
-  const _sumAmt=s.rows.filter(r=>r.picked).reduce((a,r)=>a+(+r.amount||0),0);
-  /* v3.20.22 (Sếp 03/9 — "ẩn thông tin không liên quan: SL đợt này/SL phiếu này; Mã FAST đang lấy mã
-     báo giá — cần tự khớp mã thật theo tên"): bỏ 2 cột SL phiếu này/SL đợt này khỏi màn ĐỐI CHIẾU
-     (không liên quan ở bước này — SL phiếu này vẫn tự tính đúng ngầm bên trong lúc Gửi, SL đợt này
-     là việc của thủ kho lúc xác nhận thật, không phải lúc đối chiếu báo giá); cột Mã FAST giờ hiện
-     mã đã tự khớp theo tên (kèm mã NCC gốc bên dưới để tra), khớp được tô đen bình thường, CHƯA khớp
-     tô cam để thủ kho biết cần tự chọn khi tạo phiếu NK — không gán bừa mã NCC vào ô Mã FAST nữa. */
   openModal('📦 Đối chiếu & gửi vào Chờ giao hàng — '+esc(s.partner),
     `<div style="font-size:11px;color:#1c5a8c;margin-bottom:8px;padding:6px 10px;border:1px dashed #1c5a8c;border-radius:6px">Đây CHƯA phải xác nhận đã nhận hàng — chỉ đối chiếu SL/Đơn giá/Giá trị với báo giá rồi gửi cả phiếu vào <b>Theo dõi nhập kho → Chờ giao hàng</b>. Khi hàng về thật (có BBGN), Thủ kho mới xác nhận SL thực nhận ở bước riêng.</div>
      <datalist id="usi-codes">${matCodes}</datalist>
@@ -75109,16 +75194,16 @@ function _usiRender(){
      <div style="display:flex;gap:8px;margin-bottom:8px;align-items:center">
        <label style="font-size:11px;color:var(--muted)">Kho nhận </label><select style="font-size:13px;padding:5px" onchange="_usiState.warehouseId=this.value">${whOpts}</select>
        <label style="font-size:11px;color:var(--muted)">Ngày </label><input type="date" value="${esc(s.date)}" style="font-size:13px;padding:5px" onchange="_usiState.date=this.value">
-       <button class="btn-sec" style="font-size:12px;margin-left:auto" onclick="document.getElementById('usi-quote-file').click()" title="AP chỉ có dòng gộp? Import báo giá/hợp đồng để nhập chi tiết từng vật tư — dòng chi tiết vẫn neo về hóa đơn này. Ưu tiên XML hóa đơn điện tử (đáng tin cậy nhất, đúng 1 hóa đơn/file) hoặc Excel/CSV nếu NCC có gửi — nhanh hơn PDF.">📄 Import chi tiết (Báo giá/HĐ)</button>
+       <button class="btn-sec" style="font-size:12px;margin-left:auto" onclick="document.getElementById('usi-quote-file').click()" title="Import báo giá/hợp đồng để nhập chi tiết từng vật tư — app tự khớp đúng dòng AP theo Số hóa đơn (nếu phiếu chỉ 1 dòng thì tự gắn luôn, không cần khớp số). Ưu tiên XML hóa đơn điện tử (đáng tin cậy nhất) hoặc Excel/CSV — nhanh hơn PDF.">📄 Import chi tiết (Báo giá/HĐ)</button>
        <span style="font-size:10px;color:var(--muted)" title="Excel/CSV đọc trực tiếp, không qua AI — nhanh hơn PDF.">Ưu tiên Excel/CSV — nhanh hơn</span>
        <input type="file" id="usi-quote-file" accept=".xlsx,.xls,.csv,.pdf,.xml" style="display:none" onchange="_usiQuoteFile(this.files[0]);this.value=''">
        ${s.quoteFile&&s.quoteFile.url?`<a href="${esc(s.quoteFile.url)}" target="_blank" rel="noopener" style="font-size:10.5px" title="File gốc đã lưu trên Drive">📎 ${esc(s.quoteFile.name||'File đã lưu')}</a>`:''}
      </div>
      <table style="width:100%;border-collapse:collapse;border:1px solid var(--rule)">
-       <thead><tr style="background:var(--rule);font-size:10px"><th style="padding:5px 6px;width:34px"><input type="checkbox" ${allPicked?'checked':''} onchange="_usiPickAll(this.checked)"></th><th style="padding:5px 6px;text-align:left">Dòng hàng</th><th style="padding:5px 6px;text-align:right">Đơn giá</th><th style="padding:5px 6px;text-align:right" title="SL × Đơn giá — đối chiếu với báo giá">Giá trị</th><th style="padding:5px 6px;text-align:right" title="Cộng dồn các đợt trước (kể cả đang chờ)">Đã nhập</th><th style="padding:5px 6px" title="Nhập theo đúng đơn hàng / báo giá">SL theo đơn</th><th style="padding:5px 6px">Mã FAST</th></tr></thead>
-       <tbody>${rows}</tbody>
-       <tfoot><tr style="border-top:2px solid var(--rule);font-weight:600"><td colspan="3" style="padding:5px 6px">Tổng giá trị đã tích (đối chiếu với báo giá)</td><td style="padding:5px 6px;text-align:right;font-family:monospace">${_sumAmt.toLocaleString('vi-VN')}</td><td colspan="3"></td></tr></tfoot></table>
-     <div style="font-size:11px;color:var(--muted);margin-top:6px">Đã chọn <b>${s.rows.filter(r=>r.picked).length}</b>/${s.rows.length} dòng · SL theo đơn hàng/báo giá — app tự trừ phần đã nhận khi gửi. Mã FAST cam = chưa khớp được, thủ kho sẽ chọn khi tạo phiếu NK. Đường kho độc lập luồng ký duyệt thanh toán.</div>`,
+       <thead><tr style="background:var(--rule);font-size:10px"><th style="padding:5px 6px;width:34px"></th><th style="padding:5px 6px;text-align:left">Dòng hàng</th><th style="padding:5px 6px;text-align:right">Đơn giá</th><th style="padding:5px 6px;text-align:right" title="SL × Đơn giá, không VAT">Thành tiền</th><th style="padding:5px 6px;text-align:right" title="Cộng dồn các đợt trước (kể cả đang chờ)">Đã nhập</th><th style="padding:5px 6px" title="Nhập theo đúng đơn hàng / báo giá">SL / ĐVT</th><th style="padding:5px 6px">Mã FAST</th></tr></thead>
+       <tbody>${bodyHtml}</tbody>
+       <tfoot><tr style="border-top:2px solid var(--rule);font-weight:600"><td colspan="3" style="padding:5px 6px">Tổng giá trị đã tích (chi tiết mặt hàng, không VAT)</td><td style="padding:5px 6px;text-align:right;font-family:monospace">${_sumAmt.toLocaleString('vi-VN')}</td><td colspan="3"></td></tr></tfoot></table>
+     <div style="font-size:11px;color:var(--muted);margin-top:6px">Đã chọn <b>${_pickedCount}</b>/${_totalDetail} dòng chi tiết · Dòng AP (nền xám) chỉ để tham khảo/đối chiếu, không cộng vào tổng. Mã FAST cam = chưa khớp được, thủ kho sẽ chọn khi tạo phiếu NK.</div>`,
     `<button class="btn-ghost" onclick="closeModal()">Hủy</button><button class="btn-primary" onclick="_usiSave()">Gửi vào Chờ giao hàng</button>`);
 }
 /* v3.20.20 (Sếp 03/9 — phiếu đã lưu trước bản vá PDF, cần nạp lại chi tiết mà không phải xóa/tạo
@@ -75145,39 +75230,46 @@ async function _usiQuoteFile(file){
   const _up=_usiUploadQuoteFile(file);   // chạy song song, không chặn đọc dữ liệu
   const isPdf=/pdf$/i.test(file.name)||file.type==='application/pdf';
   const isXml=/xml$/i.test(file.name)||file.type==='text/xml'||file.type==='application/xml';
-  /* v3.20.107 (Sếp: "Nếu import file hóa đơn dạng xml có dễ hơn?"): CÓ — XML hóa đơn điện tử chuẩn
-     là dữ liệu CÓ CẤU TRÚC (thẻ rõ ràng: mã/tên/ĐVT/SL/đơn giá), không phải "đoán chữ" như đọc PDF —
-     đáng tin cậy hơn hẳn, và mỗi file XML luôn ĐÚNG 1 HÓA ĐƠN (không có vụ nhiều hóa đơn gộp 1 file
-     như PDF, tự giải quyết luôn vấn đề đó cho trường hợp NCC gửi XML). Dùng lại ĐÚNG bộ đọc đã có sẵn
-     từ v3.20.79 (_xmlHdleQuoteLines, cho bước tạo phiếu) — chỉ nối thêm vào bước Nhập kho, chưa từng
-     có ở đây trước giờ. */
+  /* v3.20.113 (Sếp xác nhận thiết kế cuối): whMergeQuoteRows() nay trả về {rows, error} thay vì mảng
+     thẳng — có error (Phương án A: không khớp được dòng AP theo số hóa đơn) thì KHÔNG áp vào
+     _usiState.rows, chỉ báo lỗi rõ cho NV tự sửa (số hóa đơn trên file hoặc trên dòng AP), không tự
+     đoán/nhét bừa. */
+  const _apply=(res, doneMsg)=>{
+    if(!res){ return; }
+    if(res.error){ toast('⚠ '+res.error,'bad'); return; }
+    _usiState.rows=res.rows;
+    toast(doneMsg,'good');
+    _usiRender();
+  };
   if(isXml){
     try{
       const text=await file.text();
       const items=_xmlHdleQuoteLines(text);
       const uploaded=await _up; if(uploaded){ _usiState.quoteFile=uploaded; }
       if(!items.length){ toast('Không đọc được dòng chi tiết nào từ XML — kiểm lại đúng file hóa đơn điện tử chuẩn (TT78/NĐ123)'+(uploaded?' (đã lưu file gốc lên Drive)':''),'bad'); return; }
-      _usiState.rows=whMergeQuoteRows(_usiState.rows, items, _usiState.apIds[0]||'', file.name);
-      toast('✓ Đã nạp '+items.length+' dòng chi tiết từ XML (đáng tin cậy hơn PDF, đúng 1 hóa đơn/file)'+(uploaded?' — đã lưu file gốc lên Drive':''),'good');
-      _usiRender();
+      const invNoM=text.match(/<SHDon>(.*?)<\/SHDon>/); const xmlInvNo=invNoM?invNoM[1].trim():'';
+      const res=whMergeQuoteRows(_usiState.rows, items, _usiState.apIds[0]||'', file.name, xmlInvNo);
+      _apply(res, '✓ Đã nạp '+items.length+' dòng chi tiết từ XML (đáng tin cậy hơn PDF, đúng 1 hóa đơn/file)'+(uploaded?' — đã lưu file gốc lên Drive':''));
     }catch(e){ toast('Lỗi đọc XML: '+(e&&e.message||e),'bad'); }
     return;
   }
   if(isPdf){
     try{
-      /* v3.20.108: dùng bản CÓ TÁCH THEO HÓA ĐƠN — mỗi hóa đơn phát hiện được trong file ra ĐÚNG 1
-         dòng riêng (như đã làm cho XML/Excel/CSV nhiều hóa đơn từ trước) — không còn gộp lẫn nhiều
-         hóa đơn khác nhau vào 1 dòng như trước, kể cả khi NCC gửi PDF nhiều trang/nhiều hóa đơn. */
+      /* v3.20.108/113: tách theo TỪNG hóa đơn phát hiện được trong file — mỗi hóa đơn đọc chi tiết
+         riêng, khớp đúng dòng AP cùng số hóa đơn (KHÔNG gộp thành dòng tổng nữa — v3.20.113). */
       const groups=await _provQuoteReadPdfLinesGrouped(file);
       const uploaded=await _up; if(uploaded){ _usiState.quoteFile=uploaded; }
       const totalItems=groups.reduce((n,g)=>n+g.items.length,0);
       if(!totalItems){ toast('Không đọc được dòng chi tiết nào từ PDF — kiểm lại định dạng file hoặc dùng XML/Excel'+(uploaded?' (đã lưu file gốc lên Drive)':''),'bad'); return; }
+      let okN=0, errs=[];
       groups.forEach(g=>{
-        const label=g.invoiceNo?('HĐ '+g.invoiceNo):file.name;
-        _usiState.rows=whMergeQuoteRows(_usiState.rows, g.items, _usiState.apIds[0]||'', label, g.invoiceNo);
+        const res=whMergeQuoteRows(_usiState.rows, g.items, _usiState.apIds[0]||'', file.name, g.invoiceNo);
+        if(res.error){ errs.push((g.invoiceNo?'HĐ '+g.invoiceNo+': ':'')+res.error); }
+        else { _usiState.rows=res.rows; okN+=g.items.length; }
       });
-      toast('✓ Đã nạp '+totalItems+' dòng chi tiết từ PDF'+(groups.length>1?(' — tách đúng '+groups.length+' hóa đơn, mỗi hóa đơn 1 dòng riêng'):' (gộp 1 dòng — chi tiết ẩn tới lúc tạo phiếu)')+(uploaded?' — đã lưu file gốc lên Drive':''),'good');
-      _usiRender();
+      if(okN) toast('✓ Đã nạp '+okN+' dòng chi tiết từ PDF'+(groups.length>1?(' — tách đúng '+groups.length+' hóa đơn'):'')+(uploaded?' — đã lưu file gốc lên Drive':''),'good');
+      if(errs.length) toast('⚠ '+errs.join(' | '),'bad');
+      if(okN||errs.length) _usiRender();
     }catch(e){ toast('Lỗi đọc PDF: '+(e&&e.message||e),'bad'); }
     return;
   }
@@ -75189,11 +75281,8 @@ async function _usiQuoteFile(file){
       const {items, errors}=whParseQuoteRows(aoa);
       const uploaded=await _up; if(uploaded){ _usiState.quoteFile=uploaded; }
       if(!items.length){ toast('Không đọc được dòng chi tiết nào'+(errors.length?(' — '+errors[0].msg):'')+(uploaded?' (đã lưu file gốc lên Drive)':''),'bad'); return; }
-      // neo về record gộp: nếu 1 record thì hiển nhiên; nhiều record → neo record đầu (tiền vẫn theo cụm batch)
-      _usiState.rows=whMergeQuoteRows(_usiState.rows, items, _usiState.apIds[0]||'', file.name);
-      // tra mã báo giá với danh mục: mã lạ giữ nguyên nhưng thủ kho sẽ map lại (không chặn)
-      toast('✓ Đã nạp '+items.length+' dòng chi tiết (gộp 1 dòng — chi tiết ẩn tới lúc tạo phiếu)'+(errors.length?(' · '+errors.length+' dòng lỗi bị bỏ'):'')+(uploaded?' — đã lưu file gốc lên Drive':''),'good');
-      _usiRender();
+      const res=whMergeQuoteRows(_usiState.rows, items, _usiState.apIds[0]||'', file.name);
+      _apply(res, '✓ Đã nạp '+items.length+' dòng chi tiết'+(errors.length?(' · '+errors.length+' dòng lỗi bị bỏ'):'')+(uploaded?' — đã lưu file gốc lên Drive':''));
     }catch(e){ toast('Lỗi đọc file: '+e.message,'bad'); }
   };
   reader.readAsArrayBuffer(file);
@@ -75202,30 +75291,45 @@ function _usiCanBatch(){ return (typeof canManageStock==='function'&&canManageSt
 function _usiPick(i,on){ if(_usiState&&_usiState.rows[i]){ _usiState.rows[i].picked=!!on; _usiRender(); } }
 function _usiPickAll(on){ if(_usiState){ _usiState.rows.forEach(r=>r.picked=!!on); _usiRender(); } }
 function _usiSet(i,k,v){ if(_usiState&&_usiState.rows[i]){ _usiState.rows[i][k]=v; } }
+/* v3.20.113: 3 cách tạo chi tiết khi phiếu chưa import file — "1 mặt hàng duy nhất" (đúng tinh thần
+   phiếu chỉ mua 1 loại hàng, dùng luôn diễn giải+tổng tiền AP làm gợi ý), "+ Thêm dòng" (gõ tay hoàn
+   toàn), và Import file (đã có, whMergeQuoteRows). */
+function _usiAddSingleItem(apId){
+  const s=_usiState; if(!s) return;
+  const ap=s.rows.find(r=>r.isApRef && r.apId===apId); if(!ap) return;
+  s.rows.push({ apId, desc:ap.desc||'', invoiceNo:ap.invoiceNo||'', price:+ap.amount||0, amount:+ap.amount||0,
+    fromQuote:true, picked:true, code:whMatSmartMatch(ap.desc||'')||'', srcCode:'', unit:'', qty:1, orderedQty:1, received:0 });
+  _usiRender();
+}
+function _usiAddManualLine(apId){
+  const s=_usiState; if(!s) return;
+  const ap=s.rows.find(r=>r.isApRef && r.apId===apId);
+  s.rows.push({ apId:apId||'', invoiceNo:(ap&&ap.invoiceNo)||'', desc:'', price:0, amount:0,
+    fromQuote:true, picked:true, code:'', srcCode:'', unit:'', qty:0, orderedQty:0, received:0, _manual:true });
+  _usiRender();
+}
+function _usiRecalcRow(i){
+  const s=_usiState; if(!s||!s.rows[i]) return;
+  const r=s.rows[i];
+  r.amount=Math.round((+r.price||0)*(+r.orderedQty||0)*100)/100;
+  if(r.desc && !r.code) r.code=whMatSmartMatch(r.desc)||'';
+  _usiRender();
+}
+function _usiRemoveRow(i){
+  const s=_usiState; if(!s||!s.rows[i]) return;
+  s.rows.splice(i,1);
+  _usiRender();
+}
 function _usiSave(){
   const s=_usiState; if(!s) return;
-  const picked=s.rows.filter(r=>r.picked);
-  if(!picked.length){ toast('Chưa tích dòng nào','warn'); return; }
-  /* v3.20.92 (Sếp xác nhận: nhiều hóa đơn/báo giá — mỗi hóa đơn giữ đúng 1 "Dòng hàng" + đúng tổng
-     riêng, KHÔNG bung ra từng mặt hàng ngay lúc đối chiếu): dòng đã gộp theo hóa đơn (r._quoteLines,
-     xem whMergeQuoteRows) chỉ bung lại thành từng dòng mặt hàng ĐÚNG LÚC tạo phiếu chờ nhập (ở đây)
-     — không mất thông tin gì, chỉ dời thời điểm bung để bảng "Dòng hàng" lúc đối chiếu không ngập
-     dòng lẫn lộn nhiều hóa đơn. Dòng KHÔNG có _quoteLines (phiếu thường, không import chi tiết) giữ
-     nguyên hành vi cũ 100%. */
-  const expanded=[];
-  picked.forEach(r=>{
-    if(Array.isArray(r._quoteLines) && r._quoteLines.length){
-      r._quoteLines.forEach(it=>{
-        expanded.push({ apId:r.apId, desc:it.name||'', invoiceNo:r.invoiceNo||'', code:it.code||'',
-          unit:it.unit||'', qty:it.qty, orderedQty:it.qty, received:0, price:+it.price||0, srcCode:it.srcCode||'', fromQuote:true });
-      });
-    } else {
-      expanded.push(r);
-    }
-  });
+  /* v3.20.113 (Sếp xác nhận thiết kế cuối — Nhập kho tách biệt hoàn toàn, không gộp): rows giờ đã LÀ
+     dòng chi tiết sẵn (whMergeQuoteRows không còn gộp _quoteLines nữa) — bỏ bước "bung dòng gộp" cũ
+     (v3.20.92), không còn cần. Dòng AP (isApRef) chỉ để tham khảo — loại hẳn khỏi lưu dù lỡ tick. */
+  const picked=s.rows.filter(r=>r.picked && !r.isApRef);
+  if(!picked.length){ toast('Chưa tích dòng chi tiết nào','warn'); return; }
   const lines=[];
   const _ov=_usiCanBatch();
-  for(const r of expanded){
+  for(const r of picked){
     const q=whUsiLineQty(r,_ov);   // v3.15.60: SL phiếu = SL đơn − đã nhập (thủ kho override được)
     if(q.err){ toast('Dòng "'+String(r.desc||'').slice(0,28)+'": '+q.err,'bad'); return; }
     lines.push({ code:String(r.code||'').trim(), name:(r.desc||'').slice(0,80), unit:String(r.unit||'').trim(),
@@ -75793,10 +75897,14 @@ function openStockInUnifiedFromQuote(apId, quoteLines, warehouseId){
   openStockInUnified(apId);
   if(_usiState && Array.isArray(quoteLines) && quoteLines.length){
     const _ap=(typeof AccountingService!=='undefined')?AccountingService.payableById(apId):null;
-    _usiState.rows=whMergeQuoteRows(_usiState.rows, quoteLines, apId, (_ap&&_ap.invoiceNo)||'');
-    if(warehouseId) _usiState.warehouseId=warehouseId;
-    _usiRender();
-    toast('✓ Đã tự điền '+quoteLines.length+' dòng từ báo giá (gộp 1 dòng — kiểm lại rồi bấm Gửi vào Chờ giao hàng)','good');
+    const res=whMergeQuoteRows(_usiState.rows, quoteLines, apId, '', (_ap&&_ap.invoiceNo)||'');
+    if(res.error){ toast('⚠ '+res.error,'bad'); }
+    else {
+      _usiState.rows=res.rows;
+      if(warehouseId) _usiState.warehouseId=warehouseId;
+      _usiRender();
+      toast('✓ Đã tự điền '+quoteLines.length+' dòng chi tiết từ báo giá — kiểm lại rồi bấm Gửi vào Chờ giao hàng','good');
+    }
   }
 }
 function whParseBbgn(text){
