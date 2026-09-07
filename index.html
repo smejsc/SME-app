@@ -3867,7 +3867,7 @@ const WH_TYPES = {
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.20.122';
+const APP_VERSION='3.20.124';
 /* HOTFIX 3.12.17-email: CHẶN TRIỆT ĐỂ gửi email TỰ ĐỘNG (mất kiểm soát — spam quota Google).
    Email phải do NV được phân quyền CHỦ ĐỘNG chọn gửi. Cờ này:
    (1) chặn auto-SCAN tạo email (hrmScanExpiries/vesselCertScanExpiries);
@@ -10918,6 +10918,44 @@ function renderKunnList(tEl){
 }
 /* v3.20.105: gộp nhiều NHÁP đã tick (cấp độ cả nháp, khác kuDraftOrganize gộp theo từng khoản giải
    ngân) — ràng buộc CÙNG ngân hàng + CÙNG loại tiền, giống mọi chỗ gộp KUNN khác trong app. */
+/* v3.20.123 (Sếp: mở form điền nhanh NGAY TẠI màn đang gộp, không bắt NV rời đi màn khác): liệt kê
+   đúng các khoản còn thiếu "VNĐ tương đương", điền xong bấm 1 nút là lưu + tự gộp tiếp luôn. */
+function _kuMergeQuickFill(missingItems, reMergeIds){
+  const body=`
+    <div style="font-size:11px;color:var(--muted);margin-bottom:8px">Còn ${missingItems.length} khoản ngoại tệ chưa quy đổi được sang VNĐ — điền đúng số tiền VNĐ đã thấy trên sao kê ngân hàng cho từng khoản, xong bấm "Lưu & Gộp tiếp".</div>
+    <table class="table" style="font-size:12px;width:100%">
+      <thead><tr><th>Ngân hàng</th><th>Phiếu / NCC</th><th style="text-align:right">Số tiền</th><th>VNĐ tương đương</th></tr></thead>
+      <tbody>${missingItems.map((it,i)=>`<tr>
+        <td style="font-size:11px">${esc(it.lender)}</td>
+        <td style="font-size:11px">${esc(it.partner)}</td>
+        <td class="num" style="text-align:right">${it.amount.toLocaleString('vi-VN')} ${esc(it.ccy)}</td>
+        <td><input type="number" step="any" id="kmf-${i}" placeholder="VD: theo sao kê NH" style="width:150px;font-size:11px;padding:3px"> <span style="font-size:10px;color:var(--muted)">VNĐ</span></td>
+      </tr>`).join('')}</tbody></table>
+    <div id="kmf-err" style="color:var(--bad);font-size:13px;min-height:14px;margin-top:6px"></div>`;
+  openModal('💱 Điền nhanh VNĐ tương đương', body,
+    `<button class="btn-ghost" onclick="closeModal()">Đóng</button>
+     <button class="btn-primary" onclick="_kuMergeQuickFillSave()">💾 Lưu &amp; Gộp tiếp</button>`);
+  window._kmfItems=missingItems; window._kmfReMergeIds=reMergeIds;
+}
+function _kuMergeQuickFillSave(){
+  const missingItems=window._kmfItems||[];
+  const err=document.getElementById('kmf-err');
+  let filled=0, blanks=[];
+  missingItems.forEach((it,i)=>{
+    const el=document.getElementById('kmf-'+i);
+    const vnd=+((el&&el.value)||0);
+    if(vnd<=0){ blanks.push(it.partner||('khoản '+(i+1))); return; }
+    const rate=(+it.amount>0)?(vnd/it.amount):0;
+    const r=it.src==='op' ? (S.opTransactions||[]).find(x=>x&&x.id===it.recId) : (S.payables||[]).find(x=>x&&x.id===it.recId);
+    const p=r && (r.payments||[])[it.idx];
+    if(p){ p.fxRate=rate; try{ touchRecord(r); }catch(e){} filled++; }
+  });
+  if(blanks.length){ if(err) err.textContent='⚠ Còn trống: '+blanks.join(', ')+' — điền đủ hết mới gộp tiếp được.'; return; }
+  try{ saveState(); }catch(e){}
+  toast('✓ Đã lưu VNĐ tương đương cho '+filled+' khoản — đang gộp tiếp...','good');
+  closeModal();
+  kuListMergeSelected();   // v3.20.123: tự gộp tiếp ngay, không bắt NV bấm lại tay
+}
 function kuListMergeSelected(){
   const ids=Array.from(document.querySelectorAll('.kl-ck:checked')).map(c=>c.dataset.id);
   if(ids.length<2){ toast('Tick ít nhất 2 khế ước nháp để gộp','warn'); return; }
@@ -10931,21 +10969,24 @@ function kuListMergeSelected(){
      giải ngân gắn với nháp đó theo tỷ giá ĐÃ LƯU riêng từng khoản (p.fxRate, điền qua "VNĐ tương
      đương" ở màn Chia các khoản giải ngân) — không dùng thẳng l.principal cho nháp ngoại tệ. Thiếu
      tỷ giá ở bất kỳ khoản nào → chặn, chỉ rõ đúng nháp/khoản còn thiếu để NV quay lại điền trước. */
-  const missing=[];
+  /* v3.20.123 (Sếp: "nên tạo bước mở phiếu đơn giản ngay tại màn đang gộp/tạo KUNN" — thay vì bắt NV
+     rời màn đi tìm màn khác): thu thập ĐÚNG các khoản còn thiếu (không chỉ tóm tắt bằng chữ) để mở
+     form điền nhanh NGAY TẠI ĐÂY, điền xong tự gộp tiếp luôn — không cần rời màn. */
+  const missing=[]; const missingItems=[];
   const vndOf=(l)=>{
     if((l.ccy||'VND')==='VND') return +l.principal||0;
     let sum=0, ok=true;
     _loanPayScan((r,p,idx,src)=>{
       if(p.linkedLoanId!==l.id) return;
       const rate=+p.fxRate||0;
-      if(rate<=0){ ok=false; return; }
+      if(rate<=0){ ok=false; missingItems.push({recId:r.id, idx, src, loanId:l.id, lender:l.lender||l.bankName||'', partner:(r.partner||r.desc||''), amount:+p.amount||0, ccy:p.ccy||l.ccy||''}); return; }
       sum+=Math.round(rate*(+p.amount||0));
     });
     if(!ok){ missing.push((l.lender||l.bankName||l.id)+' ('+(+l.principal||0).toLocaleString('vi-VN')+' '+(l.ccy||'')+')'); return 0; }
     return sum;
   };
   const vndTotals=loans.map(vndOf);
-  if(missing.length){ toast('Chưa điền "VNĐ tương đương" cho các khoản trong: '+missing.join(', ')+' — điền ở màn "Chia các khoản giải ngân" trước rồi mới gộp được.','bad'); return; }
+  if(missing.length){ _kuMergeQuickFill(missingItems, ids); return; }
   const total=vndTotals.reduce((s,v)=>s+v,0);
   if(!confirm('Gộp '+loans.length+' khế ước nháp ('+lenders[0]+') thành 1 — tổng '+total.toLocaleString('vi-VN')+' VNĐ (đã quy đổi)?\n\nCác nháp còn lại sẽ bị xóa, mọi phiếu giải ngân của chúng chuyển hết về nháp giữ lại.')) return;
   const keep=loans[0], drop=loans.slice(1);
@@ -35141,26 +35182,52 @@ function renderProjectData(){
   const tDone=document.getElementById('pd-table-done'), cDone=document.getElementById('pd-count-done');
   if(!tPend || !tAct || !tDone) return;
   const canArchive = canArchiveItem();
-  /* v3.20.122: "có TBTT" = có ít nhất 1 đoạn On/Off-hire (VesselService.events) gắn projectId — dữ
-     liệu đã có sẵn từ trước, không cần trường mới. */
-  const evByProject={};
-  (VesselService.events()||[]).forEach(e=>{ if(e && !e._deleted && e.projectId){ evByProject[e.projectId]=(evByProject[e.projectId]||0)+1; } });
+  /* v3.20.124 (Sếp: "dự án O&M không có TBTT, thay vào đó là ngày bắt đầu/kết thúc" + "TBTT có ngày
+     kết thúc: đó là ngày dự án hoàn thành — kiểm tra"): PHÂN LOẠI LẠI THÔNG MINH HƠN v3.20.122 —
+     - Dự án GẮN TÀU (Mảng VESSEL_*): không còn so "TBTT mới nhất giữa các dự án" — chỉ cần xem ĐÚNG
+       TBTT của CHÍNH dự án đó: còn ít nhất 1 đoạn CHƯA CÓ e.endAt (đang mở) hoặc e.endAt chưa tới →
+       Đang triển khai; có TBTT nhưng TẤT CẢ đã qua e.endAt → Đã hoàn thành (đúng ý "TBTT có ngày kết
+       thúc = ngày dự án hoàn thành"); chưa có TBTT nào → Chưa triển khai.
+     - Dự án KHÔNG GẮN TÀU (O&M/Cảng/Quản lý chung — không bao giờ có TBTT): dùng ĐÚNG p.start/p.end
+       của chính phiếu dự án thay cho TBTT — chưa tới ngày bắt đầu → Chưa triển khai; trong khoảng
+       (hoặc chưa có ngày kết thúc) → Đang triển khai; đã qua ngày kết thúc → Đã hoàn thành.
+     Cả 2 tín hiệu đều CHỈ ẢNH HƯỞNG HIỂN THỊ (không tự đổi p.archived) — an toàn/dễ đảo ngược; NV bấm
+     tay ⊘/↺ vẫn luôn thắng tuyệt đối (p.archived=true → luôn vào "Đã hoàn thành" bất kể tín hiệu gì). */
+  const evsByProject={};
+  (VesselService.events()||[]).forEach(e=>{ if(e && !e._deleted && e.projectId){ (evsByProject[e.projectId]=evsByProject[e.projectId]||[]).push(e); } });
+  const today=todayISO();
+  const lifecycle=(p)=>{
+    if(p.archived) return 'done';
+    const isVessel=String(p.segment||'').indexOf('VESSEL')===0;
+    if(isVessel){
+      const evs=evsByProject[p.id];
+      if(!evs || !evs.length) return 'pending';
+      const stillOpen=evs.some(e=>!e.endAt || String(e.endAt).slice(0,10)>=today);
+      return stillOpen ? 'active' : 'done';
+    }
+    if(!p.start) return 'pending';
+    if(p.start>today) return 'pending';
+    if(p.end && p.end<today) return 'done';
+    return 'active';
+  };
   const all=(S.projects||[]).slice().sort((a,b)=>(a.code||'').localeCompare(b.code||''));
-  const pending=all.filter(p=>!p.archived && !evByProject[p.id]);
-  const active=all.filter(p=>!p.archived && evByProject[p.id]);
-  const done=all.filter(p=>p.archived);
-  const rowHtml=(p, showTbtt)=>{
+  const pending=all.filter(p=>lifecycle(p)==='pending');
+  const active=all.filter(p=>lifecycle(p)==='active');
+  const done=all.filter(p=>lifecycle(p)==='done');
+  const rowHtml=(p, showTbtt, lc)=>{
     const seg = SEGMENTS[p.segment] || {name: p.segment||'?', short:p.segment||'?', chip:''};
     const statusChip = p.archived
       ? `<span class="ds-need" data-dot="bad" style="font-size:10px" title="Đã hoàn thành bởi ${esc(p.archivedBy||'?')} lúc ${p.archivedAt?new Date(p.archivedAt).toLocaleDateString('vi-VN'):'?'}${p.archivedReason==='auto_new_project_same_vessel'?' (tự động — tạo dự án mới cùng tàu)':''}">⊘ HOÀN THÀNH</span>`
-      : `<span class="ds-need" data-dot="good" style="font-size:10px">✓ ACTIVE</span>`;
+      : (lc==='done'
+          ? `<span class="ds-need" data-dot="bad" style="font-size:10px" title="Tự nhận diện xong — TBTT/ngày kết thúc đã qua, chưa ai bấm Hoàn thành tay">⊘ HOÀN THÀNH (tự nhận diện)</span>`
+          : `<span class="ds-need" data-dot="good" style="font-size:10px">✓ ACTIVE</span>`);
     const archiveBtn = canArchive
       ? (p.archived
           ? `<button class="icon-btn" title="Mở lại dự án" onclick="toggleArchiveProject('${p.id}')" style="color:var(--good)">↺</button>`
           : `<button class="icon-btn" title="Đánh dấu hoàn thành — ẩn khỏi dropdown nhập mới" onclick="toggleArchiveProject('${p.id}')" style="color:var(--warn)">⊘</button>`)
       : '';
     const tbttBtn = showTbtt ? `<button class="btn-sec" style="font-size:10px;padding:2px 8px" onclick="closeModal();openEventModal(null,'${p.vesselId||''}','${p.id}')" title="Thêm TBTT ngay — không cần vào Sửa trước">🛳 +TBTT</button>` : '';
-    return `<tr style="${p.archived?'opacity:0.55;background:var(--paper-3)':''}">
+    return `<tr style="${(p.archived||lc==='done')?'opacity:0.55;background:var(--paper-3)':''}">
       <td class="ds-t-sub" style="font-family:var(--font-mono)"><b>${esc(p.code)}</b></td>
       <td>${esc(p.name)}</td>
       <td style="font-size:11px">${esc(p.client||'—')}</td>
@@ -35171,13 +35238,13 @@ function renderProjectData(){
     </tr>`;
   };
   const head='<thead><tr><th>Mã</th><th>Tên</th><th>Khách hàng</th><th>Mảng</th><th>CCY</th><th>Trạng thái</th><th></th></tr></thead>';
-  const fill=(tbl,cnt,list,emptyMsg,showTbtt)=>{
+  const fill=(tbl,cnt,list,emptyMsg,showTbtt,lc)=>{
     cnt.textContent='('+list.length+')';
-    tbl.innerHTML = list.length ? (head+'<tbody>'+list.map(p=>rowHtml(p,showTbtt)).join('')+'</tbody>') : ('<tr><td class="empty">'+emptyMsg+'</td></tr>');
+    tbl.innerHTML = list.length ? (head+'<tbody>'+list.map(p=>rowHtml(p,showTbtt,lc)).join('')+'</tbody>') : ('<tr><td class="empty">'+emptyMsg+'</td></tr>');
   };
-  fill(tPend, cPend, pending, 'Không có dự án nào đang chờ TBTT', true);
-  fill(tAct, cAct, active, 'Chưa có dự án nào đang triển khai', false);
-  fill(tDone, cDone, done, 'Chưa có dự án nào hoàn thành', false);
+  fill(tPend, cPend, pending, 'Không có dự án nào đang chờ TBTT', true, 'pending');
+  fill(tAct, cAct, active, 'Chưa có dự án nào đang triển khai', false, 'active');
+  fill(tDone, cDone, done, 'Chưa có dự án nào hoàn thành', false, 'done');
 }
 function renderCatalog(){
   try{ expGroupsSync(); }catch(e){}   /* v3.18.71 */
