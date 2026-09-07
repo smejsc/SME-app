@@ -1214,14 +1214,33 @@ span.chip.chip-fixed{display:inline-flex;align-items:center;gap:4px}
     </div>
   </div>
 
+  <!-- v3.20.122 (Sếp: "1 module Dự án chưa triển khai ngay sau Tạo dự án... Đổi Danh sách dự án
+       thành Dự án đang triển khai... tạo thêm Dự án đã hoàn thành"): tách 1 khối "Danh sách dự án"
+       cũ thành 3 khối theo đúng vòng đời — không cần trường dữ liệu mới, tự suy từ: có/không có TBTT
+       gắn (VesselService.events().projectId) + cờ archived đã có sẵn. -->
   <div class="section collapsible">
-    <div class="section-head"><div class="section-title"><span class="tag">∑</span>Danh sách dự án <span id="pd-count" style="text-transform:none;font-weight:400;color:var(--muted);font-size:11px">(0)</span></div>
+    <div class="section-head"><div class="section-title"><span class="tag">⏳</span>Dự án chưa triển khai <span id="pd-count-pending" style="text-transform:none;font-weight:400;color:var(--muted);font-size:11px">(0)</span></div>
       <div style="margin-left:auto;display:flex;align-items:center;gap:8px">
         <button class="btn-sec" onclick="catalogImport('project')" id="pd-import-btn">📥 Import Excel</button>
       </div>
     </div>
     <div class="section-body">
-      <div class="tbl-scroll"><table class="tbl" id="pd-table"></table></div>
+      <div style="font-size:10.5px;color:var(--muted);padding:0 0 6px">Đã tạo (ký HĐ) nhưng chưa có TBTT nào — vào đây để tìm nhanh khi có TBTT.</div>
+      <div class="tbl-scroll"><table class="tbl" id="pd-table-pending"></table></div>
+    </div>
+  </div>
+
+  <div class="section collapsible">
+    <div class="section-head"><div class="section-title"><span class="tag">▶</span>Dự án đang triển khai <span id="pd-count-active" style="text-transform:none;font-weight:400;color:var(--muted);font-size:11px">(0)</span></div></div>
+    <div class="section-body">
+      <div class="tbl-scroll"><table class="tbl" id="pd-table-active"></table></div>
+    </div>
+  </div>
+
+  <div class="section collapsible">
+    <div class="section-head"><div class="section-title"><span class="tag">✓</span>Dự án đã hoàn thành <span id="pd-count-done" style="text-transform:none;font-weight:400;color:var(--muted);font-size:11px">(0)</span></div></div>
+    <div class="section-body">
+      <div class="tbl-scroll"><table class="tbl" id="pd-table-done"></table></div>
     </div>
   </div>
 </section>
@@ -3848,7 +3867,7 @@ const WH_TYPES = {
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.20.120';
+const APP_VERSION='3.20.122';
 /* HOTFIX 3.12.17-email: CHẶN TRIỆT ĐỂ gửi email TỰ ĐỘNG (mất kiểm soát — spam quota Google).
    Email phải do NV được phân quyền CHỦ ĐỘNG chọn gửi. Cờ này:
    (1) chặn auto-SCAN tạo email (hrmScanExpiries/vesselCertScanExpiries);
@@ -10906,10 +10925,29 @@ function kuListMergeSelected(){
   if(loans.length<2){ toast('Không đủ khế ước nháp hợp lệ','bad'); return; }
   const lenders=[...new Set(loans.map(l=>(l.lender||l.bankName||'').trim()))];
   if(lenders.length>1){ toast('Các nháp đã tick thuộc '+lenders.length+' ngân hàng khác nhau ('+lenders.join(' · ')+') — mỗi khế ước chỉ 1 ngân hàng','bad'); return; }
-  const ccys=[...new Set(loans.map(l=>l.ccy||'VND'))];
-  if(ccys.length>1){ toast('Các nháp đã tick có '+ccys.length+' loại tiền ('+ccys.join(' · ')+') — mỗi khế ước chỉ 1 loại tiền','bad'); return; }
-  const total=loans.reduce((s,l)=>s+(+l.principal||0),0);
-  if(!confirm('Gộp '+loans.length+' khế ước nháp ('+lenders[0]+') thành 1 — tổng '+total.toLocaleString('vi-VN')+' '+ccys[0]+'?\n\nCác nháp còn lại sẽ bị xóa, mọi phiếu giải ngân của chúng chuyển hết về nháp giữ lại.')) return;
+  /* v3.20.121 (Sếp xác nhận: vay VNĐ thật, RUB chỉ là hình thức chi — bỏ ràng buộc "cùng loại tiền"
+     ở CẢ CẤP GỘP NHÁP này, đồng nhất với whKuGroupPick đã sửa ở v3.20.120): nháp không phải VNĐ →
+     principal của nó vẫn đang ở NGUYÊN TỆ GỐC (RUB...), phải quy đổi bằng cách cộng dồn TỪNG khoản
+     giải ngân gắn với nháp đó theo tỷ giá ĐÃ LƯU riêng từng khoản (p.fxRate, điền qua "VNĐ tương
+     đương" ở màn Chia các khoản giải ngân) — không dùng thẳng l.principal cho nháp ngoại tệ. Thiếu
+     tỷ giá ở bất kỳ khoản nào → chặn, chỉ rõ đúng nháp/khoản còn thiếu để NV quay lại điền trước. */
+  const missing=[];
+  const vndOf=(l)=>{
+    if((l.ccy||'VND')==='VND') return +l.principal||0;
+    let sum=0, ok=true;
+    _loanPayScan((r,p,idx,src)=>{
+      if(p.linkedLoanId!==l.id) return;
+      const rate=+p.fxRate||0;
+      if(rate<=0){ ok=false; return; }
+      sum+=Math.round(rate*(+p.amount||0));
+    });
+    if(!ok){ missing.push((l.lender||l.bankName||l.id)+' ('+(+l.principal||0).toLocaleString('vi-VN')+' '+(l.ccy||'')+')'); return 0; }
+    return sum;
+  };
+  const vndTotals=loans.map(vndOf);
+  if(missing.length){ toast('Chưa điền "VNĐ tương đương" cho các khoản trong: '+missing.join(', ')+' — điền ở màn "Chia các khoản giải ngân" trước rồi mới gộp được.','bad'); return; }
+  const total=vndTotals.reduce((s,v)=>s+v,0);
+  if(!confirm('Gộp '+loans.length+' khế ước nháp ('+lenders[0]+') thành 1 — tổng '+total.toLocaleString('vi-VN')+' VNĐ (đã quy đổi)?\n\nCác nháp còn lại sẽ bị xóa, mọi phiếu giải ngân của chúng chuyển hết về nháp giữ lại.')) return;
   const keep=loans[0], drop=loans.slice(1);
   commitMutation(()=>{
     drop.forEach(l=>{
@@ -10920,11 +10958,11 @@ function kuListMergeSelected(){
       (l.auditTrail=l.auditTrail||[]).push({at:new Date().toISOString(),by:actorName(),act:'ku_draft_merge_into',mergedInto:keep.id});
       try{ markDeleted([l.id],'loans'); }catch(e){}
     });
-    keep.principal=total;
+    keep.ccy='VND'; keep.principal=total;
     try{ touchRecord(keep); }catch(e){}
     try{ logAuditEvent('ku_draft_merge',{keep:keep.id, dropped:drop.map(l=>l.id), total, actor:actorName()}); }catch(e){}
   }, {action:'ku_draft_merge', fields:['loans','payables','opTransactions','deletedIds'], onOk:()=>{
-    toast('⊕ Đã gộp '+loans.length+' khế ước nháp thành 1','good');
+    toast('⊕ Đã gộp '+loans.length+' khế ước nháp thành 1 (VNĐ)','good');
     if(typeof renderAll==='function') renderAll();
   }});
 }
@@ -35098,44 +35136,48 @@ function canEditTreasury(){
 function renderProjectData(){
   try{ fillProjectVesselPicker(); }catch(e){}
   try{ _prjSegToggle(); }catch(e){}
-  const pTbl = document.getElementById('pd-table');
-  const pCount = document.getElementById('pd-count');
-  if(!pTbl || !pCount) return;
-  const list = (S.projects||[]).slice().sort((a,b)=>{
-    const ax=a.archived?1:0, bx=b.archived?1:0;
-    return ax-bx || (a.code||'').localeCompare(b.code||'');
-  });
-  const activeCount = list.filter(p=>!p.archived).length;
-  const archivedCount = list.length - activeCount;
-  pCount.textContent = archivedCount>0 ? `(${activeCount} đang dùng · ${archivedCount} đã đóng)` : `(${list.length})`;
-  if(!list.length){
-    pTbl.innerHTML = '<tr><td class="empty">Chưa có dự án — dùng form "Tạo dự án" phía trên</td></tr>';
-    return;
-  }
+  const tPend=document.getElementById('pd-table-pending'), cPend=document.getElementById('pd-count-pending');
+  const tAct=document.getElementById('pd-table-active'), cAct=document.getElementById('pd-count-active');
+  const tDone=document.getElementById('pd-table-done'), cDone=document.getElementById('pd-count-done');
+  if(!tPend || !tAct || !tDone) return;
   const canArchive = canArchiveItem();
-  let h = '<thead><tr><th>Mã</th><th>Tên</th><th>Khách hàng</th><th>Mảng</th><th>CCY</th><th>Trạng thái</th><th></th></tr></thead><tbody>';
-  list.forEach(p => {
+  /* v3.20.122: "có TBTT" = có ít nhất 1 đoạn On/Off-hire (VesselService.events) gắn projectId — dữ
+     liệu đã có sẵn từ trước, không cần trường mới. */
+  const evByProject={};
+  (VesselService.events()||[]).forEach(e=>{ if(e && !e._deleted && e.projectId){ evByProject[e.projectId]=(evByProject[e.projectId]||0)+1; } });
+  const all=(S.projects||[]).slice().sort((a,b)=>(a.code||'').localeCompare(b.code||''));
+  const pending=all.filter(p=>!p.archived && !evByProject[p.id]);
+  const active=all.filter(p=>!p.archived && evByProject[p.id]);
+  const done=all.filter(p=>p.archived);
+  const rowHtml=(p, showTbtt)=>{
     const seg = SEGMENTS[p.segment] || {name: p.segment||'?', short:p.segment||'?', chip:''};
     const statusChip = p.archived
-      ? `<span class="ds-need" data-dot="bad" style="font-size:10px" title="Đã hoàn thành bởi ${esc(p.archivedBy||'?')} lúc ${p.archivedAt?new Date(p.archivedAt).toLocaleDateString('vi-VN'):'?'}">⊘ HOÀN THÀNH</span>`
+      ? `<span class="ds-need" data-dot="bad" style="font-size:10px" title="Đã hoàn thành bởi ${esc(p.archivedBy||'?')} lúc ${p.archivedAt?new Date(p.archivedAt).toLocaleDateString('vi-VN'):'?'}${p.archivedReason==='auto_new_project_same_vessel'?' (tự động — tạo dự án mới cùng tàu)':''}">⊘ HOÀN THÀNH</span>`
       : `<span class="ds-need" data-dot="good" style="font-size:10px">✓ ACTIVE</span>`;
     const archiveBtn = canArchive
       ? (p.archived
           ? `<button class="icon-btn" title="Mở lại dự án" onclick="toggleArchiveProject('${p.id}')" style="color:var(--good)">↺</button>`
           : `<button class="icon-btn" title="Đánh dấu hoàn thành — ẩn khỏi dropdown nhập mới" onclick="toggleArchiveProject('${p.id}')" style="color:var(--warn)">⊘</button>`)
       : '';
-    h += `<tr style="${p.archived?'opacity:0.55;background:var(--paper-3)':''}">
+    const tbttBtn = showTbtt ? `<button class="btn-sec" style="font-size:10px;padding:2px 8px" onclick="closeModal();openEventModal(null,'${p.vesselId||''}','${p.id}')" title="Thêm TBTT ngay — không cần vào Sửa trước">🛳 +TBTT</button>` : '';
+    return `<tr style="${p.archived?'opacity:0.55;background:var(--paper-3)':''}">
       <td class="ds-t-sub" style="font-family:var(--font-mono)"><b>${esc(p.code)}</b></td>
       <td>${esc(p.name)}</td>
       <td style="font-size:11px">${esc(p.client||'—')}</td>
       <td><span class="ds-need" style="font-size:10px">${esc(seg.name)}</span></td>
       <td class="ds-t-sub" style="font-family:var(--font-mono)">${esc(p.ccy||'—')}</td>
       <td>${statusChip}</td>
-      <td><div class="row-actions">${archiveBtn}<button class="btn-sec" style="font-size:10px;padding:2px 8px" onclick="editProject('${p.id}')">✎ Sửa</button></div></td>
+      <td><div class="row-actions">${tbttBtn}${archiveBtn}<button class="btn-sec" style="font-size:10px;padding:2px 8px" onclick="editProject('${p.id}')">✎ Sửa</button></div></td>
     </tr>`;
-  });
-  h += '</tbody>';
-  pTbl.innerHTML = h;
+  };
+  const head='<thead><tr><th>Mã</th><th>Tên</th><th>Khách hàng</th><th>Mảng</th><th>CCY</th><th>Trạng thái</th><th></th></tr></thead>';
+  const fill=(tbl,cnt,list,emptyMsg,showTbtt)=>{
+    cnt.textContent='('+list.length+')';
+    tbl.innerHTML = list.length ? (head+'<tbody>'+list.map(p=>rowHtml(p,showTbtt)).join('')+'</tbody>') : ('<tr><td class="empty">'+emptyMsg+'</td></tr>');
+  };
+  fill(tPend, cPend, pending, 'Không có dự án nào đang chờ TBTT', true);
+  fill(tAct, cAct, active, 'Chưa có dự án nào đang triển khai', false);
+  fill(tDone, cDone, done, 'Chưa có dự án nào hoàn thành', false);
 }
 function renderCatalog(){
   try{ expGroupsSync(); }catch(e){}   /* v3.18.71 */
@@ -36016,6 +36058,7 @@ function toggleArchiveProject(id){
   // Refresh dropdowns
   try{ fillProjectPicker(); fillVesselExpensePickers(); }catch(e){}
   try{ renderProjects(); }catch(e){}  // v2.58.0: cập nhật bảng tab Dự án tại chỗ
+  try{ renderProjectData(); }catch(e){}  // v3.20.122: cập nhật đúng 3 khối (chưa/đang/đã hoàn thành) ở tab Dự án mới
 }
 
 function toggleArchiveVessel(id){
@@ -38882,14 +38925,16 @@ function addProject(){
   const code=document.getElementById('prj-code').value.trim();
   const name=document.getElementById('prj-name').value.trim();
   if(!code||!name){toast('Nhập mã + tên dự án','bad');return;}
-  S.projects.push({
+  const _newSegment=document.getElementById('prj-segment').value;
+  const _newVesselId=document.getElementById('prj-vessel').value||null;
+  const newProj={
     id:uid(),
     code,name,
     client:document.getElementById('prj-client').value.trim(),
     endClient:((document.getElementById('prj-endclient')||{}).value||'').trim(),   /* v3.19.17 */
     notice:((document.getElementById('prj-notice')||{}).value||'').trim(),   /* v3.19.20 — không hỏi lúc tạo nữa (v3.20.104), điền sau qua Sửa */
-    segment:document.getElementById('prj-segment').value,
-    vesselId:document.getElementById('prj-vessel').value||null,
+    segment:_newSegment,
+    vesselId:_newVesselId,
     ccy:document.getElementById('prj-ccy').value,
     start:document.getElementById('prj-start').value,
     end:document.getElementById('prj-end').value,
@@ -38903,7 +38948,25 @@ function addProject(){
     isOM:!!(document.getElementById('prj-isOM')||{}).checked,   /* v3.20.104: không hỏi lúc tạo nữa */
     createdAt:new Date().toISOString(),
     updatedAt:new Date().toISOString()  // v2.61.0: timestamp ngay từ khi tạo để sync nhận diện đúng
-  });
+  };
+  S.projects.push(newProj);
+  /* v3.20.122 (Sếp xác nhận: "khi NV bắt đầu tạo 1 dự án mới = dự án đang làm của tàu đã hoàn thành"
+     — chỉ là sắp xếp/phân loại hiển thị, KHÔNG đụng Doanh thu/Chi phí, dễ mở lại nếu sai → chọn mức
+     A tự động, không cần NV xác nhận từng lần): tạo dự án mới gắn TÀU CỤ THỂ (Mảng thuộc nhóm
+     VESSEL_*) → tự động đánh dấu HOÀN THÀNH mọi dự án KHÁC đang "Đang triển khai" của ĐÚNG con tàu
+     đó (1 tàu chỉ phục vụ 1 khách/1 hợp đồng tại 1 thời điểm — đúng thực tế). KHÔNG áp dụng cho dự
+     án không gắn tàu (O&M/Cảng biển/Quản lý chung) — nhiều dự án loại này chạy song song bình
+     thường, không có gì để so trùng. */
+  let _autoClosedNames=[];
+  if(_newVesselId && String(_newSegment||'').indexOf('VESSEL')===0){
+    S.projects.forEach(p=>{
+      if(p.id===newProj.id || p.archived || p.vesselId!==_newVesselId) return;
+      p.archived=true; p.archivedBy=actorName(); p.archivedAt=new Date().toISOString();
+      p.archivedReason='auto_new_project_same_vessel';   // v3.20.122: lý do tự động, phân biệt với NV tự bấm tay
+      try{ touchRecord(p); }catch(e){}
+      _autoClosedNames.push(p.code||p.name||p.id);
+    });
+  }
   saveState();
   ['prj-code','prj-name','prj-client','prj-endclient','prj-notice','prj-days'].forEach(i=>{ const el=document.getElementById(i); if(el) el.value=''; });
   document.getElementById('prj-vessel').value='';
@@ -38917,7 +38980,7 @@ function addProject(){
   try{ _prjSegToggle(); }catch(e){}
   const isOMEl=document.getElementById('prj-isOM'); if(isOMEl) isOMEl.checked=false;
   _prjCodeTouched=false;  // v3.02.18: dự án kế tiếp lại auto gợi ý mã
-  toast('Đã tạo dự án'); renderAll();
+  toast('Đã tạo dự án'+(_autoClosedNames.length?(' — tự chuyển "Đã hoàn thành" cho dự án cũ cùng tàu: '+_autoClosedNames.join(', ')+' (mở lại được nếu chưa đúng)'):'')); renderAll();
 }
 function delProject(id){
   if(!isAdmin()){toast('Chỉ admin mới xóa được dự án','bad');return;}
