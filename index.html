@@ -3867,7 +3867,7 @@ const WH_TYPES = {
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.20.129';
+const APP_VERSION='3.20.132';
 /* HOTFIX 3.12.17-email: CHẶN TRIỆT ĐỂ gửi email TỰ ĐỘNG (mất kiểm soát — spam quota Google).
    Email phải do NV được phân quyền CHỦ ĐỘNG chọn gửi. Cờ này:
    (1) chặn auto-SCAN tạo email (hrmScanExpiries/vesselCertScanExpiries);
@@ -54606,6 +54606,15 @@ function renderAR(){
   // AP KPI block
   const apK=document.getElementById('ap-kpi');
   if(apK){
+    /* v3.20.132 (Sếp: "Phần phải trả của NV nhập liệu: không cần bảng tổng hợp này"): NV nhập liệu
+       thường (không canCheckAcc/L1/L2/BOD/VM) chỉ cần thấy đúng số của CHÍNH MÌNH (đã có ở bảng chi
+       tiết bên dưới) — không cần 3 thẻ KPI tổng hợp toàn công ty này (Tổng phải trả/Đã trả/Còn lại),
+       dễ gây hiểu nhầm "công ty nợ 0đ" khi thực ra chỉ đang lọc theo đúng phạm vi của họ. Dùng đúng
+       canSeeAllRecords() — hàm đã dùng để ẩn banner "Phạm vi của bạn" (v3.20.127), cùng 1 nhóm đối
+       tượng. KT viên/L1/L2/BOD/VM/admin không đổi gì, vẫn thấy đủ 3 thẻ như cũ. */
+    if(!canSeeAllRecords()){
+      apK.innerHTML='';
+    } else {
     apK.innerHTML=`
       <div class="kpi">
         <div class="kpi-label">Tổng phải trả</div>
@@ -54622,6 +54631,7 @@ function renderAR(){
         <div class="kpi-value" style="color:var(--bad)">${fmt(payRemNet)}</div>
         <div class="kpi-sub">1. Năm trước: ${fmt(remPrev)}<br>2. Năm nay (${_curYear}): ${fmt(remThis)}<br>3. Tuổi nợ: ≤30d ${fmt(_agBuckets[1])} · 31–60 ${fmt(_agBuckets[2])} · 61–90 ${fmt(_agBuckets[3])} · <span style="color:var(--bad)">&gt;90 ${fmt(_agBuckets[4])}</span></div>
       </div>`;
+    }
   }
 
   // Render both tables
@@ -54730,7 +54740,7 @@ function _renderBatchRow(u, isAp, kind){
   // status cell: AR dùng lifecycle, AP dùng wf badge
   let statusCell;
   if(isAp){
-    statusCell=`<div>${wfBadgeHtml}</div>`;
+    statusCell=`<div>${wfBadgeHtml}</div>${whApTrackingIconBatch(recs, batchId)}`;
   } else {
     // AR: nếu approved → lifecycle theo rem; chưa duyệt → Chưa xuất HĐ
     const lc = a.status==='approved' ? (a.rem<=0.0001?{label:'Đã thu',chip:'chip-good'}:{label:'Đã xuất HĐ',chip:'chip-warn'}) : (a.status==='_mixed'?{label:'Hỗn hợp',chip:'chip-warn'}:{label:'Chưa xuất HĐ',chip:''});
@@ -75038,21 +75048,33 @@ function whReqToTransferDraft(req){
    lại nội dung"): icon nhỏ ngay dưới trạng thái duyệt trên dòng AP, khớp ĐÚNG 4 trạng thái thật của
    Theo dõi nhập kho (không chỉ 2 như bản đầu) — pending/received/short/done, cùng định nghĩa với
    whGroupTrackingDocs() để không lệch 2 nơi. Chưa gửi Nhập kho lần nào → không hiện gì (giữ gọn). */
-function whApTrackingIcon(r){
-  if(!r || !r.id) return '';
-  const docs=(InventoryService.stockDocs()||[]).filter(d=>d && d.apId===r.id && d.status!=='cancelled' && !d.reversedById);
+function _whTrackingIconFromDocs(docs){
   if(!docs.length) return '';
   let state, label, color;
   if(docs.some(d=>d.status==='pending')){ state='🚚'; label='Chờ giao hàng'; color='#b8730a'; }
   else if(docs.some(d=>d.status==='received')){ state='🏷'; label='Chờ nhập kho (mã tạm)'; color='#b8730a'; }
   else {
-    // v3.20.90-91: mọi doc còn lại đều 'confirmed' — so SL đã yêu cầu với SL đã nhận để biết còn thiếu đợt hay đã đủ.
     let ordered=0, received=0;
     docs.forEach(d=>(d.lines||[]).forEach(l=>{ ordered+=(+l.orderedQty>0?+l.orderedQty:+l.reqQty||0); received+=(+l.qty||0); }));
     if(ordered>received+0.001){ state='⚠'; label='Còn thiếu đợt ('+received+'/'+ordered+')'; color='var(--bad)'; }
     else { state='📦✓'; label='Đã nhập kho'; color='#1e7d44'; }
   }
   return `<div style="margin-top:3px;font-size:10.5px;color:${color};cursor:pointer" title="${esc(label)} — bấm xem chi tiết Theo dõi nhập kho" onclick="event.stopPropagation();openStockInTracking()">${state} ${esc(label)}</div>`;
+}
+function whApTrackingIcon(r){
+  if(!r || !r.id) return '';
+  const docs=(InventoryService.stockDocs()||[]).filter(d=>d && d.apId===r.id && d.status!=='cancelled' && !d.reversedById);
+  return _whTrackingIconFromDocs(docs);
+}
+/* v3.20.130 (Sếp: "với phiếu nhiều dòng: chưa có tình trạng kho như vậy?" — đúng, v3.20.129 chỉ làm
+   hàng đơn dòng, hàng gộp nhiều dòng (_renderBatchRow) chưa có): gộp docs theo TOÀN BỘ batch — khớp
+   apBatchId của batch NÀY hoặc apId của BẤT KỲ dòng con nào trong batch (đường liên kết có thể theo
+   1 trong 2 tùy nơi tạo phiếu kho). */
+function whApTrackingIconBatch(recs, batchId){
+  if(!recs || !recs.length) return '';
+  const ids=new Set(recs.map(r=>r.id));
+  const docs=(InventoryService.stockDocs()||[]).filter(d=>d && d.status!=='cancelled' && !d.reversedById && (d.apBatchId===batchId || ids.has(d.apId)));
+  return _whTrackingIconFromDocs(docs);
 }
 function whDocsOfAp(apId, stockDocs){
   const all=[], confirmed=[], pending=[];
@@ -75421,7 +75443,7 @@ function openStockInUnified(apId){
       amountNet:(+r.amountNet||(+r.amountGross||+r.amount||0))||0,   /* v3.20.116: đối chiếu chi tiết (không VAT) phải so với NET, không phải Gross */
       picked:false, code:'', qty:'', orderedQty:'', isApRef:true,   /* v3.20.113: dòng AP chỉ để THAM KHẢO/khớp — không cộng tổng */
       received:(recv['ap:'+r.id]||recv['ds:'+whNormName(r.desc||'')]||0) })),
-    priorDocs:prior.map(d=>({docNo:d.docNo,status:d.status,date:d.date,n:(d.lines||[]).length})) };
+    priorDocs:prior.map(d=>({id:d.id,docNo:d.docNo,status:d.status,date:d.date,n:(d.lines||[]).length})) };
   _usiRender();
 }
 function _usiRender(){
@@ -75487,9 +75509,19 @@ function _usiRender(){
     }
     _totalDetail += items.length;
   });
+  /* v3.20.131 (Sếp: "Nên cập nhật cả trong phiếu — khi NV Gửi chờ giao hàng: nút ẩn, thay vào đó:
+     Xác nhận nhận hàng... NV thao tác 1 nơi. Với trường hợp giao hàng nhiều lần: nên như thế nào"):
+     mỗi đợt "chờ" (pending) giờ có nút "✓ Xác nhận nhận hàng" NGAY TẠI ĐÂY — dùng đúng hàm Theo dõi
+     nhập kho đang dùng (openVesselReceive cho phía tàu, openConfirmInbound cho thủ kho/admin khác) —
+     không cần rời màn đi tìm "Theo dõi nhập kho" nữa. GIAO HÀNG NHIỀU LẦN: mỗi đợt liệt kê riêng,
+     đợt nào "chờ" thì có nút riêng; đợt "đã nhập" chỉ hiện trạng thái, không có nút (đã xong). Muốn
+     tạo THÊM đợt mới (hàng về thêm) vẫn dùng đúng luồng tick+gửi bình thường phía dưới banner này —
+     không đổi gì, 2 việc độc lập nhau trong cùng 1 màn. */
+  const _recvFn=(typeof whIsVesselSideUser==='function' && whIsVesselSideUser())?'openVesselReceive':'openConfirmInbound';
   const banner=s.priorDocs.length?`<div style="border:1px solid var(--warn);border-radius:6px;padding:6px 10px;margin-bottom:8px;font-size:11px;background:rgba(184,115,10,.06)">
-      ⚠ Cụm hóa đơn này ĐÃ có <b>${s.priorDocs.length}</b> phiếu nhập (đợt): ${s.priorDocs.map(p=>esc(p.docNo)+' ('+(p.status==='confirmed'?'đã nhập':'chờ')+')').join(' · ')}.
-      Chỉ tạo tiếp cho phần hàng VỀ THÊM — cột "Đã nhập" bên dưới cộng dồn các đợt trước, đừng nhập trùng.</div>`:'';
+      ⚠ Cụm hóa đơn này ĐÃ có <b>${s.priorDocs.length}</b> phiếu nhập (đợt):
+      ${s.priorDocs.map(p=>`<span style="display:inline-flex;align-items:center;gap:4px;margin:2px 6px 2px 0">${esc(p.docNo)} (${p.status==='confirmed'?'đã nhập':'chờ'})${p.status!=='confirmed'&&p.id?`<button class="btn-sec" style="font-size:10px;padding:1px 6px" onclick="closeModal();${_recvFn}('${esc(p.id)}')">✓ Xác nhận nhận hàng</button>`:''}</span>`).join('')}
+      <br>Chỉ tạo tiếp cho phần hàng VỀ THÊM — cột "Đã nhập" bên dưới cộng dồn các đợt trước, đừng nhập trùng.</div>`:'';
   openModal('📦 Đối chiếu & gửi vào Chờ giao hàng — '+esc(s.partner),
     `<div style="font-size:11px;color:#1c5a8c;margin-bottom:8px;padding:6px 10px;border:1px dashed #1c5a8c;border-radius:6px">Đây CHƯA phải xác nhận đã nhận hàng — chỉ đối chiếu SL/Đơn giá/Giá trị với báo giá rồi gửi cả phiếu vào <b>Theo dõi nhập kho → Chờ giao hàng</b>. Khi hàng về thật (có BBGN), Thủ kho mới xác nhận SL thực nhận ở bước riêng.</div>
      <datalist id="usi-codes">${matCodes}</datalist>
