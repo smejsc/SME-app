@@ -3879,7 +3879,7 @@ const WH_TYPES = {
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.20.143';
+const APP_VERSION='3.20.144';
 /* HOTFIX 3.12.17-email: CHẶN TRIỆT ĐỂ gửi email TỰ ĐỘNG (mất kiểm soát — spam quota Google).
    Email phải do NV được phân quyền CHỦ ĐỘNG chọn gửi. Cờ này:
    (1) chặn auto-SCAN tạo email (hrmScanExpiries/vesselCertScanExpiries);
@@ -76304,27 +76304,61 @@ function whParseQuotePdfLines(text){
      mục đơn vị của từng vật tư trong Material Master — 2 khái niệm riêng). Không thể "tự học" đơn vị
      hoàn toàn mới từ văn bản PDF (cần biết trước ĐÂU LÀ đơn vị mới nhận diện được ranh giới dòng —
      gà-trứng), nên mở rộng danh sách cho bao quát các đơn vị hay gặp thay vì chỉ thêm đúng "Đôi". */
-  const UNIT_RE=/\b(cái|bộ|kg|lít|lit|m|met|chiếc|hộp|cuộn|thùng|can|chai|tấm|kiện|đôi|cặp|gói|viên|tờ|quyển|ống|lô|cụm|khối|tá|dây|sợi|bình|túi|drum|bag|pcs|pc|set|box|ea)\b/i;
+  /* v3.20.144 (phát hiện khi kiểm bằng dữ liệu PDF thật — file Hải Bình/An Phú): \b không nhận diện
+     đúng ký tự có dấu tiếng Việt (ơ, ă, ạ...) là "chữ" — khiến chữ "m" (đơn vị mét) trong danh sách
+     dưới đây khớp NHẦM vào giữa các từ có dấu chứa "m" đứng sau nguyên âm có dấu (VD "Thơm", "Tấm",
+     "Nhóm"...), ra sai hoàn toàn vị trí tách tên/ĐVT/số. Đổi sang biên Unicode thật (\p{L}/\p{N} +
+     lookaround, cờ u) — "m" chỉ khớp khi đứng ĐỘC LẬP thật sự (không dính liền chữ/số ở 2 đầu). */
+  /* v3.20.144: bổ sung "cây" (BÀN CHẢI ĐÁNH RĂNG... Cây) và "bịch" (Nước xả vải... bịch) — phát hiện
+     khi kiểm bằng file Hải Bình thật, cùng loại việc mở rộng danh sách đã làm ở v3.20.107. */
+  const UNIT_RE=/(?<![\p{L}\p{N}])(cái|bộ|kg|lít|lit|m|met|chiếc|hộp|cuộn|thùng|can|chai|tấm|kiện|đôi|cặp|gói|viên|tờ|quyển|ống|lô|cụm|khối|tá|dây|sợi|bình|túi|cây|bịch|drum|bag|pcs|pc|set|box|ea)(?![\p{L}\p{N}])/iu;
   const out=[]; let stopped=false;
-  lines.forEach(l=>{
+  lines.forEach((l,idx)=>{
     if(FOOT.test(l)){ stopped=true; return; }
     if(stopped) return;
     const first=l.match(/^(\d{1,3})\s+/); if(!first) return;   // phải có STT số đứng đầu dòng, không thì bỏ qua
     const body=l.slice(first[0].length);
-    const um=body.match(UNIT_RE); if(!um) return;   // không thấy ĐVT → không đoán, bỏ dòng
+    /* v3.20.144 (phát hiện khi kiểm bằng file An Phú/Hải Bình thật): body.match() lấy lần khớp ĐẦU
+       TIÊN — sai khi chính TÊN HÀNG mở đầu bằng 1 từ trùng với ĐVT thật ("Chai phá rỉ RP7...", "Bộ
+       ren ngược...", "Dây curoa...", "Bộ lau nhà...") — bắt nhầm luôn từ đầu tên làm ĐVT, "before"
+       rỗng → mất tên → bỏ dòng oan (mất cả dòng dữ liệu đúng). ĐVT thật luôn đứng NGAY TRƯỚC SL/Đơn
+       giá, tức ở CUỐI dòng — lấy lần khớp CUỐI CÙNG thay vì đầu tiên là đúng trong mọi trường hợp. */
+    const umList=[...body.matchAll(new RegExp(UNIT_RE.source,'giu'))]; if(!umList.length) return;   // không thấy ĐVT → không đoán, bỏ dòng
+    const um=umList[umList.length-1];
     const before=body.slice(0,um.index).trim();
     const after=body.slice(um.index+um[0].length).trim();
     const codeMatch=before.match(/^([A-Z0-9][A-Z0-9\-\.\/]{2,20})\s+/i);
     const code=codeMatch?codeMatch[1]:'';
-    const name=(codeMatch?before.slice(codeMatch[0].length):before).trim();
+    let name=(codeMatch?before.slice(codeMatch[0].length):before).trim();
+    /* v3.20.144 (Sếp — file Hải Bình/An Phú: tên hàng dài bị PDF ngắt xuống dòng RIÊNG phía TRÊN,
+       dòng chứa STT lại chỉ có ĐVT+SL+giá ngay sau số thứ tự, không kèm tên — "before" rỗng, dòng bị
+       bỏ qua oan dù SL/đơn giá đọc đủ): tên rỗng → lấy nguyên dòng NGAY TRƯỚC làm tên, miễn dòng đó
+       không phải chính nó là 1 dòng dữ liệu khác (không tự bắt đầu bằng STT số) và không phải dòng
+       Điều khoản/Ghi chú cuối bảng. */
+    if(!name && idx>0){
+      const prev=lines[idx-1];
+      if(prev && !/^\d{1,3}\s+/.test(prev) && !FOOT.test(prev)) name=prev;
+    }
     if(!name) return;
     const nums=after.match(/\d{1,3}(?:[.,]\d{3})*(?:[.,]\d+)?/g)||[];
     if(!nums.length) return;
-    const _n=s=>{ s=String(s||''); const c=(s.match(/,/g)||[]).length, d=(s.match(/\./g)||[]).length;   /* v3.20.21: sửa lỗi replace(',','.') chỉ thay dấu phẩy ĐẦU khi số có 2+ dấu phẩy (7,360,000) ra NaN */
-      if(c>1||d>1) return +s.replace(/[.,]/g,'')||0;
-      if(c===1&&!d){ const p=s.split(','); return (p[1]&&p[1].length<=2)?(+s.replace(',','.')||0):(+s.replace(',','')||0); }
-      if(d===1&&!c){ const p=s.split('.'); return (p[1]&&p[1].length<=2)?(+s||0):(+s.replace('.','')||0); }
-      return +s||0; };
+    /* v3.20.144 (phát hiện khi kiểm bằng file Hải Bình/An Phú thật — viết lại hoàn toàn thay vì vá
+       thêm nhánh, vì bản cũ đếm SỐ LƯỢNG dấu chấm/phẩy để đoán kiểu số, bỏ sót đúng ca "1 chấm + 1
+       phẩy" (VD "24.000,00") ra NaN→0, và ca "nhiều chấm + 1 phẩy" (VD "4.212.000,00") bị nhánh xóa-
+       sạch-mọi-dấu nuốt luôn dấu phẩy thập phân, ra sai gấp 100 lần (421.200.000 thay vì 4.212.000).
+       Cách chắc hơn: lấy dấu phân cách ĐỨNG SAU CÙNG trong chuỗi làm mốc — phần đuôi sau dấu đó dài
+       ≤2 ký tự thì coi là phần thập phân thật (mọi dấu trước đó là phân nhóm nghìn, xóa hết); dài hơn
+       (VD 3 số như "7,360,000" hay "5.600") thì cả chuỗi chỉ là phân nhóm nghìn, không có thập phân. */
+    const _n=s=>{
+      s=String(s||'').trim(); if(!s) return 0;
+      const lastSep=Math.max(s.lastIndexOf(','), s.lastIndexOf('.'));
+      if(lastSep<0) return +s||0;
+      const fracPart=s.slice(lastSep+1);
+      if(fracPart.length>=1 && fracPart.length<=2 && /^\d+$/.test(fracPart)){
+        return +(s.slice(0,lastSep).replace(/[.,]/g,'')+'.'+fracPart)||0;
+      }
+      return +s.replace(/[.,]/g,'')||0;
+    };
     const qty=_n(nums[0]);
     if(!(qty>0)||qty>100000) return;   // SL vô lý → bỏ, không suy diễn
     const price=nums.length>1?_n(nums[1]):0;   /* v3.20.21: số thứ 2 sau ĐVT = Đơn giá (số thứ 3 là Thành tiền, không lấy — để app tự tính lại SL×Đơn giá, tránh sai số làm tròn của báo giá) */
@@ -76339,7 +76373,12 @@ function whParseQuotePdfLines(text){
    cùng 1 file PDF nhiều trang. Không tìm được mốc nào (chỉ 1 hóa đơn, hoặc mẫu khác không có "Số:")
    → coi cả file là 1 đoạn duy nhất, hành vi y hệt trước đây, không hồi quy. */
 function _provQuoteSplitTextByInvoice(text){
-  const NO_RE=/S[ốo]\s*:\s*(\d{5,10})\b/gi;
+  /* v3.20.144 (Sếp — file Hải Bình, phần mềm MISA meInvoice): nhãn in dính liền "Số(No.): 00000815"
+     (không có khoảng trắng, có cụm "(No.)" chen giữa "Số" và dấu ":") không khớp regex cũ (chỉ chấp
+     nhận khoảng trắng thuần giữa "Số" và ":") — không tách được số hóa đơn nào, phiếu có ≥2 dòng AP
+     thì báo lỗi "không khớp" oan. Nới thêm 1 cụm ngoặc tùy chọn (vd "(No.)", "（No.）") được phép chen
+     giữa — vẫn khớp đúng mẫu cũ "Số: 00000037" (không ngoặc) vì cụm này là tùy chọn. */
+  const NO_RE=/S[ốo]\s*(?:[\(（][^\)）]{0,20}[\)）])?\s*:\s*(\d{5,10})\b/gi;
   const marks=[]; let m;
   while((m=NO_RE.exec(text))){ marks.push({idx:m.index, no:m[1]}); }
   if(marks.length<2) return [{invoiceNo:(marks[0]&&marks[0].no)||'', text}];   // <2 mốc → không tách, giữ nguyên hành vi cũ
@@ -76553,11 +76592,11 @@ function _confRender(){
        tư" riêng, chỉ thêm lối tạo thứ 2, không phải 2 danh mục khác nhau). */
     const _newBtn=(_codeTyped && !_matExists) ? `<button class="btn-sec" style="font-size:9.5px;padding:1px 5px;margin-top:2px" onclick="_confQuickNewMat(${i})" title="Mã &quot;${esc(_codeTyped)}&quot; chưa có trong Danh mục — tạo mới ngay tại đây">+ Mới</button>` : '';
     return `<tr>
-    <td style="padding:3px"><input value="${esc(l.code||'')}" list="conf-codes" placeholder="Mã FAST" style="width:100px;padding:4px;font-family:monospace;font-size:11px" onchange="_confLineCode(${i},this.value)">${_newBtn}${l.srcDesc?`<div style="font-size:10px;color:var(--muted);max-width:120px" title="${esc(l.srcDesc)}">↳ ${esc((l.srcDesc||'').slice(0,28))}</div>`:''}${l.srcCode?`<div style="font-size:9.5px;color:var(--muted)" title="Mã bên bán (NCC) — để đối chiếu, không phải mã FAST">mã NCC: ${esc(l.srcCode)}</div>`:''}</td>
-    <td style="padding:3px 6px;font-size:11px">${esc(l.name||'')}</td>
+    <td style="padding:3px 4px"><input value="${esc(l.code||'')}" list="conf-codes" placeholder="Mã FAST" style="width:100%;box-sizing:border-box;padding:4px;font-family:monospace;font-size:11px" onchange="_confLineCode(${i},this.value)">${_newBtn}${l.srcDesc?`<div style="font-size:10.5px;color:var(--muted);word-break:break-word" title="${esc(l.srcDesc)}">↳ ${esc((l.srcDesc||'').slice(0,28))}</div>`:''}${l.srcCode?`<div style="font-size:10.5px;color:var(--muted)" title="Mã bên bán (NCC) — để đối chiếu, không phải mã FAST">mã NCC: ${esc(l.srcCode)}</div>`:''}</td>
+    <td style="padding:3px 6px;font-size:11px;word-break:break-word">${esc(l.name||'')}</td>
     <td style="padding:3px 6px;font-size:11px;text-align:center">${esc(l.unit||'')}</td>
     <td style="padding:3px 6px;font-size:11px;text-align:right;color:var(--muted)">${l.reqQty||0}</td>
-    <td style="padding:3px"><input type="number" value="${l.qty!=null?l.qty:l.reqQty}" style="width:64px;padding:4px;font-size:11px;text-align:right" onchange="_confQty(${i},this.value)"></td></tr>`;
+    <td style="padding:3px 4px"><input type="number" value="${l.qty!=null?l.qty:l.reqQty}" style="width:100%;box-sizing:border-box;padding:4px;font-size:11px;text-align:right" onchange="_confQty(${i},this.value)"></td></tr>`;
   }).join('');
   // landed cost (chỉ người xem giá)
   let landedBlock='';
@@ -76595,8 +76634,13 @@ function _confRender(){
   const _needMap=(d.lines||[]).some(l=>!String(l.code||'').trim());
   const body=`<datalist id="conf-codes">${_matCodesConf}</datalist>
     <div style="font-size:11px;color:var(--muted);margin-bottom:8px">Phiếu ${esc(d.docNo)} · Kho ${esc(_whName(d.warehouseId))}. Kiểm hàng thực tế, ${_needMap?'<b style="color:#b8730a">chọn mã vật tư FAST cho từng dòng</b>, ':''}điều chỉnh SL thực nhận.</div>
-    <table style="width:100%;border-collapse:collapse;border:1px solid var(--rule)">
-      <thead><tr style="background:var(--rule);font-size:11px"><th style="padding:4px">Mã FAST${_needMap?' *':''}</th><th style="padding:4px">Tên</th><th style="padding:4px">ĐVT</th><th style="padding:4px">SL yêu cầu</th><th style="padding:4px">SL thực nhận</th></tr></thead>
+    <!-- v3.20.144 (Sếp — "bố cục không cân đối: Mã FAST dòng tên hơi nhỏ, Tên vật tư quá dài, ĐVT chưa
+         hiển thị, SL yêu cầu lệch"): thêm table-layout:fixed + colgroup độ rộng cố định — cùng khuôn đã
+         vá cho "Theo dõi nhập kho" ở v3.20.26, màn này bị bỏ sót. Không table-layout:fixed → cột Tên
+         (không giới hạn) nuốt hết chỗ, ép ĐVT/SL yêu cầu gần như 0 bề rộng. -->
+    <table style="width:100%;border-collapse:collapse;border:1px solid var(--rule);table-layout:fixed">
+      <colgroup><col style="width:150px"><col><col style="width:60px"><col style="width:90px"><col style="width:100px"></colgroup>
+      <thead><tr style="background:var(--rule);font-size:11px"><th style="padding:4px">Mã FAST${_needMap?' *':''}</th><th style="padding:4px;text-align:left">Tên</th><th style="padding:4px">ĐVT</th><th style="padding:4px">SL yêu cầu</th><th style="padding:4px">SL thực nhận</th></tr></thead>
       <tbody>${lineRows}</tbody></table>
     ${landedBlock}
     ${!showVal?'<div style="font-size:11px;color:var(--muted);margin-top:8px">Chi phí phát sinh (thuế/phí) do kế toán/thủ kho tổng ghi nhận.</div>':''}`;
@@ -76772,6 +76816,14 @@ function _confSave(confirmNow){
     real.pnkSeen = (real.createdBy===real.confirmedBy);
   }
   else { real.status='draft'; }
+  /* v3.20.144 (Sếp — "xác nhận nhập kho xong, chuyển tab lại quay về Chờ nhập kho (mã tạm)"): _confSave()
+     đổi real.status nhưng QUÊN touchRecord(real) — updatedAt không cập nhật. Cơ chế đồng bộ nhiều máy
+     so updatedAt để chọn bản mới hơn (mergeByID); real.status đã đổi thật + lưu local thành công, nhưng
+     vì updatedAt đứng yên, lần đồng bộ/merge kế tiếp (vd khi chuyển tab) không nhận ra đây là bản MỚI
+     hơn bản 'received' cũ đang có sẵn ở cloud/bộ nhớ khác → merge chọn nhầm bản cũ, phiếu hiện lại về
+     "Đã nhận (mã tạm)" như chưa từng xác nhận, dù dữ liệu (mã/SL/chi phí) không mất. Các hàm lưu khác
+     cùng lớp (_vrSave...) đã gọi touchRecord đúng — _confSave() bị bỏ sót. */
+  try{ touchRecord(real); }catch(e){}
   try{ logAuditEvent(confirmNow?'stock_confirm':'stock_in',{docNo:real.docNo, fromPending:true, landed:(real.landedCosts||[]).length}); if((real.landedCosts||[]).length) logAuditEvent('landed_cost',{docNo:real.docNo, count:real.landedCosts.length, total:(real.landedCosts||[]).reduce((s,c)=>s+(+c.amount||0),0)}); }catch(e){}
   // v3.08.57: thông báo về TÀU khi đề nghị mua/nhập của tàu được xác nhận nhận hàng
   if(confirmNow){
