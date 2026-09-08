@@ -1008,6 +1008,12 @@ span.chip.chip-fixed{display:inline-flex;align-items:center;gap:4px}
        Xóa) — dùng cơ chế tick quyền bình thường (canAccessTab('project_data')), không khóa cứng
        KTT/BOD như tab cũ. -->
   <button class="nav-item" data-page="project_data"><span class="num">📐</span>Dự án</button>
+  <!-- v3.20.137 (Sếp: xây màn riêng cho "Phụ trách kế toán công ty con" — quyền như KTT, giới hạn 1
+       công ty, tương tự VM Dashboard cho Vessel Manager): tab MỚI, chỉ hiện cho NV bị giới hạn theo
+       công ty (getActorCompanyId() có giá trị) VÀ có quyền dạng KTT (canManageUsers hoặc
+       canCheckAcc) — không phải ai bị giới hạn công ty cũng cần màn này (NV nhập liệu thường không
+       cần). Gộp 3 mảng: Nhân sự / Kế toán / NSNN — xem canAccessTab('co_dashboard'). -->
+  <button class="nav-item" data-page="co_dashboard"><span class="num">🏢</span>Tổng quan công ty con</button>
   <!-- v3.10.55 (Sếp): hub TCKT thành NHÓM DROPDOWN — các mục trên dashboard thành tab cho gọn.
        Hiện/ẩn cùng cơ chế _finGrouped (chỉ admin dùng giao diện gom; NV giữ nav cũ). -->
   <div class="nav-group" id="nav-group-fin" style="display:none">
@@ -1243,6 +1249,12 @@ span.chip.chip-fixed{display:inline-flex;align-items:center;gap:4px}
       <div class="tbl-scroll"><table class="tbl" id="pd-table-done"></table></div>
     </div>
   </div>
+</section>
+
+<!-- ============ TỔNG QUAN CÔNG TY CON (v3.20.137) — trang riêng cho Phụ trách kế toán công ty
+     con, tương tự VM Dashboard cho Vessel Manager, JS dựng ============ -->
+<section class="page" id="page-co_dashboard">
+  <div id="co-dashboard-body"><!-- renderCoDashboard() --></div>
 </section>
 
 
@@ -3867,7 +3879,7 @@ const WH_TYPES = {
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.20.132';
+const APP_VERSION='3.20.137';
 /* HOTFIX 3.12.17-email: CHẶN TRIỆT ĐỂ gửi email TỰ ĐỘNG (mất kiểm soát — spam quota Google).
    Email phải do NV được phân quyền CHỦ ĐỘNG chọn gửi. Cờ này:
    (1) chặn auto-SCAN tạo email (hrmScanExpiries/vesselCertScanExpiries);
@@ -12257,6 +12269,14 @@ function getParentCompanyId(){
   const list = S.companies||[];
   const parent = list.find(c=>c.isParent);
   return parent ? parent.id : (list[0] ? list[0].id : 'CO-PARENT');
+}
+/* v3.20.137 (Sếp — dashboard "Tổng quan công ty con": "Có" thêm field công ty cho Ngân hàng): tài
+   khoản CHƯA có companyId (tạo trước bản vá này) coi như thuộc công ty MẸ — không đổi hành vi hiện
+   tại của những ai đang xem "tất cả" (KTT công ty mẹ vẫn thấy hết như trước), chỉ NV bị giới hạn 1
+   công ty con mới thực sự bị lọc hẹp lại. */
+function bankAccountsForCompany(coId){
+  if(!coId) return AccountingService.bankAccounts();
+  return AccountingService.bankAccounts().filter(a=>String(a.companyId||getParentCompanyId())===String(coId));
 }
 /* Tên công ty theo id — fallback an toàn */
 function companyName(id){
@@ -40672,6 +40692,87 @@ function openOpVesselHub(vid){
    → Tàu quản lý hộ (DƯỚI) → Cảnh báo → Lối vào nhanh (Thu-Chi hộ + Kho vật tư).
    Dùng TOÀN hàm data có sẵn (opBalance/opMinUsd/vesselCrewMerged/khoanReconcile/_segForVesselDate);
    KHÔNG tạo hàm data mới. Cột On/Off-hire: đang khai thác → ngày On-hire + Charterer; khác → ngày bắt đầu. */
+function renderCoDashboard(){
+  const box=document.getElementById('co-dashboard-body'); if(!box) return;
+  const coId=getActorCompanyId();
+  const co=(S.companies||[]).find(c=>c.id===coId);
+  const _f=n=>Math.round(n||0).toLocaleString('vi-VN')+'đ';
+  const _esc=x=>(typeof esc==='function')?esc(x):String(x==null?'':x);
+  // ---- Nhân sự: kỳ lương gần nhất của công ty này ----
+  const periods=(PayrollService.periods()||[]).filter(p=>String(p.companyId||'')===String(coId)).sort((a,b)=>String(b.period||'').localeCompare(String(a.period||'')));
+  const curPeriod=periods[0]||null;
+  const periodChip=curPeriod?(payStatusIdx(curPeriod.status)>=payStatusIdx('approved')?`<span style="color:var(--good)">Đã duyệt</span>`:`<span style="color:var(--warn)">Chờ duyệt</span>`):`<span style="color:var(--muted)">Chưa có kỳ</span>`;
+  // ---- Kế toán: AP/AR/Ngân hàng theo công ty ----
+  const apAll=(AccountingService.payables()||[]).filter(r=>String(r.companyId||'')===String(coId) && !r._isCreditNote);
+  const arAll=(AccountingService.receivables()||[]).filter(r=>String(r.companyId||'')===String(coId) && !r._isCreditNote);
+  const apRem=apAll.reduce((s,r)=>s+(typeof arRemaining==='function'?arRemaining(r):0),0);
+  const arRem=arAll.reduce((s,r)=>s+(typeof arRemaining==='function'?arRemaining(r):0),0);
+  const pendingCount=apAll.filter(r=>['pending_acc','pending_l1','pending_l2'].includes(wfStatus(r))).length
+    + arAll.filter(r=>['pending_acc','pending_l1','pending_l2'].includes(wfStatus(r))).length;
+  const bankAccs=bankAccountsForCompany(coId).filter(a=>a.isActive!==false);
+  const bankByCcy={}; bankAccs.forEach(a=>{ bankByCcy[a.ccy||'VND']=(bankByCcy[a.ccy||'VND']||0)+(+a.balance||0); });
+  const bankLine=Object.keys(bankByCcy).sort().map(c=>c==='VND'?_f(bankByCcy[c]):Math.round(bankByCcy[c]).toLocaleString('en-US')+' '+c).join(' · ')||'—';
+  // ---- Chờ duyệt gộp (AP + kỳ lương) ----
+  const approvalRows=[];
+  apAll.filter(r=>['pending_acc','pending_l1','pending_l2'].includes(wfStatus(r))).slice(0,8).forEach(r=>{
+    approvalRows.push({kind:'Phải trả', partner:r.partner||r.desc||'', amt:(typeof arRemaining==='function'?arRemaining(r):0), ccy:r.ccy||'VND', open:`navTo('payables')`});
+  });
+  if(curPeriod && payStatusIdx(curPeriod.status)<payStatusIdx('approved')){
+    approvalRows.push({kind:'Kỳ lương', partner:'Kỳ '+(curPeriod.period||'')+' — '+((curPeriod.rows||[]).length)+' NV', amt:0, ccy:'', open:`navTo('pay_periods')`});
+  }
+  const approvalHtml=approvalRows.length?approvalRows.map(a=>`<tr onclick="${a.open}" style="cursor:pointer">
+      <td style="padding:9px 14px">${_esc(a.kind)}</td><td style="padding:9px 14px">${_esc(a.partner)}</td>
+      <td style="padding:9px 14px;text-align:right;font-family:var(--font-mono)">${a.amt?fmtOrig(a.amt,a.ccy):'—'}</td>
+      <td style="padding:9px 14px;text-align:right;color:var(--accent)">Mở →</td></tr>`).join('')
+    :'<tr><td colspan="4" style="padding:16px;text-align:center;color:var(--good)">✓ Không có gì chờ duyệt</td></tr>';
+  const kpi=(label,val,sub,onclick)=>`<div class="cok" ${onclick?`onclick="${onclick}" style="cursor:pointer"`:''}>
+      <div class="cok-l">${_esc(label)}</div><div class="cok-v">${val}</div>${sub?`<div class="cok-s">${sub}</div>`:''}</div>`;
+  box.innerHTML=`
+    <style>
+      #page-co_dashboard .cok{background:var(--card,#fff);border:1px solid var(--rule);border-radius:8px;padding:14px 16px}
+      #page-co_dashboard .cok-l{font-size:11px;letter-spacing:.05em;text-transform:uppercase;color:var(--muted);font-weight:600}
+      #page-co_dashboard .cok-v{font-size:20px;font-weight:700;margin-top:4px;font-family:var(--font-mono)}
+      #page-co_dashboard .cok-s{font-size:12px;color:var(--muted);margin-top:2px}
+      #page-co_dashboard .co-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin-bottom:20px}
+      #page-co_dashboard .co-sec{font-size:13px;font-weight:600;margin:0 2px 8px}
+      #page-co_dashboard table.co-tbl{width:100%;border-collapse:collapse}
+      #page-co_dashboard .co-tbl th{background:var(--paper);text-align:left;font-size:11px;text-transform:uppercase;color:var(--muted);font-weight:600;padding:9px 14px;border-bottom:1px solid var(--rule)}
+      #page-co_dashboard .co-tbl td{border-bottom:1px solid rgba(0,0,0,.05);font-size:13px}
+      #page-co_dashboard .co-panel{background:var(--card,#fff);border:1px solid var(--rule);border-radius:8px;overflow:hidden}
+    </style>
+    <div class="page-head"><div>
+      <div class="page-title">Tổng quan <span class="it">công ty con</span></div>
+      <div class="page-sub">${_esc((co&&co.name)||coId)} · phạm vi: chỉ công ty này</div>
+    </div></div>
+
+    <div class="co-sec">Nhân sự</div>
+    <div class="co-grid">
+      ${kpi('Kỳ lương gần nhất', curPeriod?_esc(curPeriod.period):'—', periodChip, `navTo('pay_periods')`)}
+      ${kpi('BHXH', 'Xem chi tiết', '', `navTo('nsnn')`)}
+      ${kpi('Thuế TNCN', 'Xem quyết toán', '', `window._coDashTncn='${_esc(coId)}';pitSettlementOpen()`)}
+    </div>
+
+    <div class="co-sec">Kế toán</div>
+    <div class="co-grid">
+      ${kpi('Phải thu còn lại', _f(arRem), '', `navTo('receivables')`)}
+      ${kpi('Phải trả còn lại', _f(apRem), '', `navTo('payables')`)}
+      ${kpi('Số dư Ngân hàng', bankLine, bankAccs.length+' tài khoản', `navTo('banking')`)}
+      ${kpi('Phiếu chờ duyệt', pendingCount, '', `navTo('approval')`)}
+    </div>
+
+    <div class="co-sec">NSNN</div>
+    <div class="co-grid" style="margin-bottom:20px">
+      ${kpi('Thuế GTGT', 'Xem chi tiết', '', `navTo('nsnn')`)}
+      ${kpi('Thuế TNDN', 'Xem chi tiết', '', `navTo('nsnn')`)}
+      ${kpi('Các sắc thuế khác', 'Xem chi tiết', '', `navTo('nsnn')`)}
+    </div>
+
+    <div class="co-panel">
+      <div style="padding:10px 14px;font-weight:600;font-size:13px;border-bottom:1px solid var(--rule)">Chờ duyệt của bạn</div>
+      <table class="co-tbl"><thead><tr><th>Loại</th><th>Đối tác</th><th style="text-align:right">Số tiền</th><th></th></tr></thead>
+      <tbody>${approvalHtml}</tbody></table>
+    </div>`;
+}
 function renderVmDashboard(){
   const box=document.getElementById('vm-dashboard-body'); if(!box) return;
   const _f=n=>(typeof _khoanFmtUsd==='function')?_khoanFmtUsd(n):('$'+Math.round(n||0).toLocaleString('en-US'));
@@ -50329,7 +50430,11 @@ function loanDueThisMonthByTerm(){
 
 function renderBanking(){
   if(!document.getElementById('page-banking')) return;
-  const accounts =AccountingService.bankAccounts();
+  /* v3.20.137 (Sếp — dashboard "Tổng quan công ty con"): NV bị giới hạn theo 1 công ty (Quản lý công
+     ty con) chỉ thấy đúng tài khoản ngân hàng của công ty đó — dùng lại getActorCompanyId() đã có
+     sẵn từ trước (cùng cơ chế đang lọc Phải thu/Phải trả). Admin/KTT công ty mẹ không đổi gì (thấy
+     hết như cũ). */
+  const accounts =bankAccountsForCompany(getActorCompanyId());
   const loans =AccountingService.loans();
   // v3.03.42: AUTO TỰ THU — tự ghi kỳ tới hạn cho các NH đang bật auto (idempotent, chặn re-entry).
   if(!window._loanAutoRunning){
@@ -52082,6 +52187,10 @@ function _bankAccountModal(a){
           <option value="RUB" ${a.ccy==='RUB'?'selected':''}>RUB</option>
         </select>
       </div>
+      ${(S.companies||[]).length>1?`<div class="field">
+        <label>Pháp nhân *</label>
+        <select id="ba-company">${(S.companies||[]).map(c=>`<option value="${c.id}" ${(a.companyId||getParentCompanyId())===c.id?'selected':''}>${esc(c.name)}${c.isParent?' (mẹ)':''}</option>`).join('')}</select>
+      </div>`:''}
       <div class="field">
         <label>Trạng thái</label>
         <label style="display:flex;align-items:center;gap:6px;padding:8px;font-size:13px">
@@ -52106,6 +52215,7 @@ function _saveBankAccount(id){
   const no=document.getElementById('ba-no').value.trim();
   const name=document.getElementById('ba-name').value.trim();
   const ccy=document.getElementById('ba-ccy').value;
+  const companyId=(document.getElementById('ba-company')||{}).value||getParentCompanyId();
   const active=document.getElementById('ba-active').checked;
   const note=document.getElementById('ba-note').value.trim();
   if(!bank){err.textContent='Nhập tên ngân hàng';return;}
@@ -52115,12 +52225,12 @@ function _saveBankAccount(id){
     const a=AccountingService.bankAccounts().find(x=>x.id===id);
     if(!a)return;
     a.bankName=bank; a.branch=branch; a.accountNo=no; a.accountName=name;
-    a.ccy=ccy; a.isActive=active; a.note=note; a.updatedAt=new Date().toISOString();
+    a.ccy=ccy; a.companyId=companyId; a.isActive=active; a.note=note; a.updatedAt=new Date().toISOString();
   } else {
     AccountingService.addBankAccount({
       id:'BANK-'+uid().slice(-6),
       bankName:bank, branch, accountNo:no, accountName:name,
-      ccy, isActive:active, note,
+      ccy, companyId, isActive:active, note,
       createdAt:new Date().toISOString(), createdBy:actorName()
     });
   }
@@ -72340,7 +72450,13 @@ const MAT_GROUPS_DEFAULT=['Nhiên liệu','Dầu nhờn','Phụ tùng','Vật t�
 function matList(){ return InventoryService.materials().slice(); }
 function matByCode(code){ return InventoryService.materialByCode(code); }
 function matGroups(){ const s=new Set(MAT_GROUPS_DEFAULT); InventoryService.materials().forEach(m=>{ if(m.group) s.add(m.group); }); return Array.from(s); }
-function canManageMaterials(){ return isAdmin() || !!(CURRENT_USER && (CURRENT_USER.isWarehouse || CURRENT_USER.isCentralWarehouse || CURRENT_USER.canManageUsers)); }   // v3.16.74: Thủ kho tổng toàn quyền kho
+function canManageMaterials(){
+  /* v3.20.135 (Sếp: "Thủ kho áp mã không lưu được" — tìm ra: NV có "Kho phụ trách" (assignedWarehouseIds,
+     xây từ v3.20.86) thao tác kho bình thường (canManageStock() đã có check này) nhưng hàm RIÊNG quyết
+     định "ai lưu được vật tư mới" lại quên bổ sung cùng lúc — chặn nhầm "Không có quyền" khi họ tạo mã
+     mới. Thêm đúng check còn thiếu, khớp với canManageStock(). */
+  return isAdmin() || !!(CURRENT_USER && (CURRENT_USER.isWarehouse || CURRENT_USER.isCentralWarehouse || CURRENT_USER.canManageUsers || (Array.isArray(CURRENT_USER.assignedWarehouseIds) && CURRENT_USER.assignedWarehouseIds.length)));
+}   // v3.16.74: Thủ kho tổng toàn quyền kho
 let _matFilter={q:'',group:'',status:''};
 function openMaterialMaster(){
   const all=matList();
@@ -75052,7 +75168,7 @@ function _whTrackingIconFromDocs(docs){
   if(!docs.length) return '';
   let state, label, color;
   if(docs.some(d=>d.status==='pending')){ state='🚚'; label='Chờ giao hàng'; color='#b8730a'; }
-  else if(docs.some(d=>d.status==='received')){ state='🏷'; label='Chờ nhập kho (mã tạm)'; color='#b8730a'; }
+  else if(docs.some(d=>d.status==='received')){ state='🏷'; label='Chờ nhập kho'; color='#b8730a'; }
   else {
     let ordered=0, received=0;
     docs.forEach(d=>(d.lines||[]).forEach(l=>{ ordered+=(+l.orderedQty>0?+l.orderedQty:+l.reqQty||0); received+=(+l.qty||0); }));
@@ -75517,10 +75633,20 @@ function _usiRender(){
      đợt nào "chờ" thì có nút riêng; đợt "đã nhập" chỉ hiện trạng thái, không có nút (đã xong). Muốn
      tạo THÊM đợt mới (hàng về thêm) vẫn dùng đúng luồng tick+gửi bình thường phía dưới banner này —
      không đổi gì, 2 việc độc lập nhau trong cùng 1 màn. */
-  const _recvFn=(typeof whIsVesselSideUser==='function' && whIsVesselSideUser())?'openVesselReceive':'openConfirmInbound';
+  /* v3.20.134 (Sếp: "Nút áp mã và xác nhận là phần việc của Thủ kho — không nên xuất hiện tại đây,
+     tại đây nhãn nên là: Chờ nhập kho" + "Lần lượt các nhãn phải là: chờ giao hàng - chờ nhập kho
+     tương ứng với trạng thái phiếu"): bỏ hẳn nút cho "received" (đã nhận, mã tạm) — đây là việc của
+     Thủ kho ở màn riêng (Theo dõi nhập kho), không làm ở đây. Chỉ "pending" (chưa nhận) mới có nút
+     "Xác nhận nhận hàng" tại đây. */
+  const _isVesselSide=(typeof whIsVesselSideUser==='function' && whIsVesselSideUser());
   const banner=s.priorDocs.length?`<div style="border:1px solid var(--warn);border-radius:6px;padding:6px 10px;margin-bottom:8px;font-size:11px;background:rgba(184,115,10,.06)">
       ⚠ Cụm hóa đơn này ĐÃ có <b>${s.priorDocs.length}</b> phiếu nhập (đợt):
-      ${s.priorDocs.map(p=>`<span style="display:inline-flex;align-items:center;gap:4px;margin:2px 6px 2px 0">${esc(p.docNo)} (${p.status==='confirmed'?'đã nhập':'chờ'})${p.status!=='confirmed'&&p.id?`<button class="btn-sec" style="font-size:10px;padding:1px 6px" onclick="closeModal();${_recvFn}('${esc(p.id)}')">✓ Xác nhận nhận hàng</button>`:''}</span>`).join('')}
+      ${s.priorDocs.map(p=>{
+        const _lbl = p.status==='confirmed'?'đã nhập':(p.status==='received'?'chờ nhập kho':'chờ giao hàng');
+        const _fn = _isVesselSide ? 'openVesselReceive' : 'openConfirmInbound';
+        const _showBtn = p.status==='pending' && p.id;   // v3.20.134: chỉ pending mới có nút — received/confirmed chỉ hiện nhãn
+        return `<span style="display:inline-flex;align-items:center;gap:4px;margin:2px 6px 2px 0">${esc(p.docNo)} (${_lbl})${_showBtn?`<button class="btn-sec" style="font-size:10px;padding:1px 6px" onclick="closeModal();${_fn}('${esc(p.id)}')">✓ Xác nhận nhận hàng</button>`:''}</span>`;
+      }).join('')}
       <br>Chỉ tạo tiếp cho phần hàng VỀ THÊM — cột "Đã nhập" bên dưới cộng dồn các đợt trước, đừng nhập trùng.</div>`:'';
   openModal('📦 Đối chiếu & gửi vào Chờ giao hàng — '+esc(s.partner),
     `<div style="font-size:11px;color:#1c5a8c;margin-bottom:8px;padding:6px 10px;border:1px dashed #1c5a8c;border-radius:6px">Đây CHƯA phải xác nhận đã nhận hàng — chỉ đối chiếu SL/Đơn giá/Giá trị với báo giá rồi gửi cả phiếu vào <b>Theo dõi nhập kho → Chờ giao hàng</b>. Khi hàng về thật (có BBGN), Thủ kho mới xác nhận SL thực nhận ở bước riêng.</div>
@@ -76382,12 +76508,23 @@ function _confRender(){
   const d=_confDraft; if(!d) return;
   const showVal=(typeof canViewStockValue==='function'&&canViewStockValue());
   const _bbgnBanner=d.bbgn?`<div style="font-size:11.5px;padding:6px 10px;border:1px solid #1e7d44;border-radius:8px;background:#eafaf0;margin-bottom:6px">📎 Xác nhận theo <b>biên bản giao nhận${d.bbgn.no?' '+esc(d.bbgn.no):''}</b>${d.bbgn.date?' · '+esc(d.bbgn.date):''}${d.bbgn.url?` · <a href="${esc(d.bbgn.url)}" target="_blank" rel="noopener">mở file</a>`:''} · khớp ${d.bbgn.matched||0}/${d.bbgn.rows||0} dòng · nhập bởi ${esc(d.bbgn.readBy||'')}</div>`:'';
-  const lineRows=(d.lines||[]).map((l,i)=>`<tr>
-    <td style="padding:3px"><input value="${esc(l.code||'')}" list="conf-codes" placeholder="Mã FAST" style="width:100px;padding:4px;font-family:monospace;font-size:11px" onchange="_confLineCode(${i},this.value)">${l.srcDesc?`<div style="font-size:10px;color:var(--muted);max-width:120px" title="${esc(l.srcDesc)}">↳ ${esc((l.srcDesc||'').slice(0,28))}</div>`:''}${l.srcCode?`<div style="font-size:9.5px;color:var(--muted)" title="Mã bên bán (NCC) — để đối chiếu, không phải mã FAST">mã NCC: ${esc(l.srcCode)}</div>`:''}</td>
+  const lineRows=(d.lines||[]).map((l,i)=>{
+    const _codeTyped=String(l.code||'').trim();
+    const _matExists=_codeTyped && (typeof matByCode==='function') && matByCode(_codeTyped);
+    /* v3.20.136 (Sếp xác nhận: "NV tạo mã mới ngay tại màn áp mã vật tư và nhập kho — không phải
+       chuyển màn về tạo mã riêng" + "mã sẽ được cập nhật ngay lập tức vào danh mục mã vật tư, mã
+       vật tư có thể tạo tại 2 nơi"): nút "+ Mới" chỉ hiện khi đã gõ mã nhưng KHÔNG khớp vật tư nào
+       có sẵn — mở form nhỏ ngay tại đây (không rời màn Áp mã), lưu thẳng vào ĐÚNG Danh mục vật tư
+       (dùng lại whValidateMaterial/whApplySaveMaterial — cùng 1 nguồn dữ liệu với màn "+ Thêm vật
+       tư" riêng, chỉ thêm lối tạo thứ 2, không phải 2 danh mục khác nhau). */
+    const _newBtn=(_codeTyped && !_matExists) ? `<button class="btn-sec" style="font-size:9.5px;padding:1px 5px;margin-top:2px" onclick="_confQuickNewMat(${i})" title="Mã &quot;${esc(_codeTyped)}&quot; chưa có trong Danh mục — tạo mới ngay tại đây">+ Mới</button>` : '';
+    return `<tr>
+    <td style="padding:3px"><input value="${esc(l.code||'')}" list="conf-codes" placeholder="Mã FAST" style="width:100px;padding:4px;font-family:monospace;font-size:11px" onchange="_confLineCode(${i},this.value)">${_newBtn}${l.srcDesc?`<div style="font-size:10px;color:var(--muted);max-width:120px" title="${esc(l.srcDesc)}">↳ ${esc((l.srcDesc||'').slice(0,28))}</div>`:''}${l.srcCode?`<div style="font-size:9.5px;color:var(--muted)" title="Mã bên bán (NCC) — để đối chiếu, không phải mã FAST">mã NCC: ${esc(l.srcCode)}</div>`:''}</td>
     <td style="padding:3px 6px;font-size:11px">${esc(l.name||'')}</td>
     <td style="padding:3px 6px;font-size:11px;text-align:center">${esc(l.unit||'')}</td>
     <td style="padding:3px 6px;font-size:11px;text-align:right;color:var(--muted)">${l.reqQty||0}</td>
-    <td style="padding:3px"><input type="number" value="${l.qty!=null?l.qty:l.reqQty}" style="width:64px;padding:4px;font-size:11px;text-align:right" onchange="_confQty(${i},this.value)"></td></tr>`).join('');
+    <td style="padding:3px"><input type="number" value="${l.qty!=null?l.qty:l.reqQty}" style="width:64px;padding:4px;font-size:11px;text-align:right" onchange="_confQty(${i},this.value)"></td></tr>`;
+  }).join('');
   // landed cost (chỉ người xem giá)
   let landedBlock='';
   if(showVal){
@@ -76436,6 +76573,35 @@ function _confRender(){
 }
 function _confQty(i,v){ if(_confDraft.lines[i]) _confDraft.lines[i].qty=(+v||0); }
 function _confLineCode(i,code){ const l=_confDraft.lines[i]; if(!l) return; l.code=String(code||'').trim(); const m=(typeof matByCode==='function')?matByCode(l.code):null; if(m){ l.name=m.name; l.unit=m.unit; } _confRender(); }
+/* v3.20.136: tạo mã vật tư mới NGAY TẠI màn Áp mã — form nhỏ, dùng lại đúng
+   whValidateMaterial/whApplySaveMaterial (cùng nguồn dữ liệu với "+ Thêm vật tư" ở Danh mục). */
+function _confQuickNewMat(i){
+  if(!canManageMaterials()){ toast('Không có quyền tạo vật tư mới','bad'); return; }
+  const l=_confDraft&&_confDraft.lines[i]; if(!l) return;
+  window._cqnIdx=i;
+  const body=`<div style="font-size:11px;color:var(--muted);margin-bottom:8px">Mã "${esc(l.code||'')}" chưa có trong Danh mục vật tư — tạo mới, lưu xong áp thẳng vào dòng này.</div>
+    <label style="font-size:11px;color:var(--muted);display:block;margin-bottom:6px">Mã vật tư (FAST)<input id="cqn-code" value="${esc(l.code||'')}" style="width:100%;font-size:13px;padding:6px;margin-top:2px;font-family:monospace"></label>
+    <label style="font-size:11px;color:var(--muted);display:block;margin-bottom:6px">Tên vật tư<input id="cqn-name" value="${esc(l.name||l.srcDesc||'')}" style="width:100%;font-size:13px;padding:6px;margin-top:2px"></label>
+    <label style="font-size:11px;color:var(--muted);display:block">Đơn vị tính<input id="cqn-unit" value="${esc(l.unit||'')}" placeholder="VD: cái, kg, m..." style="width:100%;font-size:13px;padding:6px;margin-top:2px"></label>
+    <div id="cqn-err" style="color:var(--bad);font-size:12px;min-height:14px;margin-top:8px"></div>`;
+  openModal('+ Tạo mã vật tư mới', body,
+    `<button class="btn-ghost" onclick="_confRender()">← Quay lại Áp mã</button>
+     <button class="btn-primary" onclick="_confQuickNewMatSave()">💾 Lưu &amp; áp vào dòng</button>`);
+}
+function _confQuickNewMatSave(){
+  const i=window._cqnIdx; const l=_confDraft&&_confDraft.lines[i]; const err=document.getElementById('cqn-err');
+  if(!l){ if(err) err.textContent='Dòng không còn tồn tại — quay lại Áp mã.'; return; }
+  const data={ code:(document.getElementById('cqn-code').value||'').trim(), name:(document.getElementById('cqn-name').value||'').trim(),
+    unit:(document.getElementById('cqn-unit').value||'').trim(), group:'', group2:'', costCode:'', status:'active',
+    note:'', updatedAt:new Date().toISOString(), updatedBy:actorName() };
+  const val=whValidateMaterial(data, '', code=>matByCode(code)); if(!val.ok){ if(err) err.textContent=val.reason; return; }
+  const res=whApplySaveMaterial(data, '');
+  try{ logAuditEvent('material_create',{code:data.code, name:data.name, fromScreen:'confirm_inbound'}); }catch(e){}
+  saveState();
+  l.code=data.code; l.name=data.name; l.unit=data.unit;
+  toast('✓ Đã tạo vật tư '+data.code+' — áp vào dòng','good');
+  _confRender();
+}
 function _lcAdd(){ _confDraft.landedCosts.push({source:'manual',kind:'freight',amount:0,allocBy:'qty',accountType:'cogs'}); _confRender(); }
 function _lcDel(i){ _confDraft.landedCosts.splice(i,1); _confRender(); }
 function _lcSet(i,k,v){ const c=_confDraft.landedCosts[i]; if(!c) return;
@@ -92803,6 +92969,13 @@ function canAccessTab(tabId){
      tàu (bộ tab tàu vẫn tuyệt đối), TRƯỚC 2 nhánh cấp ngầm. Thư viện giữ cho VM. */
   /* v3.16.60 (Sếp): trang tổng quan riêng cho Vessel Manager — chỉ VM (và admin) truy cập. */
   if(tabId==='vm_dashboard'){ return isVesselManager(); }
+  /* v3.20.137 (Sếp: "Xây dựng màn giao diện riêng cho chức danh phụ trách kế toán công ty con.
+     Quyền = KTT và giới hạn: chỉ công ty con"): cần cả 2 điều kiện — bị giới hạn theo ĐÚNG 1 công ty
+     (getActorCompanyId() có giá trị, không phải NV bờ không giới hạn/không phải công ty mẹ) VÀ có
+     quyền dạng KTT (canManageUsers) hoặc KT viên (canCheckAcc). NV nhập liệu thường bị giới hạn công
+     ty nhưng không có 2 cờ này thì KHÔNG thấy tab này — đúng tinh thần "phụ trách kế toán", không
+     phải mọi NV công ty con. */
+  if(tabId==='co_dashboard'){ return !!(getActorCompanyId() && CURRENT_USER && (CURRENT_USER.canManageUsers || CURRENT_USER.canCheckAcc)); }
   /* v3.17.30 (Sếp, ảnh nav TP HR): vai HR THUẦN (cờ NS, không cờ kế toán) — ẨN 'Phải thu' khỏi nav,
      chỉ hiện khi admin TICK TAY (đúng công thức VM v3.16.53). Phải trả + Tạm ứng giữ nguyên theo lệnh. */
   if(CURRENT_ROLE!=='admin' && tabId==='receivables'
@@ -98967,6 +99140,7 @@ function renderAll(opts){
   maybe('inv_analytics', renderInvAnalytics);
   maybe('catalog', renderCatalog);
   maybe('project_data', renderProjectData);
+  maybe('co_dashboard', renderCoDashboard);
   maybe('reports', renderReports);
   maybe('rates', renderRates);
   maybe('nsnn', renderNSNN);
