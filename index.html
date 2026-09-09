@@ -3882,7 +3882,7 @@ const WH_TYPES = {
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.20.169';
+const APP_VERSION='3.20.171';
 /* HOTFIX 3.12.17-email: CHẶN TRIỆT ĐỂ gửi email TỰ ĐỘNG (mất kiểm soát — spam quota Google).
    Email phải do NV được phân quyền CHỦ ĐỘNG chọn gửi. Cờ này:
    (1) chặn auto-SCAN tạo email (hrmScanExpiries/vesselCertScanExpiries);
@@ -33391,7 +33391,7 @@ const DocEngine = (function(){
       ${spec.footerNote?`<div style="font-size:11px;margin-top:8px;border-top:1px solid #999;padding-top:4px">${_esc(spec.footerNote)}</div>`:''}
       ${(spec.footerLines&&spec.footerLines.length)?spec.footerLines.map(fl=>`<div style="font-size:10.5px;color:#333;margin-top:2px">${_esc(fl)}</div>`).join(''):''}
       <div style="display:flex;justify-content:space-around;margin-top:6px">${sigCells}</div>
-      <div style="text-align:right;font-size:10px;color:#aaa;margin-top:16px">${showVal?'Bản đầy đủ (có giá)':'Phiếu đề nghị (không giá)'} · In lúc ${_esc(new Date().toLocaleString('vi-VN'))} · Seahorse Manager v${_esc(typeof APP_VERSION!=='undefined'?APP_VERSION:'')}</div>
+      <div style="text-align:right;font-size:10px;color:#aaa;margin-top:16px">${showVal?'':'Phiếu đề nghị (không giá) · '}In lúc ${_esc(new Date().toLocaleString('vi-VN'))} · Seahorse Manager v${_esc(typeof APP_VERSION!=='undefined'?APP_VERSION:'')}</div>
     </div>`;
   }
   /* Preview trong modal */
@@ -74962,6 +74962,10 @@ function whDocTypeMatch(doc, key){
   const t=(doc&&doc.type)||'';
   if(key==='XFER') return t==='TRANSFER_IN'||t==='TRANSFER_OUT';
   if(key==='ADJ')  return t==='ADJUST_IN'||t==='ADJUST_OUT';
+  /* v3.20.169 (Sếp — ảnh Chứng từ kho: "Thêm loại: Nhập - Xuất thẳng cho đúng"): lọc riêng đúng
+     tập phiếu đang in ra mẫu "PHIẾU NHẬP - XUẤT THẲNG" (xem _stockSpec) — Nhập mà kho nhận KHÔNG
+     PHẢI Kho VPCT. "Chỉ Nhập" (key IN) vẫn giữ nguyên = TẤT CẢ phiếu nhập, không đụng. */
+  if(key==='IN_DIRECT') return t==='IN' && typeof _whIsVpct==='function' && !_whIsVpct(doc.warehouseId);
   return t===key;
 }
 function openStockDocs(){
@@ -75029,7 +75033,7 @@ function openStockDocs(){
   const sel='padding:6px 8px;border:1px solid var(--rule);border-radius:6px;font-size:13px';
   const body=`<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px;align-items:center">
       <select id="sd-ftype" style="${sel}" onchange="_stockApply()">
-        ${[['','— Mọi loại phiếu —'],['IN','Chỉ Nhập'],['OUT','Chỉ Xuất'],['XFER','Điều chuyển (2 vế)'],['ADJ','Điều chỉnh (2 vế)'],['OPENING','Tồn đầu kỳ'],['COUNT','Kiểm kê']]
+        ${[['','— Mọi loại phiếu —'],['IN','Chỉ Nhập'],['IN_DIRECT','Nhập - Xuất thẳng'],['OUT','Chỉ Xuất'],['XFER','Điều chuyển (2 vế)'],['ADJ','Điều chỉnh (2 vế)'],['OPENING','Tồn đầu kỳ'],['COUNT','Kiểm kê']]
           .map(o=>`<option value="${o[0]}" ${_stockFilter.type===o[0]?'selected':''}>${o[1]}</option>`).join('')}
       </select>
       <select id="sd-fwh" style="${sel}" onchange="_stockApply()">${whOpts}</select>
@@ -80124,10 +80128,20 @@ function _stockSpec(d, opts){
     lines=pr.lines; landedByKind=pr.landedByKind;
   }
   const parties=[];
-  if(isIn){ parties.push({label:'Họ và tên người giao hàng', name:d.deliveredBy||''}); }
+  /* v3.20.170 (Sếp — ảnh mẫu in: "Họ và tên người giao hàng: để trống nếu nhân viên không điền
+     khi Xác nhận giao hàng"): trước đây rơi về d.deliveredBy — mà d.deliveredBy lại tự điền SẴN
+     tên NCC (đối tác) lúc tạo phiếu từ Phải trả (xem s.partner ở các nơi tạo phiếu), nên in ra
+     TÊN CÔNG TY thay vì họ tên người thật. Giờ CHỈ lấy đúng người NV xác nhận thật lúc "Xác nhận
+     giao hàng" (BBGN) — không có thì để trống, không rơi về d.deliveredBy nữa. */
+  if(isIn){ parties.push({label:'Họ và tên người giao hàng', name:(d.bbgn&&d.bbgn.delivererConfirmed)||''}); }
   else { parties.push({label:'Họ và tên người nhận hàng', name:d.receivedBy||''}); }
   let reason=d.note||'';
-  if(isIn && d.apId){ const a=AccountingService.payableById(d.apId); if(a) reason='Theo HĐ: '+(a.partner||'')+(d.contractNo?(' · HĐ số '+d.contractNo):'')+(d.invoiceNoHdr?(' · hóa đơn '+d.invoiceNoHdr):'')+' · '+(a.desc||'')+(reason?(' — '+reason):''); }
+  /* v3.20.170 (Sếp — ảnh mẫu in: "Phần Theo: giữ nguyên: bỏ 1 chữ Theo trùng và nội dung vật tư -
+     phần này có trong chi tiết bên dưới"): mẫu in ngoài (DocEngine) đã tự thêm nhãn "Theo:" trước
+     spec.reason rồi — dòng dưới trước đây LẠI thêm "Theo HĐ: " nữa → in ra "Theo: Theo HĐ: ..."
+     trùng chữ. Bỏ tiền tố "Theo HĐ: " ở đây (nhãn ngoài đã đủ). Bỏ luôn "· (a.desc)" (mô tả vật
+     tư của hóa đơn) — trùng với bảng chi tiết dòng hàng ngay bên dưới, không cần lặp lại. */
+  if(isIn && d.apId){ const a=AccountingService.payableById(d.apId); if(a) reason=(a.partner||'')+(d.contractNo?(' · HĐ số '+d.contractNo):'')+(d.invoiceNoHdr?(' · hóa đơn '+d.invoiceNoHdr):'')+(reason?(' — '+reason):''); }
   if(isIn && d.bbgn && d.bbgn.date){ reason+=(reason?' — ':'')+'Ngày giao hàng (theo BBGN'+(d.bbgn.no?' '+d.bbgn.no:'')+'): '+d.bbgn.date; }   /* v3.20.14 */
   if(d.receivedLocation){ reason+=(reason?' — ':'')+'Địa điểm nhận hàng thực tế: '+d.receivedLocation; }   /* v3.20.44 */
   // C2b: cụm nhiều đợt → in rõ Đợt k/n + lũy kế đã nhận (đối chiếu thanh toán từng phần)
