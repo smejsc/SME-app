@@ -3878,7 +3878,7 @@ const WH_TYPES = {
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.20.146';
+const APP_VERSION='3.20.153';
 /* HOTFIX 3.12.17-email: CHẶN TRIỆT ĐỂ gửi email TỰ ĐỘNG (mất kiểm soát — spam quota Google).
    Email phải do NV được phân quyền CHỦ ĐỘNG chọn gửi. Cờ này:
    (1) chặn auto-SCAN tạo email (hrmScanExpiries/vesselCertScanExpiries);
@@ -17148,6 +17148,14 @@ function getExpenseType(code){
    loại BOD-only (isBODOnly hoặc nhóm BOD) CHỈ admin thấy — lọc một chỗ ở activeExpenseTypes → mọi dropdown/chip/danh mục
    (AP đơn, nhiều dòng, bảng kê, sổ quỹ, form loại) đều theo; NV có cờ isBOD vẫn KHÔNG thấy (Sếp: duy nhất admin). */
 function isExpenseTypeBOD(t){ return !!(t && (t.isBODOnly || t.group==='BOD')); }
+/* v3.20.147 (Sếp — "Ẩn các loại chi phí nhóm A khỏi NV vì đây là loại liên quan NSNN, thuộc KT"):
+   nhóm A (Tài chính) là nhóm CHỮ ĐỘNG — với nhóm chữ động, khóa nội bộ (t.group) CHÍNH LÀ chữ cái
+   ('A'), không như 4 nhóm cố định M/F/T/C có khóa nội bộ khác chữ hiển thị. Dùng etypeDisplayGroup()
+   (suy theo tiền tố mã, tự đúng kể cả khi t.group bị lệch) thay vì so t.group thẳng — cùng cách
+   _etCatRegroup() đang dùng để xác định nhóm thật của 1 loại. Nếu sau này Sếp đổi chữ cái đại diện
+   khác cho nhóm này, hàm này tự bám theo vì đọc thẳng từ tiền tố mã, không hardcode chữ 'A' cứng vào
+   danh sách riêng. */
+function isExpenseTypeFinOnly(t){ return !!(t && (typeof etypeDisplayGroup==='function') && etypeDisplayGroup(t)==='A'); }
 /* v3.20.66 (Sếp — "E là 1 nhóm chi phí thông thường như các nhóm khác. Nhóm con cũng chọn được...
    1 phiếu tạo chọn nhóm E.01.10: vật tư sửa chữa boong là đủ. Chi tiết loại được quy định theo mã
    vật tư, đây là mã chi phí"): hiểu sai trước đó — tưởng MỖI nhánh (dù tới tận cháu) vẫn cần thêm 1
@@ -17173,8 +17181,16 @@ function _expTreeSyntheticTypes(){
 function activeExpenseTypes(){
   const list = (S && S.expenseTypes && S.expenseTypes.length) ? S.expenseTypes : DEFAULT_EXPENSE_TYPES;
   const adm=(typeof isAdmin==='function')?isAdmin():false;
-  const real=list.filter(t=>!t.archived && (adm || !isExpenseTypeBOD(t)));
+  /* v3.20.147 (Sếp — nhóm A/Tài chính liên quan NSNN, chỉ KT thấy): thuộc KT = admin, hoặc có quyền
+     KT viên (canCheckAcc) hoặc KTT (canManageUsers) — cùng công thức "thuộc KT" đã dùng ở chỗ khác
+     trong app (vd tab fin_accounting). NV thường (kể cả NV kế toán nhưng chưa được tick 1 trong 2 cờ
+     trên) sẽ không thấy nhóm A ở bất kỳ dropdown/chip/danh mục chi phí nào. */
+  const isKT = adm || (typeof canCheckAcc==='function' && canCheckAcc()) || !!(CURRENT_USER && CURRENT_USER.canManageUsers);
+  const real=list.filter(t=>!t.archived && (adm || !isExpenseTypeBOD(t)) && (isKT || !isExpenseTypeFinOnly(t)));
   let synth=[]; try{ synth=_expTreeSyntheticTypes(); }catch(e){}
+  /* v3.20.147: nhánh lá CHƯA có loại chi phí thật gắn vào (sinh ảo ở trên) không đi qua bộ lọc real
+     ở trên — nếu là nhánh lá nhóm A thì vẫn phải ẩn với NV, lọc riêng 1 lượt ở đây. */
+  synth=synth.filter(t=>isKT || !isExpenseTypeFinOnly(t));
   return real.concat(synth);
 }
 
@@ -17840,7 +17856,12 @@ function expGroupsActive(opts){
     Object.keys(EXPENSE_GROUPS).forEach(k=>{ if(!out.includes(k) && used.has(k)) out.push(k); });
   }
   const adm=(typeof isAdmin==='function')?isAdmin():false;   /* v3.18.95: nhóm BOD chỉ admin */
-  return adm ? out : out.filter(k=>k!=='BOD');
+  /* v3.20.147 (Sếp — nhóm A/Tài chính liên quan NSNN, chỉ KT thấy): cùng công thức "thuộc KT" ở
+     activeExpenseTypes() — ẩn luôn TIÊU ĐỀ nhóm A khỏi NV, không chỉ ẩn từng loại con bên trong. */
+  const isKT = adm || (typeof canCheckAcc==='function' && canCheckAcc()) || !!(CURRENT_USER && CURRENT_USER.canManageUsers);
+  let out2 = adm ? out : out.filter(k=>k!=='BOD');
+  if(!isKT) out2 = out2.filter(k=>k!=='A');
+  return out2;
 }
 /* Chữ cái → key nhóm: bảng cố định (chữ HIỆN HÀNH) thắng; chữ cái động → chính nó (nếu đã sync thành nhóm); lạ → rỗng. */
 function etypeLetterGroup(L){
@@ -34672,6 +34693,9 @@ function _doAddExpenseType(){
 
 function editExpenseType(id){
   try{ expGroupsSync(); }catch(e){}   /* v3.18.71 */
+  /* v3.20.151 (Sếp: "Tắt liên kết TK kế toán hoặc chỉ để admin") — HOÀN TÁC v3.20.148: quay lại
+     CHỈ ADMIN được sửa loại chi phí (gồm cả ô "TK Nợ mặc định"), KT (canCheckAcc/canManageUsers)
+     không còn quyền này nữa. */
   if(!isAdmin()){toast('Chỉ admin','bad');return;}
   const t=(S.expenseTypes||[]).find(x=>x.id===id);
   if(!t){toast('Không tìm thấy','bad');return;}
@@ -35508,10 +35532,13 @@ function renderCatalog(){
       eTbl.innerHTML = '<tr><td class="empty">Chưa có loại chi phí</td></tr>';
     } else {
       // v3.02.14: GOM THEO NHÓM CHA — mỗi nhóm 1 dòng tiêu đề + loại con thụt vào.
+      /* v3.20.151 (Sếp: "Tắt liên kết TK kế toán hoặc chỉ để admin") — HOÀN TÁC v3.20.148: cột thao
+         tác của bảng Loại chi phí quay lại đúng adminMode như cũ, không mở thêm cho KT nữa. */
+      const etShowActionCol=adminMode;
       let h = '<thead><tr><th>Mã</th><th>Tên</th>';
-      if(adminMode) h += '<th></th>';
+      if(etShowActionCol) h += '<th></th>';
       h += '</tr></thead><tbody>';
-      const colspan = adminMode ? 3 : 2;
+      const colspan = etShowActionCol ? 3 : 2;
       // thứ tự nhóm theo EXPENSE_GROUPS; loại nào group lạ → dồn vào cuối nhóm '?'
       const order = expGroupsActive().concat(grpKeys.filter(k=>!expGroupsActive().includes(k))).concat(['?']);   /* v3.18.78: thứ tự bảng mới */
       const byGroup = {};
@@ -35529,9 +35556,9 @@ function renderCatalog(){
         return `<tr data-etcode="${esc(String(t.code||''))}">
           <td class="ds-t-sub" style="font-family:var(--font-mono)" style="padding-left:22px"><b>${esc(t.code)}</b>${fuelChip}${flags.join('')}</td>
           <td>${t.icon?esc(t.icon)+' ':''}${esc(t.label)}${t.treeCode?`<div style="font-size:11px;color:var(--muted);font-variant-numeric:tabular-nums">🔢 ${esc(t.treeCode)} · ${esc((typeof expTreePath==='function'?expTreePath(t.treeCode,t.label):'')||'')}</div>`:''}</td>
-          ${adminMode?`<td><div class="row-actions">
+          ${etShowActionCol?`<td><div class="row-actions">
             <button class="icon-btn" title="Sửa" onclick="editExpenseType('${t.id||t.code}')">✎</button>
-            <button class="icon-btn danger" title="Ẩn (archive)" onclick="archiveExpenseType('${t.id||t.code}')">⊘</button>
+            ${adminMode?`<button class="icon-btn danger" title="Ẩn (archive)" onclick="archiveExpenseType('${t.id||t.code}')">⊘</button>`:''}
           </div></td>`:''}
         </tr>`;
       };
@@ -49427,24 +49454,39 @@ function _cashImportExcelDateToISO(v){
   return s;
 }
 function _cashImportGuessType(desc){
-  // Đoán expenseType code từ mô tả (tiếng Việt). Trả về code hoặc 'OTHER'.
+  /* v3.20.150 (Sếp — ảnh sổ quỹ VPCT: "Trang tạm ứng"/nước uống/cước mobi bị đoán hết ra "Dầu DO"):
+     Hàm cũ trả mã CỐ ĐỊNH của bộ danh mục MẶC ĐỊNH gốc (COMM/UTIL/EMP_ADVANCE/OTHER...) — bộ mã này
+     KHÔNG còn tồn tại trong danh mục thật đang dùng (đã chuyển hẳn sang hệ chữ cái C/M/T/F/A/D/E/O/
+     R/Z). Dropdown ở màn xem trước dựng từ danh mục thật, không thấy mã cũ này → không option nào
+     "selected" → trình duyệt tự hiện option ĐẦU TIÊN trong list, trông như đoán bừa ra 1 loại sai.
+     Viết lại: dò trực tiếp trong danh mục THẬT (activeExpenseTypes()) theo từ khóa xuất hiện trong
+     TÊN loại — khớp được thì trả đúng MÃ THẬT; không khớp thì trả rỗng (dropdown hiện trống, buộc KT
+     tự chọn — an toàn hơn nhiều so với đoán liều ra 1 loại sai). */
   const d=(desc||'').toLowerCase();
   const has=(...kw)=>kw.some(k=>d.includes(k));
-  if(has('vinaphone','viettel','mobifone','cước','thuê bao','sim','internet','fpt','ems','điện thoại','liên lạc')) return 'COMM';
-  if(has('điện','nước','utility','tiền điện','tiền nước')) return 'UTIL';
-  if(has('thẻ tạm trú','visa','work permit','xuất nhập cảnh','nhập cảnh','vé tàu','vé máy bay','vé xe','công tác','hộ chiếu')) return 'TRAVEL';
-  if(has('khách sạn','phòng khách sạn','ks ','accommodation','nhà ở','lưu trú')) return 'ACCOMMODATION';
-  if(has('trà','café','cafe','cà phê','nước uống','tiếp khách','bánh','trái cây','tiệc','liên hoan')) return 'ENTERTAIN';
-  if(has('vpp','văn phòng phẩm','văn phòng','đồ dùng','usb','bàn phím','mực','giấy')) return 'OFFICE';
-  if(has('xe','taxi','grab','xăng','nhiên liệu xe','cầu đường','gửi xe')) return 'RENT';
-  if(has('lương','salary')) return 'SALARY';
-  if(has('thưởng')) return 'BONUS';
-  if(has('phụ cấp','trợ cấp','cấp ')) return 'ALLOWANCE';
-  if(has('bảo hộ','bhlđ','đồng phục','áo','giày bảo hộ','khám sức khỏe')) return 'CREW_HEALTH';
-  if(has('ứng tiền','tạm ứng','ứng quỹ')) return 'EMP_ADVANCE';
-  if(has('giặt','vệ sinh','rác thải','dọn')) return 'OFFICE';
-  if(has('dịch thuật','công chứng','phí dịch')) return 'FEES';
-  return 'OTHER';
+  let kw=null;
+  if(has('vinaphone','viettel','mobifone','cước','thuê bao','sim','internet','fpt','ems','điện thoại','liên lạc','mobi')) kw=['cước','viễn thông','điện thoại','internet','liên lạc'];
+  else if(has('tiền điện','tiền nước','hóa đơn điện','hóa đơn nước','utility')) kw=['điện','nước'];
+  else if(has('thẻ tạm trú','visa','work permit','xuất nhập cảnh','nhập cảnh','vé tàu','vé máy bay','vé xe','công tác','hộ chiếu')) kw=['công tác','di chuyển','vé'];
+  else if(has('khách sạn','phòng khách sạn','ks ','accommodation','lưu trú')) kw=['lưu trú','khách sạn'];
+  else if(has('trà','café','cafe','cà phê','nước uống','tiếp khách','bánh','trái cây','tiệc','liên hoan')) kw=['tiếp khách','giao tế','nước uống'];
+  else if(has('vpp','văn phòng phẩm','đồ dùng văn phòng','usb','bàn phím','mực in','giấy in')) kw=['văn phòng phẩm','vpp'];
+  else if(has('taxi','grab','xăng','nhiên liệu xe','cầu đường','gửi xe','sửa xe','rửa xe')) kw=['xe'];
+  else if(has('lương','salary')) kw=['lương'];
+  else if(has('thưởng')) kw=['thưởng'];
+  else if(has('phụ cấp','trợ cấp')) kw=['phụ cấp','trợ cấp'];
+  else if(has('bảo hộ','bhlđ','đồng phục','giày bảo hộ','khám sức khỏe')) kw=['bảo hộ','sức khỏe'];
+  else if(has('ứng tiền','tạm ứng')) kw=['tạm ứng','ứng tiền'];
+  else if(has('thuê nhà','thuê văn phòng','tiền nhà','tiền thuê')) kw=['thuê'];
+  else if(has('giặt','vệ sinh','rác thải','dọn dẹp')) kw=['vệ sinh'];
+  else if(has('dịch thuật','công chứng','phí dịch')) kw=['dịch thuật','công chứng'];
+  if(!kw) return '';
+  try{
+    const types=(typeof activeExpenseTypes==='function')?activeExpenseTypes():(S.expenseTypes||[]);
+    const norm=s=>String(s||'').toLowerCase();
+    const hit=types.find(t=>t && !t.archived && kw.some(k=>norm(t.label).includes(k)||norm(t.hint).includes(k)));
+    return hit?hit.code:'';
+  }catch(e){ return ''; }
 }
 async function cashImportReadExcel(inputEl, fundId){
   const file=inputEl && inputEl.files && inputEl.files[0];
@@ -49562,7 +49604,9 @@ function cashImportShowPreview(){
   const D=window._cashImportData; if(!D){ toast('Chưa có dữ liệu','bad'); return; }
   const f=AccountingService.cashFunds().find(x=>x.id===D.fundId);
   const fmt=n=>(+n||0).toLocaleString('vi-VN');
-  const ETYPES=(S.expenseTypes||[]);
+  /* v3.20.150: dùng activeExpenseTypes() thay vì đọc thẳng S.expenseTypes — đúng "1 điểm lọc duy nhất"
+     (BOD-only/nhóm A chỉ Admin-KT thấy) áp dụng luôn cho dropdown ở màn xem trước import sổ quỹ này. */
+  const ETYPES=(typeof activeExpenseTypes==='function')?activeExpenseTypes():(S.expenseTypes||[]);
   const etLabel=code=>{const t=ETYPES.find(x=>x.code===code);return t?(t.icon||'')+' '+t.label:code;};
   // Đối chiếu: tổng chi tiết vs TOTAL
   const recon=[
@@ -49592,7 +49636,7 @@ function cashImportShowPreview(){
     return Object.entries(g).sort((a,b)=>b[1].sum-a[1].sum);
   };
   // v3.06.00: bảng CHI TIẾT có dropdown sửa loại CP từng dòng (để ghi sổ GĐ2)
-  const etOptions=(sel)=>ETYPES.filter(t=>!t.archived).map(t=>`<option value="${t.code}" ${t.code===sel?'selected':''}>${esc((t.icon||'')+' '+t.label)}</option>`).join('');
+  const etOptions=(sel)=>'<option value="">— Chọn loại chi phí —</option>'+ETYPES.filter(t=>!t.archived).map(t=>`<option value="${t.code}" ${t.code===sel?'selected':''}>${esc((t.icon||'')+' '+t.label)}</option>`).join('');
   const detailTable=(label,grp,rows)=>{
     if(!rows.length) return '';
     return `<div style="margin-top:12px"><div style="font-weight:600;font-size:13px;margin-bottom:4px">${esc(label)} — ${rows.length} dòng, tổng ${fmt(rows.reduce((s,r)=>s+r.amount,0))} đ</div>
@@ -56513,17 +56557,9 @@ function _arVesselOptsForSegment(segment, selectedId){
 
 /* v1.82.0: Khi NV đổi Mảng → cập nhật lại dropdown Tàu cho khớp.
    QL chung (OTHER) → vô hiệu ô tàu. */
-/* v3.18.92: chip nhóm chi phí trên form AP — bấm chip lọc select theo nhóm; Tất cả = đủ nhóm (nhóm ưu tiên theo mảng lên đầu ★) */
-function _arEtChip(gk){
-  const sel=document.getElementById('ar-expense-type'); if(!sel) return;
-  const seg=(document.getElementById('ar-segment')||{}).value||''; const pref=expGroupsForSegment(seg);
-  sel.innerHTML=expenseTypeOptsPref(sel.value, pref, gk||'');
-  document.querySelectorAll('#ar-et-chips [data-etchip]').forEach(b=>{ const on=(b.getAttribute('data-etchip')||'')===(gk||''); b.style.border='1px solid '+(on?'var(--accent)':'var(--rule)'); b.style.fontWeight=on?'700':''; });
-  /* v3.18.96: chip chữ cái = gốc cây nhánh; mở cascade ngay tại nhánh của nhóm đó (không bắt bấm "Chọn theo nhánh") */
-  const L=(gk && typeof expGroupLetter==='function')?expGroupLetter(gk):''; window._arEtLetter=L||'';
-  const pn=document.getElementById('et-cascade');
-  if(pn){ if(L){ pn.style.display=''; try{ _etTreeRender(L); }catch(e){ try{ _etCascade(2,L); }catch(_){} } } else if(!gk){ pn.style.display='none'; } }   /* v3.19.08: cây 3 cấp tại chỗ */
-}
+/* v3.20.152 (Sếp: "Gỡ" cây nhánh cũ) — XÓA _arEtChip(): chức năng lọc theo nhóm nay đã thay hẳn
+   bằng dropdown #ar-expense-group (v3.20.151, 2 bước tường minh); phần tự mở #et-cascade kèm theo
+   đây đúng là cơ chế gây lỗi "cây tự bật, không đóng được" Sếp từng báo — gỡ luôn cùng đợt. */
 /* v3.19.44 (Sếp 27/8 'Lọc thông minh: chỉ hiện các dự án thuộc tàu này/mảng này'): ô Dự án của phiếu AR/AP lọc theo Tàu đã chọn
    (không chọn tàu → theo mảng); có mục '… hiện tất cả' để bỏ lọc; dự án đang chọn luôn giữ. */
 function _arProjectSmartFilter(prefix, showAll){
@@ -56544,8 +56580,18 @@ function _arProjectSmartFilter(prefix, showAll){
 }
 function _arSegmentChanged(){
   try{ setTimeout(()=>_arProjectSmartFilter('ar'),0); }catch(e){}   /* v3.19.44 */
-  /* v3.18.92: đổi mảng → ưu tiên nhóm chi phí theo mảng (chỉ đổi thứ tự/lọc hiển thị) */
-  try{ const pref=expGroupsForSegment((document.getElementById('ar-segment')||{}).value||''); _arEtChip(pref.length===1?pref[0]:''); }catch(e){}
+  /* v3.20.152 (Sếp: "Gỡ" cây nhánh cũ #et-cascade/_arEtChip — thay hẳn bằng dropdown "Nhóm cha"
+     tường minh ở v3.20.151, khỏi trùng 2 cơ chế lúc đổi Mảng). Gợi ý nhẹ: đổi Mảng mà NV CHƯA chọn gì
+     (cả nhóm lẫn loại còn trống) thì tự điền sẵn Nhóm cha theo mảng vào đúng #ar-expense-group — NV
+     vẫn đổi tay bình thường, không tự mở/khóa gì như cây cũ. */
+  try{
+    const gsel=document.getElementById('ar-expense-group');
+    const tsel=document.getElementById('ar-expense-type');
+    if(gsel && tsel && !gsel.value && !tsel.value){
+      const pref=expGroupsForSegment((document.getElementById('ar-segment')||{}).value||'');
+      if(pref.length===1){ gsel.value=pref[0]; arExpenseGroupChanged(); }
+    }
+  }catch(e){}
   const segEl=document.getElementById('ar-segment');
   const vesEl=document.getElementById('ar-vessel');
   if(!segEl || !vesEl) return;
@@ -57123,10 +57169,29 @@ function _arEditorBody(r,isPayable){
     }
     expenseTypeBlock = `
       <div class="field" style="grid-column:span 3">
-        <label>Loại chi phí <span style="color:var(--muted);text-transform:none;font-weight:400;font-size:10px">(chọn loại để tự kích hoạt trường nhiên liệu nếu có)</span></label>
-        <select id="ar-expense-type" onchange="arExpenseTypeChanged()">${(function(){ try{ const pref=expGroupsForSegment(r.segment||''); return expenseTypeOptsPref(r.expenseType, pref, pref.length===1?pref[0]:''); }catch(e){ return etHtml; } })()}</select>
-        <!-- v3.20.16 (Sếp 03/9: "Bỏ dòng chi tiết Loại chi phí: trùng. Chỉ để ô chọn loại chi phí") — bỏ dãy chip #ar-et-chips, dropdown tự nhóm optgroup theo mảng sẵn có (v3.18.78), không mất chức năng lọc -->
-        <div id="et-cascade" style="display:none;border:1px solid var(--rule);border-radius:8px;padding:6px;margin-top:4px;background:var(--paper-2);max-height:200px;overflow:auto;font-size:12px"></div>
+        <label>Loại chi phí <span style="color:var(--muted);text-transform:none;font-weight:400;font-size:10px">(chọn Nhóm cha trước để lọc gọn — chọn loại để tự kích hoạt trường nhiên liệu nếu có)</span></label>
+        ${(function(){
+          /* v3.20.152 (Sếp: "dropdown chọn loại chi phí: 2 bước" rồi "Gỡ" cây nhánh cũ): select
+             "Nhóm cha" lọc gọn #ar-expense-type — cây/cascade cũ (#et-cascade) đã gỡ hẳn cùng đợt,
+             thay hoàn toàn bằng 2 bước này. Giữ lại đúng năng lực admin tạo nhanh loại mới (trước nằm
+             trong cây) bằng 1 option "＋ Tạo loại mới" cuối danh sách bước 2. */
+          const pref=expGroupsForSegment(r.segment||'');
+          let curGroup='';
+          if(r.expenseType==='__BUDGET__') curGroup='__BUDGET__';
+          else if(r.expenseType){ const _t=(S.expenseTypes||[]).find(x=>x.code===r.expenseType); if(_t) curGroup=(typeof etypeDisplayGroup==='function')?(etypeDisplayGroup(_t)||_t.group):_t.group; }
+          if(!curGroup && pref.length===1) curGroup=pref[0];
+          const groupOpts='<option value="">— Nhóm cha —</option>'
+            +`<option value="__BUDGET__" ${curGroup==='__BUDGET__'?'selected':''}>📋 Dự kiến chi (chưa phát sinh)</option>`
+            +expGroupsActive().map(gk=>`<option value="${esc(gk)}" ${curGroup===gk?'selected':''}>${esc(expGroupLabel(gk))}</option>`).join('');
+          const newOpt=isAdmin()?'<option value="__NEW__">＋ Tạo loại chi phí mới… (admin)</option>':'';
+          const typeOptsHtml = curGroup==='__BUDGET__'
+            ? '<option value="__BUDGET__" selected>📋 Dự kiến chi (chưa phát sinh)</option>'
+            : ((function(){ try{ return expenseTypeOptsPref(r.expenseType, [], curGroup||''); }catch(e){ return etHtml; } })()+newOpt);
+          return `<div style="display:grid;grid-template-columns:1fr 2fr;gap:6px">
+            <select id="ar-expense-group" onchange="arExpenseGroupChanged()">${groupOpts}</select>
+            <select id="ar-expense-type" onchange="if(this.value==='__NEW__'){ this.value=''; _etQuickCreate('','ar-expense-type'); } else arExpenseTypeChanged()" ${curGroup==='__BUDGET__'?'disabled':''}>${typeOptsHtml}</select>
+          </div>`;
+        })()}
       </div>
       <div class="field" id="ar-khoan-field" style="grid-column:span 3;display:${_isOpManagedAp(r)?'':'none'}">
         <label style="display:flex;align-items:center;gap:8px;cursor:pointer;padding:8px 10px;background:rgba(var(--accent-rgb,65,65,65),.06);border-left:3px solid var(--accent,#414141);border-radius:3px">
@@ -57609,76 +57674,40 @@ function _etQuickCreate(chau, selectId, lineTmpId){
   commitMutation(()=>{ if(newChau) expTreeUpsert(newChau.code,newChau.name); (S.expenseTypes=S.expenseTypes||[]).push(rec); },{action:'etype_quick_add', fields:newChau?['expenseTree','expenseTypes']:['expenseTypes'], onOk:()=>{
     try{ logAuditEvent('etype_quick_add',{code, label:rec.label, from:'ap_form', actor:rec.createdBy}); }catch(e){}
     toast('✓ Đã tạo loại '+code+' · '+rec.label+' — có mặt trong Danh mục (đồng bộ mọi máy)','good');
-    try{ if(selectId==='ar-expense-type'){ _etPick(code); const L=code.charAt(0); if(window._arEtLetter===L) try{ _etTreeRender(L); }catch(e){} }
-         else if(lineTmpId){ if(typeof _mrLineExpenseType==='function') _mrLineExpenseType(lineTmpId, code); if(typeof _renderMultiRowModal==='function') _renderMultiRowModal(); } }catch(e){}
+    /* v3.20.152 (Sếp: "Gỡ" cây nhánh cũ) — trước đây gọi _etPick()/_etTreeRender() (đã xóa cùng đợt);
+       nay chỉ cần đặt thẳng giá trị mới tạo vào đúng #ar-expense-type (thêm option nếu dropdown đang
+       lọc theo nhóm khác chưa có mã này) rồi báo thay đổi — gọn hơn, không còn cây nào để vẽ lại. */
+    try{
+      if(selectId==='ar-expense-type'){
+        const s2=document.getElementById('ar-expense-type');
+        if(s2){
+          if(![...s2.options].some(o=>o.value===code)){ const o=document.createElement('option'); o.value=code; o.textContent=(rec.icon||'')+' '+rec.label; s2.appendChild(o); }
+          s2.value=code; arExpenseTypeChanged();
+        }
+      }
+      else if(lineTmpId){ if(typeof _mrLineExpenseType==='function') _mrLineExpenseType(lineTmpId, code); if(typeof _renderMultiRowModal==='function') _renderMultiRowModal(); }
+    }catch(e){}
   }});
 }
-/* chọn loại từ cây → ô Loại chi phí (thêm option nếu dropdown đang lọc không có), đóng cây */
-function _etPick(code){
-  const s2=document.getElementById('ar-expense-type'); if(!s2) return;
-  if(![...s2.options].some(o=>o.value===code)){ const t=(S.expenseTypes||[]).find(x=>x&&x.code===code); const o=document.createElement('option'); o.value=code; o.textContent=((t&&t.icon)||'')+' '+((t&&t.label)||code); s2.appendChild(o); }
-  s2.value=code; try{ arExpenseTypeChanged(); }catch(e){}
-  const p2=document.getElementById('et-cascade'); if(p2) p2.style.display='none';
-}
-function _etTreeRender(rootL){
-  const pn=document.getElementById('et-cascade'); if(!pn) return;
-  const types=(typeof expenseTypesForUser==='function')?expenseTypesForUser():(S.expenseTypes||[]);
-  const tree=(typeof expTreeList==='function'?expTreeList():[]).map(n=>({code:String(n.code),name:n.name||''})).filter(n=>n.code.indexOf(rootL+'.')===0);
-  const cons={}; tree.forEach(n=>{ const p=n.code.split('.'); if(p.length===2) cons[n.code]={code:n.code,name:n.name,chaus:{},types:[]}; });
-  tree.forEach(n=>{ const p=n.code.split('.'); if(p.length===3){ const c=p.slice(0,2).join('.'); if(!cons[c]) cons[c]={code:c,name:'',chaus:{},types:[]}; cons[c].chaus[n.code]={code:n.code,name:n.name,types:[]}; } });
-  types.forEach(t=>{ const tc=String(t.treeCode||t.code||''); if(tc.indexOf(rootL+'.')!==0) return; const p=tc.split('.'); const c=p.slice(0,2).join('.'); if(!cons[c]) cons[c]={code:c,name:'',chaus:{},types:[]};
-    if(p.length>=3){ const ch=p.slice(0,3).join('.'); if(!cons[c].chaus[ch]) cons[c].chaus[ch]={code:ch,name:'',types:[]}; cons[c].chaus[ch].types.push(t); } else cons[c].types.push(t); });
-  const sel=document.getElementById('ar-expense-type'); const cur=sel?sel.value:'';
-  const leafRow=(t,pad)=>`<div style="padding:3px 6px 3px ${pad}px;border-bottom:1px dotted var(--rule);cursor:pointer;background:${t.code===cur?'#fff3c4':'#fff'}" onclick="event.stopPropagation();_etPick('${esc(t.code)}')">${t.icon||''} <b style="font-variant-numeric:tabular-nums">${esc(t.code)}</b> ${esc(t.label||'')} ✓</div>`;
-  const tog=(id)=>`(function(ev){try{ev&&ev.stopPropagation&&ev.stopPropagation();}catch(e){} const b=document.getElementById('${id}'); if(b){ const on=b.style.display==='none'; b.style.display=on?'':'none'; const c=b.previousElementSibling&&b.previousElementSibling.querySelector('.ettg'); if(c) c.textContent=on?'▾':'▸'; } })(typeof event!=='undefined'?event:null)`;
-  let h='';
-  Object.keys(cons).sort((a,b)=>a.localeCompare(b,'vi',{numeric:true})).forEach((ck,ci)=>{ const c=cons[ck]; const idC='ettr-c'+ci;
-    const nC=Object.values(c.chaus).reduce((s,x)=>s+x.types.length,0)+c.types.length;
-    h+=`<div style="padding:4px 6px;border-bottom:1px solid var(--rule);cursor:pointer;font-weight:600" onclick="${tog(idC)}"><span class="ettg" style="display:inline-block;width:12px;font-size:10px">▸</span><b style="font-variant-numeric:tabular-nums">${esc(c.code)}</b> ${esc(c.name)} <span style="font-weight:400;color:var(--muted)">(${nC} loại)</span></div><div id="${idC}" style="display:none">`;
-    c.types.forEach(t=>{ h+=leafRow(t,26); });
-    if(isAdmin()) h+=`<div style="padding:3px 6px 3px 26px;border-bottom:1px dotted var(--rule);cursor:pointer;color:var(--accent);font-size:11px" onclick="event.stopPropagation();_etQuickCreate('${esc(c.code)}','ar-expense-type')">＋ Tạo loại mới dưới ${esc(c.code)} (tạo nhánh cháu mới · admin)</div>`;   /* v3.19.13 */
-    Object.keys(c.chaus).sort((a,b)=>a.localeCompare(b,'vi',{numeric:true})).forEach((chk,hi)=>{ const ch=c.chaus[chk]; const idH=idC+'h'+hi;
-      h+=`<div style="padding:3px 6px 3px 22px;border-bottom:1px dotted var(--rule);cursor:pointer" onclick="${tog(idH)}"><span class="ettg" style="display:inline-block;width:12px;font-size:10px">▸</span><b style="font-variant-numeric:tabular-nums">${esc(ch.code)}</b> ${esc(ch.name)} <span style="color:var(--muted)">(${ch.types.length} loại)</span></div><div id="${idH}" style="display:none">`;
-      ch.types.forEach(t=>{ h+=leafRow(t,40); });
-      if(isAdmin()) h+=`<div style="padding:3px 6px 3px 40px;border-bottom:1px dotted var(--rule);cursor:pointer;color:var(--accent);font-size:11px" onclick="event.stopPropagation();_etQuickCreate('${esc(ch.code)}','ar-expense-type')">＋ Tạo loại mới dưới ${esc(ch.code)} (admin)</div>`;   /* v3.19.12 */
-      h+='</div>'; });
-    h+='</div>'; });
-  pn.innerHTML=h||'<div style="padding:6px;color:var(--muted)">Nhóm '+esc(rootL)+' chưa có nhánh/loại</div>'; pn.style.display='';
-  /* tự bung nhánh chứa loại đang chọn */
-  if(cur){ const t=types.find(x=>x.code===cur); const tc=t?String(t.treeCode||t.code||''):''; if(tc.indexOf(rootL+'.')===0){ const p=tc.split('.'); const ck=p.slice(0,2).join('.'); const ci=Object.keys(cons).sort((a,b)=>a.localeCompare(b,'vi',{numeric:true})).indexOf(ck); if(ci>=0){ const bC=document.getElementById('ettr-c'+ci); if(bC){ bC.style.display=''; const cc=bC.previousElementSibling.querySelector('.ettg'); if(cc) cc.textContent='▾'; }
-      if(p.length>=3){ const chk=p.slice(0,3).join('.'); const hi=Object.keys(cons[ck].chaus).sort((a,b)=>a.localeCompare(b,'vi',{numeric:true})).indexOf(chk); const bH=document.getElementById('ettr-c'+ci+'h'+hi); if(bH){ bH.style.display=''; const ch=bH.previousElementSibling.querySelector('.ettg'); if(ch) ch.textContent='▾'; } } } } }
-}
-function _etCascade(lv, prefix){
-  /* v3.18.62: viết lại điều khiển — lv=0: bấm LINK (bật/tắt); lv>=1: render mức đó.
-     Mọi click dòng chặn nổi bọt để không dội ngược lên link làm tắt panel. */
-  const pn=document.getElementById('et-cascade'); if(!pn) return;
-  try{ if(typeof event!=='undefined'&&event&&event.stopPropagation) event.stopPropagation(); }catch(e){}
-  /* v3.18.96 (Sếp 26/8 "Đã chọn Vận hành tàu sao còn chọn theo nhánh? Chỉ để lại nhánh thuộc vận hành tàu"):
-     chip nhóm đang chọn (chữ cái) = GỐC của cây — cascade mở thẳng ở nhánh của chữ cái đó, không lùi lên trên. */
-  const rootL=String(window._arEtLetter||'');
-  if(lv===0){ if(pn.style.display!=='none'){ pn.style.display='none'; return; } lv=rootL?2:1; prefix=rootL; }
-  if(lv===1 && rootL){ lv=2; prefix=rootL; }
-  pn.style.display='';
-  prefix=String(prefix||'');
-  const types=(typeof expenseTypesForUser==='function')?expenseTypesForUser():(S.expenseTypes||[]);
-  const upPrefix=prefix?prefix.split('.').slice(0,-1).join('.'):'';
-  const back=(prefix && !(rootL && prefix===rootL))?`<div style="padding:4px 6px;color:var(--muted);cursor:pointer;font-weight:600" onclick="_etCascade(${prefix.indexOf('.')>=0?lv-1:1},'${esc(upPrefix)}')">← quay lại${upPrefix?(' '+esc(upPrefix)):''}</div>`
-    :(rootL?`<div style="padding:4px 6px;color:var(--muted);font-size:11px">Nhánh của nhóm <b>${esc(rootL)}</b> — chọn "Tất cả" ở dãy nhóm để xem nhánh khác</div>`:'');
-  const kids={};
-  (typeof expTreeList==='function'?expTreeList():[]).forEach(n=>{
-    const c=String(n.code);
-    if(prefix){ if(c.indexOf(prefix+'.')!==0) return; if(c.split('.').length!==prefix.split('.').length+1) return; }
-    else if(c.indexOf('.')>=0) return;
-    kids[c]={code:c,name:n.name||''};
-  });
-  const leaf=prefix?types.filter(t=>{const tc=String(t.treeCode||t.code||''); return tc===prefix||tc.indexOf(prefix+'.')===0;})
-    .filter(t=>{const tc=String(t.treeCode||t.code||''); return tc.split('.').length<=prefix.split('.').length+1;}):[];
-  let h=back;
-  Object.values(kids).sort((a,b)=>a.code.localeCompare(b.code,'vi',{numeric:true})).forEach(n=>{
-    h+=`<div style="padding:4px 6px;border-bottom:1px dotted var(--rule);cursor:pointer" onclick="_etCascade(${lv+1},'${esc(n.code)}')"><b style="min-width:64px;display:inline-block;font-variant-numeric:tabular-nums">${esc(n.code)}</b> ${esc(n.name)} ▸</div>`; });
-  leaf.forEach(t=>{ h+=`<div style="padding:4px 6px;border-bottom:1px dotted var(--rule);cursor:pointer;background:#fff" onclick="(function(ev){try{ev&&ev.stopPropagation&&ev.stopPropagation();}catch(e){} const sel=document.getElementById('ar-expense-type'); if(sel){ sel.value='${esc(t.code)}'; try{arExpenseTypeChanged();}catch(e){} } const p2=document.getElementById('et-cascade'); if(p2) p2.style.display='none';})(typeof event!=='undefined'?event:null)">${t.icon||''} <b style="font-variant-numeric:tabular-nums">${esc(t.code)}</b> ${esc(t.label||'')} ✓</div>`; });
-  if(!h) h='<div style="padding:6px;color:var(--muted)">Nhánh trống — nạp Bảng tên nhánh trước (📥)</div>';
-  pn.innerHTML=h;
+/* v3.20.151: xử lý bước 1 (Nhóm cha) — chỉ lọc lại options của #ar-expense-type (bước 2), không đụng
+   gì tới toàn bộ khối xử lý fuel/advance/asset/capex bên dưới trong arExpenseTypeChanged(). */
+function arExpenseGroupChanged(){
+  const gsel=document.getElementById('ar-expense-group');
+  const tsel=document.getElementById('ar-expense-type');
+  if(!gsel||!tsel) return;
+  const gk=gsel.value;
+  if(gk==='__BUDGET__'){
+    tsel.innerHTML='<option value="__BUDGET__" selected>📋 Dự kiến chi (chưa phát sinh)</option>';
+    tsel.disabled=true;
+  }else{
+    tsel.disabled=false;
+    const curCode=tsel.value;
+    const t=(curCode&&curCode!=='__BUDGET__')?(S.expenseTypes||[]).find(x=>x.code===curCode):null;
+    const curGroup=t?((typeof etypeDisplayGroup==='function')?(etypeDisplayGroup(t)||t.group):t.group):'';
+    const keep=(curGroup===gk)?curCode:'';
+    tsel.innerHTML=expenseTypeOptsPref(keep, [], gk||'')+(isAdmin()?'<option value="__NEW__">＋ Tạo loại chi phí mới… (admin)</option>':'');
+  }
+  arExpenseTypeChanged();
 }
 function arExpenseTypeChanged(){
   const sel = document.getElementById('ar-expense-type');
@@ -59118,6 +59147,8 @@ let _multiRowState = {
   projectId: '',      // v1.37.3: dùng cho AR (Phải thu) thay cho departmentId
   noteHeader: '',
   segment: 'OTHER',   // default segment
+  expenseType: '',    // v3.20.151: Loại chi phí mặc định header — áp cho dòng thêm sau
+  expenseGroup: '',   // v3.20.151: Nhóm cha đang chọn ở header (bước 1 của 2 bước)
   lines: [],          // {tmpId, invoiceNo, desc, amountNet, vatPercent, vatAmount, amountGross, costCategory, dueDate, vesselId, projectId}
   undoStack: [],
   // v2.99.62: PAYROLL MODE — phiếu lương dùng chung khung multi-row
@@ -59143,6 +59174,8 @@ function openMultiRowModal(kind, opts){
     projectId: '',
     noteHeader: '',
     segment: 'OTHER',
+    expenseType: '',    // v3.20.151: Loại chi phí mặc định header — áp cho dòng thêm sau
+    expenseGroup: '',   // v3.20.151: Nhóm cha đang chọn ở header (bước 1 của 2 bước)
     lines: [_newLine()],
     undoStack: [],
     advLinkId: '',      // v3.03.06: hoàn ứng tạm ứng (header phiếu)
@@ -59227,7 +59260,7 @@ function _newLine(){
     vatPercent: 10,
     vatAmount: 0,
     amountGross: 0,
-    expenseType: '',      // NEW v1.30: loại chi phí cho AP
+    expenseType: (typeof _multiRowState!=='undefined' && _multiRowState && _multiRowState.expenseType) ? _multiRowState.expenseType : '',      // v3.20.151: mặc định theo Loại chi phí chọn ở header phiếu (gắn thông minh), NV tự sửa dòng nào cần
     revenueType: '',      // NEW v1.30.4: loại doanh thu cho AR
     segment: '',          // v3.02.91: mảng KD theo TỪNG DÒNG ('' = theo header phiếu)
     costCenterType: '',   // NEW v1.30: department / vessel / project / opVessel / general
@@ -59782,6 +59815,19 @@ function _renderMultiRowModal(){
           <input type="number" id="mr-fx" data-nf-int="1" value="${(+s.fxToVnd>0)?(+s.fxToVnd):''}" step="any" placeholder="Bắt buộc: 1 ${esc(s.ccy||'')} = ? VND" oninput="_mrFieldChange('fxToVnd', parseFloat(this.value)||0)">
         </div>
       </div>
+      ${(isPayable && !s.payroll) ? `
+      <div class="field" style="margin:8px 0 0 0">
+        <label style="font-size:10px" title="Mặc định cho các dòng thêm SAU — từng dòng vẫn tự chọn lại được riêng ở cột Loại chi phí trong bảng">Nhóm cha + Loại chi phí (mặc định dòng)</label>
+        <div style="display:grid;grid-template-columns:1fr 2fr;gap:8px">
+          <select id="mr-exp-group" onchange="_mrHeaderGroupChanged(this.value)">
+            <option value="">— Nhóm cha —</option>
+            ${(function(){ try{ const gcur=_mrHeaderCurrentGroup(); return expGroupsActive().map(gk=>`<option value="${esc(gk)}" ${gcur===gk?'selected':''}>${esc(expGroupLabel(gk))}</option>`).join(''); }catch(e){ return ''; } })()}
+          </select>
+          <select id="mr-exp-type" onchange="_mrHeaderExpenseTypeChanged(this.value)">
+            ${(function(){ try{ return expenseTypeOptsPref(s.expenseType, [], _mrHeaderCurrentGroup()||''); }catch(e){ return expenseTypeOpts(s.expenseType); } })()}
+          </select>
+        </div>
+      </div>` : ''}
       <div class="field" style="margin:8px 0 0 0">
         <label style="font-size:10px">${partnerLabel} *</label>
         <input type="text" id="mr-partner" list="mr-partner-suggestions" value="${esc(s.partner)}"
@@ -61093,6 +61139,40 @@ function _mrFieldChange(field, value){
     const tb = document.getElementById('mr-lines-body');
     if(tb) tb.innerHTML = _multiRowState.lines.map((l,i)=>_renderMrLine(l,i)).join('');
   }
+}
+/* v3.20.151 (Sếp — "Phiếu nhiều dòng: gắn thông minh: chọn ngay khi tạo chung điền đủ tại đây là áp
+   cho toàn bộ các dòng phát sinh, NV tự sửa dòng nào cần"): 2 bước Nhóm cha → Loại chi phí ở HEADER
+   phiếu — chọn 1 lần, áp mặc định cho dòng THÊM SAU (_newLine() đọc từ đây) và cho các dòng hiện có
+   NÀO CHƯA bị NV tự sửa khác (còn trống hoặc còn đúng bằng giá trị header CŨ) — dòng NV đã tự chọn
+   khác thì giữ nguyên, không ghi đè lên lựa chọn tay của NV. */
+function _mrHeaderCurrentGroup(){
+  if(_multiRowState.expenseGroup) return _multiRowState.expenseGroup;
+  if(_multiRowState.expenseType){
+    const t=(S.expenseTypes||[]).find(x=>x.code===_multiRowState.expenseType);
+    if(t) return (typeof etypeDisplayGroup==='function')?(etypeDisplayGroup(t)||t.group):t.group;
+  }
+  return '';
+}
+function _mrHeaderGroupChanged(gk){
+  _multiRowState.expenseGroup = gk||'';
+  if(_multiRowState.expenseType){
+    const t=(S.expenseTypes||[]).find(x=>x.code===_multiRowState.expenseType);
+    const dg=t?((typeof etypeDisplayGroup==='function')?(etypeDisplayGroup(t)||t.group):t.group):'';
+    if(dg!==gk) _multiRowState.expenseType='';   // đổi nhóm mà loại cũ không thuộc nhóm mới → xóa, bắt chọn lại
+  }
+  const sel=document.getElementById('mr-exp-type');
+  if(sel) sel.innerHTML=expenseTypeOptsPref(_multiRowState.expenseType, [], gk||'');
+}
+function _mrHeaderExpenseTypeChanged(code){
+  const oldVal=_multiRowState.expenseType;
+  _multiRowState.expenseType = code||'';
+  if(code){
+    const t=(S.expenseTypes||[]).find(x=>x.code===code);
+    if(t) _multiRowState.expenseGroup=(typeof etypeDisplayGroup==='function')?(etypeDisplayGroup(t)||t.group):t.group;
+  }
+  (_multiRowState.lines||[]).forEach(l=>{ if(!l.expenseType || l.expenseType===oldVal) l.expenseType=_multiRowState.expenseType; });
+  const tb=document.getElementById('mr-lines-body');
+  if(tb) tb.innerHTML=_multiRowState.lines.map((l,i)=>_renderMrLine(l,i)).join('');
 }
 
 /* v3.07.13: đổi đơn vị tiền phiếu nhiều dòng → hiện/ẩn ô tỷ giá (ngoại tệ khác USD/VND cần tỷ giá → VND). */
@@ -70057,17 +70137,22 @@ function renderExecDashboard(){
     }
     // timesheet chưa duyệt (giai đoạn sau có crewTimesheets) — tạm đếm 0
     // ---- KHO ----
+    /* v3.20.146 (Sếp — "số liệu tồn kho: thiếu", ảnh Giá trị tồn kho ra 0đ): cụm KPI này vẫn đọc
+       invMovements — bảng nhập-xuất-tồn NHẬP TAY của cơ chế cũ, đã khai tử từ v3.16.21 (từ khi kho
+       chạy sổ chứng từ, bảng này không còn được ghi gì nữa → luôn rỗng → luôn ra 0đ). Đúng lỗi y hệt
+       v3.16.11 đã vá cho KPI ở màn Kho Vật tư thật — màn đó đã đổi sang đọc thẳng sổ chứng từ (FIFO)
+       nhưng thẻ trên Tổng quan điều hành này bị bỏ sót, chưa đổi theo. Nay dùng chung đúng engine
+       whWarehouseStockValue/whCostBasisMap như màn Kho Vật tư — số sẽ khớp nhau. */
     let invValue=0;
-    // v3.07.48: FIX trùng lặp — chỉ lấy bản ghi MỚI NHẤT mỗi (kho|vật tư) theo month,
-    //   đồng bộ với "Tổng giá trị tồn kho" ở màn Kho Vật tư. Trước đây cộng close của
-    //   TẤT CẢ bản ghi qua mọi kỳ → phồng số gấp nhiều lần.
     (function(){
-      const _latest={};
-      InventoryService.invMovements().forEach(m=>{
-        const key=`${m.warehouseId}|${String(m.itemName||'').toLowerCase()}`;
-        if(!_latest[key] || (m.month||'')>(_latest[key].month||'')) _latest[key]=m;
-      });
-      Object.values(_latest).forEach(m=>{ const close=(+m.openValue||0)+(+m.inValue||0)-(+m.outValue||0); if(close>0) invValue+=toDisplay(close,m.ccy||'VND'); });
+      try{
+        const _allDocs=InventoryService.stockDocs();
+        const _basisAll=InventoryService.costBasis();
+        InventoryService.warehouses().filter(w=>w.isActive!==false).forEach(w=>{
+          const sv=whWarehouseStockValue(_allDocs, w.id, whCostBasisMap(_basisAll, w.id));
+          invValue+=toDisplay(sv.value||0, 'VND');
+        });
+      }catch(e){ console.warn('[execDashboard] invValue', e); }
     })();
     const lowStock=InventoryService.warehouses().length?0:0; // cảnh báo tồn thấp: để module kho tính chi tiết
 
