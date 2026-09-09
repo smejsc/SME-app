@@ -3897,7 +3897,7 @@ const WH_TYPES = {
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.20.175';
+const APP_VERSION='3.20.184';
 /* HOTFIX 3.12.17-email: CHẶN TRIỆT ĐỂ gửi email TỰ ĐỘNG (mất kiểm soát — spam quota Google).
    Email phải do NV được phân quyền CHỦ ĐỘNG chọn gửi. Cờ này:
    (1) chặn auto-SCAN tạo email (hrmScanExpiries/vesselCertScanExpiries);
@@ -7334,6 +7334,132 @@ function _auditUnmappedFields(){
   }catch(e){ return []; }
 }
 
+/* ============================================================================
+ * v3.20.183 (Sếp/Admin — module "Giao diện": xem thử đúng giao diện 1 tài khoản cụ thể)
+ * Đã chốt: (a) đăng nhập dưới danh nghĩa đúng tài khoản thật (không giả lập) — CRYPTO_KEY dùng
+ * chung 1 khóa cho toàn bộ dữ liệu công ty (mỗi NV chỉ có 1 bản khóa được "wrap" riêng bằng mật
+ * khẩu của họ, KHÔNG phải khóa khác nhau) nên admin đã đăng nhập thật KHÔNG cần mật khẩu người kia
+ * vẫn đọc được đúng dữ liệu — chỉ cần đổi CURRENT_USER/CURRENT_ROLE trong bộ nhớ rồi renderAll()
+ * lại. (b) chỉ Admin thấy mục này. (c) liệt kê theo ĐÚNG người cụ thể. (d) CHỈ XEM — chặn ghi ở
+ * saveState() (xem trên). (e) có ghi log (S.viewAsLog). (f) tự thoát sau 15 phút không thao tác.
+ * ========================================================================== */
+let _viewAsActive=false;
+let _viewAsSnapshot=null;   // bản chụp S lúc bắt đầu — phục hồi khi thoát, không sót thay đổi tạm
+let _viewAsLogId=null;
+let _viewAsIdleTimer=null;
+const VIEW_AS_IDLE_MS=15*60*1000;   // 15 phút không thao tác → tự thoát
+
+function viewAsStart(userName){
+  if(!isAdmin()){ toast('Chỉ admin dùng được "Xem thử"','bad'); return; }
+  if(_viewAsActive){ toast('Đang xem thử rồi — thoát trước khi chọn người khác','bad'); return; }
+  const cfg=getAuthConfig(); const target=(cfg&&cfg.users||[]).find(u=>u.name===userName);
+  if(!target){ toast('Không tìm thấy tài khoản','bad'); return; }
+  // Ghi log BẮT ĐẦU trước khi khóa ghi — đây là hành động thật của admin, phải lưu được.
+  S.viewAsLog=S.viewAsLog||[];
+  const logId=uid();
+  S.viewAsLog.push({id:logId, adminName:actorName(), targetName:target.name, targetFullName:target.fullName||target.name, startAt:new Date().toISOString(), endAt:null});
+  if(S.viewAsLog.length>200) S.viewAsLog=S.viewAsLog.slice(-200);
+  saveState();
+  // Chụp nguyên trạng S TRƯỚC khi hóa thân — phục hồi đúng khi thoát, không sót thay đổi tạm nào.
+  try{ _viewAsSnapshot=JSON.parse(JSON.stringify(S)); }catch(e){ toast('Không chụp được bản chụp an toàn — hủy xem thử','bad'); return; }
+  _viewAsLogId=logId;
+  _viewAsActive=true;
+  CURRENT_ROLE='user'; CURRENT_USER=target;
+  closeModal();
+  try{ applyRoleUI(); }catch(e){ console.error('[viewAs] applyRoleUI', e); }
+  try{ renderAll(); }catch(e){ console.error('[viewAs] renderAll', e); }
+  _viewAsShowBanner(target);
+  _viewAsResetIdle();
+  toast('🔍 Đang xem thử: '+(target.fullName||target.name)+' — chỉ xem, không lưu được','good');
+}
+function viewAsExit(auto){
+  if(!_viewAsActive) return;
+  // đóng log
+  try{
+    const entry=(S.viewAsLog||[]).find(x=>x.id===_viewAsLogId);
+    if(entry) entry.endAt=new Date().toISOString();
+  }catch(e){}
+  // phục hồi nguyên trạng S từ snapshot — bỏ hết thay đổi tạm phát sinh lúc xem thử (nếu có)
+  if(_viewAsSnapshot){
+    try{ Object.keys(S).forEach(k=>{ delete S[k]; }); Object.assign(S,_viewAsSnapshot); }catch(e){ console.error('[viewAs] khôi phục snapshot lỗi', e); }
+  }
+  _viewAsActive=false; _viewAsSnapshot=null;
+  CURRENT_ROLE='admin'; CURRENT_USER=null;
+  saveState();   // giờ đã mở khóa — ghi endAt của log thật
+  clearTimeout(_viewAsIdleTimer);
+  ['mousemove','keydown','click','touchstart'].forEach(ev=>document.removeEventListener(ev,_viewAsResetIdle));
+  _viewAsHideBanner();
+  try{ applyRoleUI(); }catch(e){}
+  try{ renderAll(); }catch(e){}
+  toast(auto?'⏱ Đã tự thoát xem thử (15 phút không thao tác)':'✓ Đã thoát xem thử','good');
+  _viewAsLogId=null;
+}
+function _viewAsResetIdle(){
+  clearTimeout(_viewAsIdleTimer);
+  _viewAsIdleTimer=setTimeout(()=>viewAsExit(true), VIEW_AS_IDLE_MS);
+  ['mousemove','keydown','click','touchstart'].forEach(ev=>document.addEventListener(ev,_viewAsResetIdle,{once:true,passive:true}));
+}
+function _viewAsShowBanner(target){
+  _viewAsHideBanner();
+  const b=document.createElement('div');
+  b.id='view-as-banner';
+  b.style.cssText='position:fixed;top:0;left:0;right:0;z-index:99999;background:#7a2620;color:#fff;padding:9px 18px;display:flex;justify-content:space-between;align-items:center;font-size:13px;box-shadow:0 2px 6px rgba(0,0,0,.25)';
+  b.innerHTML=`<span>🔍 <b>ĐANG XEM THỬ</b> — ${esc(target.fullName||target.name)} · <span style="opacity:.85">chỉ xem, không lưu được</span></span>
+    <button onclick="viewAsExit(false)" style="background:#fff;color:#7a2620;border:none;padding:5px 14px;border-radius:6px;font-weight:700;font-size:12px;cursor:pointer">↩ Thoát xem thử</button>`;
+  document.body.appendChild(b);
+  document.body.style.paddingTop='40px';
+}
+function _viewAsHideBanner(){
+  const b=document.getElementById('view-as-banner'); if(b) b.remove();
+  document.body.style.paddingTop='';
+}
+function viewAsRoleLabel(u){
+  if(u.isVesselAccount) return 'Tài khoản tàu';
+  if(u.isCEO) return 'Tổng Giám đốc';
+  if(u.isBOD) return 'BOD';
+  if(u.isVesselManager) return 'Vessel Manager';
+  if(u.canApproveL2) return 'Duyệt L2';
+  if(u.canApproveL1) return 'Kế toán trưởng / Duyệt L1';
+  if(u.canCheckAcc) return 'KT viên kiểm hồ sơ';
+  if(u.isPayrollAcc) return 'KT tiền lương';
+  if(u.canManageUsers) return 'Sub-admin (QL NV)';
+  if(u.isViewer) return 'Viewer';
+  return 'Nhân viên';
+}
+function viewAsScopeText(u){
+  const parts=[];
+  if(u.departmentId){ const d=HRService.departments().find(x=>x.id===u.departmentId); if(d) parts.push(d.name); }
+  if((u.assignedVesselIds||[]).length) parts.push((u.assignedVesselIds||[]).map(id=>{const v=VesselService.vessels().find(x=>x.id===id); return v?v.name:'?';}).join(', '));
+  if((u.assignedOpVesselIds||[]).length) parts.push('QL hộ: '+(u.assignedOpVesselIds||[]).map(id=>{const v=VesselService.opVessels().find(x=>x.id===id); return v?v.name:'?';}).join(', '));
+  return parts.join(' · ')||'—';
+}
+function openViewAsAdmin(){
+  if(!isAdmin()){ toast('Chỉ admin dùng được mục này','bad'); return; }
+  const cfg=getAuthConfig(); if(!cfg){ toast('Chưa đăng nhập','bad'); return; }
+  const users=(cfg.users||[]).slice().sort((a,b)=>String(a.fullName||a.name).localeCompare(String(b.fullName||b.name),'vi'));
+  const rows=users.map(u=>`<tr>
+      <td><b>${esc(u.fullName||u.name)}</b>${u.fullName?`<div style="font-size:10px;color:var(--muted)">${esc(u.name)}</div>`:''}</td>
+      <td><span class="ds-need" style="font-size:10.5px">${esc(viewAsRoleLabel(u))}</span></td>
+      <td style="font-size:11px;color:var(--muted)">${esc(viewAsScopeText(u))}</td>
+      <td><button class="btn-primary" style="font-size:11px" onclick="viewAsStart('${esc(u.name)}')">👁 Xem thử</button></td>
+    </tr>`).join('');
+  const log=(S.viewAsLog||[]).slice().sort((a,b)=>String(b.startAt).localeCompare(String(a.startAt))).slice(0,30);
+  const logRows=log.length?log.map(l=>{
+    const dur=l.endAt?Math.round((new Date(l.endAt)-new Date(l.startAt))/60000)+' phút':'<span style="color:var(--warn)">đang xem</span>';
+    return `<tr><td>${esc(l.adminName)}</td><td>${esc(l.targetFullName||l.targetName)}</td><td style="font-size:11px;font-family:monospace">${esc(String(l.startAt||'').slice(0,16).replace('T',' '))}</td><td style="font-size:11px;font-family:monospace">${l.endAt?esc(String(l.endAt).slice(0,16).replace('T',' ')):'—'}</td><td style="font-size:11px">${dur}</td></tr>`;
+  }).join(''):'<tr><td colspan="5" style="text-align:center;color:var(--muted);padding:12px">Chưa có lượt xem thử nào</td></tr>';
+  openModal('🖥 Giao diện — Xem thử theo tài khoản', `
+    <div style="font-size:11px;color:var(--muted);margin-bottom:10px">Xem đúng giao diện một tài khoản cụ thể đang thấy — dùng đúng dữ liệu/quyền thật của người đó. <b>Chỉ xem</b>, không thao tác/lưu được. Tự thoát sau 15 phút không thao tác.</div>
+    <div style="font-weight:700;font-size:12.5px;margin-bottom:6px">Danh sách tài khoản</div>
+    <div class="tbl-scroll" style="max-height:280px"><table class="tbl" style="font-size:12.5px">
+      <thead><tr><th>Họ tên</th><th>Vai trò</th><th>Phạm vi gán</th><th></th></tr></thead>
+      <tbody>${rows}</tbody></table></div>
+    <div style="font-weight:700;font-size:12.5px;margin:16px 0 6px">📋 Lịch sử xem thử (30 gần nhất)</div>
+    <div class="tbl-scroll" style="max-height:200px"><table class="tbl" style="font-size:12px">
+      <thead><tr><th>Admin</th><th>Xem như</th><th>Bắt đầu</th><th>Kết thúc</th><th>Thời lượng</th></tr></thead>
+      <tbody>${logRows}</tbody></table></div>`,
+    `<button class="btn-ghost" onclick="closeModal()">Đóng</button>`);
+}
 function openSettings(){
   _staffBasicMode = false;  // v3.06.00: form mở từ menu admin → full quyền (không phải chế độ tab Nhân viên)
   const cfg=getAuthConfig();
@@ -7625,7 +7751,10 @@ function openSettings(){
       <hr style="border:none;border-top:1px solid var(--rule);margin:8px 0">
       <div style="display:flex;justify-content:space-between;align-items:center">
         <div style="font-family:var(--font-display);font-size:16px;font-weight:600">Quản lý nhân viên</div>
-        <button class="btn-sec" onclick="addUser()">+ Thêm nhân viên</button>
+        <div style="display:flex;gap:6px">
+          ${isAdmin()?`<button class="btn-sec" onclick="openViewAsAdmin()" title="Xem đúng giao diện 1 tài khoản cụ thể đang thấy — chỉ xem, có ghi log">🖥 Giao diện</button>`:''}
+          <button class="btn-sec" onclick="addUser()">+ Thêm nhân viên</button>
+        </div>
       </div>
       <div style="font-size:11px;color:var(--muted);font-style:normal;margin-bottom:8px">Mỗi nhân viên có mật khẩu riêng và danh sách tab được phép. Họ chỉ thấy các tab được tick.${restrictedMode?'<br><br><b>⚠ Lưu ý:</b> Bạn KHÔNG thể tạo/sửa NV với các cờ quyền cao (canApproveL2, canManageUsers, isBOD) — chỉ admin được làm. Bạn cũng CHỈ gán được các tab trong phạm vi quyền của chính bạn.':''}</div>
       <table class="tbl" style="font-size:13px">
@@ -32084,6 +32213,17 @@ function mergeStateByFields(cloudFull, localFull, fields){
 }
 
 function saveState(){
+  /* v3.20.183 (Admin — module Giao diện: Xem thử theo tài khoản, CHỈ XEM): chặn MỌI ghi dữ liệu
+     ở đúng 1 chỗ trung tâm — saveState() là nơi DUY NHẤT mọi thao tác Lưu/Gửi/Duyệt trong toàn app
+     cuối cùng đều đi qua để ghi xuống localStorage/cloud. Chặn ở đây thay vì dò từng nút rải rác
+     khắp app (không khả thi, dễ sót) — đảm bảo không nút nào lọt lưới trong lúc admin đang "hóa
+     thân" xem thử. Thay đổi trong bộ nhớ (S.xxx.push...) đã xảy ra TRƯỚC khi gọi hàm này vẫn còn
+     tạm thời trong RAM, nhưng KHÔNG BAO GIỜ persist — và viewAsExit() phục hồi nguyên trạng S từ
+     snapshot chụp lúc bắt đầu xem thử nên không sót lại gì. */
+  if(typeof _viewAsActive!=='undefined' && _viewAsActive){
+    try{ toast('🔍 Đang xem thử — không lưu được (chỉ xem)','bad'); }catch(e){}
+    return;
+  }
   // v3.09.52 DATA FIRST: auto-snapshot cục bộ (throttle 20s) TRƯỚC khi ghi — phao rollback nếu ghi hỏng.
   try{ if(typeof pushLocalSnapshot==='function') pushLocalSnapshot(''); }catch(_){}
   // v2.99.97: GIẢM PAYLOAD SYNC mạnh — cắt nhật ký + dọn tombstone cũ ngay khi lưu.
@@ -41017,60 +41157,239 @@ function renderCoDashboard(){
       <tbody>${approvalHtml}</tbody></table>
     </div>`;
 }
+/* v3.20.177 (Dashboard VM — bước 2/nhiều, đúng phạm vi anh Trọng, KHÔNG đụng openFleetDashboard()
+   của Admin/BOD): Employment 4 trạng thái + Activity 2 tầng + Next Event — theo đúng bảng ánh xạ đã
+   chốt trong SOURCE MAP (mục 3) và logic Next Event đã chốt (mục 3b). Dùng lại _segForVesselDate()
+   có sẵn (v3.10.26) — không viết lại cách tìm đoạn hiện hành. */
+const VM_EMPLOYMENT_MAP={onhire:'onhire',transit:'onhire',standby:'onhire',mob:'onhire',demob:'onhire',dock:'drydocking',outofservice:'outofservice',csb:'available',offjob:'available'};
+const VM_EMPLOYMENT_LABEL={onhire:'ON-HIRE',available:'AVAILABLE',drydocking:'DRYDOCKING',outofservice:'OUT OF SERVICE'};
+const VM_ACTIVITY_LABEL={onhire:'Working',transit:'Transit',standby:'Standby',mob:'Mobilisation',demob:'Demobilisation'};
+function vmNextEventText(vid, seg){
+  const fmtD=s=>s?String(s).slice(0,10):'';
+  if(seg && seg.endAt) return 'Due '+fmtD(seg.endAt);
+  // đoạn đang mở (không endAt) HOẶC không có đoạn nào — tìm đoạn kế tiếp đã nhập thật (startAt tương lai)
+  const future=(VesselService.events()||[]).filter(e=>e&&e.vesselId===vid&&e.startAt&&new Date(e.startAt).getTime()>Date.now())
+    .sort((a,b)=>new Date(a.startAt)-new Date(b.startAt))[0];
+  if(future){ const t=(typeof evtType==='function')?evtType(future.type):{label:future.type}; return 'Next: '+t.label+' '+fmtD(future.startAt); }
+  return 'Ongoing';   // KHÔNG để trống, KHÔNG đoán trạng thái tiếp theo (đã chốt với anh Trọng 09/09)
+}
+function vmClientProjectText(seg){
+  if(!seg) return '—';
+  const parts=[];
+  if(seg.charterer) parts.push(seg.charterer);
+  if(seg.projectId){ const p=(S.projects||[]).find(x=>x.id===seg.projectId); if(p) parts.push(p.code||p.name||''); }
+  return parts.length?parts.join(' / '):'—';
+}
+function vesselEmploymentInfo(vid){
+  const today=(new Date()).toISOString().slice(0,10);
+  const seg=(typeof _segForVesselDate==='function')?_segForVesselDate(vid,today):null;
+  const empKey=seg?(VM_EMPLOYMENT_MAP[seg.type]||'available'):'available';   // không có đoạn nào = AVAILABLE mặc định (nguyên tắc không để khoảng trắng)
+  const activityLabel=(empKey==='onhire'&&seg)?(VM_ACTIVITY_LABEL[seg.type]||''):'';
+  const since=(seg&&seg.startAt)?Math.max(0,Math.floor((Date.now()-new Date(seg.startAt).getTime())/86400000)):null;
+  return {seg, empKey, employmentLabel:VM_EMPLOYMENT_LABEL[empKey], activityLabel, since,
+    nextEvent:vmNextEventText(vid,seg), clientProject:(empKey==='onhire')?vmClientProjectText(seg):'—'};
+}
+/* v3.20.178 (Dashboard VM — bước 3: Management Attention, đúng phạm vi trang page-vm_dashboard của
+   anh Trọng). Gộp cảnh báo thật từ 4 nguồn đã có sẵn trong app (không suy diễn gì mới):
+   Certificates (vesselCertExpiryCount/_certDaysLeft, ngưỡng 60 ngày có sẵn), Crew rotation
+   (crewRotationLevel, ngưỡng 60/75/90 có sẵn), DAR chưa nộp hôm nay (VesselService.dailyReports()),
+   HĐLĐ sắp hết hạn (contractEndDate, ngưỡng 60 ngày — cùng ngưỡng hrContractDueOpen() đang dùng), và
+   1 mục Commercial: tàu đang AVAILABLE nhiều ngày mà chưa có đoạn kế tiếp nào được nhập (Next Event
+   = Ongoing) — không đoán, chỉ nêu sự kiện đã có thật (tàu rảnh lâu, chưa có gì ghi nhận tiếp theo). */
+function vmManagementAttention(coVessels, opVessels){
+  const alerts=[]; const today=(new Date()).toISOString().slice(0,10);
+  const allV=coVessels.concat(opVessels||[]);
+  const vIds=new Set(allV.map(v=>v.id));
+  const vName=id=>{ const v=allV.find(x=>x.id===id); return v?v.name:'?'; };
+  // 1) Certificates
+  allV.forEach(v=>{
+    vesselCertList(v).forEach(c=>{
+      const d=_certDaysLeft(c.expiryDate); if(d==null||d>VESSEL_CERT_WARN_DAYS) return;
+      alerts.push({sev:d<=14?'critical':'operational', text:`${v.name} — ${c.type||'Certificate'} ${d<0?('expired '+(-d)+'d ago'):('expires in '+d+'d')}`});
+    });
+  });
+  // 2) Crew rotation (cùng ngưỡng crewRenderRotationAlerts đang dùng)
+  (HRService.crewAssignments()||[]).forEach(a=>{
+    if(!vIds.has(a.vesselId)||a.actualSignoffDate||a.status==='signed_off'||a.status==='transfer_out') return;
+    const e=crewEmpInfo(a.empId); const rk=crewRankOf(a.title||(e?e.title:''));
+    const days=crewDaysOnboard(a); const lvl=crewRotationLevel(days,rk); if(!lvl) return;
+    alerts.push({sev:days>=90?'critical':'operational', text:`${vName(a.vesselId)} — ${e?(e.fullName||e.name):'?'} · ${days}d onboard`});
+  });
+  // 3) DAR chưa nộp hôm nay
+  allV.forEach(v=>{
+    const reps=(VesselService.dailyReports()||[]).filter(r=>r.vesselId===v.id);
+    const latest=reps.map(r=>r.date||'').sort().pop();
+    if(!latest||latest<today) alerts.push({sev:'operational', text:`${v.name} — DAR not submitted for today`});
+  });
+  // 4) HĐLĐ sắp hết hạn (thuyền viên đang onboard tàu công ty)
+  (HRService.crewAssignments()||[]).forEach(a=>{
+    if(!vIds.has(a.vesselId)||a.actualSignoffDate||a.status==='signed_off'||a.status==='transfer_out') return;
+    const e=crewEmpInfo(a.empId); if(!e||!e.contractEndDate) return;
+    const dd=Math.round((new Date(e.contractEndDate)-new Date())/86400000);
+    if(dd>=0&&dd<=60) alerts.push({sev:dd<=14?'critical':'commercial', text:`${e.fullName||e.name} (${vName(a.vesselId)}) — contract ends in ${dd}d`});
+  });
+  // 5) Commercial — Available lâu, chưa có gì ghi nhận tiếp theo
+  allV.forEach(v=>{
+    const info=vesselEmploymentInfo(v.id);
+    if(info.empKey==='available'&&info.nextEvent==='Ongoing'&&info.since!=null&&info.since>=4){
+      alerts.push({sev:'commercial', text:`${v.name} — available ${info.since}d, no fixture on offer`});
+    }
+  });
+  // 6) v3.20.182 (gộp QL hộ vào Fleet Status theo yêu cầu): số dư chủ tàu dưới ngưỡng + kỳ khoán
+  //    chưa khóa đối chiếu — trước đây có panel "Cảnh báo cần xử lý" riêng, giờ gộp vào đây.
+  (opVessels||[]).forEach(v=>{
+    try{ const bal=opBalance(v.id), thr=opMinUsd(v); if(bal<thr) alerts.push({sev:'commercial', text:`${v.name} — owner balance below threshold`}); }catch(e){}
+    try{ const rc=khoanReconcile(v.id); const u=rc&&rc.pairs?rc.pairs.filter(p=>!p.complete).length:0; if(u) alerts.push({sev:'operational', text:`${v.name} — ${u} reconciliation period(s) not locked`}); }catch(e){}
+  });
+  return alerts;
+}
+/* v3.20.179 (Dashboard VM — bước 4: Employment Timeline 2 tầng, đúng phạm vi anh Trọng). 30 ngày
+   trước / 60 ngày sau, y hệt nguyên tắc eventAutoGaps() có sẵn (v3.18.97) nhưng áp cho khung thời
+   gian cố định thay vì toàn bộ lịch sử, và CHỈ lấp khoảng trống bằng Available tới NOW — không lấp
+   sang phần TƯƠNG LAI chưa có gì (đã chốt 09/09: "không được để khoảng trắng nếu tàu luôn phải có
+   1 trạng thái hiện hành", nhưng tương lai chưa xảy ra thì để trống thật, không phải lỗi). */
+function vmTimelineSegments(vid, winStartMs, winEndMs){
+  const totalMs=winEndMs-winStartMs; const nowMs=Date.now();
+  const evs=(VesselService.events()||[]).filter(e=>e&&e.vesselId===vid&&e.startAt)
+    .map(e=>({type:e.type,_s:new Date(e.startAt).getTime(),_e:e.endAt?new Date(e.endAt).getTime():nowMs}))
+    .filter(e=>e._e>winStartMs&&e._s<winEndMs)
+    .sort((a,b)=>a._s-b._s);
+  const raw=[]; let cursor=winStartMs;
+  evs.forEach(e=>{
+    const s=Math.max(e._s,winStartMs), en=Math.min(e._e,winEndMs);
+    if(s>cursor) raw.push({type:'csb',_s:cursor,_e:s});
+    raw.push({type:e.type,_s:s,_e:en});
+    cursor=Math.max(cursor,en);
+  });
+  if(cursor<winEndMs&&cursor<nowMs) raw.push({type:'csb',_s:cursor,_e:Math.min(winEndMs,nowMs)});
+  return raw.filter(s=>s._e>s._s).map(s=>{
+    const empKey=VM_EMPLOYMENT_MAP[s.type]||'available';
+    return {empKey, activity:(empKey==='onhire')?(VM_ACTIVITY_LABEL[s.type]||''):'',
+      startPct:(s._s-winStartMs)/totalMs*100, widthPct:(s._e-s._s)/totalMs*100};
+  });
+}
+/* v3.20.180 (sửa lỗi thiếu sót — Sếp phát hiện ảnh thật: "Hoàn toàn khác bản mockup đã duyệt"):
+   trước đó em chỉ thêm CỘT vào bảng có sẵn và thêm 2 khối mới bên dưới, nhưng KHÔNG hề đụng tới
+   phần đầu trang (tiêu đề, khối KPI) — nên trang vẫn mang hình hài + KPI CŨ (Tàu công ty/Tàu quản
+   lý hộ/Đang khai thác) chứ không phải 6 KPI cấp điều hành đã duyệt (Fleet/On-Hire/Available/
+   Utilisation MTD/Available Days/Alerts), và giao diện vẫn kiểu card bo tròn cũ chứ không phải kiểu
+   navy/dày đặc đã duyệt. Sửa toàn diện lần này: tiêu đề, khối KPI (số THẬT, có cả MTD/YTD), và style. */
+let _vmPeriodMode='mtd';
+function vmSetPeriodMode(m){ _vmPeriodMode=m; if(typeof renderVmDashboard==='function') renderVmDashboard(); }
+function vmFleetPeriodStats(coVessels, periodStartMs, periodEndMs){
+  let onHireDays=0, availableDays=0, drydockDays=0, oosDays=0;
+  const totalDays=(periodEndMs-periodStartMs)/86400000;
+  coVessels.forEach(v=>{
+    vmTimelineSegments(v.id, periodStartMs, periodEndMs).forEach(s=>{
+      const days=(s.widthPct/100)*totalDays;
+      if(s.empKey==='onhire') onHireDays+=days;
+      else if(s.empKey==='available') availableDays+=days;
+      else if(s.empKey==='drydocking') drydockDays+=days;
+      else if(s.empKey==='outofservice') oosDays+=days;
+    });
+  });
+  const denom=onHireDays+availableDays;
+  return {onHireDays, availableDays, drydockDays, oosDays, utilisationPct:denom>0?(onHireDays/denom*100):null};
+}
 function renderVmDashboard(){
   const box=document.getElementById('vm-dashboard-body'); if(!box) return;
-  const _f=n=>(typeof _khoanFmtUsd==='function')?_khoanFmtUsd(n):('$'+Math.round(n||0).toLocaleString('en-US'));
-  const _d10=s=>s?String(s).slice(0,10):'—';
   // ---- dữ liệu tàu công ty (loại đơn vị kho isShoreUnit) + tàu QL hộ ----
   const coVessels=(VesselService.vessels()||[]).filter(v=>v && !v.isShoreUnit && v.status!=='inactive');
   const opV=(VesselService.opVessels()||[]).filter(v=>v && v.status!=='inactive');
-  const today=(new Date()).toISOString().slice(0,10);
-  // ---- KPI ----
-  let onhireCount=0;
-  coVessels.concat(opV).forEach(v=>{ const seg=(typeof _segForVesselDate==='function')?_segForVesselDate(v.id,today):null; if(seg && (seg.type==='onhire'||seg.type==='transit')) onhireCount++; });
-  const kpi=(label,val,cls)=>`<div class="vmk"><div class="vmk-l">${label}</div><div class="vmk-v ${cls||''}">${val}</div></div>`;
-  // ---- 1 dòng trạng thái On/Off-hire ----
-  const statusCell=(vid)=>{
-    const seg=(typeof _segForVesselDate==='function')?_segForVesselDate(vid,today):null;
-    if(!seg) return '<span style="color:var(--muted)">—</span>';
-    const t=(typeof evtType==='function')?evtType(seg.type):{label:seg.type};
-    if(seg.type==='onhire'||seg.type==='transit'){
-      const chr=seg.charterer?(' · '+_esc(seg.charterer)):'';
-      return `<span style="color:var(--good);font-weight:600">${_esc(t.label)}</span><div style="font-size:11px;color:var(--muted)">On-hire ${_d10(seg.startAt)}${chr}</div>`;
-    }
-    return `<span style="color:var(--muted)">${_esc(t.label)}</span><div style="font-size:11px;color:var(--muted)">from ${_d10(seg.startAt)}</div>`;
-  };
+  // ---- KPI cấp điều hành (v3.20.180) — Fleet/On-Hire/Available/Utilisation/Available Days/Alerts ----
+  const _now=new Date();
+  const _mtdStart=new Date(_now.getFullYear(),_now.getMonth(),1).getTime();
+  const _ytdStart=new Date(_now.getFullYear(),0,1).getTime();
+  const _periodStart=_vmPeriodMode==='ytd'?_ytdStart:_mtdStart;
+  const _allFleet=coVessels.concat(opV);   // v3.20.182: gộp QL hộ vào Fleet Status (yêu cầu Sếp/anh Trọng)
+  const _periodStats=vmFleetPeriodStats(_allFleet,_periodStart,Date.now());
+  let onhireCount=0, availableCount=0;
+  _allFleet.forEach(v=>{ const k=vesselEmploymentInfo(v.id).empKey; if(k==='onhire') onhireCount++; else if(k==='available') availableCount++; });
+  const kpi=(label,val,cls,sub)=>`<div class="vmk"><div class="vmk-l">${label}</div><div class="vmk-v ${cls||''}">${val}</div>${sub?`<div class="vmk-s">${sub}</div>`:''}</div>`;
   function _esc(x){ return (typeof esc==='function')?esc(x):String(x==null?'':x); }
-  // ---- Bảng TÀU CÔNG TY (TRÊN) ----
-  const coRows=coVessels.length?coVessels.map(v=>{
-    let crewN=0; try{ crewN=(vesselCrewMerged(v.id)||[]).length; }catch(e){}
-    const tag=v.type==='SERVICE'?'<span class="vmt vmt-dv">DV</span>':'<span class="vmt vmt-kt">KT</span>';
-    return `<tr onclick="openVesselHub('${v.id}')" style="cursor:pointer">
+  // ---- Management Attention (v3.20.182) — Certificates/Crew/DAR/HĐLĐ/Commercial/số dư QL hộ ----
+  const mgmtAlerts=vmManagementAttention(coVessels, opV);
+  const _mgmtGroup=(sev)=>mgmtAlerts.filter(a=>a.sev===sev);
+  // ---- Bảng FLEET STATUS (v3.20.182: gộp tàu công ty + QL hộ vào 1 bảng, phân biệt bằng tag) ----
+  const fleetRows=_allFleet.length?_allFleet.map(v=>{
+    const isOp=opV.some(x=>x.id===v.id);
+    const tag=isOp?'<span class="vmt vmt-op">QL HỘ</span>':(v.type==='SERVICE'?'<span class="vmt vmt-dv">DV</span>':'<span class="vmt vmt-kt">KT</span>');
+    const info=vesselEmploymentInfo(v.id);
+    return `<tr onclick="${isOp?`openOpVesselHub('${v.id}')`:`openVesselHub('${v.id}')`}" style="cursor:pointer">
       <td><b>${_esc(v.name)}</b> ${tag}</td>
-      <td class="c">${crewN||'—'}</td>
-      <td>${statusCell(v.id)}</td>
+      <td><span class="vm-emp vm-emp-${info.empKey}">${info.employmentLabel}</span></td>
+      <td style="font-size:12px;color:var(--muted)">${_esc(info.activityLabel||'—')}</td>
+      <td style="font-size:12px">${_esc(info.clientProject)}</td>
+      <td class="c mono" style="font-size:12px">${info.since!=null?info.since+'d':'—'}</td>
+      <td style="font-size:12px">${_esc(info.nextEvent)}</td>
       <td class="c"><span class="vm-open">Mở →</span></td></tr>`;
-  }).join(''):'<tr><td colspan="4" class="empty">Chưa có tàu công ty</td></tr>';
-  // ---- Bảng TÀU QL HỘ (DƯỚI) ----
-  const opRows=opV.length?opV.map(v=>{
-    const bal=opBalance(v.id), thr=opMinUsd(v), low=bal<thr;
-    let unrec=0; try{ const rc=khoanReconcile(v.id); unrec=(rc&&rc.pairs?rc.pairs.filter(p=>!p.complete).length:0); }catch(e){}
-    const balC=low?'var(--bad)':'var(--good)';
-    const stat=low?'<span class="vm-chip vm-warn">Dưới ngưỡng</span>':'<span class="vm-chip vm-ok">Trên ngưỡng</span>';
-    const rec=unrec?`<span class="vm-chip vm-warn">${unrec} chưa khóa</span>`:'<span class="vm-chip vm-ok">✓ khớp</span>';
-    return `<tr onclick="openOpVesselHub('${v.id}')" style="cursor:pointer">
-      <td><b>${_esc(v.name)}</b> <span class="vmt vmt-op">QL hộ</span><div style="font-size:11px;color:var(--muted)">${_esc(v.owner||'')}</div></td>
-      <td class="r mono" style="color:${balC};font-weight:600">${_f(bal)}</td>
-      <td>${statusCell(v.id)}</td>
-      <td class="c">${rec}</td>
-      <td class="c">${stat}</td>
-      <td class="c"><span class="vm-open">Mở →</span></td></tr>`;
-  }).join(''):'<tr><td colspan="6" class="empty">Chưa có tàu quản lý hộ</td></tr>';
-  // ---- Cảnh báo ----
-  const alerts=[];
-  opV.forEach(v=>{ const bal=opBalance(v.id); if(bal<opMinUsd(v)) alerts.push(`⚠ <b>${_esc(v.name)}</b> dưới ngưỡng số dư chủ tàu (${_f(bal)} / ngưỡng ${_f(opMinUsd(v))}) — cần nạp quỹ`); });
-  opV.forEach(v=>{ try{ const rc=khoanReconcile(v.id); const u=rc&&rc.pairs?rc.pairs.filter(p=>!p.complete).length:0; if(u) alerts.push(`⚑ <b>${_esc(v.name)}</b> · ${u} kỳ khoán chưa khóa đối chiếu`); }catch(e){} });
-  const alertsHtml=alerts.length?alerts.map(a=>`<div class="vm-alert">${a}</div>`).join(''):'<div style="padding:12px;text-align:center;color:var(--good)">✓ Không có cảnh báo</div>';
+  }).join(''):'<tr><td colspan="7" class="empty">Chưa có tàu</td></tr>';
+  // v3.20.182 (Sếp: "critical: không sổ cả list đầy ra dashboard") — chỉ hiện tối đa 4 mục/nhóm,
+  // còn lại gộp thành "+N khác" (không mất thông tin, chỉ không xổ hết ra choán chỗ).
+  const VM_MGMT_CAP=4;
+  const _mgmtSec=(sev,label,color)=>{ const g=_mgmtGroup(sev); if(!g.length) return '';
+    const shown=g.slice(0,VM_MGMT_CAP), rest=g.length-shown.length;
+    return `<div style="padding:10px 14px"><div style="font-size:10.5px;font-weight:700;letter-spacing:.03em;color:${color};margin-bottom:5px">● ${label} (${g.length})</div>
+      ${shown.map(a=>`<div style="font-size:12px;padding:3px 0 3px 14px;border-bottom:1px dotted var(--rule)">${_esc(a.text)}</div>`).join('')}
+      ${rest>0?`<div style="font-size:11px;padding:3px 0 3px 14px;color:var(--muted);font-style:italic">+${rest} khác — mở từng tàu để xem đủ</div>`:''}</div>`; };
+  const mgmtHtml = mgmtAlerts.length
+    ? _mgmtSec('critical','CRITICAL','var(--bad,#c0392b)')+_mgmtSec('commercial','COMMERCIAL','var(--warn,#b26a00)')+_mgmtSec('operational','OPERATIONAL','#8a7515')
+    : '<div style="padding:12px;text-align:center;color:var(--good)">✓ Không có việc cần chú ý</div>';
+  // ---- Employment Timeline (v3.20.179/182) — 30 ngày trước / 60 ngày sau, 2 tầng Employment+Activity ----
+  const _tlWinStart=Date.now()-30*86400000, _tlWinEnd=Date.now()+60*86400000;
+  const _tlEmpColor={onhire:'#1e7d44',available:'repeating-linear-gradient(45deg,#dfe3e7,#dfe3e7 6px,#eef1f4 6px,#eef1f4 12px)',drydocking:'#c07800',outofservice:'#5a2a2a'};
+  const _tlEmpLabel={onhire:'ON-HIRE',available:'AVAILABLE',drydocking:'DRYDOCKING',outofservice:'OUT OF SERVICE'};
+  const _tlActColor={Working:'#2c5f7c',Transit:'#7c9db3',Standby:'#a9c2d3',Mobilisation:'#d98c00',Demobilisation:'#d98c00'};
+  const _fmtAxisD=ms=>new Date(ms).toLocaleDateString('en-GB',{day:'2-digit',month:'short'});
+  const _tlTodayPct=(Date.now()-_tlWinStart)/(_tlWinEnd-_tlWinStart)*100;
+  const timelineRows = _allFleet.length ? _allFleet.map(v=>{
+    const segs=vmTimelineSegments(v.id,_tlWinStart,_tlWinEnd);
+    const empBar=segs.map(s=>`<div class="vm-tl-seg" style="left:${s.startPct}%;width:${s.widthPct}%;background:${_tlEmpColor[s.empKey]};color:${s.empKey==='available'?'var(--muted)':'#fff'}">${s.widthPct>9?_tlEmpLabel[s.empKey]:''}</div>`).join('');
+    const actBar=segs.map(s=>s.activity?`<div class="vm-tl-seg" style="left:${s.startPct}%;width:${s.widthPct}%;background:${_tlActColor[s.activity]||'#a9c2d3'};color:#fff;font-size:8px">${s.widthPct>11?s.activity:''}</div>`:'').join('');
+    return `<div style="margin-bottom:12px">
+      <div style="font-size:11.5px;font-weight:700;margin-bottom:3px">${_esc(v.name)}</div>
+      <div style="display:flex;align-items:center;margin-bottom:2px"><div class="vm-tl-lbl">Employment</div>
+        <div class="vm-tl-track vm-tl-emp">${empBar}<div class="vm-tl-today" style="left:${_tlTodayPct}%"></div></div></div>
+      <div style="display:flex;align-items:center"><div class="vm-tl-lbl">Activity</div>
+        <div class="vm-tl-track vm-tl-act">${actBar}</div></div>
+    </div>`;
+  }).join('') : '<div style="padding:12px;text-align:center;color:var(--muted)">Chưa có tàu</div>';
+  // ---- Fleet Performance (v3.20.182) — On-Hire/Drydock/Out of Service Days, MTD và YTD cùng lúc ----
+  const _mtdStats=vmFleetPeriodStats(_allFleet,_mtdStart,Date.now());
+  const _ytdStats=vmFleetPeriodStats(_allFleet,_ytdStart,Date.now());
+  const _fpRow=(label,mtd,ytd)=>`<tr><td>${label}</td><td class="r mono">${Math.round(mtd)}</td><td class="r mono">${Math.round(ytd)}</td></tr>`;
+  const fleetPerfHtml=`<table class="vm-mtbl"><thead><tr><th></th><th class="r">MTD</th><th class="r">YTD</th></tr></thead><tbody>
+    ${_fpRow('On-Hire Days',_mtdStats.onHireDays,_ytdStats.onHireDays)}
+    ${_fpRow('Drydock Days',_mtdStats.drydockDays,_ytdStats.drydockDays)}
+    ${_fpRow('Out of Service Days',_mtdStats.oosDays,_ytdStats.oosDays)}
+  </tbody></table>`;
+  // ---- Commercial Outlook (v3.20.182) — từ đúng vesselEmploymentInfo() của từng tàu, không đoán ----
+  let _jobsEnding30=0, _noNextEmp=0, _upcomingEmp=0, _avail7=0;
+  _allFleet.forEach(v=>{
+    const info=vesselEmploymentInfo(v.id);
+    if(info.empKey==='onhire' && info.nextEvent.indexOf('Due ')===0){
+      const dd=Math.round((new Date(info.nextEvent.slice(4)).getTime()-Date.now())/86400000);
+      if(dd>=0&&dd<=30) _jobsEnding30++;
+    }
+    if(info.empKey==='available' && info.nextEvent==='Ongoing') _noNextEmp++;
+    if(info.nextEvent.indexOf('Next: ')===0) _upcomingEmp++;
+    if(info.empKey==='available' && info.since!=null && info.since>7) _avail7++;
+  });
+  const _coRow=(label,val,color)=>`<tr><td>${label}</td><td class="r mono" style="${color?`color:${color}`:''}">${val}</td></tr>`;
+  const commercialOutlookHtml=`<table class="vm-mtbl"><tbody>
+    ${_coRow('Jobs ending ≤30 days',_jobsEnding30,_jobsEnding30?'var(--warn,#b26a00)':'')}
+    ${_coRow('No next employment',_noNextEmp,_noNextEmp?'var(--bad,#c0392b)':'')}
+    ${_coRow('Upcoming employment',_upcomingEmp,'')}
+    ${_coRow('Available &gt;7 days',_avail7,'')}
+  </tbody></table>`;
+  // ---- Operational Exceptions (v3.20.182) — strip gọn, không Fuel (chưa duyệt baseline) ----
+  const _excCert=mgmtAlerts.filter(a=>/Certificate|expired|expires in/.test(a.text)).length;
+  const _excCrew=mgmtAlerts.filter(a=>/onboard/.test(a.text)).length;
+  const _excDar=mgmtAlerts.filter(a=>/DAR not submitted/.test(a.text)).length;
+  const _excOos=_allFleet.filter(v=>vesselEmploymentInfo(v.id).empKey==='outofservice').length;
+  let _excWh=0; try{ _excWh=(InventoryService.stockDocs()||[]).filter(d=>(d.type==='IN'||d.type==='TRANSFER_IN')&&d.status==='pending').length; }catch(e){}
+  const _excItem=(n,label)=>`<span class="vm-exc-item"><span class="vm-exc-n${n?'':' zero'}">${n}</span><span class="vm-exc-lbl">${label}</span></span>`;
+  const opExcHtml=_excItem(_excCert,'Certificates')+_excItem(_excCrew,'Crew')+_excItem(_excDar,'DAR')+_excItem(_excOos,'Out of Service')+_excItem(_excWh,'Warehouse');
   // ---- Lối vào nhanh: Thu-Chi hộ + Kho vật tư ----
   const quick=`
     <a class="vm-q" onclick="navTo('op_input')"><span>🔁</span> Thu-Chi hộ</a>
@@ -41078,13 +41397,21 @@ function renderVmDashboard(){
   // ---- render ----
     box.innerHTML=`
     <style>
-      #page-vm_dashboard .vmk{background:var(--card,#fff);border:1px solid var(--rule);border-radius:8px;padding:14px 16px}
-      #page-vm_dashboard .vmk-l{font-size:11px;letter-spacing:.05em;text-transform:uppercase;color:var(--muted);font-weight:600}
-      #page-vm_dashboard .vmk-v{font-size:24px;font-weight:700;margin-top:4px;font-family:var(--font-mono)}
-      #page-vm_dashboard .vmk-v.good{color:var(--good)} #page-vm_dashboard .vmk-v.warn{color:var(--warn)}
+      #page-vm_dashboard .vmk{background:var(--card,#fff);border:1px solid var(--rule);padding:12px 14px}
+      #page-vm_dashboard .vmk-l{font-size:9.5px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);font-weight:600}
+      #page-vm_dashboard .vmk-v{font-size:24px;font-weight:700;margin-top:4px;font-family:Georgia,serif;color:var(--navy,#0f1e30)}
+      #page-vm_dashboard .vmk-v.good{color:var(--good)} #page-vm_dashboard .vmk-v.warn{color:var(--bad,#c0392b)}
+      #page-vm_dashboard .vmk-s{font-size:10px;color:var(--muted);margin-top:3px}
       #page-vm_dashboard .vm-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin-bottom:20px}
-      #page-vm_dashboard .vm-panel{background:var(--card,#fff);border:1px solid var(--rule);border-radius:8px;overflow:hidden;margin-bottom:20px}
-      #page-vm_dashboard .vm-sec{font-size:13px;font-weight:600;margin:0 2px 8px}
+      #page-vm_dashboard .vm-grid-kpi{grid-template-columns:repeat(6,1fr);gap:1px;background:var(--rule);border:1px solid var(--rule);margin-top:14px;margin-bottom:20px}
+      #page-vm_dashboard .vm-grid-2col{grid-template-columns:1.55fr 1fr;gap:14px;margin-bottom:20px;align-items:start}
+      #page-vm_dashboard .vm-toggle{display:inline-flex;border:1px solid var(--rule);border-radius:5px;overflow:hidden;margin-top:4px}
+      #page-vm_dashboard .vm-toggle span{padding:2px 9px;font-size:10.5px;color:var(--muted);cursor:pointer}
+      #page-vm_dashboard .vm-toggle span.on{background:var(--navy,#0f1e30);color:#fff}
+      #page-vm_dashboard .vm-panel{background:var(--card,#fff);border:1px solid var(--rule);border-radius:8px;overflow:hidden;margin-bottom:0}
+      #page-vm_dashboard .vm-panel-h{padding:9px 14px;border-bottom:1px solid var(--rule);font-size:11.5px;font-weight:700;letter-spacing:.04em;color:var(--navy,#0f1e30);text-transform:uppercase}
+      #page-vm_dashboard .vm-sec{font-size:11.5px;font-weight:700;letter-spacing:.03em;text-transform:uppercase;color:var(--navy,#0f1e30);margin:0 2px 8px}
+      #page-vm_dashboard .vm-grid-2col-even{grid-template-columns:1fr 1fr;gap:14px;margin-bottom:20px}
       #page-vm_dashboard table.vm-tbl{width:100%;border-collapse:collapse}
       #page-vm_dashboard .vm-tbl th{background:var(--paper);text-align:left;font-size:11px;letter-spacing:.04em;text-transform:uppercase;color:var(--muted);font-weight:600;padding:9px 14px;border-bottom:1px solid var(--rule)}
       #page-vm_dashboard .vm-tbl th.r{text-align:right} #page-vm_dashboard .vm-tbl th.c{text-align:center}
@@ -41097,31 +41424,80 @@ function renderVmDashboard(){
       #page-vm_dashboard .vm-ok{background:var(--good-bg,#e7f4ec);color:var(--good,#1a7a4c)} #page-vm_dashboard .vm-warn{background:var(--warn-bg,#fbf1e0);color:var(--warn,#b26a00)}
       #page-vm_dashboard .vm-open{font-size:12px;color:var(--accent);font-weight:600}
       #page-vm_dashboard .vm-alert{padding:10px 14px;border-bottom:1px solid rgba(0,0,0,.05);font-size:13px}
+      #page-vm_dashboard .vm-emp{font-size:10px;font-weight:700;padding:2px 7px;border-radius:3px;letter-spacing:.02em;white-space:nowrap}
+      #page-vm_dashboard .vm-emp-onhire{background:#e8f6ee;color:#1e7d44}
+      #page-vm_dashboard .vm-emp-available{background:#eef1f4;color:var(--muted)}
+      #page-vm_dashboard .vm-emp-drydocking{background:#fdecea;color:#c07800}
+      #page-vm_dashboard .vm-emp-outofservice{background:#f3e4e4;color:#5a2a2a}
+      #page-vm_dashboard .vm-tl-lbl{width:78px;flex-shrink:0;font-size:8px;color:var(--muted);text-transform:uppercase;letter-spacing:.03em}
+      #page-vm_dashboard .vm-tl-track{flex:1;position:relative;overflow:hidden}
+      #page-vm_dashboard .vm-tl-emp{height:18px;background:#eef1f4;border-radius:3px}
+      #page-vm_dashboard .vm-tl-act{height:10px;margin-top:2px}
+      #page-vm_dashboard .vm-tl-seg{position:absolute;top:0;bottom:0;display:flex;align-items:center;justify-content:center;font-size:8.5px;font-weight:700;letter-spacing:.02em;white-space:nowrap;overflow:hidden}
+      #page-vm_dashboard .vm-tl-today{position:absolute;top:-3px;bottom:-3px;width:2px;background:var(--ink);z-index:2}
+      #page-vm_dashboard .vm-tl-axis{display:flex;justify-content:space-between;font-size:10px;color:var(--muted);margin:0 0 8px 78px}
+      #page-vm_dashboard .vm-mtbl{width:100%;border-collapse:collapse;font-size:12.5px}
+      #page-vm_dashboard .vm-mtbl th{font-size:9.5px;text-transform:uppercase;color:var(--muted);text-align:right;padding:8px 14px 4px;background:none;border:none}
+      #page-vm_dashboard .vm-mtbl th:first-child{text-align:left}
+      #page-vm_dashboard .vm-mtbl td{padding:7px 14px;border-bottom:1px dotted var(--rule)}
+      #page-vm_dashboard .vm-mtbl td:not(:first-child){text-align:right;font-family:Georgia,serif;font-weight:700}
+      #page-vm_dashboard .vm-mtbl tr:last-child td{border-bottom:none}
+      #page-vm_dashboard .vm-exc-strip{display:flex;align-items:center;padding:10px 14px;flex-wrap:wrap}
+      #page-vm_dashboard .vm-exc-title{font-size:11px;font-weight:700;letter-spacing:.04em;color:var(--navy,#0f1e30);text-transform:uppercase;margin-right:16px;flex-shrink:0}
+      #page-vm_dashboard .vm-exc-item{display:flex;align-items:center;gap:6px;padding:0 16px;border-left:1px solid var(--rule);font-size:12px}
+      #page-vm_dashboard .vm-exc-item:first-of-type{border-left:none}
+      #page-vm_dashboard .vm-exc-n{font-weight:700;font-family:Georgia,serif;font-size:16px;color:var(--bad,#c0392b)}
+      #page-vm_dashboard .vm-exc-n.zero{color:var(--muted);opacity:.5}
+      #page-vm_dashboard .vm-exc-lbl{color:var(--muted);font-size:10.5px}
       #page-vm_dashboard .vm-q{display:flex;align-items:center;gap:10px;padding:14px 16px;background:var(--card,#fff);border:1px solid var(--rule);border-radius:8px;font-weight:500;cursor:pointer;text-decoration:none;color:var(--ink)}
       #page-vm_dashboard .vm-q:hover{background:var(--paper);color:var(--accent)}
       #page-vm_dashboard .vm-q span{font-size:18px}
     </style>
-    <div class="page-head"><div>
-      <div class="page-title">Tổng quan <span class="it">đội tàu</span></div>
-      <div class="page-sub">Fleet Operations · Vessel Manager</div>
-    </div></div>
-    <div class="vm-grid">
-      ${kpi('Tàu công ty', coVessels.length)}
-      ${kpi('Tàu quản lý hộ', opV.length)}
-      ${kpi('Đang khai thác', onhireCount)}
+    <div class="page-head" style="border-bottom:2px solid var(--navy,#0f1e30);align-items:baseline"><div>
+      <div class="page-title" style="font-family:inherit;letter-spacing:.03em;color:var(--navy,#0f1e30)">FLEET MANAGEMENT</div>
+      <div class="page-sub">Executive Overview</div>
     </div>
-    <div class="vm-sec">Tàu công ty</div>
-    <div class="vm-panel"><table class="vm-tbl">
-      <thead><tr><th>Tàu</th><th class="c">Thuyền viên</th><th>Hoạt động</th><th class="c"></th></tr></thead>
-      <tbody>${coRows}</tbody></table></div>
-    <div class="vm-sec">Tàu quản lý hộ</div>
-    <div class="vm-panel"><table class="vm-tbl">
-      <thead><tr><th>Tàu · Chủ tàu</th><th class="r">Số dư chủ tàu</th><th>Hoạt động</th><th class="c">Đối chiếu</th><th class="c">Ngưỡng</th><th class="c"></th></tr></thead>
-      <tbody>${opRows}</tbody></table></div>
-    <div style="display:grid;grid-template-columns:1.4fr 1fr;gap:20px">
-      <div><div class="vm-sec">Cảnh báo cần xử lý</div><div class="vm-panel">${alertsHtml}</div></div>
-      <div><div class="vm-sec">Lối vào nhanh</div><div style="display:grid;gap:10px">${quick}</div></div>
-    </div>`;
+    <div style="text-align:right;font-size:11.5px;color:var(--muted)">
+      ${_esc(_now.toLocaleDateString('en-GB',{day:'2-digit',month:'short',year:'numeric'}).toUpperCase())} · ${_esc(_now.toTimeString().slice(0,5))}
+      <div class="vm-toggle">
+        <span class="${_vmPeriodMode==='mtd'?'on':''}" onclick="vmSetPeriodMode('mtd')">MTD</span><span class="${_vmPeriodMode==='ytd'?'on':''}" onclick="vmSetPeriodMode('ytd')">YTD</span>
+      </div>
+    </div></div>
+    <div class="vm-grid vm-grid-kpi">
+      ${kpi('Fleet', _allFleet.length, '', 'active vessels')}
+      ${kpi('On-Hire', onhireCount, 'good', 'current')}
+      ${kpi('Available', availableCount, '', 'current')}
+      ${kpi('Utilisation '+_vmPeriodMode.toUpperCase(), _periodStats.utilisationPct!=null?Math.round(_periodStats.utilisationPct*10)/10+'%':'—', '', 'On-Hire ÷ (On-Hire+Available)')}
+      ${kpi('Available Days', Math.round(_periodStats.availableDays), '', _vmPeriodMode.toUpperCase())}
+      ${kpi('Alerts', mgmtAlerts.length, mgmtAlerts.length?'warn':'', _mgmtGroup('critical').length+' critical')}
+    </div>
+    <div class="vm-grid vm-grid-2col">
+      <div class="vm-panel">
+        <div class="vm-panel-h">Fleet Status</div>
+        <table class="vm-tbl">
+          <thead><tr><th>Vessel</th><th>Employment</th><th>Current Activity</th><th>Client / Project</th><th class="c">Since</th><th>Next Event</th><th class="c"></th></tr></thead>
+          <tbody>${fleetRows}</tbody></table>
+      </div>
+      <div class="vm-panel">
+        <div class="vm-panel-h">Management Attention</div>
+        ${mgmtHtml}
+      </div>
+    </div>
+    <div class="vm-panel" style="margin-bottom:20px">
+      <div class="vm-panel-h" style="display:flex;justify-content:space-between">Employment Timeline<span style="font-weight:400;color:var(--muted);text-transform:none;letter-spacing:normal">30 days past · 60 days forward</span></div>
+      <div style="padding:14px">
+        <div class="vm-tl-axis"><span>${_fmtAxisD(_tlWinStart)}</span><span style="font-weight:700;color:var(--ink)">TODAY</span><span>${_fmtAxisD(_tlWinEnd)}</span></div>
+        ${timelineRows}
+        <div style="font-size:10px;color:var(--muted);margin-top:4px;font-style:normal">Phần sau TODAY để trống nếu chưa có đoạn nào được nhập trước — không tự đoán trạng thái tương lai.</div>
+      </div>
+    </div>
+    <div class="vm-grid vm-grid-2col-even">
+      <div class="vm-panel"><div class="vm-panel-h">Fleet Performance</div>${fleetPerfHtml}</div>
+      <div class="vm-panel"><div class="vm-panel-h">Commercial Outlook</div>${commercialOutlookHtml}</div>
+    </div>
+    <div class="vm-panel vm-exc-strip" style="margin-bottom:20px"><span class="vm-exc-title">Operational Exceptions</span>${opExcHtml}</div>
+    <div class="vm-sec" style="margin-top:6px">Lối vào nhanh</div>
+    <div style="display:flex;gap:10px;flex-wrap:wrap">${quick}</div>`;
 }
 function openFleetDashboard(){
   // Quyền: chỉ cấp quản lý (không crew)
@@ -41311,6 +41687,10 @@ function renderVesselOpsSubmenu(){
     ? `<button class="nav-sub-item" onclick="openFleetDashboard()" title="KPI + cảnh báo + việc hôm nay" style="font-weight:600"><span class="sub-dot" style="background:var(--accent)"></span>📊 Tổng quan đội tàu</button>`
     : '');
   if(!vessels.length){ box.innerHTML=dashRow||'<div style="padding:8px 14px;font-size:11px;color:var(--muted);font-style:normal">Chưa có tàu</div>'; return; }
+  /* v3.20.182 (Sếp/anh Trọng: "Không để các tàu nằm ở tab trên đầu"): VM giờ có Fleet Status GỘP
+     đủ cả tàu công ty + QL hộ ngay trong Dashboard riêng (nút "Mở →" từng dòng) — danh sách tàu lặp
+     lại ở đây thành thừa, chỉ gây rối. VM CHỈ còn đúng 1 nút "📊 Tổng quan". Vai khác giữ nguyên. */
+  if(_vmDash){ box.innerHTML=dashRow; return; }
   // v3.10.34: tàu QL hộ (opVessels) — thêm vào dropdown, mở Hub op (Báo cáo chủ tàu). Lọc quyền tương tự.
   let opVessels=VesselService.opVessels().slice();
   try{
@@ -41539,7 +41919,11 @@ function _vaDashCards(vid, forVessel){
     card('📋','Báo cáo hàng ngày (DAR)','Biểu charter (PTSC / SME) — tàu điền, gửi là khóa, in PDF đúng biểu. (v3.18.62 GĐ1)','Mở DAR', go(`openDarList('${vid}')`), '#1c3a5c')
   ];
   // Khối 2 — Hoạt động & vận hành
-  const _opexAllowed = !forVessel && !(typeof whIsVesselSideUser==='function' && whIsVesselSideUser()) && (isAdmin() || (typeof isVesselManager==='function' && isVesselManager()));
+  /* v3.20.175 (Sếp: "Tại app của anh Trọng - quyền VM: tạm thời ẩn - tắt module Chi phí OPEX tại
+     các tàu. Lý do: chưa xây hoàn thiện nên anh Trọng chưa cần biết"): bỏ VM khỏi quyền xem module
+     này — chỉ còn Admin. Giữ nguyên code/dữ liệu bên trong, chỉ ẩn lối vào cho VM, dễ mở lại khi
+     module xây xong. */
+  const _opexAllowed = !forVessel && !(typeof whIsVesselSideUser==='function' && whIsVesselSideUser()) && isAdmin();
   const block2=[
     card('🛳','Khai thác (On/Off-Hire)', events.length+' đoạn · '+nReports+' báo cáo ngày.','Xem khai thác', `openVesselOnHire('${vid}')`),
     /* v3.15.71: ba việc kho gom về MỘT cửa — Kho vật tư là tồn + nhận + kiểm kê. */
@@ -41547,7 +41931,7 @@ function _vaDashCards(vid, forVessel){
       (wh?(nStock+' mặt hàng tồn'):'Chưa có kho gắn tàu này.')+(nPend?(' · <b style="color:#b8730a">'+nPend+' phiếu chờ nhận</b>'):'')+(wh?'<div style="font-size:11px;margin-top:2px">Tồn · nhận hàng · xuất dùng · kiểm kê</div>':''),
       nPend?'Mở kho — có hàng chờ nhận':'Mở kho',
       forVessel?'openVesselStockOverview()':go(`whOpenVesselStockDirect('${vid}')`), nPend?'#b8730a':''),
-    _opexAllowed ? card('💰','Chi phí vận hành (OPEX)','Tổng hợp OPEX theo loại chi phí × tháng (chỉ admin/VM).','Mở báo cáo OPEX', `openVesselOpexReport('${vid}')`, '#b8730a') : '',
+    _opexAllowed ? card('💰','Chi phí vận hành (OPEX)','Tổng hợp OPEX theo loại chi phí × tháng (chỉ admin).','Mở báo cáo OPEX', `openVesselOpexReport('${vid}')`, '#b8730a') : '',
     card('📢','Thông báo', nUnread?('<b style="color:#c0392b">'+nUnread+' chưa đọc</b>'):'Kết quả xử lý đề nghị/phiếu của tàu.','Xem thông báo', go(`openVesselNotifs('${vid}')`))
   ];
   return _blkTitle('📄','Thông tin chung')+_grid(block1)+_blkTitle('⚓','Hoạt động &amp; vận hành')+_grid(block2);
@@ -41621,7 +42005,10 @@ function _vesselOpexMatrix(vid, fromM, toM){
 function openVesselOpexReport(vid){
   // CHẶN TUYỆT ĐỐI tài khoản tàu — không thấy bất kỳ con số tiền nào
   if(typeof whIsVesselSideUser==='function' && whIsVesselSideUser()){ toast('Tài khoản tàu không xem được báo cáo chi phí','bad'); return; }
-  if(!(isAdmin() || (typeof isVesselManager==='function' && isVesselManager()))){ toast('Chỉ admin & Vessel Manager xem được OPEX','bad'); return; }
+  /* v3.20.175 (Sếp: "tạm ẩn - tắt module Chi phí OPEX tại các tàu cho VM — chưa xây hoàn thiện"):
+     bỏ VM khỏi quyền — chỉ Admin. Chặn lại ở tầng hàm, phòng khi VM gọi thẳng chứ không qua thẻ đã
+     ẩn ở trên. */
+  if(!isAdmin()){ toast('Chỉ admin xem được OPEX','bad'); return; }
   const v=VesselService.vessels().find(x=>x.id===vid); if(!v){ toast('Không tìm thấy tàu','bad'); return; }
   _opexVid=vid;
   // mặc định: 12 tháng gần nhất
@@ -42295,6 +42682,14 @@ function renderVessels(){
      (đóng đoạn dùng vai Ⓑ trong wizard), dữ liệu cũ vẫn hiển thị/tính đúng.
    - csb (Commercial Standby) → nhãn 'Available' (tàu rảnh, ngoài job / chờ việc thương mại). Standby
      giữ nghĩa chờ TRONG một job. Hành vi P&L của csb KHÔNG đổi ở GĐ1. */
+/* v3.20.176 (anh Trọng 09/09, quyền VM — chốt qua Sếp, phục vụ Dashboard VM: "trạng thái cấp cao có
+   thể là ON-HIRE | AVAILABLE | DRYDOCKING | OUT OF SERVICE"): thêm loại đoạn MỚI outofservice — tàu
+   ngoài hợp đồng và KHÔNG sẵn sàng nhận việc vì lý do kỹ thuật/khác (khác với Available = ngoài hợp
+   đồng nhưng sẵn sàng, và khác Drydocking = bảo trì có kế hoạch). Gộp chung 1 type — không tách riêng
+   "Maintenance/Repair" (đã chốt). Màu chip: xanh dương (chip-6, đã có sẵn CSS, không tạo mới). Cho
+   tạo mới từ dropdown (creatable mặc định true) — NV chủ động ghi nhận khi xảy ra, không giống offjob
+   (chỉ tự sinh qua luồng đóng hợp đồng). Đây là bước 1/nhiều của Dashboard VM — chỉ thêm đúng 1 dòng
+   này, CHƯA nối gì vào dashboard. */
 const EVENT_TYPES=[
   {key:'onhire',label:'On-Hire',short:'ON',chip:'chip-1',billable:true,wantProject:true},
   {key:'transit',label:'Transit',short:'TR',chip:'chip-2',billable:true,wantProject:true,wantPorts:true},
@@ -42303,7 +42698,8 @@ const EVENT_TYPES=[
   {key:'offjob',label:'Off-Hire',short:'OFF',chip:'chip-5',billable:false,creatable:false},
   {key:'csb',label:'Available',short:'AVL',chip:'chip-5',billable:false},   // v3.16.58: tàu rảnh/ngoài job (trước: Commercial Standby); hành vi P&L giữ như v3.10.26
   {key:'mob',label:'Mobilisation',short:'MOB',chip:'chip-2',billable:false,wantPorts:true},
-  {key:'demob',label:'Demobilisation',short:'DMB',chip:'chip-2',billable:false,wantPorts:true}
+  {key:'demob',label:'Demobilisation',short:'DMB',chip:'chip-2',billable:false,wantPorts:true},
+  {key:'outofservice',label:'Out of Service',short:'OOS',chip:'chip-6',billable:false}   // v3.20.176: xem ghi chú trên
 ];
 function evtType(k){return EVENT_TYPES.find(e=>e.key===k)||EVENT_TYPES[0];}
 /* v3.18.97 (Sếp 26/8: "Khoảng cách giữa các kỳ Off-hire → On-hire = Chờ việc. App auto tính từng quãng để lịch liên tục"):
