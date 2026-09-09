@@ -3782,6 +3782,21 @@ span.chip.chip-fixed{display:inline-flex;align-items:center;gap:4px}
         <div id="crew-alerts"></div>
       </div>
 
+      <!-- v3.20.172 (mockup Điều động tàu — Đổi ca nhanh — đã duyệt): gom thẳng thao tác vào 1
+           bảng, khỏi phải mở từng người — cùng nguồn dữ liệu với Cảnh báo thay ca ở trên, chỉ thêm
+           cột Tàu/Chức danh + 3 nút hành động sẵn có (⚓ Xuống tàu / 🔁 Chuyển tàu / 🏖 Nghỉ ca). -->
+      <div class="section" style="margin-bottom:14px">
+        <div class="section-title" style="font-size:13px;margin-bottom:8px">⚡ Đổi ca nhanh</div>
+        <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px">
+          <label style="font-size:11px;color:var(--muted)">Chức danh:</label>
+          <select id="crew-qc-rank" onchange="hrmRenderCrew()" style="padding:5px 8px;border:1px solid var(--rule);border-radius:6px;font-size:12px">
+            <option value="">— Tất cả —</option>
+            ${CREW_RANKS.map(r=>`<option value="${esc(r.key)}">${esc(CREW_RANK_LABEL[r.key]||r.key)}</option>`).join('')}
+          </select>
+        </div>
+        <div id="crew-quickchange"></div>
+      </div>
+
       <!-- Kế hoạch thay ca -->
       <div class="section" style="margin-bottom:14px">
         <div class="section-title" style="font-size:13px;margin-bottom:8px">📋 Kế hoạch thay ca</div>
@@ -3882,7 +3897,7 @@ const WH_TYPES = {
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.20.171';
+const APP_VERSION='3.20.175';
 /* HOTFIX 3.12.17-email: CHẶN TRIỆT ĐỂ gửi email TỰ ĐỘNG (mất kiểm soát — spam quota Google).
    Email phải do NV được phân quyền CHỦ ĐỘNG chọn gửi. Cờ này:
    (1) chặn auto-SCAN tạo email (hrmScanExpiries/vesselCertScanExpiries);
@@ -13691,9 +13706,12 @@ function crewRenderDashboard(hostId, vidFilter){
     <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:10px">${vesselCards||'<div class="empty">Chưa có tàu</div>'}</div>`;
 }
 /* CẢNH BÁO thay ca: ai sắp/đã quá hạn onboard. */
-function crewRenderRotationAlerts(hostId){
+function crewRenderRotationAlerts(hostId, vidFilter){
   const host=document.getElementById(hostId||'crew-alerts'); if(!host) return;
-  const vs=new Set(fleetVessels().map(v=>v.id));
+  /* v3.20.171 (Sếp — ảnh Điều động tàu: "Phải lọc cả danh sách thuyền viên theo tàu phía dưới"):
+     cùng lỗi với crewRenderDashboard (v3.20.167) — hàm này cũng chưa từng nhận tham số lọc tàu,
+     luôn liệt kê CẢNH BÁO THAY CA của TẤT CẢ tàu bất kể đã chọn gì ở ô lọc "Tàu:" phía trên. */
+  const vs=vidFilter?new Set([vidFilter]):new Set(fleetVessels().map(v=>v.id));
   const rows=[];
   HRService.crewAssignments().forEach(a=>{
     if(!vs.has(a.vesselId)) return;
@@ -13717,7 +13735,40 @@ function crewRenderRotationAlerts(hostId){
     <td class="c">${canManageCrewChange()?`<button class="icon-btn" title="Lập/sửa kế hoạch thay ca" onclick="openCrewPlanModal('${r.plan?r.plan.id:''}','${r.a.empId}','${r.a.vesselId}')">📋</button>`:''}</td>
   </tr>`).join('')}</tbody></table>`;
 }
-/* DANH SÁCH kế hoạch thay ca. */
+/* v3.20.172 (mockup Điều động tàu — Đổi ca nhanh — đã duyệt): cùng nguồn dữ liệu với
+   crewRenderRotationAlerts (ngưỡng onboard 60/75/90) — thêm cột Tàu/Chức danh + gộp thẳng 3 nút
+   hành động sẵn có (⚓ Xuống tàu / 🔁 Chuyển tàu / 🏖 Nghỉ ca, dùng chung hrQuickAssign đã có) vào
+   1 dòng, khỏi phải mở từng người như "Cảnh báo thay ca". Lọc thêm theo Chức danh. */
+function crewRenderQuickChange(hostId, vidFilter, rankFilter){
+  const host=document.getElementById(hostId||'crew-quickchange'); if(!host) return;
+  const vs=vidFilter?new Set([vidFilter]):new Set(fleetVessels().map(v=>v.id));
+  const rows=[];
+  HRService.crewAssignments().forEach(a=>{
+    if(!vs.has(a.vesselId)) return;
+    if(a.actualSignoffDate) return;
+    if(a.status==='signed_off'||a.status==='transfer_out') return;
+    const e=crewEmpInfo(a.empId); const rk=crewRankOf(a.title||(e?e.title:''));
+    if(rankFilter && rk!==rankFilter) return;
+    const days=crewDaysOnboard(a); const lvl=crewRotationLevel(days,rk);
+    if(!lvl) return;
+    rows.push({a,e,rk,days,lvl});
+  });
+  rows.sort((x,y)=>y.days-x.days);
+  if(!rows.length){ host.innerHTML='<div style="font-size:13px;color:var(--muted);padding:8px">Không có thuyền viên nào đến ngưỡng đổi ca.</div>'; return; }
+  host.innerHTML=`<div class="tbl-scroll"><table class="tbl" style="font-size:13px"><thead><tr><th>Nhân viên</th><th>Tàu / Chức danh</th><th class="r">Ngày onboard</th><th>Thao tác nhanh</th></tr></thead><tbody>${rows.map(r=>`<tr${r.days>=90?' style="background:#fdecea"':''}>
+    <td><b>${esc(r.e?(r.e.fullName||r.e.name):'?')}</b><div style="font-size:9px;color:var(--muted)">${esc((r.e&&r.e.smartId)||'')}</div></td>
+    <td style="font-size:11px"><b>${esc(anyVesselName(r.a.vesselId)||'')}</b> · ${esc(CREW_RANK_LABEL[r.rk]||'')}</td>
+    <td class="r num" style="font-weight:700;color:${CREW_LEVEL_COLOR[r.lvl]}">${r.days} ngày</td>
+    <td style="white-space:nowrap">
+      <button class="btn-sec" style="font-size:10px;padding:3px 7px" onclick="hrQuickAssign('${r.a.empId}','board','crewQuickChangeReopen')">⚓ Xuống tàu</button>
+      <button class="btn-sec" style="font-size:10px;padding:3px 7px" onclick="hrQuickAssign('${r.a.empId}','switch','crewQuickChangeReopen')">🔁 Chuyển tàu</button>
+      <button class="btn-sec" style="font-size:10px;padding:3px 7px" onclick="hrQuickAssign('${r.a.empId}','rest','crewQuickChangeReopen')">🏖 Nghỉ ca</button>
+    </td>
+  </tr>`).join('')}</tbody></table></div>`;
+}
+/* Quay lại đúng màn Điều động tàu (không rơi về hrContractDueOpen như mặc định của hrQuickAssign). */
+function crewQuickChangeReopen(){ hrmSwitchView('crew'); }
+
 function crewRenderPlans(hostId, filterVid){
   const host=document.getElementById(hostId||'crew-plan-list'); if(!host) return;
   let list=(S.crewChangePlans||[]).slice();
@@ -25413,12 +25464,17 @@ function hrQuickTerminate(empId){
   toast('Đã tạo đề xuất nghỉ việc (nháp) cho '+e.fullName+' — duyệt + checklist trong 📋','good');
   hrContractDueOpen();
 }
-function hrQuickAssign(empId, mode){
+function hrQuickAssign(empId, mode, retFn){
+  /* v3.20.172 (mockup Đổi ca nhanh — đã duyệt): thêm tham số retFn (tên hàm, dạng chuỗi) để nút
+     "← Quay lại" trả đúng về màn đã gọi — trước đây LUÔN cứng về hrContractDueOpen (màn HĐLĐ), kể
+     cả khi gọi từ Điều động tàu → bấm xong bị "bắn" nhầm sang màn khác. Không truyền = giữ hành vi
+     cũ (hrContractDueOpen), không phá caller sẵn có. */
+  retFn=retFn||'hrContractDueOpen';
   const e=(S.hrEmployees||[]).find(x=>x.id===empId); if(!e) return;
   if(mode==='rest'){
     if(!confirm('Tạo đề xuất NGHỈ CA (rời tàu) cho '+e.fullName+'?')) return;
     _hrQuickPush('transfer', empId, new Date().toISOString().slice(0,10), {linkVesselId:'__CLEAR__', division:'Nghỉ ca'}, 'Điều động: nghỉ ca (rời tàu)');
-    toast('Đã tạo đề xuất nghỉ ca (nháp) — duyệt trong 📋','good'); hrContractDueOpen(); return;
+    toast('Đã tạo đề xuất nghỉ ca (nháp) — duyệt trong 📋','good'); (window[retFn]||hrContractDueOpen)(); return;
   }
   const vs=(VesselService.vessels()||[]).filter(v=>v && v.isActive!==false && v.status!=='inactive' && v.id!==e.linkVesselId);
   if(!vs.length){ toast('Không có tàu khả dụng','warn'); return; }
@@ -25428,17 +25484,18 @@ function hrQuickAssign(empId, mode){
       <label>Chọn tàu<select id="hrqa-vessel" style="width:100%;padding:6px;border:1px solid var(--rule);border-radius:5px">${opts}</select></label>
       <label style="display:block;margin-top:8px">Hiệu lực từ<input id="hrqa-eff" type="date" value="${new Date().toISOString().slice(0,10)}" style="width:100%;padding:6px;border:1px solid var(--rule);border-radius:5px"></label>
     </div>`,
-    `<button class="btn-sec" onclick="hrContractDueOpen()">← Quay lại</button>
-     <button class="btn-primary" onclick="_hrQuickAssignSave('${esc(empId)}','${mode}')">Tạo đề xuất</button>`);
+    `<button class="btn-sec" onclick="(window['${retFn}']||hrContractDueOpen)()">← Quay lại</button>
+     <button class="btn-primary" onclick="_hrQuickAssignSave('${esc(empId)}','${mode}','${retFn}')">Tạo đề xuất</button>`);
 }
-function _hrQuickAssignSave(empId, mode){
+function _hrQuickAssignSave(empId, mode, retFn){
+  retFn=retFn||'hrContractDueOpen';
   const e=(S.hrEmployees||[]).find(x=>x.id===empId); if(!e) return;
   const vid=document.getElementById('hrqa-vessel').value;
   const v=(VesselService.vessels()||[]).find(x=>x.id===vid)||{};
   const eff=document.getElementById('hrqa-eff').value||new Date().toISOString().slice(0,10);
   _hrQuickPush('transfer', empId, eff, {linkVesselId:vid}, 'Điều động: '+(mode==='board'?'xuống tàu ':'chuyển tàu → ')+(v.name||''));
   toast('Đã tạo đề xuất điều động (nháp) '+e.fullName+' → '+(v.name||'')+' — duyệt trong 📋','good');
-  hrContractDueOpen();
+  (window[retFn]||hrContractDueOpen)();
 }
 
 function hrReqOpen(){
@@ -33315,34 +33372,39 @@ const DocEngine = (function(){
       if(r){
         const qty=(+r.qty||0); const price=(+r.price||0); const amount=price*qty; total+=amount;
         bodyRows.push(`<tr>
-          <td style="border:1px solid #333;padding:3px 5px;text-align:center;font-size:11px">${i+1}</td>
-          <td style="border:1px solid #333;padding:3px 5px;font-size:11px">${_esc(r.name||'')}</td>
-          <td style="border:1px solid #333;padding:3px 5px;font-family:monospace;font-size:11px">${_esc(r.code||'')}</td>
-          <td style="border:1px solid #333;padding:3px 5px;text-align:center;font-size:11px">${_esc(r.unit||'')}</td>
-          <td style="border:1px solid #333;padding:3px 5px;text-align:right;font-size:11px">${r.reqQty!=null?_esc(r.reqQty):''}</td>
-          <td style="border:1px solid #333;padding:3px 5px;text-align:right;font-size:11px">${_esc(qty.toLocaleString('vi-VN'))}</td>
-          ${showVal?`<td style="border:1px solid #333;padding:3px 5px;text-align:right;font-size:11px">${price?_esc(price.toLocaleString('vi-VN')):''}</td>
-          <td style="border:1px solid #333;padding:3px 5px;text-align:right;font-size:11px">${amount?_esc(amount.toLocaleString('vi-VN')):''}</td>`:''}
+          <td style="border:1px solid #333;padding:3px 5px;text-align:center;font-size:11px;color:#000">${i+1}</td>
+          <td style="border:1px solid #333;padding:3px 5px;font-size:11px;color:#000">${_esc(r.name||'')}</td>
+          <td style="border:1px solid #333;padding:3px 5px;font-family:monospace;font-size:11px;color:#000">${_esc(r.code||'')}</td>
+          <td style="border:1px solid #333;padding:3px 5px;text-align:center;font-size:11px;color:#000">${_esc(r.unit||'')}</td>
+          <td style="border:1px solid #333;padding:3px 5px;text-align:right;font-size:11px;color:#000">${r.reqQty!=null?_esc(r.reqQty):''}</td>
+          <td style="border:1px solid #333;padding:3px 5px;text-align:right;font-size:11px;color:#000">${_esc(qty.toLocaleString('vi-VN'))}</td>
+          ${showVal?`<td style="border:1px solid #333;padding:3px 5px;text-align:right;font-size:11px;color:#000">${price?_esc(price.toLocaleString('vi-VN')):''}</td>
+          <td style="border:1px solid #333;padding:3px 5px;text-align:right;font-size:11px;color:#000">${amount?_esc(amount.toLocaleString('vi-VN')):''}</td>`:''}
         </tr>`);
       } else {
         bodyRows.push(`<tr>${'<td style="border:1px solid #333;padding:3px 5px;height:20px">&nbsp;</td>'.repeat(nCols)}</tr>`);
       }
     }
+    /* v3.20.174 (Sếp — ảnh phiếu in thật: "Căn chữ cho cân, đổi màu chữ, in mờ"): dòng tiêu đề bảng
+       trước đây không có color/vertical-align tường minh — máy in/PDF một số máy render ra chữ mờ,
+       xám nhạt theo màu kế thừa từ CSS ngoài, lệch không đều dòng. Ép hẳn đen (#000), giữa dòng
+       (vertical-align:middle) + giữa ô (text-align:center) cho toàn bộ tiêu đề, không phụ thuộc kế
+       thừa từ đâu nữa. */
     const colHead = `<tr>
-      <th rowspan="2" style="border:1px solid #333;padding:4px;background:#eef2f7;font-size:11px;width:34px">Stt</th>
-      <th rowspan="2" style="border:1px solid #333;padding:4px;background:#eef2f7;font-size:11px">Tên vật tư</th>
-      <th rowspan="2" style="border:1px solid #333;padding:4px;background:#eef2f7;font-size:11px">Mã vật tư</th>
-      <th rowspan="2" style="border:1px solid #333;padding:4px;background:#eef2f7;font-size:11px;width:48px">Đvt</th>
-      <th colspan="2" style="border:1px solid #333;padding:4px;background:#eef2f7;font-size:11px">Số lượng</th>
-      ${showVal?'<th rowspan="2" style="border:1px solid #333;padding:4px;background:#eef2f7;font-size:11px">Giá</th><th rowspan="2" style="border:1px solid #333;padding:4px;background:#eef2f7;font-size:11px">Tiền</th>':''}
+      <th rowspan="2" style="border:1px solid #333;padding:4px;background:#eef2f7;font-size:11px;width:34px;color:#000;vertical-align:middle;text-align:center">Stt</th>
+      <th rowspan="2" style="border:1px solid #333;padding:4px;background:#eef2f7;font-size:11px;color:#000;vertical-align:middle;text-align:center">Tên vật tư</th>
+      <th rowspan="2" style="border:1px solid #333;padding:4px;background:#eef2f7;font-size:11px;color:#000;vertical-align:middle;text-align:center">Mã vật tư</th>
+      <th rowspan="2" style="border:1px solid #333;padding:4px;background:#eef2f7;font-size:11px;width:48px;color:#000;vertical-align:middle;text-align:center">Đvt</th>
+      <th colspan="2" style="border:1px solid #333;padding:4px;background:#eef2f7;font-size:11px;color:#000;text-align:center">Số lượng</th>
+      ${showVal?'<th rowspan="2" style="border:1px solid #333;padding:4px;background:#eef2f7;font-size:11px;color:#000;vertical-align:middle;text-align:center">Giá</th><th rowspan="2" style="border:1px solid #333;padding:4px;background:#eef2f7;font-size:11px;color:#000;vertical-align:middle;text-align:center">Tiền</th>':''}
     </tr>
     <tr>
-      <th style="border:1px solid #333;padding:4px;background:#eef2f7;font-size:10px;width:64px">${qtyLabel}</th>
-      <th style="border:1px solid #333;padding:4px;background:#eef2f7;font-size:10px;width:64px">Thực ${isIn?'nhập':'xuất'}</th>
+      <th style="border:1px solid #333;padding:4px;background:#eef2f7;font-size:10px;width:64px;color:#000;text-align:center">${qtyLabel}</th>
+      <th style="border:1px solid #333;padding:4px;background:#eef2f7;font-size:10px;width:64px;color:#000;text-align:center">Thực ${isIn?'nhập':'xuất'}</th>
     </tr>
     ${/* v3.15.84: dòng chữ cái A B C D 1 2 3 4 đúng mẫu 01-VT của FAST */''}
     <tr>${(showVal?['A','B','C','D','1','2','3','4']:['A','B','C','D','1','2'])
-      .map(x=>`<th style="border:1px solid #333;padding:2px;background:#eef2f7;font-size:10px;font-weight:400">${x}</th>`).join('')}</tr>`;
+      .map(x=>`<th style="border:1px solid #333;padding:2px;background:#eef2f7;font-size:10px;font-weight:400;color:#000;text-align:center;vertical-align:middle">${x}</th>`).join('')}</tr>`;
     /* v3.15.84: mẫu FAST LUÔN có dòng Tổng cộng (phiếu điều chuyển hiện 0) */
     const totalRow = showVal
       ? `<tr>
@@ -95159,7 +95221,8 @@ function hrmRenderCrew(){
   }
   const vid=sel?sel.value:'';
   try{ crewRenderDashboard('crew-dash', vid); }catch(e){ console.warn('crewDash',e); }
-  try{ crewRenderRotationAlerts('crew-alerts'); }catch(e){ console.warn('crewAlerts',e); }
+  try{ crewRenderRotationAlerts('crew-alerts', vid); }catch(e){ console.warn('crewAlerts',e); }
+  try{ const rankSel=document.getElementById('crew-qc-rank'); crewRenderQuickChange('crew-quickchange', vid, rankSel?rankSel.value:''); }catch(e){ console.warn('crewQuickChange',e); }
   try{ crewRenderPlans('crew-plan-list', vid); }catch(e){ console.warn('crewPlans',e); }
   try{ renderCrewAssignments('crew-assign-list', vid); }catch(e){ console.warn('crewAssign',e); }
 }
@@ -96050,10 +96113,15 @@ function openSalaryLedger(){
       return myCo===parentCo;
     });
   }
-  const fDept=(document.getElementById('sl-f-dept')||{}).value||'';
+  /* v3.20.173 (Sếp — ảnh Sổ lương: "Để lọc theo công ty, không cần theo bộ phận"): thay lọc Phòng
+     ban bằng lọc Công ty — cùng cơ chế đọc empAssignments()/công ty mẹ mặc định đã dùng ở khối lọc
+     phạm vi phía trên (v3.20.97), chỉ khác là lọc THEO LỰA CHỌN của người xem, không phải khóa
+     cứng theo công ty của họ. */
+  const fCompany=(document.getElementById('sl-f-company')||{}).value||'';
+  const _todayStr=new Date().toISOString().slice(0,10);
+  const _parentCoId=(typeof getParentCompanyId==='function')?getParentCompanyId():'';
   const fTitle=((document.getElementById('sl-f-title')||{}).value||'').toLowerCase();
   const fQ=((document.getElementById('sl-f-q')||{}).value||'').toLowerCase();
-  const fMin=+((document.getElementById('sl-f-min')||{}).value||0);
   const fQuick=(document.getElementById('sl-f-quick')||{}).value||'';
   const rows=[]; let fund=0, cnt=0, raisedThisYear=0, raiseVal=0, raisePctSum=0, raiseN=0;
   /* v3.12.87: snapshot tỷ giá MỘT LẦN cho cả lần render (không gọi fxRate() rải rác) */
@@ -96094,10 +96162,13 @@ function openSalaryLedger(){
     if(cur && !_slOff && monthsSince>=10) dueRaise.push({e, monthsSince, tot});
     if(e.contractEndDate && !_slOff){ const dd=Math.round((new Date(e.contractEndDate)-new Date())/86400000); if(dd>=0&&dd<=60) expiring.push({e,dd}); }
     // filter
-    if(fDept && hrDeptCanon(e.dept||'')!==fDept) return;
+    if(fCompany){
+      const asg=(typeof empAssignments==='function')?empAssignments(e.id, _todayStr):[];
+      const match = asg.length ? asg.some(a=>a.companyId===fCompany) : (fCompany===_parentCoId);
+      if(!match) return;
+    }
     if(fTitle && !(e.title||'').toLowerCase().includes(fTitle)) return;
     if(fQ && !((e.fullName||'')+' '+(e.smartId||'')).toLowerCase().includes(fQ)) return;
-    if(fMin>0 && tot<fMin) return;
     if(fQuick==='due' && monthsSince<10) return;
     if(fQuick==='stale' && monthsSince<18) return;
     if(fQuick==='new' && !( (e.startDate||'') >= new Date(Date.now()-90*86400000).toISOString().slice(0,10) )) return;
@@ -96154,7 +96225,7 @@ function openSalaryLedger(){
     /* v3.20.167 (mockup Nhân sự H3 đã duyệt: "chuyển Thẻ lương của NV về đây: cập nhật - sửa chữa -
        bổ sung/thêm mới tại đây"): thêm nút "✏️ Sửa" tường minh cạnh tên — trước đây phải BIẾT bấm vào
        tên mới mở được Thẻ lương (openSalaryProfileCard đã có sẵn đủ chức năng thêm/sửa), không rõ ràng. */
-    return {grp:x._grp, html:`<tr data-slg="${esc(x._grp)}" style="border-top:1px solid var(--rule)${x.off?';opacity:.55':''}">
+    return {grp:x._grp, html:`<tr data-slg="${esc(x._grp)}" style="display:none;border-top:1px solid var(--rule)${x.off?';opacity:.55':''}">
       <td style="padding:6px 8px;font-size:12px"><a href="javascript:void(0)" onclick="openSalaryProfileCard('${e.id}')" style="font-weight:600;color:var(--accent)">${esc(e.fullName)}</a> <button class="btn-ghost" style="font-size:9.5px;padding:0 5px" onclick="openSalaryProfileCard('${e.id}')" title="Cập nhật/sửa/thêm phiên bản Thẻ lương">✏️ Sửa</button>${x.off?` <span style="font-size:9px;background:#f3e8e8;color:#9a4b4b;border-radius:3px;padding:0 4px" title="Đã nghỉ — vẫn xem được thẻ, phục vụ kỳ lương lúc còn làm việc">🔚 nghỉ ${esc((e.resignDate||e.terminationDate||'').slice(0,10))}</span>`:''}<br><span style="font-family:var(--font-mono);font-size:10px;color:var(--muted)">${esc(e.smartId||'')}</span></td>
       <td style="padding:6px 8px;font-size:11px">${esc((function(){const _c=hrDeptCanon(e.dept||'');return _c?hrDeptLabel(_c):(e.dept||'—');})())}<br><span style="color:var(--muted)">${esc(e.title||'')}</span></td>
       <td style="padding:6px 8px;font-size:10.5px">vào ${esc(e.startDate||'—')}<br>HĐ ${esc(e.contractType||'—')}${e.contractEndDate?('<br>hết '+esc(e.contractEndDate)):''}</td>
@@ -96197,7 +96268,7 @@ function openSalaryLedger(){
   const deptOrder=depts.concat((rowsByGrp['_none']||[]).length?[{code:'_none',label:'— Chưa gán phòng ban —'}]:[]);
   const trs=deptOrder.map(dp=>{
     const list=rowsByGrp[dp.code]; if(!list||!list.length) return '';
-    const head=`<tr class="sl-dept-head" onclick="slDeptToggle('${esc(dp.code)}',this)" style="cursor:pointer;background:#f7f8fa"><td colspan="6" style="padding:7px 10px;font-weight:700;font-size:12px"><span class="sl-chev" style="display:inline-block;width:14px">▾</span> ${esc(dp.label)} <span style="font-weight:400;color:var(--muted)">(${list.length})</span></td></tr>`;
+    const head=`<tr class="sl-dept-head" onclick="slDeptToggle('${esc(dp.code)}',this)" style="cursor:pointer;background:#f7f8fa"><td colspan="6" style="padding:7px 10px;font-weight:700;font-size:12px"><span class="sl-chev" style="display:inline-block;width:14px">▸</span> ${esc(dp.label)} <span style="font-weight:400;color:var(--muted)">(${list.length})</span></td></tr>`;
     return head+list.join('');
   }).join('');
   const body=`
@@ -96219,11 +96290,10 @@ function openSalaryLedger(){
         ${expiring.length?('<div style="font-size:10px;font-weight:700;text-transform:uppercase;color:var(--bad);margin:8px 0 4px">⚠ HĐ sắp hết hạn (≤60 ngày)</div>'+expiring.map(x=>`<div style="font-size:10.5px">• ${esc(x.e.fullName)} — còn ${x.dd} ngày</div>`).join('')):''}
       </div>
     </div>
-    <div style="display:grid;grid-template-columns:repeat(5,1fr) auto;gap:6px;align-items:end;margin-bottom:6px">
-      <div class="field" style="margin:0"><label style="font-size:9px;display:block;margin:0 0 3px;line-height:1">Phòng ban</label><select id="sl-f-dept" onchange="openSalaryLedger()" style="width:100%;height:32px;box-sizing:border-box"><option value="">Tất cả</option>${depts.map(dp=>`<option value="${esc(dp.code)}" ${fDept===dp.code?'selected':''}>${esc(dp.label)}</option>`).join('')}</select></div>
+    <div style="display:grid;grid-template-columns:repeat(4,1fr) auto;gap:6px;align-items:end;margin-bottom:6px">
+      <div class="field" style="margin:0"><label style="font-size:9px;display:block;margin:0 0 3px;line-height:1">Công ty</label><select id="sl-f-company" onchange="openSalaryLedger()" style="width:100%;height:32px;box-sizing:border-box"><option value="">Tất cả</option>${(S.companies||[]).map(co=>`<option value="${esc(co.id)}" ${fCompany===co.id?'selected':''}>${esc(co.name)}</option>`).join('')}</select></div>
       <div class="field" style="margin:0"><label style="font-size:9px;display:block;margin:0 0 3px;line-height:1">Chức vụ</label><input id="sl-f-title" value="${esc(fTitle)}" style="width:100%;height:32px;box-sizing:border-box" onchange="openSalaryLedger()"></div>
       <div class="field" style="margin:0"><label style="font-size:9px;display:block;margin:0 0 3px;line-height:1">Tìm NV</label><input id="sl-f-q" value="${esc(fQ)}" style="width:100%;height:32px;box-sizing:border-box" onchange="openSalaryLedger()"></div>
-      <div class="field" style="margin:0"><label style="font-size:9px;display:block;margin:0 0 3px;line-height:1">Lương từ ≥</label><input id="sl-f-min" type="number" value="${fMin||''}" style="width:100%;height:32px;box-sizing:border-box" onchange="openSalaryLedger()"></div>
       <div class="field" style="margin:0"><label style="font-size:9px;display:block;margin:0 0 3px;line-height:1">Tìm nhanh</label><select id="sl-f-quick" onchange="openSalaryLedger()" style="width:100%;height:32px;box-sizing:border-box">
         <option value="">—</option>
         <option value="due" ${fQuick==='due'?'selected':''}>Đến kỳ xét tăng (≥10th)</option>
