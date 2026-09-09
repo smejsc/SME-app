@@ -3878,7 +3878,7 @@ const WH_TYPES = {
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.20.153';
+const APP_VERSION='3.20.160';
 /* HOTFIX 3.12.17-email: CHẶN TRIỆT ĐỂ gửi email TỰ ĐỘNG (mất kiểm soát — spam quota Google).
    Email phải do NV được phân quyền CHỦ ĐỘNG chọn gửi. Cờ này:
    (1) chặn auto-SCAN tạo email (hrmScanExpiries/vesselCertScanExpiries);
@@ -7272,6 +7272,22 @@ function allowedFieldsForUser(){
   });
   // v3.02.96: Tạm ứng NV mở cho MỌI NV → luôn cấp field của tab advances (gồm payables để hoàn ứng chứng từ)
   (TAB_TO_FIELDS['advances']||[]).forEach(f=>fields.add(f));
+  /* v3.20.159 (Sếp — "Máy admin không cập nhật... kiểm tra luồng sync các phần liên quan đến kho vật
+     tư mới tạo"): GỐC RỄ NGHIÊM TRỌNG — thao tác kho (Nhận hàng/Áp mã & xác nhận/tạo mã tạm...) đã mở
+     rộng cho GẦN NHƯ MỌI NV (whCanConfirmByBbgn: admin/canManageStock/site-side/VM/hoặc "không phải
+     tài khoản tàu" — tức hầu hết NV thường) VÀ cả TÀI KHOẢN TÀU (isVesselAccount, tabs chỉ có
+     ['operations'] — xem VESSEL_ACCOUNT_TABS) — nhưng field đồng bộ 'stockDocs'/'materials'/
+     'warehouses'... CHỈ cấp cho ai có tab 'inventory'. NV/tài khoản tàu không có tab này vẫn thao tác
+     được BÌNH THƯỜNG trên máy mình (S cục bộ đúng, tự thấy kết quả) — nhưng lúc đồng bộ lên cloud,
+     allowedFieldsForUser() không cho field kho đi qua → thay đổi KHÔNG BAO GIỜ lên được cloud, máy
+     khác (Admin/Thủ kho) không bao giờ nhận được, im lặng mất, không báo lỗi gì. Cấp thêm field kho
+     cho MỌI TÀI KHOẢN THAO TÁC ĐƯỢC kho — đúng khớp mọi điều kiện đang cho phép dùng tính năng kho ở
+     nơi khác trong app (isVesselAccount/isCaptain/isWarehouse/isCentralWarehouse/assignedWarehouseIds/
+     canManageUsers) — và vì whCanConfirmByBbgn thực chất cho phép GẦN NHƯ MỌI NV thường khác cũng bấm
+     Nhận hàng, cấp luôn cho tất cả TRỪ Viewer (chỉ xem báo cáo, không thao tác gì để mà mất). */
+  const u=CURRENT_USER;
+  const _needsInventorySync = !(u && u.isViewer);
+  if(_needsInventorySync){ (TAB_TO_FIELDS['inventory']||[]).forEach(f=>fields.add(f)); }
   return Array.from(fields);
 }
 
@@ -17300,14 +17316,63 @@ function migrateExpenseTypes(){
       partsFixed++;
     }
   });
-  if(added>0 || fuelBackfilled>0 || labelFixed>0 || partsFixed>0){
+  // v3.20.153 (Sếp — ảnh "Chọn loại chi phí": toàn bộ loại dưới nhóm M hiện icon 📁 giống hệt nhau,
+  //   "tạo lại icon"): tự đoán icon theo TỪ KHÓA trong tên loại — chỉ áp cho loại đang icon rỗng hoặc
+  //   còn 📁 (mặc định lúc tạo hàng loạt từ Bảng tên nhánh, chưa ai chỉnh tay) — không đụng icon nào
+  //   Sếp/KT đã tự chọn riêng. Chạy migration thật (sửa thẳng dữ liệu SỐNG, không phải seed).
+  let iconGuessed=0;
+  S.expenseTypes.forEach(t=>{
+    if(t.icon==='📁' || !t.icon){
+      const g=_guessExpenseIcon(t.label);
+      if(g && g!==t.icon){ t.icon=g; iconGuessed++; }
+    }
+  });
+  if(added>0 || fuelBackfilled>0 || labelFixed>0 || partsFixed>0 || iconGuessed>0){
     if(added>0) dlog('[migrate] Added',added,'expense types (default)');
     if(fuelBackfilled>0) dlog('[migrate] Backfilled isFuel on',fuelBackfilled,'types');
     if(labelFixed>0) dlog('[migrate] Fixed',labelFixed,'double-escaped labels');
     if(partsFixed>0) dlog('[migrate] PARTS_PO → non-PO on',partsFixed,'types');
+    if(iconGuessed>0) dlog('[migrate] Guessed icon on',iconGuessed,'types');
     saveState();
   }
   return added;
+}
+/* v3.20.153: đoán icon theo từ khóa tên loại chi phí — dùng cho migration ở trên (dữ liệu cũ icon 📁
+   hàng loạt) và có thể tái dùng khi tạo loại mới. Không đoán được → trả rỗng, giữ nguyên icon cũ. */
+function _guessExpenseIcon(label){
+  const d=String(label||'').toLowerCase();
+  const has=(...kw)=>kw.some(k=>d.includes(k));
+  if(has('lương')) return '💰';
+  if(has('thực phẩm','tiền ăn')) return '🍽️';
+  if(has('mob/demob','mob-demob','demob')) return '✈️';
+  if(has('bhlđ','khám sk','đổi bằng','bảo hộ')) return '🦺';
+  if(has('hull')) return '🚢';
+  if(has('p&i')) return '🛟';
+  if(has('bảo hiểm')) return '🛡️';
+  if(has('boong')) return '⚓';
+  if(has('giàn khoan')) return '🏗️';
+  if(has('máy móc thiết bị','máy')) return '⚙️';
+  if(has('vật tư điện')) return '🔌';
+  if(has('bếp')) return '🍳';
+  if(has('sửa chữa')) return '🔧';
+  if(has('cước vệ tinh','vệ tinh')) return '📡';
+  if(has('sóng định vị','định vị')) return '📍';
+  if(has('bản tin thời tiết','thời tiết')) return '🌤️';
+  if(has('cảng phí','cầu cảng')) return '⚓';
+  if(has('điện bờ')) return '🔋';
+  if(has('nước')) return '💧';
+  if(has('thuê dịch vụ','thuê ngoài','thuê mmtb','thuê nhân sự')) return '🤝';
+  if(has('thuế')) return '🧾';
+  if(has('phí đại lý','phí pháp lý','phí kiểm định','phí kiểm')) return '📋';
+  if(has('vpp','văn phòng phẩm')) return '📎';
+  if(has('có hóa đơn')) return '🧾';
+  if(has('không có hóa đơn','không hóa đơn')) return '📄';
+  if(has('kiểm tra','chứng nhận')) return '✅';
+  if(has('aphh')) return '📦';
+  if(has('khoan')) return '🛠️';
+  if(has('phụ tùng')) return '🔩';
+  if(has('nhân sự')) return '👤';
+  return '';
 }
 
 /* v1.43.0: Check if an expense type is marked as Fuel (needs qty + unitPrice + fuelKind) */
@@ -57169,28 +57234,49 @@ function _arEditorBody(r,isPayable){
     }
     expenseTypeBlock = `
       <div class="field" style="grid-column:span 3">
-        <label>Loại chi phí <span style="color:var(--muted);text-transform:none;font-weight:400;font-size:10px">(chọn Nhóm cha trước để lọc gọn — chọn loại để tự kích hoạt trường nhiên liệu nếu có)</span></label>
+        <label>Loại chi phí <span style="color:var(--muted);text-transform:none;font-weight:400;font-size:10px">(Nhóm cha → Nhóm con → Nhánh cháu nếu có — chọn xong tự kích hoạt trường nhiên liệu nếu có)</span></label>
         ${(function(){
-          /* v3.20.152 (Sếp: "dropdown chọn loại chi phí: 2 bước" rồi "Gỡ" cây nhánh cũ): select
-             "Nhóm cha" lọc gọn #ar-expense-type — cây/cascade cũ (#et-cascade) đã gỡ hẳn cùng đợt,
-             thay hoàn toàn bằng 2 bước này. Giữ lại đúng năng lực admin tạo nhanh loại mới (trước nằm
-             trong cây) bằng 1 option "＋ Tạo loại mới" cuối danh sách bước 2. */
+          /* v3.20.153 (Sếp: "thêm 1 ô chọn tới nhánh cháu. Chọn Nhóm Cha - Con - cháu. Cho phép không
+             cần chọn nhóm cháu"): 3 tầng dropdown theo đúng cây (cha=chữ, con=cha.số, cháu=cha.số.số).
+             Nhánh cháu CHỈ hiện khi nhóm con đó thật sự có cháu (VD "Vật tư, sửa chữa" có cháu Boong/
+             Máy/...); nhóm con không có cháu (VD "APHH", "VPP") thì bỏ qua bước cháu, dùng thẳng loại
+             gắn ở cấp con. Ô "Loại chi phí" cuối cùng chỉ còn tác dụng XÁC NHẬN (thường tự ra đúng 1
+             loại khớp nhánh đã chọn), không cần bấm thêm trong đa số trường hợp. */
           const pref=expGroupsForSegment(r.segment||'');
-          let curGroup='';
+          let curGroup='', curCon='', curChau='';
           if(r.expenseType==='__BUDGET__') curGroup='__BUDGET__';
-          else if(r.expenseType){ const _t=(S.expenseTypes||[]).find(x=>x.code===r.expenseType); if(_t) curGroup=(typeof etypeDisplayGroup==='function')?(etypeDisplayGroup(_t)||_t.group):_t.group; }
+          else if(r.expenseType){
+            const _t=(S.expenseTypes||[]).find(x=>x.code===r.expenseType);
+            if(_t){
+              curGroup=(typeof etypeDisplayGroup==='function')?(etypeDisplayGroup(_t)||_t.group):_t.group;
+              const tc=String(_t.treeCode||_t.code||''); const parts=tc.split('.');
+              if(parts.length>=2) curCon=parts.slice(0,2).join('.');
+              if(parts.length>=3) curChau=parts.slice(0,3).join('.');
+            }
+          }
           if(!curGroup && pref.length===1) curGroup=pref[0];
           const groupOpts='<option value="">— Nhóm cha —</option>'
             +`<option value="__BUDGET__" ${curGroup==='__BUDGET__'?'selected':''}>📋 Dự kiến chi (chưa phát sinh)</option>`
             +expGroupsActive().map(gk=>`<option value="${esc(gk)}" ${curGroup===gk?'selected':''}>${esc(expGroupLabel(gk))}</option>`).join('');
-          const newOpt=isAdmin()?'<option value="__NEW__">＋ Tạo loại chi phí mới… (admin)</option>':'';
-          const typeOptsHtml = curGroup==='__BUDGET__'
+          const isBudget=curGroup==='__BUDGET__';
+          const cons=(curGroup&&!isBudget)?_arTreeConsOf(curGroup):[];
+          const conOpts='<option value="">— Nhóm con —</option>'+cons.map(c=>`<option value="${esc(c.code)}" ${curCon===c.code?'selected':''}>${esc(c.code)} · ${esc(c.name)}</option>`).join('')+((isAdmin()&&curGroup&&!isBudget)?'<option value="__NEW_CON__">＋ Tạo nhóm con mới (admin)</option>':'');
+          const chauList=curCon?_arTreeChauOf(curCon):[];
+          const chauOpts='<option value="">— Nhánh cháu —</option>'+chauList.map(c=>`<option value="${esc(c.code)}" ${curChau===c.code?'selected':''}>${esc(c.code)} · ${esc(c.name)}</option>`).join('')+(isAdmin()?'<option value="__NEW__">＋ Tạo loại chi phí mới… (admin)</option>':'');
+          const finalTypes = isBudget ? [] : (chauList.length ? (curChau?_arTypesForTreeCode(curChau):[]) : (curCon?_arTypesForTreeCode(curCon):[]));
+          const typeOptsHtml = isBudget
             ? '<option value="__BUDGET__" selected>📋 Dự kiến chi (chưa phát sinh)</option>'
-            : ((function(){ try{ return expenseTypeOptsPref(r.expenseType, [], curGroup||''); }catch(e){ return etHtml; } })()+newOpt);
-          return `<div style="display:grid;grid-template-columns:1fr 2fr;gap:6px">
-            <select id="ar-expense-group" onchange="arExpenseGroupChanged()">${groupOpts}</select>
-            <select id="ar-expense-type" onchange="if(this.value==='__NEW__'){ this.value=''; _etQuickCreate('','ar-expense-type'); } else arExpenseTypeChanged()" ${curGroup==='__BUDGET__'?'disabled':''}>${typeOptsHtml}</select>
-          </div>`;
+            : (finalTypes.length ? finalTypes.map(t=>`<option value="${esc(t.code)}" ${r.expenseType===t.code?'selected':''}>${t.icon||''} ${esc(t.label)}</option>`).join('') : '<option value="">— Chưa có loại chi phí ở nhánh này —</option>');
+          return `
+            <select id="ar-expense-group" style="margin-bottom:6px" onchange="arExpenseGroupChanged()">${groupOpts}</select>
+            <div id="ar-expense-con-wrap" style="display:${(curGroup&&!isBudget)?'':'none'};margin-bottom:6px">
+              <select id="ar-expense-con" onchange="arExpenseConChanged()">${conOpts}</select>
+            </div>
+            <div id="ar-expense-chau-wrap" style="display:${chauList.length?'':'none'};margin-bottom:6px">
+              <select id="ar-expense-chau" onchange="arExpenseChauChanged()">${chauOpts}</select>
+            </div>
+            <select id="ar-expense-type" onchange="arExpenseTypeChanged()" ${isBudget?'disabled':''}>${typeOptsHtml}</select>
+          `;
         })()}
       </div>
       <div class="field" id="ar-khoan-field" style="grid-column:span 3;display:${_isOpManagedAp(r)?'':'none'}">
@@ -57689,25 +57775,91 @@ function _etQuickCreate(chau, selectId, lineTmpId){
     }catch(e){}
   }});
 }
-/* v3.20.151: xử lý bước 1 (Nhóm cha) — chỉ lọc lại options của #ar-expense-type (bước 2), không đụng
-   gì tới toàn bộ khối xử lý fuel/advance/asset/capex bên dưới trong arExpenseTypeChanged(). */
+/* v3.20.153 (Sếp — ảnh danh mục M dài, phẳng: "thêm 1 ô chọn tới nhánh cháu. Chọn Nhóm Cha - Con -
+   cháu. Cho phép không cần chọn nhóm cháu"): 3 hàm dựng cây theo đúng cấu trúc mã đã chốt (cha=chữ,
+   con=cha.số, cháu=cha.số.số — v3.18.62). Cấp 2/3 dùng TÊN NHÁNH (expTreeList), không phải loại chi
+   phí — loại chi phí thật chỉ xuất hiện ở bước CUỐI, tự suy ra khi đã đủ cha+con(+cháu nếu con có
+   cháu); con KHÔNG có cháu thì bước cháu tự ẩn, dùng thẳng loại gắn ở cấp con. */
+function _arTreeConsOf(letter){
+  const nodes=(typeof expTreeList==='function'?expTreeList():[]);
+  const out=[]; nodes.forEach(n=>{ const c=String(n.code||''); const p=c.split('.'); if(p[0]===letter && p.length===2) out.push({code:c,name:n.name||''}); });
+  return out.sort((a,b)=>a.code.localeCompare(b.code,'vi',{numeric:true}));
+}
+function _arTreeChauOf(conCode){
+  const nodes=(typeof expTreeList==='function'?expTreeList():[]);
+  const out=[]; nodes.forEach(n=>{ const c=String(n.code||''); if(c.indexOf(conCode+'.')===0 && c.split('.').length===3) out.push({code:c,name:n.name||''}); });
+  return out.sort((a,b)=>a.code.localeCompare(b.code,'vi',{numeric:true}));
+}
+function _arTypesForTreeCode(code){
+  const types=(typeof activeExpenseTypes==='function')?activeExpenseTypes():(S.expenseTypes||[]);
+  return types.filter(t=>String(t.treeCode||t.code||'')===code);
+}
+/* Đặt thẳng giá trị cuối vào #ar-expense-type (ẩn) rồi báo thay đổi — types.length: 0=chưa có loại
+   nào gắn ở nhánh này (chưa tạo), 1=đúng như kỳ vọng, >1=hiếm gặp, tạm lấy loại đầu. */
+function _arResolveFinalType(types){
+  const tsel=document.getElementById('ar-expense-type'); if(!tsel) return;
+  tsel.innerHTML = types.length ? types.map(t=>`<option value="${esc(t.code)}">${t.icon||''} ${esc(t.label)}</option>`).join('') : '<option value="">— Chưa có loại chi phí ở nhánh này —</option>';
+  tsel.value = types.length ? types[0].code : '';
+  arExpenseTypeChanged();
+}
 function arExpenseGroupChanged(){
   const gsel=document.getElementById('ar-expense-group');
-  const tsel=document.getElementById('ar-expense-type');
-  if(!gsel||!tsel) return;
+  const conWrap=document.getElementById('ar-expense-con-wrap');
+  const conSel=document.getElementById('ar-expense-con');
+  if(!gsel||!conSel) return;
   const gk=gsel.value;
   if(gk==='__BUDGET__'){
-    tsel.innerHTML='<option value="__BUDGET__" selected>📋 Dự kiến chi (chưa phát sinh)</option>';
-    tsel.disabled=true;
-  }else{
-    tsel.disabled=false;
-    const curCode=tsel.value;
-    const t=(curCode&&curCode!=='__BUDGET__')?(S.expenseTypes||[]).find(x=>x.code===curCode):null;
-    const curGroup=t?((typeof etypeDisplayGroup==='function')?(etypeDisplayGroup(t)||t.group):t.group):'';
-    const keep=(curGroup===gk)?curCode:'';
-    tsel.innerHTML=expenseTypeOptsPref(keep, [], gk||'')+(isAdmin()?'<option value="__NEW__">＋ Tạo loại chi phí mới… (admin)</option>':'');
+    if(conWrap) conWrap.style.display='none';
+    const chauWrap=document.getElementById('ar-expense-chau-wrap'); if(chauWrap) chauWrap.style.display='none';
+    const tsel=document.getElementById('ar-expense-type');
+    if(tsel){ tsel.innerHTML='<option value="__BUDGET__" selected>📋 Dự kiến chi (chưa phát sinh)</option>'; }
+    arExpenseTypeChanged();
+    return;
   }
-  arExpenseTypeChanged();
+  if(conWrap) conWrap.style.display=gk?'':'none';
+  const cons=gk?_arTreeConsOf(gk):[];
+  conSel.innerHTML='<option value="">— Nhóm con —</option>'+cons.map(c=>`<option value="${esc(c.code)}">${esc(c.code)} · ${esc(c.name)}</option>`).join('')+(isAdmin()&&gk?`<option value="__NEW_CON__">＋ Tạo nhóm con mới (admin)</option>`:'');
+  arExpenseConChanged();
+}
+function arExpenseConChanged(){
+  const conSel=document.getElementById('ar-expense-con'); if(!conSel) return;
+  if(conSel.value==='__NEW_CON__'){
+    conSel.value='';
+    const gsel=document.getElementById('ar-expense-group'); const gk=gsel?gsel.value:'';
+    const nm=prompt('Tên nhóm con mới (thuộc nhóm '+gk+'):',''); if(nm===null) return;
+    if(!nm.trim()){ toast('Nhập tên nhóm con','bad'); return; }
+    const nc=(typeof expTreeNextChildCode==='function')?expTreeNextChildCode(gk):'';
+    if(!nc){ toast('Không tạo được mã nhóm con','bad'); return; }
+    commitMutation(()=>{ expTreeUpsert(nc,nm.trim()); },{action:'exptree_add_con', fields:['expenseTree'], onOk:()=>{
+      toast('✓ Đã tạo nhóm con '+nc+' · '+nm.trim(),'good');
+      arExpenseGroupChanged();
+      setTimeout(()=>{ const cs=document.getElementById('ar-expense-con'); if(cs) cs.value=nc; arExpenseConChanged(); },50);
+    }});
+    return;
+  }
+  const chauWrap=document.getElementById('ar-expense-chau-wrap');
+  const chauSel=document.getElementById('ar-expense-chau');
+  const conCode=conSel.value;
+  if(!conCode){ if(chauWrap) chauWrap.style.display='none'; _arResolveFinalType([]); return; }
+  const chau=_arTreeChauOf(conCode);
+  if(!chau.length){
+    if(chauWrap) chauWrap.style.display='none';
+    _arResolveFinalType(_arTypesForTreeCode(conCode));
+  }else{
+    if(chauWrap) chauWrap.style.display='';
+    if(chauSel) chauSel.innerHTML='<option value="">— Nhánh cháu —</option>'+chau.map(c=>`<option value="${esc(c.code)}">${esc(c.code)} · ${esc(c.name)}</option>`).join('')+(isAdmin()?`<option value="__NEW__">＋ Tạo loại chi phí mới… (admin)</option>`:'');
+    arExpenseChauChanged();
+  }
+}
+function arExpenseChauChanged(){
+  const chauSel=document.getElementById('ar-expense-chau'); if(!chauSel) return;
+  if(chauSel.value==='__NEW__'){
+    const conSel=document.getElementById('ar-expense-con'); const conCode=conSel?conSel.value:'';
+    chauSel.value='';
+    _etQuickCreate(conCode,'ar-expense-type');
+    return;
+  }
+  _arResolveFinalType(chauSel.value?_arTypesForTreeCode(chauSel.value):[]);
 }
 function arExpenseTypeChanged(){
   const sel = document.getElementById('ar-expense-type');
@@ -76303,11 +76455,18 @@ function openPendingInbound(myOnly){
   const rowFor=d=>{
     const a=AccountingService.payableById(d.apId);
     const nNoCode=(d.lines||[]).filter(l=>!String(l.code||'').trim()).length;
+    /* v3.20.158 (Sếp — ảnh "Chờ nhận hàng": cột "Đối tác" hiện tên người (Bùi Xuân Dũng) cho phiếu
+       điều chuyển — không có "đối tác" nào ở đây, đó là "Người giao" ghi lúc tạo, dễ hiểu nhầm là NCC.
+       Điều chuyển không có NCC — hiện đúng bản chất: Kho xuất điều chuyển (kho nguồn) thay cho tên
+       người). Phiếu mua hàng thường (PN) vẫn hiện Nhà cung cấp như cũ. */
+    const partnerCell = d.type==='TRANSFER_IN'
+      ? 'Kho xuất điều chuyển: '+esc(_whName(d.pairWarehouseId)||'—')
+      : esc(a?a.partner:(d.deliveredBy||''));
     return `<tr style="border-bottom:1px solid var(--rule)">
       <td style="padding:5px 8px;font-family:monospace;font-size:11px"><b>${esc(d.docNo)}</b></td>
       <td style="padding:5px 8px;font-size:11px">${esc(d.date)}</td>
       <td style="padding:5px 8px;font-size:11px">${esc(_whName(d.warehouseId))}</td>
-      <td style="padding:5px 8px;font-size:11px">${esc(a?a.partner:(d.deliveredBy||''))}</td>
+      <td style="padding:5px 8px;font-size:11px">${partnerCell}</td>
       <td style="padding:5px 8px;font-size:11px">${(d.lines||[]).length} VT${nNoCode?` <span style="color:#b8730a" title="${nNoCode} dòng chưa có mã FAST">⚠${nNoCode}</span>`:''}</td>
       <td style="padding:5px 8px;white-space:nowrap">
         ${canEdit?(whIsVesselSideUser()?`<button class="btn-primary" style="font-size:11px" onclick="openVesselReceive('${d.id}')">✓ Nhận hàng</button>`:`<button class="btn-primary" style="font-size:11px" onclick="openConfirmInbound('${d.id}')">✓ Nhận hàng & xác nhận</button>`):''}
@@ -76319,7 +76478,7 @@ function openPendingInbound(myOnly){
     return `<div style="margin-bottom:14px">
       <div style="font-size:13px;font-weight:700;color:#1c5a8c;background:#eef5fb;border:1px solid #cfe0ef;border-radius:6px;padding:5px 10px;margin-bottom:4px">👤 ${esc(k)} <span style="font-weight:400;color:var(--muted)">· ${docs.length} phiếu</span></div>
       <table style="width:100%;border-collapse:collapse;font-size:13px;border:1px solid var(--rule)">
-        <thead><tr style="background:var(--rule);text-align:left"><th style="padding:6px 8px">Số CT</th><th style="padding:6px 8px">Ngày</th><th style="padding:6px 8px">Kho</th><th style="padding:6px 8px">Đối tác</th><th style="padding:6px 8px">VT</th><th style="padding:6px 8px"></th></tr></thead>
+        <thead><tr style="background:var(--rule);text-align:left"><th style="padding:6px 8px">Số CT</th><th style="padding:6px 8px">Ngày</th><th style="padding:6px 8px">Kho nhận</th><th style="padding:6px 8px">Nhà cung cấp</th><th style="padding:6px 8px">VT</th><th style="padding:6px 8px"></th></tr></thead>
         <tbody>${docs.map(rowFor).join('')}</tbody></table></div>`;
   }).join('') : `<div style="padding:14px;text-align:center;color:var(--muted)">Không có phiếu chờ nhận hàng.</div>`;
   const hint = myOnly
@@ -76675,7 +76834,19 @@ function openConfirmInbound(id){
 function _confRender(){
   const d=_confDraft; if(!d) return;
   const showVal=(typeof canViewStockValue==='function'&&canViewStockValue());
-  const _bbgnBanner=d.bbgn?`<div style="font-size:11.5px;padding:6px 10px;border:1px solid #1e7d44;border-radius:8px;background:#eafaf0;margin-bottom:6px">📎 Xác nhận theo <b>biên bản giao nhận${d.bbgn.no?' '+esc(d.bbgn.no):''}</b>${d.bbgn.date?' · '+esc(d.bbgn.date):''}${d.bbgn.url?` · <a href="${esc(d.bbgn.url)}" target="_blank" rel="noopener">mở file</a>`:''} · khớp ${d.bbgn.matched||0}/${d.bbgn.rows||0} dòng · nhập bởi ${esc(d.bbgn.readBy||'')}</div>`:'';
+  /* v3.20.155 (Sếp — "Bỏ nút import BBGN thay = đính kèm BBGN. Thủ kho check bản đính kèm được"):
+     2 kiểu d.bbgn giờ cùng tồn tại — kiểu cũ (đọc/khớp dòng, có d.bbgn.rows) và kiểu mới (chỉ đính
+     kèm thuần túy qua _vrAttachBbgnOnly(), không có .rows) — banner tách riêng để không hiện nhầm
+     "khớp 0/0 dòng" cho file chỉ đính kèm tham khảo. */
+  const _bbgnBanner=d.bbgn?(d.bbgn.rows!=null
+    ? `<div style="font-size:11.5px;padding:6px 10px;border:1px solid #1e7d44;border-radius:8px;background:#eafaf0;margin-bottom:6px">📎 Xác nhận theo <b>biên bản giao nhận${d.bbgn.no?' '+esc(d.bbgn.no):''}</b>${d.bbgn.date?' · '+esc(d.bbgn.date):''}${d.bbgn.url?` · <a href="${esc(d.bbgn.url)}" target="_blank" rel="noopener">mở file</a>`:''} · khớp ${d.bbgn.matched||0}/${d.bbgn.rows||0} dòng · nhập bởi ${esc(d.bbgn.readBy||'')}</div>`
+    : `<div style="font-size:11.5px;padding:6px 10px;border:1px solid #1e7d44;border-radius:8px;background:#eafaf0;margin-bottom:6px">📎 Đã đính kèm biên bản giao nhận (chỉ tham khảo, chưa đọc SL)${d.bbgn.url?` · <a href="${esc(d.bbgn.url)}" target="_blank" rel="noopener">mở file</a>`:''}${d.bbgn.uploadedBy?' · đính bởi '+esc(d.bbgn.uploadedBy):''}</div>`
+  ):'';
+  /* v3.20.157 (Sếp — "Tàu không nhận hết... trả lại kho"): hiện lại lịch sử chênh lệch điều chuyển
+     (nếu có) ngay tại màn Thủ kho xác nhận, để không bị quên khi quay lại xem sau. */
+  const _shortfallBanner=d.shortfallReturnDocNo
+    ? `<div style="font-size:11.5px;padding:6px 10px;border:1px solid #b8730a;border-radius:8px;background:#fff7e6;margin-bottom:6px">↩ Nhận thiếu <b>${d.shortfallReturnQty||''}</b> đơn vị — đã tự trả lại kho nguồn qua phiếu <b>${esc(d.shortfallReturnDocNo)}</b></div>`
+    : (d.shortfallLoss ? `<div style="font-size:11.5px;padding:6px 10px;border:1px solid var(--bad);border-radius:8px;background:#fdecea;margin-bottom:6px">⚠ Nhận thiếu <b>${d.shortfallLossQty||''}</b> đơn vị — đánh dấu THẤT LẠC/HƯ HỎNG, CHƯA xử lý bút toán gì — cần Thủ kho/KT quyết hướng xử lý</div>` : '');
   const lineRows=(d.lines||[]).map((l,i)=>{
     const _codeTyped=String(l.code||'').trim();
     const _matExists=_codeTyped && (typeof matByCode==='function') && matByCode(_codeTyped);
@@ -76739,10 +76910,43 @@ function _confRender(){
       <tbody>${lineRows}</tbody></table>
     ${landedBlock}
     ${!showVal?'<div style="font-size:11px;color:var(--muted);margin-top:8px">Chi phí phát sinh (thuế/phí) do kế toán/thủ kho tổng ghi nhận.</div>':''}`;
-  openModal('✓ Nhận hàng & xác nhận — '+esc(d.docNo), _bbgnBanner+body,
-    `<button class="btn-ghost" onclick="openPendingInbound()">← Chờ nhập</button>
+  openModal('✓ Nhận hàng & xác nhận — '+esc(d.docNo), _bbgnBanner+_shortfallBanner+body,
+    `<button class="btn-ghost" style="border-color:var(--bad);color:var(--bad)" onclick="_confReturnToCreator('${d.id}')" title="Kho nhận thực tế khác kho đã chọn trên phiếu — trả về cho NV tạo phiếu chọn lại kho, gửi lại về Chờ nhập kho">↩ Trả về NV (kho sai)</button>
+     <button class="btn-ghost" onclick="openPendingInbound()">← Chờ nhập</button>
      <button class="btn-sec" onclick="_confSave(false)">💾 Lưu nháp</button>
      <button class="btn-primary" onclick="_confSave(true)">✓ Xác nhận nhập kho</button>`);
+}
+/* v3.20.154 (Sếp — "kho nhận thực tế khác kho trên phiếu: tạo nút trả về: thủ kho trả về cho NV tạo
+   phiếu, NV chọn lại kho và gửi lại về Chờ nhập kho"): tồn kho trong app tính THẲNG từ sổ chứng từ
+   (stockDocs status received/confirmed), KHÔNG phải bảng số dư riêng — nên chỉ cần đổi status phiếu
+   về lại 'pending' là tồn kho ở kho SAI tự động hết bị tính (không cần cộng/trừ tay thêm chỗ nào).
+   NV mở lại đúng phiếu này qua "Nhận hàng" bình thường như phiếu mới — chọn ĐÚNG kho lần này (đã xóa
+   sẵn warehouseId cũ để không lỡ tay bấm qua, giữ nguyên kho sai). */
+function _confReturnToCreator(id){
+  const d=InventoryService.stockDocById(id);
+  if(!d){ toast('Không tìm thấy phiếu','bad'); return; }
+  if(d.status!=='received'){ toast('Phiếu không ở trạng thái Chờ nhập kho','bad'); return; }
+  const reason=prompt('Lý do trả về (NV sẽ thấy khi mở lại phiếu):','Kho nhận thực tế khác với kho đã chọn trên phiếu — chọn lại đúng kho rồi Nhận hàng lại');
+  if(reason===null) return;
+  const oldWh=_whName(d.warehouseId)||'';
+  commitMutation(()=>{
+    d.status='pending';
+    d.returnedBy=actorName();
+    d.returnedAt=new Date().toISOString();
+    d.returnedReason=reason||'';
+    d.returnCount=(+d.returnCount||0)+1;
+    d.warehouseId='';           // xóa kho sai — bắt NV chọn lại tay, không để mặc định lỡ bấm qua
+    d.vesselReceived=false;
+    delete d.vesselReceivedAt; delete d.vesselReceivedBy;
+    d.receivedSeen=false;       // dùng lại đúng cơ chế badge "MỚI" sẵn có (v3.20.91) để NV để ý phiếu cần làm lại
+    try{ touchRecord(d); }catch(e){}
+  },{action:'stock_return_to_creator', fields:['stockDocs'], onOk:()=>{
+    try{ logAuditEvent('stock_return_to_creator',{docNo:d.docNo, reason, oldWarehouse:oldWh, byWarehouse:actorName(), toCreator:d.createdBy}); }catch(e){}
+    toast('↩ Đã trả phiếu '+esc(d.docNo)+' về cho '+esc(d.createdBy||'NV tạo phiếu')+' (kho cũ: '+esc(oldWh)+') — chọn lại kho và Nhận hàng lại','good');
+    try{ if(typeof renderInventory==='function') renderInventory(); }catch(e){}
+    closeModal();
+    openPendingInbound();
+  }});
 }
 function _confQty(i,v){ if(_confDraft.lines[i]) _confDraft.lines[i].qty=(+v||0); }
 function _confLineCode(i,code){ const l=_confDraft.lines[i]; if(!l) return; l.code=String(code||'').trim(); const m=(typeof matByCode==='function')?matByCode(l.code):null; if(m){ l.name=m.name; l.unit=m.unit; } _confRender(); }
@@ -77387,7 +77591,13 @@ function _lkPick(key, val){
 }
 function _stockRenderForm(){
   const s=_stockDraft; if(!s) return;
-  const isIn=s.type==='IN';
+  /* v3.20.156 (Sếp — ảnh "PXDC/PNDC mở chi tiết dòng chờ nhập lại hiện Phiếu XUẤT kho, Kho xuất =
+     Kho tàu (đáng lẽ là kho NHẬN)"): isIn cũ chỉ so đúng chữ "IN", không nhận "TRANSFER_IN" (cũng
+     thiếu "ADJUST_IN"/"OPENING") — mở SỬA 1 phiếu TRANSFER_IN (đúng là "chờ nhập" của điều chuyển)
+     qua màn này bị hiểu nhầm thành phiếu XUẤT, nhãn "Kho xuất" hiện đúng warehouseId của phiếu
+     TRANSFER_IN (vốn dĩ ĐÚNG LÀ kho nhận) nhưng gắn nhầm nhãn. Khớp lại đúng định nghĩa isIn dùng
+     thống nhất ở mọi chỗ khác trong app (vd dòng ~75005/79885/79991). */
+  const isIn=(s.type==='IN'||s.type==='TRANSFER_IN'||s.type==='ADJUST_IN'||s.type==='OPENING');
   const allowed=stockAllowedWarehouses();
   const whOpts=allowed.map(w=>`<option value="${w.id}" ${s.warehouseId===w.id?'selected':''}>${esc(w.name)}</option>`).join('');
   // liên kết AP (chỉ phiếu nhập) — hóa đơn phải trả đã duyệt
@@ -77439,7 +77649,8 @@ function _stockRenderForm(){
     ${s.id?`<button class="btn-sec" style="font-size:11px;margin-top:6px;margin-left:6px" onclick="_stockPrint('pdf')" title="In phiếu PDF theo mẫu chuẩn FAST — màn bờ bản có giá">🖨 PDF</button>
     <button class="btn-sec" style="font-size:11px;margin-top:6px;margin-left:6px" onclick="_stockPrint('xlsx')" title="Xuất Excel cùng mẫu với bản in — bản có giá">⬇ Excel</button>`:''}
     <div style="font-size:11px;color:var(--muted);margin-top:6px">📦 ${isIn?'Đơn giá để trống thì app lấy theo bảng giá vốn của mã; có hóa đơn AP liên kết thì giá theo hóa đơn.':'Không xuất vượt tồn khả dụng (sẽ bị chặn khi xác nhận).'} Mã FAST <b>không bắt buộc</b> — để trống thì app gợi ý theo tên, không khớp thì cấp mã tạm SH-xxxx và đẩy vào 🏷 Soát mã.</div>`;
-  openModal((s.id?'✏️ Sửa ':'+ ')+(isIn?'Phiếu nhập kho':'Phiếu xuất kho'), body,
+  const _formTitle=({IN:'Phiếu nhập kho',OUT:'Phiếu xuất kho',TRANSFER_IN:'Phiếu nhập điều chuyển',TRANSFER_OUT:'Phiếu xuất điều chuyển',ADJUST_IN:'Phiếu điều chỉnh tăng',ADJUST_OUT:'Phiếu điều chỉnh giảm',OPENING:'Phiếu tồn đầu kỳ'}[s.type])||(isIn?'Phiếu nhập kho':'Phiếu xuất kho');
+  openModal((s.id?'✏️ Sửa ':'+ ')+_formTitle, body,
     `<button class="btn-ghost" onclick="openStockDocs()">← Danh sách</button>
      <button class="btn-sec" onclick="_stockSave(false)">💾 Lưu nháp</button>
      <button class="btn-primary" onclick="_stockSave(true)">✓ Lưu & Xác nhận</button>`);
@@ -77865,6 +78076,33 @@ function whPrepareVesselReceiveLines(lines, materials){
   });
 }
 /* --- Màn NHẬN HÀNG của tàu --- */
+/* v3.20.155 (Sếp — "Bỏ nút import BBGN thay = đính kèm BBGN. Thủ kho check bản đính kèm được"): chỉ
+   tải file lên Drive + lưu vào d.bbgn — KHÔNG đọc/parse/tự điền SL như whBbgnPick cũ (bộ đọc OCR/PDF
+   dễ sai — đã thấy nhiều lỗi loại này trong phiên nay). NV kiểm đếm & tự gõ SL như bình thường; file
+   chỉ để Thủ kho mở đối chiếu ở màn "Nhận hàng & xác nhận" (banner _bbgnBanner đã hiện link sẵn). */
+async function _vrAttachBbgnOnly(docId, inputEl){
+  const file=inputEl&&inputEl.files&&inputEl.files[0]; if(!file) return;
+  try{ inputEl.value=''; }catch(e){}
+  const d=InventoryService.stockDocById(docId); if(!d){ toast('Không tìm thấy phiếu','bad'); return; }
+  if(file.size>20*1024*1024){ toast('File quá lớn (>20MB)','bad'); return; }
+  const cfg=getAuthConfig();
+  if(!cfg||!cfg.scriptUrl){ toast('Chưa cấu hình Apps Script URL — không tải lên được','bad'); return; }
+  toast('⏳ Đang đính kèm biên bản…','warn');
+  try{
+    const b64=await new Promise((res,rej)=>{ const r=new FileReader(); r.onload=()=>{ const x=String(r.result||''); res(x.includes(',')?x.split(',')[1]:x); }; r.onerror=()=>rej(new Error('đọc file')); r.readAsDataURL(file); });
+    const resp=await fetch(cfg.scriptUrl,{method:'POST',headers:{'Content-Type':'text/plain'},body:JSON.stringify({
+      action:'upload_attachment', fileBase64:b64, mimeType:file.type||'application/octet-stream',
+      fileName:(d.docNo?d.docNo+' - ':'')+file.name, sub:'BBGN_'+String(d.date||todayISO()).slice(0,4), viewers:[]
+    })});
+    const data=await resp.json();
+    if(!data||!data.ok||!data.file) throw new Error((data&&data.error)||'upload lỗi');
+    const who=(typeof actorName==='function'?actorName():''), now=new Date().toISOString();
+    const bb={name:file.name, url:data.file.url||'', driveId:data.file.id||'', uploadedBy:who, uploadedAt:now};
+    await commitMutation(()=>{ const real=InventoryService.stockDocById(docId); if(real){ real.bbgn=bb; try{touchRecord(real);}catch(e){} } },{action:'stock_bbgn_attach_only', fields:['stockDocs']});
+    toast('✓ Đã đính kèm biên bản giao nhận — Thủ kho xem được khi Áp mã & xác nhận','good');
+    openVesselReceive(docId);
+  }catch(e){ toast('Lỗi đính kèm: '+(e&&e.message||''),'bad'); }
+}
 function openVesselReceive(docId){
   const d=InventoryService.stockDocById(docId);
   if(!d||d.status!=='pending'){ toast('Phiếu không ở trạng thái chờ nhận','bad'); return; }
@@ -77903,10 +78141,12 @@ function openVesselReceive(docId){
       <td style="padding:6px 8px;text-align:right"><input type="number" id="vr-q-${p.idx}" value="${p.reqQty}" min="0" step="any" style="width:80px;padding:5px;border:1px solid var(--rule);border-radius:6px;text-align:right"></td>
     </tr>`).join('');
   window._vrPrep={docId, prep};
-  /* v3.20.39: gắn sẵn nút Import BBGN NGAY TẠI ĐÂY — trước phải bấm từ nút riêng ở dòng phiếu (đã bỏ),
-     giờ màn Nhận hàng tự đủ, không phụ thuộc lối vào khác. Dùng lại đúng whBbgnPick(forceSimple=true)
-     — đọc xong tự re-render lại đúng màn này với SL đã điền theo BBGN. */
-  const bbgnBtn=whCanConfirmByBbgn(d)?`<label class="btn-sec" style="font-size:11px;cursor:pointer;margin-left:8px" title="Đọc BBGN (PDF/ảnh/Word/Excel) để tự điền SL thực nhận">📎 Import BBGN<input type="file" accept=".pdf,image/*,.doc,.docx,.xlsx,.xls" style="display:none" onchange="whBbgnPick('${esc(docId)}',this,true)"></label>`:'';
+  /* v3.20.155 (Sếp — "Bỏ nút import BBGN thay = đính kèm BBGN. Thủ kho check bản đính kèm được"):
+     bỏ hẳn nút tự đọc/khớp SL (whBbgnPick — dễ sai vì phải OCR/parse file, đã gặp nhiều lỗi loại này
+     trong phiên nay) — thay bằng đính kèm THUẦN TÚY (_vrAttachBbgnOnly), NV vẫn tự gõ SL thực nhận
+     như bình thường, file chỉ để Thủ kho mở đối chiếu ở bước Áp mã & xác nhận sau. */
+  const bbgnBtn=whCanConfirmByBbgn(d)?`<label class="btn-sec" style="font-size:11px;cursor:pointer;margin-left:8px" title="Đính kèm biên bản giao nhận (PDF/ảnh/Word/Excel) để Thủ kho xem đối chiếu — KHÔNG tự điền số lượng">📎 Đính kèm BBGN<input type="file" accept=".pdf,image/*,.doc,.docx,.xlsx,.xls" style="display:none" onchange="_vrAttachBbgnOnly('${esc(docId)}',this)"></label>`:'';
+  const bbgnLink=(d.bbgn&&d.bbgn.url)?` <a href="${esc(d.bbgn.url)}" target="_blank" rel="noopener" style="font-size:10.5px;margin-left:6px">📎 ${esc(d.bbgn.name||'BBGN')} đã đính</a>`:'';
   /* v3.20.47 (Sếp — "dùng mẫu như H2 (Đối chiếu & gửi vào Chờ giao hàng) trong phần Nhận hàng, mẫu
      này có Kho nhận đầy đủ; thêm dòng hàng chi tiết như H1"): nâng phần đầu màn lên đúng bố cục
      "Đối chiếu & gửi" — đủ Nhà cung cấp/Số hợp đồng/Ngày hợp đồng/Số hóa đơn (đọc từ đúng phiếu đã
@@ -77919,8 +78159,8 @@ function openVesselReceive(docId){
        <div><label style="font-size:11px;color:var(--muted)">Ngày hợp đồng</label><div style="font-size:13px">${esc(d.contractDate||'—')}</div></div>
        <div><label style="font-size:11px;color:var(--muted)">Số hóa đơn</label><div style="font-size:13px">${esc(d.invoiceNoHdr||'—')}</div></div>
      </div>
-     <div style="font-size:12px;color:var(--muted);margin-bottom:8px;display:flex;align-items:center;flex-wrap:wrap;gap:6px">Vị trí cất giữ (kho ghi nhập kho): ${_whSelect}${_whEditable?' <span style="font-size:10px">(chọn đúng nơi hàng thực về, có thể khác lúc tạo phiếu)</span>':''} · Ngày: <b>${esc(d.date||'')}</b>${bbgnBtn}</div>
-     <div style="font-size:12px;color:var(--muted);margin-bottom:8px">Kiểm đếm thực tế và nhập số lượng thực nhận từng dòng hàng — hoặc bấm Import BBGN để tự điền. Xác nhận xong tồn kho cộng ngay.</div>
+     <div style="font-size:12px;color:var(--muted);margin-bottom:8px;display:flex;align-items:center;flex-wrap:wrap;gap:6px">Vị trí cất giữ (kho ghi nhập kho): ${_whSelect}${_whEditable?' <span style="font-size:10px">(chọn đúng nơi hàng thực về, có thể khác lúc tạo phiếu)</span>':''} · Ngày: <b>${esc(d.date||'')}</b>${bbgnBtn}${bbgnLink}</div>
+     <div style="font-size:12px;color:var(--muted);margin-bottom:8px">Kiểm đếm thực tế và nhập số lượng thực nhận từng dòng hàng. Xác nhận xong tồn kho cộng ngay.</div>
      <div style="margin-bottom:8px"><label style="font-size:11px;color:var(--muted)">Địa điểm nhận hàng thực tế <span style="font-size:10px">(tùy chọn — ghi chú nơi hàng thật sự về, vd "Giao thẳng tại cầu cảng", có thể khác Vị trí lên sổ ở trên)</span></label>
        <input id="vr-loc" value="${esc(d.receivedLocation||'')}" placeholder="VD: Giao thẳng tại cầu cảng Vũng Tàu" style="width:100%;padding:6px 8px;border:1px solid var(--rule);border-radius:6px;font-size:13px;margin-top:2px"></div>
      <table style="width:100%;border-collapse:collapse;font-size:13px;border:1px solid var(--rule)">
@@ -77958,6 +78198,25 @@ function _vrSave(){
   const qtys={}; let tot=0;
   ctx.prep.forEach(p=>{ const v=+(document.getElementById('vr-q-'+p.idx)||{}).value||0; if(v<0){ qtys[p.idx]=0; } else { qtys[p.idx]=v; } tot+=qtys[p.idx]; });
   if(tot<=0){ toast('Chưa nhập số lượng thực nhận nào','bad'); return; }
+  /* v3.20.157 (Sếp — "Tàu không nhận hết. VD: XKDC 100 cái áo, tàu chỉ nhận 30 trả lại kho 70"):
+     điều chuyển (TRANSFER_IN) mà SL thực nhận < SL trên phiếu — trước đây phần chênh lệch "biến mất"
+     khỏi tổng tồn kho (kho nguồn đã trừ đủ lúc xuất, kho đích chỉ cộng đúng SL thực nhận, không ai
+     cộng lại chỗ nào) — không cảnh báo, không phiếu chênh lệch. Nay hỏi rõ ngay tại đây: phần thiếu
+     TRẢ VỀ kho nguồn (tự cộng lại tồn ở đó qua 1 phiếu ADJUST_IN, đúng bản chất "trả lại" của ca này)
+     hay THẤT LẠC/HƯ HỎNG (không tự cộng lại đâu — Thủ kho/KT tự xử lý riêng, app không đoán hộ). CHỈ
+     áp cho TRANSFER_IN — phiếu nhập mua thường (nhận thiếu hàng NCC) là chuyện khác (khiếu nại NCC,
+     không phải "trả kho nguồn" vì không có kho nguồn nội bộ nào để trả), không đụng tới. */
+  let shortfallLines=[], shortfallTotal=0;
+  if(d.type==='TRANSFER_IN'){
+    ctx.prep.forEach(p=>{
+      const act=qtys[p.idx]||0, req=+p.reqQty||0;
+      if(req>act+1e-9){ const q=req-act; shortfallLines.push({code:p.code, name:p.name, unit:p.unit, qty:q}); shortfallTotal+=q; }
+    });
+  }
+  let returnToSource=false;
+  if(shortfallLines.length){
+    returnToSource=confirm('Nhận thiếu '+shortfallTotal+' đơn vị so với phiếu điều chuyển.\n\n— Bấm OK nếu phần thiếu này TRẢ LẠI kho nguồn ('+esc(_whName(d.pairWarehouseId)||'')+') — app tự cộng lại tồn ở đó ngay.\n— Bấm Hủy nếu là THẤT LẠC/HƯ HỎNG (không cộng lại đâu cả — Thủ kho/KT tự xử lý riêng).');
+  }
   /* v3.20.43 (Sếp — "Vị trí thật chọn tại Nhận hàng, không cố định từ lúc tạo phiếu"): nếu màn có ô
      chọn vị trí (NV, không phải tài khoản tàu) → ghi đúng kho NV vừa chọn trước khi cộng tồn. */
   const whSel=document.getElementById('vr-wh');
@@ -77976,12 +78235,36 @@ function _vrSave(){
     (pr.lines||[]).forEach((l,i)=>{ prices[i]=+l.price||0; }); }catch(e){}
   const by=actorName(), now=new Date().toISOString();
   whApplyVesselReceive(d, ctx.prep, qtys, by, now, prices);
+  let retDocNo='';
+  if(shortfallLines.length && returnToSource && d.pairWarehouseId){
+    const totalBefore=tot+shortfallTotal;
+    const retDoc={ id:uid(), docNo:stockGenDocNo('ADJUST_IN'), type:'ADJUST_IN', date:now.slice(0,10),
+      warehouseId:d.pairWarehouseId, lines:shortfallLines,
+      note:'Trả lại từ điều chuyển '+d.docNo+' — '+_whName(d.warehouseId)+' chỉ nhận '+tot+'/'+totalBefore,
+      status:'confirmed', createdBy:by, createdAt:now, confirmedBy:by, confirmedAt:now,
+      returnOfDocId:d.id, returnOfDocNo:d.docNo };
+    InventoryService.addStockDoc(retDoc);
+    d.shortfallReturnDocId=retDoc.id; d.shortfallReturnDocNo=retDoc.docNo; d.shortfallReturnQty=shortfallTotal;
+    retDocNo=retDoc.docNo;
+    try{ logAuditEvent('stock_transfer_shortfall_return',{docNo:d.docNo, returnDoc:retDoc.docNo, qty:shortfallTotal, toWarehouse:_whName(d.pairWarehouseId)}); }catch(e){}
+  } else if(shortfallLines.length && !returnToSource){
+    d.shortfallLoss=true; d.shortfallLossQty=shortfallTotal;
+    try{ logAuditEvent('stock_transfer_shortfall_loss',{docNo:d.docNo, qty:shortfallTotal}); }catch(e){}
+  }
   try{ touchRecord(d); }catch(e){}
   try{ logAuditEvent('stock_vessel_received',{docNo:d.docNo, byVessel:true, lines:d.lines.length, temp:d.lines.filter(l=>l.codeTemp).length, warehouseId:d.warehouseId, hasPrice:d.lines.some(l=>+l.price>0)}); }catch(e){}
   window._vrPrep=null; saveState();
   /* v3.20.61: cùng lý do đã sửa ở _confSave — cập nhật badge "Chờ nhập kho" ngay, không đợi ai vô tình vào lại trang Kho vật tư */
   try{ if(typeof renderInventory==='function') renderInventory(); }catch(e){}
-  toast('✓ Đã nhận hàng '+d.docNo+' — tồn kho '+esc(_whName(d.warehouseId)||'')+' đã cập nhật (mã tạm). Chờ Thủ kho áp mã FAST + kiểm giá để chốt Phiếu nhập kho.','good');
+  if(shortfallLines.length){
+    const totalBefore=tot+shortfallTotal;
+    toast(returnToSource
+      ? ('✓ Đã nhận '+tot+'/'+totalBefore+' — '+shortfallTotal+' đã tự trả lại kho '+esc(_whName(d.pairWarehouseId)||'')+' (phiếu '+esc(retDocNo)+')')
+      : ('✓ Đã nhận '+tot+'/'+totalBefore+' — thiếu '+shortfallTotal+' đánh dấu THẤT LẠC, CHƯA xử lý gì thêm, cần Thủ kho/KT quyết'),
+      returnToSource?'good':'warn');
+  } else {
+    toast('✓ Đã nhận hàng '+d.docNo+' — tồn kho '+esc(_whName(d.warehouseId)||'')+' đã cập nhật (mã tạm). Chờ Thủ kho áp mã FAST + kiểm giá để chốt Phiếu nhập kho.','good');
+  }
   closeModal(); openStockDocs();
 }
 /* --- Màn TỒN TỔNG HỢP của tàu: kho mình xuất được, kho khác chỉ xem --- */
