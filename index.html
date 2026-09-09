@@ -3897,7 +3897,7 @@ const WH_TYPES = {
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.20.186';
+const APP_VERSION='3.20.188';
 /* HOTFIX 3.12.17-email: CHẶN TRIỆT ĐỂ gửi email TỰ ĐỘNG (mất kiểm soát — spam quota Google).
    Email phải do NV được phân quyền CHỦ ĐỘNG chọn gửi. Cờ này:
    (1) chặn auto-SCAN tạo email (hrmScanExpiries/vesselCertScanExpiries);
@@ -7374,25 +7374,28 @@ function viewAsStart(userName){
 }
 function viewAsExit(auto){
   if(!_viewAsActive) return;
-  // đóng log
-  try{
-    const entry=(S.viewAsLog||[]).find(x=>x.id===_viewAsLogId);
-    if(entry) entry.endAt=new Date().toISOString();
-  }catch(e){}
-  // phục hồi nguyên trạng S từ snapshot — bỏ hết thay đổi tạm phát sinh lúc xem thử (nếu có)
+  const logId=_viewAsLogId;
+  // v3.20.187 (Sếp phát hiện: "thoát và quay lại màn admin: 1 số tab không hiện lại"): sửa 2 lỗi.
+  // (1) Thứ tự cũ ghi endAt vào log TRƯỚC khi phục hồi snapshot — bản phục hồi lại ĐÈ MẤT đúng
+  //     dòng vừa ghi. Nay phục hồi snapshot TRƯỚC, tìm & đóng log SAU, trên đúng bản S đã phục hồi.
+  // (2) applyRoleUI()+renderAll() không đủ để vẽ lại chắc chắn MỌI phần điều hướng về đúng trạng
+  //     thái admin (một số tab từng bị ẩn lúc xem thử NV không tự hiện lại) — đổi sang TẢI LẠI TRANG
+  //     sau khi lưu, đúng cách app đang tự dùng ở nhiều chỗ khác mỗi khi cần "vẽ lại từ đầu" chắc
+  //     chắn 100%, không dò từng chỗ có thể sót.
   if(_viewAsSnapshot){
     try{ Object.keys(S).forEach(k=>{ delete S[k]; }); Object.assign(S,_viewAsSnapshot); }catch(e){ console.error('[viewAs] khôi phục snapshot lỗi', e); }
   }
-  _viewAsActive=false; _viewAsSnapshot=null;
+  try{
+    const entry=(S.viewAsLog||[]).find(x=>x.id===logId);
+    if(entry) entry.endAt=new Date().toISOString();
+  }catch(e){}
+  _viewAsActive=false; _viewAsSnapshot=null; _viewAsLogId=null;
   CURRENT_ROLE='admin'; CURRENT_USER=null;
-  saveState();   // giờ đã mở khóa — ghi endAt của log thật
+  saveState();   // giờ đã mở khóa — ghi endAt của log thật, đúng lên bản S đã phục hồi
   clearTimeout(_viewAsIdleTimer);
   ['mousemove','keydown','click','touchstart'].forEach(ev=>document.removeEventListener(ev,_viewAsResetIdle));
-  _viewAsHideBanner();
-  try{ applyRoleUI(); }catch(e){}
-  try{ renderAll(); }catch(e){}
-  toast(auto?'⏱ Đã tự thoát xem thử (15 phút không thao tác)':'✓ Đã thoát xem thử','good');
-  _viewAsLogId=null;
+  toast(auto?'⏱ Đã tự thoát xem thử (15 phút không thao tác) — đang tải lại...':'✓ Đã thoát xem thử — đang tải lại...','good');
+  setTimeout(()=>{ location.reload(); }, 400);
 }
 function _viewAsResetIdle(){
   clearTimeout(_viewAsIdleTimer);
@@ -75419,7 +75422,7 @@ function stockGenDocNo(type){
 function _whName(id){ const w=InventoryService.warehouseById(id); return w?w.name:'(?)'; }
 
 /* ---- Màn danh sách chứng từ kho ---- */
-let _stockFilter={type:'',wh:''};
+let _stockFilter={type:'',wh:'',supplier:'',buyer:''};
 /* v3.16.28 (Sếp: "cần cả Điều chuyển"): ô lọc chỉ có Nhập/Xuất nên phiếu điều chuyển, điều
    chỉnh và tồn đầu kỳ KHÔNG lọc ra được — có phiếu mà tìm không thấy. Mỗi nhóm gồm HAI VẾ
    (ĐC↑/ĐC↓, ĐC+/ĐC−) nên phải nhóm lại, đồng thời "Chỉ Nhập" KHÔNG được gộp nhầm vế nhập của
@@ -75450,11 +75453,23 @@ function openStockDocs(){
   const isVA=(typeof isVesselAccountUser==='function')&&isVesselAccountUser();  // v3.08.48 (Mảng 2)
   const allowed=stockAllowedWarehouses();
   let list=stockScopedDocs(stockDocList().filter(d=>stockCanAccessWarehouse(d.warehouseId)));
+  /* v3.20.186: chụp danh sách "NV mua hàng" (createdBy) từ TRƯỚC khi áp bộ lọc — để dropdown không
+     co lại theo kết quả đang lọc, luôn đủ lựa chọn. */
+  const _buyerOpts=Array.from(new Set(list.filter(d=>d.type==='IN'&&d.createdBy).map(d=>d.createdBy))).sort((a,b)=>a.localeCompare(b,'vi'));
   /* v3.15.82: ẩn cặp phiếu đã triệt tiêu nhau (phiếu bị đảo + phiếu đảo) — chúng cộng lại bằng 0
      nên chỉ làm rối mắt; vẫn nằm nguyên trong sổ, tick để xem lại khi cần truy vết. */
   list=whHideVoided(list, !!_stockFilter.showVoided);
   if(_stockFilter.type) list=list.filter(d=>whDocTypeMatch(d, _stockFilter.type));
   if(_stockFilter.wh) list=list.filter(d=>d.warehouseId===_stockFilter.wh);
+  /* v3.20.186 (Sếp — ảnh Chứng từ kho: "Cần thêm lọc theo tên NCC và lọc theo NV mua hàng"):
+     NCC không có field riêng trên phiếu — lấy từ AP gắn kèm (a.partner), so khớp không dấu/hoa
+     thường (whNormName) để gõ "cornes" vẫn ra "Công ty TNHH Cornes Việt Nam". NV mua hàng = đúng
+     field d.createdBy đã dùng khi in phiếu ("NV mua hàng" trên mẫu 01-VT). */
+  if(_stockFilter.supplier){
+    const q=whNormName(_stockFilter.supplier);
+    list=list.filter(d=>{ const a=d.apId?AccountingService.payableById(d.apId):null; return a && whNormName(a.partner||'').indexOf(q)>=0; });
+  }
+  if(_stockFilter.buyer) list=list.filter(d=>d.createdBy===_stockFilter.buyer);
   list.sort((a,b)=>String(b.createdAt||'').localeCompare(String(a.createdAt||'')));
   /* v3.16.00 (Sếp phát hiện qua ảnh: mã SUR.* có số giống hệt ở hai kho): cảnh báo lô TỒN ĐẦU KỲ
      bị nạp trùng sang kho khác — thường do chọn nhầm kho đích rồi nạp lại lần nữa. */
@@ -75504,6 +75519,11 @@ function openStockDocs(){
           .map(o=>`<option value="${o[0]}" ${_stockFilter.type===o[0]?'selected':''}>${o[1]}</option>`).join('')}
       </select>
       <select id="sd-fwh" style="${sel}" onchange="_stockApply()">${whOpts}</select>
+      <input id="sd-fsup" type="text" placeholder="🔍 Tên NCC..." value="${esc(_stockFilter.supplier||'')}" style="${sel};width:150px" onkeydown="if(event.key==='Enter')_stockApply()" onblur="_stockApply()">
+      <select id="sd-fbuyer" style="${sel}" onchange="_stockApply()">
+        <option value="">— Mọi NV mua hàng —</option>
+        ${_buyerOpts.map(b=>`<option value="${esc(b)}" ${_stockFilter.buyer===b?'selected':''}>${esc(b)}</option>`).join('')}
+      </select>
       ${/* v3.15.72: nhánh tàu đã chuyển hướng ở đầu hàm — không còn bộ nút riêng ở đây nữa */''}
       ${/* v3.16.27 (Sếp: "phần này trùng nhiều… chỉ dùng là bảng kê chứng từ"): bỏ bộ nút TẠO
            phiếu ở đây — chúng đã có nguyên vẹn ở khu Thao tác kho ngay trang trước. Màn này
@@ -75531,7 +75551,7 @@ function openStockDocs(){
       <tbody>${rows}</tbody></table></div>`;
   openModal(isVA?'📦 Kho vật tư của tàu':'📦 Chứng từ kho (Nhập / Xuất)', _revBanner+_dupBanner+body, `<button class="btn-ghost" onclick="closeModal()">Đóng</button>`);
 }
-function _stockApply(){ _stockFilter={type:(document.getElementById('sd-ftype')||{}).value||'',wh:(document.getElementById('sd-fwh')||{}).value||''}; openStockDocs(); }
+function _stockApply(){ _stockFilter={type:(document.getElementById('sd-ftype')||{}).value||'',wh:(document.getElementById('sd-fwh')||{}).value||'',supplier:(document.getElementById('sd-fsup')||{}).value||'',buyer:(document.getElementById('sd-fbuyer')||{}).value||''}; openStockDocs(); }
 /* v3.15.60 (Sếp 15/8 — ảnh test: 11 nút xếp 3 hàng, dropdown lọc kho che mất nút):
    thao tác HẰNG NGÀY nằm ngoài (tạo phiếu, điều chuyển, kiểm kê, tra tồn), việc ĐỊNH KỲ
    gom vào nhóm "⋯ Khác" mở ra khi cần. Badge số mã tạm chuyển lên nút nhóm để không bỏ sót. */
