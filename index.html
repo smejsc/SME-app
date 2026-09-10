@@ -3988,7 +3988,7 @@ const WH_TYPES = {
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.20.213';
+const APP_VERSION='3.20.218';
 /* HOTFIX 3.12.17-email: CHẶN TRIỆT ĐỂ gửi email TỰ ĐỘNG (mất kiểm soát — spam quota Google).
    Email phải do NV được phân quyền CHỦ ĐỘNG chọn gửi. Cờ này:
    (1) chặn auto-SCAN tạo email (hrmScanExpiries/vesselCertScanExpiries);
@@ -75874,6 +75874,26 @@ function stockByWarehouse(warehouseId){
   });
   return map;
 }
+/* v3.20.216 (Sếp — ảnh "Tồn kho tổng hợp": "Chỉ cần thêm xuất file excel cho chọn theo kho, theo
+   tháng hoặc theo 1 ngày đích danh"): bản sao của stockByWarehouse ở trên, CHỈ thêm 1 tham số mốc
+   ngày — không sửa hàm gốc (rất nhiều chỗ khác trong app đang gọi stockByWarehouse, đổi chữ ký ở đó
+   rủi ro hơn). asOfDate rỗng → hành vi y hệt bản gốc (tồn tới hiện tại). Có asOfDate → chỉ tính
+   chứng từ có ngày <= mốc đó, ra đúng tồn "tại ngày X" (dùng luôn cho "tại tháng" — chọn ngày cuối
+   tháng là ra tồn cuối tháng, không cần cơ chế lọc tháng riêng). */
+function stockByWarehouseAsOf(warehouseId, asOfDate){
+  if(!asOfDate) return stockByWarehouse(warehouseId);
+  const map={};
+  InventoryService.stockDocs().forEach(d=>{
+    if(d.warehouseId!==warehouseId || !_stockCounted(d.status)) return;
+    if(String(d.date||'')>asOfDate) return;
+    const sg=_stockSign(d.type); if(!sg) return;
+    (d.lines||[]).forEach(l=>{
+      const k=String(l.code); if(!map[k]) map[k]={code:l.code,name:l.name,unit:l.unit,qty:0};
+      map[k].qty += sg*(+l.qty||0);
+    });
+  });
+  return map;
+}
 function stockGenDocNo(type, forcePrefix){
   /* v3.20.209 (Sếp — ảnh Sổ chứng từ kho: "phiếu nạp Nhập-Xuất-Tồn theo kỳ lẫn số với PNK/PXK thật,
      nên đổi tiền tố"): thêm forcePrefix — GIỮ NGUYÊN d.type='IN'/'OUT' (mọi tính toán tồn/dấu +− và
@@ -75896,12 +75916,19 @@ let _stockFilter={type:'',wh:'',supplier:'',buyer:''};
 function whDocTypeMatch(doc, key){
   if(!key) return true;
   const t=(doc&&doc.type)||'';
+  const _isNxt=(doc&&doc.source)==='nxt_period_import';
   if(key==='XFER') return t==='TRANSFER_IN'||t==='TRANSFER_OUT';
   if(key==='ADJ')  return t==='ADJUST_IN'||t==='ADJUST_OUT';
   /* v3.20.169 (Sếp — ảnh Chứng từ kho: "Thêm loại: Nhập - Xuất thẳng cho đúng"): lọc riêng đúng
      tập phiếu đang in ra mẫu "PHIẾU NHẬP - XUẤT THẲNG" (xem _stockSpec) — Nhập mà kho nhận KHÔNG
      PHẢI Kho VPCT. "Chỉ Nhập" (key IN) vẫn giữ nguyên = TẤT CẢ phiếu nhập, không đụng. */
-  if(key==='IN_DIRECT') return t==='IN' && typeof _whIsVpct==='function' && !_whIsVpct(doc.warehouseId);
+  /* v3.20.218 (Sếp — ảnh "Nhập - Xuất thẳng" lẫn phiếu NXT: "Hiển thị cho đúng"): phiếu nạp theo kỳ
+     (source='nxt_period_import') vẫn mang type IN/OUT như phiếu lẻ thật nên trước đây lọt vào CẢ "Chỉ
+     Nhập"/"Chỉ Xuất" lẫn "Nhập - Xuất thẳng" — 3 mục lọc đó giờ loại hẳn phiếu NXT ra, chỉ còn đúng
+     phiếu lẻ thật. Thêm mục lọc riêng 'NXT' để vẫn xem được khi cần, tách bạch hẳn với phiếu lẻ. */
+  if(key==='NXT') return _isNxt;
+  if(key==='IN_DIRECT') return t==='IN' && !_isNxt && typeof _whIsVpct==='function' && !_whIsVpct(doc.warehouseId);
+  if(key==='IN'||key==='OUT') return t===key && !_isNxt;
   return t===key;
 }
 /* v3.20.210 (Sếp: "đổi luôn các phiếu cũ không ảnh hưởng, tham chiếu về kho các tàu cũng đổi theo"):
@@ -75979,21 +76006,29 @@ function openStockDocs(){
        Cặp phiếu đã triệt tiêu nhau được ẩn khỏi danh sách bên dưới, nên không cần chú thích. */
     const _lb=whDocStatusLabel(d);
     const st=`<span class="ds-need" style="color:${_lb.color}">${_lb.text}</span>`;
+    /* v3.20.217 (Sếp — ảnh Sổ chứng từ kho: "Thay: Dòng = tên NCC. Chuyển các nút ở ngoài vào ngay
+       trong phiếu, cho click vào PNK và mở ra phiếu để có thể xem/chỉnh sửa tại phiếu. Thay vì để
+       quá nhiều nút ở ngoài"): (a) cột "Dòng" (X mã · SL Y) đổi thành tên NCC/đối tác — lấy từ AP
+       gắn kèm (a.partner), phiếu không có AP (điều chuyển/điều chỉnh/NXT...) thì lấy d.deliveredBy
+       — đúng logic đang dùng ở whGroupTrackingDocs. Giữ lại "X mã · SL Y" thành dòng chữ nhỏ phụ bên
+       dưới, không mất thông tin, chỉ không còn là dòng chính. (b) Số CT bấm được → mở thẳng phiếu
+       (form Sửa, đã có sẵn PDF/Excel bên trong) qua _stockDocOpenClick — thay vì phải tìm đúng nút
+       trên hàng ngoài. (c) Bỏ hẳn nút PDF/Excel/Sửa/Xóa khỏi hàng ngoài (chuyển vào trong phiếu —
+       Xóa thêm mới vào footer form Sửa, xem _stockRenderForm) — CHỈ giữ lại đúng các nút hành động
+       luồng (Nhận hàng/Xác nhận/nút xanh vessel-receive) + Gửi email (thao tác nhanh, không phải
+       xem/sửa nên vẫn hợp lý để ngoài). */
+    const a=d.apId?AccountingService.payableById(d.apId):null;
+    const partner=(a&&a.partner)||d.deliveredBy||'—';
     return `<tr style="border-bottom:1px solid var(--rule)">
-      <td style="padding:5px 8px;font-family:monospace;font-size:11px"><b>${esc(d.docNo)}</b></td>
-      <td style="padding:5px 8px;text-align:center">${d.source==='nxt_period_import'?'<span class="ds-need" style="color:#7a5c00" title="Phiếu gộp nạp từ file Nhập-Xuất-Tồn theo kỳ — không phải 1 lần nhận/xuất hàng lẻ">NXT</span>':(({IN:'<span class="ds-need" style="color:var(--teal)">Nhập</span>',OUT:'<span class="ds-need" style="color:#9c4221">Xuất</span>',TRANSFER_IN:'<span class="ds-need" style="color:var(--good)">ĐC↑</span>',TRANSFER_OUT:'<span class="ds-need" style="color:#e65100">ĐC↓</span>',ADJUST_IN:'<span class="ds-need" style="color:#6a1b9a">Điều chỉnh+</span>',ADJUST_OUT:'<span class="ds-need" style="color:#6a1b9a">Điều chỉnh−</span>',OPENING:'<span class="ds-need" style="color:#1c5a8c">Tồn đầu</span>'}[d.type])||d.type)}</td>
+      <td style="padding:5px 8px;font-family:monospace;font-size:11px"><a href="#" onclick="event.preventDefault();_stockDocOpenClick('${d.id}')" style="font-weight:700;text-decoration:none" title="Mở phiếu — xem/sửa, in PDF/Excel bên trong">${esc(d.docNo)}</a></td>
+      <td style="padding:5px 8px;text-align:center">${d.source==='nxt_period_import'?(d.type==='OUT'?'<span class="ds-need" style="color:#9c4221" title="Phiếu gộp Xuất, nạp từ file Nhập-Xuất-Tồn theo kỳ — không phải 1 lần xuất hàng lẻ">Xuất khác</span>':'<span class="ds-need" style="color:var(--teal)" title="Phiếu gộp Nhập, nạp từ file Nhập-Xuất-Tồn theo kỳ — không phải 1 lần nhận hàng lẻ">Nhập khác</span>'):(({IN:'<span class="ds-need" style="color:var(--teal)">Nhập</span>',OUT:'<span class="ds-need" style="color:#9c4221">Xuất</span>',TRANSFER_IN:'<span class="ds-need" style="color:var(--good)">ĐC↑</span>',TRANSFER_OUT:'<span class="ds-need" style="color:#e65100">ĐC↓</span>',ADJUST_IN:'<span class="ds-need" style="color:#6a1b9a">Điều chỉnh+</span>',ADJUST_OUT:'<span class="ds-need" style="color:#6a1b9a">Điều chỉnh−</span>',OPENING:'<span class="ds-need" style="color:#1c5a8c">Tồn đầu</span>'}[d.type])||d.type)}</td>
       <td style="padding:5px 8px;font-size:11px">${esc(d.date||'')}</td>
       <td style="padding:5px 8px;font-size:11px">${esc(_whName(d.warehouseId))}</td>
-      <td style="padding:5px 8px;font-size:11px;color:var(--muted)" title="Số mã vật tư · tổng số lượng trên phiếu">${whFmtQty(nLines)} mã · SL ${whFmtQty(totQty)}</td>
+      <td style="padding:5px 8px;font-size:11px">${esc(partner)}<div style="font-size:10px;color:var(--muted)" title="Số mã vật tư · tổng số lượng trên phiếu">${whFmtQty(nLines)} mã · SL ${whFmtQty(totQty)}</div></td>
       <td style="padding:5px 8px">${st}</td>
       <td style="padding:5px 8px;white-space:nowrap">
-        <button class="btn-ghost" style="font-size:11px" title="In phiếu PDF theo mẫu chuẩn FAST" onclick="_vlPrint('${d.id}')">🖨 PDF</button>
-        <button class="btn-ghost" style="font-size:11px" title="Xuất Excel cùng mẫu, cùng dữ liệu với bản in" onclick="whDocExportXlsxPrompt('${d.id}')">⬇ Excel</button>
-        ${d.status!=='confirmed'&&canEdit?`<button class="btn-ghost" style="font-size:11px" onclick="openStockForm('${d.type}','${d.id}')">✏️</button>`:''}
-        ${d.status==='confirmed'&&canEdit?`<button class="btn-ghost" style="font-size:11px" title="Sửa phiếu đã xác nhận — có cảnh báo trước khi mở" onclick="whEditConfirmedPrompt('${d.type}','${d.id}')">✏️</button>`:''}
-        ${d.status==='pending'&&(canEdit||whIsVesselSideUser())?(whIsVesselSideUser()?`<button class="btn-ghost" style="font-size:11px;color:#1e7d44" onclick="openVesselReceive('${d.id}')" title="Nhận hàng — tick SL, xác nhận là tồn cộng ngay">✓</button>`:`<button class="btn-ghost" style="font-size:11px;color:#1e7d44" onclick="openConfirmInbound('${d.id}')" title="Nhận hàng & xác nhận">✓</button>`):''}
-        ${d.status==='draft'&&canEdit?`<button class="btn-ghost" style="font-size:11px;color:#1e7d44" onclick="stockConfirm('${d.id}')" title="Xác nhận → cập nhật tồn">✓</button>`:''}
-        ${(canManageStock()||isAdmin())?`<button class="btn-ghost" style="font-size:11px;color:var(--bad)" onclick="whDeleteDocPrompt('${d.id}')" title="Xóa HẲN phiếu này — hộp xác nhận sẽ nêu hệ quả trước khi xóa">🗑</button>`:''}
+        ${d.status==='pending'&&(canEdit||whIsVesselSideUser())?(whIsVesselSideUser()?`<button class="btn-ghost" style="font-size:11px;color:#1e7d44" onclick="openVesselReceive('${d.id}')" title="Nhận hàng — tick SL, xác nhận là tồn cộng ngay">✓ Nhận hàng</button>`:`<button class="btn-ghost" style="font-size:11px;color:#1e7d44" onclick="openConfirmInbound('${d.id}')" title="Nhận hàng & xác nhận">✓ Nhận hàng</button>`):''}
+        ${d.status==='draft'&&canEdit?`<button class="btn-ghost" style="font-size:11px;color:#1e7d44" onclick="stockConfirm('${d.id}')" title="Xác nhận → cập nhật tồn">✓ Xác nhận</button>`:''}
         ${_stockVesselReceiveBtn(d)}
         <button class="btn-ghost" style="font-size:11px" onclick="stockDocSendEmail('${d.id}')" title="Gửi email kèm PDF">📧</button>
       </td></tr>`;
@@ -76002,7 +76037,7 @@ function openStockDocs(){
   const sel='padding:6px 8px;border:1px solid var(--rule);border-radius:6px;font-size:13px';
   const body=`<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px;align-items:center">
       <select id="sd-ftype" style="${sel}" onchange="_stockApply()">
-        ${[['','— Mọi loại phiếu —'],['IN','Chỉ Nhập'],['IN_DIRECT','Nhập - Xuất thẳng'],['OUT','Chỉ Xuất'],['XFER','Điều chuyển (2 vế)'],['ADJ','Điều chỉnh (2 vế)'],['OPENING','Tồn đầu kỳ'],['COUNT','Kiểm kê']]
+        ${[['','— Mọi loại phiếu —'],['IN','Chỉ Nhập'],['IN_DIRECT','Nhập - Xuất thẳng'],['OUT','Chỉ Xuất'],['NXT','Nhập khác / Xuất khác (nạp theo kỳ)'],['XFER','Điều chuyển (2 vế)'],['ADJ','Điều chỉnh (2 vế)'],['OPENING','Tồn đầu kỳ'],['COUNT','Kiểm kê']]
           .map(o=>`<option value="${o[0]}" ${_stockFilter.type===o[0]?'selected':''}>${o[1]}</option>`).join('')}
       </select>
       <select id="sd-fwh" style="${sel}" onchange="_stockApply()">${whOpts}</select>
@@ -76034,7 +76069,7 @@ function openStockDocs(){
       <button class="btn-sec" style="font-size:13px" onclick="openOpeningImport()" title="Import số liệu kho từ Excel FAST — Tồn đầu kỳ hoặc Nhập-Xuất-Tồn theo kỳ (kèm tự thêm danh mục)">📦 Import số liệu</button>
     </div>`:''}
     <div class="tbl-scroll" style="max-height:440px"><table style="width:100%;border-collapse:collapse;font-size:13px;border:1px solid var(--rule)">
-      <thead><tr style="background:var(--rule);text-align:left"><th style="padding:6px 8px">Số CT</th><th style="padding:6px 8px;text-align:center">Loại</th><th style="padding:6px 8px">Ngày</th><th style="padding:6px 8px">Kho</th><th style="padding:6px 8px">Dòng</th><th style="padding:6px 8px">TT</th><th style="padding:6px 8px"></th></tr></thead>
+      <thead><tr style="background:var(--rule);text-align:left"><th style="padding:6px 8px">Số CT</th><th style="padding:6px 8px;text-align:center">Loại</th><th style="padding:6px 8px">Ngày</th><th style="padding:6px 8px">Kho</th><th style="padding:6px 8px">NCC / Đối tác</th><th style="padding:6px 8px">TT</th><th style="padding:6px 8px"></th></tr></thead>
       <tbody>${rows}</tbody></table></div>`;
   openModal(isVA?'📦 Kho vật tư của tàu':'📦 Chứng từ kho (Nhập / Xuất)', _revBanner+_dupBanner+body, `<button class="btn-ghost" onclick="closeModal()">Đóng</button>`);
 }
@@ -78782,8 +78817,15 @@ function _stockRenderForm(){
     <button class="btn-sec" style="font-size:11px;margin-top:6px;margin-left:6px" onclick="_stockPrint('xlsx')" title="Xuất Excel cùng mẫu với bản in — bản có giá">⬇ Excel</button>`:''}
     <div style="font-size:11px;color:var(--muted);margin-top:6px">📦 ${isIn?'Đơn giá để trống thì app lấy theo bảng giá vốn của mã; có hóa đơn AP liên kết thì giá theo hóa đơn.':'Không xuất vượt tồn khả dụng (sẽ bị chặn khi xác nhận).'} Mã FAST <b>không bắt buộc</b> — để trống thì app gợi ý theo tên, không khớp thì cấp mã tạm SH-xxxx và đẩy vào 🏷 Soát mã.</div>`;
   const _formTitle=({IN:'Phiếu nhập kho',OUT:'Phiếu xuất kho',TRANSFER_IN:'Phiếu nhập điều chuyển',TRANSFER_OUT:'Phiếu xuất điều chuyển',ADJUST_IN:'Phiếu điều chỉnh tăng',ADJUST_OUT:'Phiếu điều chỉnh giảm',OPENING:'Phiếu tồn đầu kỳ'}[s.type])||(isIn?'Phiếu nhập kho':'Phiếu xuất kho');
+  /* v3.20.217 (Sếp: "Chuyển các nút ở ngoài vào ngay trong phiếu... Thay vì để quá nhiều nút ở
+     ngoài"): PDF/Excel đã có sẵn trong form này từ trước — chỉ thiếu Xóa (trước đây CHỈ có ở Sổ
+     chứng từ kho, đã bỏ khỏi hàng ngoài). Dùng lại NGUYÊN whDeleteDocPrompt (đã có xác nhận + ghi
+     log) — không viết lại logic xóa. Chỉ hiện khi phiếu đã có id thật (đang sửa, không phải đang
+     tạo mới) và đúng quyền canManageStock/isAdmin, y hệt điều kiện cũ ở hàng ngoài. */
+  const _delBtn=(s.id&&(canManageStock()||isAdmin()))?`<button class="btn-ghost" style="border-color:var(--bad);color:var(--bad)" onclick="whDeleteDocPrompt('${s.id}')" title="Xóa HẲN phiếu này — hộp xác nhận sẽ nêu hệ quả trước khi xóa">🗑 Xóa</button>`:'';
   openModal((s.id?'✏️ Sửa ':'+ ')+_formTitle, body,
     `<button class="btn-ghost" onclick="openStockDocs()">← Danh sách</button>
+     ${_delBtn}
      <button class="btn-sec" onclick="_stockSave(false)">💾 Lưu nháp</button>
      <button class="btn-primary" onclick="_stockSave(true)">✓ Lưu & Xác nhận</button>`);
 }
@@ -79036,6 +79078,19 @@ function whDeleteDocHard(id, reason){
 function whEditConfirmedPrompt(type, id){
   if(!confirm('⚠ Phiếu này ĐÃ XÁC NHẬN — tồn kho hiện tại đã tính theo số trên phiếu.\nSửa lại sẽ đổi NGAY tồn kho, có thể ảnh hưởng các phiếu xuất/báo cáo đã lập sau đó.\nChỉ dùng khi phiếu cũ bị nhập sai. Việc sửa sẽ được ghi vào nhật ký.\n\nVẫn mở form sửa?')) return;
   openStockForm(type, id);
+}
+/* v3.20.217 (Sếp — "cho click vào PNK và mở ra phiếu để có thể xem/chỉnh sửa tại phiếu"): bấm Số CT
+   ở Sổ chứng từ kho → mở thẳng phiếu, không cần tìm đúng nút trên hàng. Dùng lại NGUYÊN 2 lối vào đã
+   có (openStockForm cho phiếu chưa xác nhận, whEditConfirmedPrompt — có cảnh báo — cho phiếu đã xác
+   nhận) theo đúng quyền canEdit; không có quyền sửa thì rơi về bản xem (stockDocPreview), không mở
+   được form sửa. */
+function _stockDocOpenClick(id){
+  const d=(typeof InventoryService!=='undefined')?InventoryService.stockDocById(id):stockDocById(id);
+  if(!d){ toast('Không tìm thấy phiếu','bad'); return; }
+  const _canEdit=canManageStock()||isAdmin();
+  if(!_canEdit){ if(typeof stockDocPreview==='function') stockDocPreview(id); return; }
+  if(d.status==='confirmed') whEditConfirmedPrompt(d.type, id);
+  else openStockForm(d.type, id);
 }
 function whDeleteDocPrompt(id){
   const d=InventoryService.stockDocById(id); if(!d){ toast('Không tìm thấy phiếu','bad'); return; }
@@ -79676,7 +79731,43 @@ function _vspPrint(){
     <div class="sg"><div>Thuyền trưởng<br><br><br>(Ký, họ tên)</div><div>Phụ trách kho tàu<br><br><br>(Ký, họ tên)</div></div>
     </body></html>`);
   w.document.close();
+  /* v3.20.215 (Sếp — ảnh "In PDF chuyển sang màn Danh sách kho": "muốn giữ giao diện luôn ở dạng
+     Tồn kho — thao tác kho sẽ dễ hơn"): openPrintWindow (dùng chung, /33868/) đóng hẳn modal trước khi
+     in để bản in không dính khung modal — cố ý từ trước (v3.17.09), nhưng KHÔNG mở lại sau khi in,
+     nên Sếp rơi về đúng màn phía sau (Danh sách kho). Chỉ vá riêng màn Tồn kho này (không đụng cơ chế
+     dùng chung openPrintWindow — các bản in khác vẫn giữ nguyên hành vi cũ): bắt sự kiện afterprint
+     MỘT LẦN, mở lại đúng modal Tồn kho của đúng kho + đúng Kỳ đang xem sau khi in xong. */
+  window.onafterprint=()=>{ window.onafterprint=null; try{ openVesselStockOverview(); }catch(e){} };
   setTimeout(()=>{ try{ w.print(); }catch(e){} }, 300);
+  /* Dự phòng: một số trình duyệt (di động) không bắn afterprint đáng tin cậy — nếu sau 4s vẫn chưa
+     tự mở lại (cờ window.onafterprint còn nguyên, chưa bị handler ở trên xóa) thì mở lại luôn. */
+  setTimeout(()=>{ if(window.onafterprint){ window.onafterprint=null; try{ openVesselStockOverview(); }catch(e){} } }, 4000);
+}
+/* v3.20.214 (Sếp — ảnh Tồn kho VPCT: "Tạo nút tải file excel/pdf tồn kho tại ngày hoặc tháng"):
+   PDF (in) đã có sẵn (_vspPrint, luôn theo đúng Kỳ ngày/tháng đang chọn trên màn) — chỉ thiếu Excel.
+   Dùng lại NGUYÊN dữ liệu whStockPeriodRows(rg.from, rg.to) như _vspPrint, cùng cột Tồn đầu/Nhập/
+   Xuất/Tồn cuối, để 2 bản PDF và Excel luôn khớp số nhau tuyệt đối — không tính lại theo cách khác. */
+function _vspExportXlsx(){
+  const wh=whMySiteWarehouse(); if(!wh){ toast('Chưa gắn kho tàu','bad'); return; }
+  const rg=_vspRange();
+  const rows=whStockPeriodRows(InventoryService.stockDocs(), wh.id, rg.from, rg.to);
+  const vName=(typeof anyVesselName==='function')?anyVesselName(wh.vesselId):'';
+  const aoa=[
+    [(S.companyInfo&&S.companyInfo.name)||'CÔNG TY CỔ PHẦN HÀNG HẢI VÀ NĂNG LƯỢNG HẢI MÃ'],
+    ['BÁO CÁO NHẬP - XUẤT - TỒN'],
+    [wh.name+(vName?(' · '+vName):'')+' · Từ '+rg.from+' đến '+rg.to],
+    [],
+    ['STT','Mã FAST','Tên vật tư','ĐVT','Tồn đầu','Nhập','Xuất','Tồn cuối']
+  ];
+  rows.forEach((r,i)=>aoa.push([i+1, r.code, r.name||'', r.unit||'', r.opening, r.inQty, r.outQty, r.closing]));
+  const sum=rows.reduce((a,r)=>({o:a.o+r.opening,i:a.i+r.inQty,x:a.x+r.outQty,c:a.c+r.closing}),{o:0,i:0,x:0,c:0});
+  aoa.push(['','','CỘNG','',sum.o,sum.i,sum.x,sum.c]);
+  const ws=XLSX.utils.aoa_to_sheet(aoa);
+  ws['!cols']=[{wch:5},{wch:16},{wch:36},{wch:8},{wch:11},{wch:11},{wch:11},{wch:11}];
+  const wb=XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, 'Ton kho');
+  try{ logAuditEvent('stock_period_export_xlsx',{warehouse:wh.name, from:rg.from, to:rg.to, rows:rows.length}); }catch(e){}
+  XLSX.writeFile(wb, 'TonKho_'+String(wh.name||'kho').replace(/[^\w-]+/g,'_')+'_'+rg.from+'_'+rg.to+'.xlsx');
 }
 /* ============================================================================
  * v3.15.93 (Sếp 16/8): MÀN KHO TÀU CÓ CỘT MỌI KHO + ĐỀ XUẤT ĐIỀU CHUYỂN TỔNG HỢP.
@@ -79961,6 +80052,7 @@ function openVesselStockOverview(){
        <button class="${_nPend?'btn-primary':'btn-sec'}" style="font-size:13px${_nPend?';background:#b8730a;border-color:#b8730a':''}" onclick="openPendingInbound()">📥 Nhận hàng${_nPend?` <span style="background:#fff;color:#b8730a;border-radius:8px;padding:0 6px;font-size:10px">${_nPend}</span>`:''}</button>
        <button class="btn-sec" style="font-size:13px" onclick="openVesselLedger()" title="Chứng từ Nhập / Xuất / Điều chỉnh của kho này">📒 Chứng từ</button>
        <button class="btn-sec" style="font-size:13px" onclick="_vspPrint()">🖨 In PDF</button>
+       <button class="btn-sec" style="font-size:13px" onclick="_vspExportXlsx()" title="Tải Excel bảng tồn kho đúng theo Kỳ (ngày/tháng) đang chọn trên màn">⬇ Excel</button>
        <button class="${nDraft?'btn-primary':'btn-sec'}" style="font-size:13px" onclick="whCloseDailyIssueReview('${draft.id||''}')" title="Chốt sớm để in; sau đó phát sinh tiếp sẽ vào phiếu tạm lần kế">✓ Chốt xuất hôm nay${nDraft?' ('+nDraft+')':''}</button>
        <span style="flex:1"></span>
        ${nSel?`<button class="btn-primary" style="font-size:13px" onclick="_vsBatchOpen()">🔄 Yêu cầu cấp ${nSel} mục</button>
@@ -80382,9 +80474,12 @@ function whIsWarehouseEmpty(whId){
 
 /* v3.16.78 (Sếp): tìm NGÀY CUỐI KỲ NXT gần nhất đã nạp cho 1 kho — để chặn kỳ sau lùi ngày.
    Quét phiếu source='nxt_period_import' của kho, lấy periodTo lớn nhất. */
+/* v3.20.218: SỬA nguồn dữ liệu — trước đọc S.invMovements (Sổ kho theo tháng CŨ, đã "nghỉ hưu" từ
+   v3.16.xx, không còn ai ghi vào) nên hàm này luôn trả về rỗng, cảnh báo lùi kỳ chưa từng chạy được.
+   Phiếu NXT thật nằm ở InventoryService.stockDocs() (whBuildPeriodDocs → addStockDoc). */
 function whLastPeriodTo(whId){
   try{
-    const docs=((S&&S.invMovements)||[]);
+    const docs=(typeof InventoryService!=='undefined'?InventoryService.stockDocs():(S&&S.stockDocs))||[];
     let last='';
     (docs||[]).forEach(d=>{
       if(!d||d.warehouseId!==whId) return;
@@ -80795,16 +80890,26 @@ function _opImportCommit(){
   /* v3.16.30: chế độ KỲ — kiểm LẠI tồn đầu ở khâu ghi, không tin mỗi giao diện (nút disabled
      có thể bị bỏ qua). LUẬT SẾP: lệch thì KHÔNG cho lưu. */
   if(c.mode==='period'){
-    const cur=stockByWarehouse(c.whId);
+    const date=String((document.getElementById('op-date')||{}).value||new Date().toISOString().slice(0,10));
+    const from=String((document.getElementById('imp-from')||{}).value||date);
+    /* v3.20.218 (Sếp — "Đã có phát sinh tháng 9, app không cho import file NXT tháng 8: Nguyên tắc
+       chỉ đối chiếu tồn đầu kỳ tháng 8 với tồn cuối kỳ tháng 7. Các phiếu phát sinh tháng 9: kế thừa
+       số cuối kỳ tháng 8 và cộng/trừ tiếp"): gốc lỗi — cur=stockByWarehouse(c.whId) LUÔN là tồn HIỆN
+       TẠI (hôm nay, gồm cả phát sinh tháng 9), không phải tồn CUỐI KỲ NGAY TRƯỚC kỳ đang nạp (tháng
+       7) — nên đối chiếu sai kỳ, tồn đầu tháng 8 trong file không thể nào khớp con số hiện tại (đã
+       cộng thêm cả tháng 9) được nữa, luôn báo lệch dù file đúng. Vá: đối chiếu với tồn TẠI ĐÚNG
+       NGÀY LIỀN TRƯỚC ngày bắt đầu kỳ (from - 1 ngày) — dùng stockByWarehouseAsOf (v3.20.216) — nên
+       dù app đã có phát sinh muộn hơn (tháng 9...) vẫn không ảnh hưởng, luôn đối chiếu đúng đúng kỳ
+       liền trước như nguyên tắc Sếp nêu. */
+    const _priorDate=(()=>{ try{ const dt=new Date(from+'T00:00:00'); if(isNaN(dt.getTime())) return ''; dt.setDate(dt.getDate()-1); return dt.toISOString().slice(0,10); }catch(e){ return ''; } })();
+    const cur=stockByWarehouseAsOf(c.whId, _priorDate);
     /* v3.16.88 (Sếp chốt): LUÔN kiểm tồn đầu file khớp tồn app. Kho chưa có TDK → tồn app=0;
        file khai tồn đầu>0 → lệch → chặn (nạp 'Tồn đầu kỳ' trước). File khai 0 → khớp → nạp NXT. */
     const chk=whCheckPeriodOpening(c.items, cur);
     if(!chk.ok){
-      toast('🔒 Không cho lưu: tồn đầu trong file lệch tồn app ở '+chk.diffs.length+' mã. Nếu kho chưa có tồn đầu kỳ, hãy nạp "Tồn đầu kỳ" (file tồn) trước rồi mới nạp NXT','bad');
+      toast('🔒 Không cho lưu: tồn đầu trong file (kỳ bắt đầu '+from+') lệch tồn app tại '+(_priorDate||'ngày liền trước')+' (cuối kỳ liền trước) ở '+chk.diffs.length+' mã. Nếu kho chưa có tồn đầu kỳ, hãy nạp "Tồn đầu kỳ" (file tồn) trước rồi mới nạp NXT','bad');
       return;
     }
-    const date=String((document.getElementById('op-date')||{}).value||new Date().toISOString().slice(0,10));
-    const from=String((document.getElementById('imp-from')||{}).value||date);
     /* v3.16.78: kỳ sau không nên lùi trước ngày cuối kỳ đã nạp — cảnh báo xác nhận (không chặn cứng). */
     const _lastTo=whLastPeriodTo(c.whId);
     if(_lastTo && from && from < _lastTo){
@@ -81511,7 +81616,7 @@ function openStockOnHand(){
  * Tra cứu nhanh: 1 vật tư đang ở những kho nào, tổng bao nhiêu. Lọc loại kho / tìm mã-tên / chỉ còn tồn.
  * Chỉ số lượng — KHÔNG giá trị (theo nguyên tắc kho mục 10).
  * ============================================================ */
-let _ovFilter={q:'',whType:'',matGroup:'',nonzero:true};   // v3.16.62: thêm lọc phân loại vật tư (group chính)
+let _ovFilter={q:'',whType:'',matGroup:'',nonzero:true,asOf:''};   // v3.16.62: thêm lọc phân loại vật tư (group chính); v3.20.216: thêm asOf (tồn tại 1 mốc ngày)
 function openStockOverview(){
   /* v3.16.37 (Sếp: "mọi NV đều được cấp quyền thấy TỒN KHO TỔNG HỢP"): bỏ chặn theo quyền —
      biết kho còn gì là việc chung, chặn chỉ khiến người ta mua trùng. Chỉ cần ĐÃ ĐĂNG NHẬP.
@@ -81526,7 +81631,7 @@ function openStockOverview(){
   const ord={CENTRAL:0,VESSEL:1,VESSEL_TECH:1.5,OFFICE:2,BRANCH:3,OTHER:4};
   whs.sort((a,b)=>((ord[a.type]??9)-(ord[b.type]??9))||String(a.name||'').localeCompare(b.name||''));
   // gom tồn từng kho: {whId: {code:{name,unit,qty}}}
-  const byWh={}; whs.forEach(w=>{ byWh[w.id]=stockByWarehouse(w.id); });
+  const byWh={}; whs.forEach(w=>{ byWh[w.id]=stockByWarehouseAsOf(w.id, _ovFilter.asOf); });
   // tập hợp tất cả mã vật tư xuất hiện
   const itemMap={};   // code → {code,name,unit}
   whs.forEach(w=>{ Object.values(byWh[w.id]).forEach(it=>{ if(!itemMap[it.code]) itemMap[it.code]={code:it.code,name:it.name,unit:it.unit}; }); });
@@ -81566,8 +81671,11 @@ function openStockOverview(){
       <select id="ov-type" style="${sel}" onchange="_ovApply()">${typeOpts}</select>
       <select id="ov-group" style="${sel}" onchange="_ovApply()">${grpOpts}</select>
       <label style="font-size:13px;display:flex;align-items:center;gap:5px;cursor:pointer"><input type="checkbox" id="ov-nonzero" ${_ovFilter.nonzero?'checked':''} onchange="_ovApply()"> Chỉ còn tồn</label>
+      <label style="font-size:12px;display:flex;align-items:center;gap:5px" title="Để trống = tồn hiện tại (hôm nay). Chọn ngày = tồn TẠI đúng ngày đó (chọn ngày cuối tháng = tồn cuối tháng)">Tồn tại ngày<input type="date" id="ov-asof" value="${esc(_ovFilter.asOf)}" style="${sel}" onchange="_ovApply()"></label>
+      ${_ovFilter.asOf?`<button class="btn-ghost" style="font-size:12px" onclick="_ovFilter.asOf='';openStockOverview()" title="Bỏ mốc ngày, quay về tồn hiện tại">✕ Bỏ mốc ngày</button>`:''}
       <button class="btn-sec" style="font-size:13px" onclick="_ovExportExcel()">📊 Xuất Excel</button>
     </div>
+    ${_ovFilter.asOf?`<div style="font-size:11.5px;padding:5px 10px;border:1px solid #1c5a8c;border-radius:6px;background:#eef5fb;margin-bottom:8px">📅 Đang xem tồn <b>tại ngày ${esc(_ovFilter.asOf)}</b> — không phải tồn hiện tại. Chứng từ có ngày sau mốc này không được tính.</div>`:''}
     <div style="font-size:11px;color:var(--muted);margin-bottom:8px">Ma trận tồn kho: dòng = vật tư, cột = từng kho. <b>${items.length}</b> vật tư × <b>${whs.length}</b> kho. Tồn = Σ nhập − Σ xuất (chứng từ đã xác nhận). Chỉ số lượng.</div>
     <div class="tbl-scroll" style="max-height:62vh;overflow:auto"><table style="border-collapse:collapse;font-size:13px;min-width:100%">
       <thead><tr style="background:var(--rule)">
@@ -81586,13 +81694,14 @@ function openStockOverview(){
   /* v3.16.41 (Sếp): lớp chặn thứ hai — nếu phía tàu/đơn vị vào được màn này bằng đường khác thì
      nút '← Chứng từ' vẫn phải ẩn, vì nó dẫn sang sổ chứng từ kho của bờ. */
   const _shoreOnly=!(typeof whIsSiteSideUser==='function' && whIsSiteSideUser());
-  openModal('📊 Tồn kho tổng hợp — tất cả kho', body, `${_shoreOnly?`<button class="btn-ghost" onclick="openStockDocs()">← Chứng từ</button>`:''}<button class="btn-ghost" onclick="closeModal()">Đóng</button>`);
+  openModal('📊 Tồn kho tổng hợp — tất cả kho'+(_ovFilter.asOf?(' (tại '+esc(_ovFilter.asOf)+')'):''), body, `${_shoreOnly?`<button class="btn-ghost" onclick="openStockDocs()">← Chứng từ</button>`:''}<button class="btn-ghost" onclick="closeModal()">Đóng</button>`);
 }
 function _ovApply(){
   _ovFilter.q=(document.getElementById('ov-q')||{}).value||'';
   _ovFilter.whType=(document.getElementById('ov-type')||{}).value||'';
   _ovFilter.matGroup=(document.getElementById('ov-group')||{}).value||'';   // v3.16.62
   _ovFilter.nonzero=!!(document.getElementById('ov-nonzero')||{}).checked;
+  _ovFilter.asOf=(document.getElementById('ov-asof')||{}).value||'';   // v3.20.216
   openStockOverview();
 }
 function _ovExportExcel(){
@@ -81602,7 +81711,7 @@ function _ovExportExcel(){
   if(_ovFilter.whType) whs=whs.filter(w=>(w.type||'OTHER')===_ovFilter.whType);
   const ord={CENTRAL:0,VESSEL:1,VESSEL_TECH:1.5,OFFICE:2,BRANCH:3,OTHER:4};
   whs.sort((a,b)=>((ord[a.type]??9)-(ord[b.type]??9))||String(a.name||'').localeCompare(b.name||''));
-  const byWh={}; whs.forEach(w=>{ byWh[w.id]=stockByWarehouse(w.id); });
+  const byWh={}; whs.forEach(w=>{ byWh[w.id]=stockByWarehouseAsOf(w.id, _ovFilter.asOf); });
   const itemMap={}; whs.forEach(w=>{ Object.values(byWh[w.id]).forEach(it=>{ if(!itemMap[it.code]) itemMap[it.code]={code:it.code,name:it.name,unit:it.unit}; }); });
   let items=Object.values(itemMap);
   const q=(_ovFilter.q||'').trim().toLowerCase();
@@ -81617,7 +81726,7 @@ function _ovExportExcel(){
   const styled=!!(EE&&XS&&(!EE.ready||EE.ready()));
   const nc=header.length; const merges=[]; let aoa;
   if(styled){
-    aoa=[[EE.title('TỒN KHO TỔNG HỢP — '+new Date().toISOString().slice(0,10))].concat(header.slice(1).map(()=>'')),[]];
+    aoa=[[EE.title('TỒN KHO TỔNG HỢP — '+(_ovFilter.asOf?('tại '+_ovFilter.asOf):('hiện tại '+new Date().toISOString().slice(0,10))))].concat(header.slice(1).map(()=>'')),[]];
     merges.push({s:{r:0,c:0},e:{r:0,c:nc-1}});
     aoa.push(header.map((h,c)=>EE.headerCell(h,c>=3?'right':'left')));
     items.forEach((it,i)=>{ const bg=(i%2)?EE.C.zebra:null;
@@ -81631,8 +81740,9 @@ function _ovExportExcel(){
   if(merges.length) ws['!merges']=merges;
   ws['!cols']=[{wch:18},{wch:44},{wch:8}].concat(whs.map(()=>({wch:14}))).concat([{wch:12}]);
   U.book_append_sheet(wb,ws,'TonKhoTongHop');
-  (styled?XS:XLSX).writeFile(wb,'TonKho_TongHop_'+new Date().toISOString().slice(0,10)+'.xlsx');
-  toast('Đã xuất Excel ✓','good');
+  (styled?XS:XLSX).writeFile(wb,'TonKho_TongHop_'+(_ovFilter.asOf?('tai_'+_ovFilter.asOf):new Date().toISOString().slice(0,10))+'.xlsx');
+  try{ logAuditEvent('stock_overview_export_xlsx',{whCount:whs.length, items:items.length, asOf:_ovFilter.asOf||'(hiện tại)'}); }catch(e){}
+  toast('Đã xuất Excel'+(_ovFilter.asOf?(' — tồn tại '+_ovFilter.asOf):'')+' ✓','good');
 }
 
 /* ============================================================
