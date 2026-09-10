@@ -3988,7 +3988,7 @@ const WH_TYPES = {
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.20.208';
+const APP_VERSION='3.20.210';
 /* HOTFIX 3.12.17-email: CHẶN TRIỆT ĐỂ gửi email TỰ ĐỘNG (mất kiểm soát — spam quota Google).
    Email phải do NV được phân quyền CHỦ ĐỘNG chọn gửi. Cờ này:
    (1) chặn auto-SCAN tạo email (hrmScanExpiries/vesselCertScanExpiries);
@@ -75874,9 +75874,13 @@ function stockByWarehouse(warehouseId){
   });
   return map;
 }
-function stockGenDocNo(type){
+function stockGenDocNo(type, forcePrefix){
+  /* v3.20.209 (Sếp — ảnh Sổ chứng từ kho: "phiếu nạp Nhập-Xuất-Tồn theo kỳ lẫn số với PNK/PXK thật,
+     nên đổi tiền tố"): thêm forcePrefix — GIỮ NGUYÊN d.type='IN'/'OUT' (mọi tính toán tồn/dấu +− và
+     lọc theo type khắp app vẫn đúng), chỉ riêng SỐ CHỨNG TỪ của phiếu nạp theo kỳ dùng tiền tố 'NXT'
+     thay vì 'PN'/'PX' — xem whBuildPeriodDocs. Không gọi forcePrefix → hành vi cũ y nguyên. */
   const PRE={IN:'PN',OUT:'PX',TRANSFER_OUT:'PDC',TRANSFER_IN:'PDC',ADJUST_IN:'PDT',ADJUST_OUT:'PDT',OPENING:'TDK',COUNT:'PKK'}; // v3.15.57: +TDK tồn đầu kỳ, +PKK kiểm kê (trước fallback 'PK')
-  const pre = PRE[type]||'PK';  // PN nhập/PX xuất/PDC điều chuyển/PDT điều chỉnh tồn
+  const pre = forcePrefix || PRE[type]||'PK';  // PN nhập/PX xuất/PDC điều chuyển/PDT điều chỉnh tồn/NXT nạp theo kỳ
   const y=new Date().getFullYear();
   const n=InventoryService.stockDocs().filter(d=>(d.docNo||'').indexOf(pre+y)===0).length+1;
   return `${pre}${y}-${String(n).padStart(4,'0')}`;
@@ -75900,6 +75904,25 @@ function whDocTypeMatch(doc, key){
   if(key==='IN_DIRECT') return t==='IN' && typeof _whIsVpct==='function' && !_whIsVpct(doc.warehouseId);
   return t===key;
 }
+/* v3.20.210 (Sếp: "đổi luôn các phiếu cũ không ảnh hưởng, tham chiếu về kho các tàu cũng đổi theo"):
+   đổi ngược tiền tố các phiếu NXT-theo-kỳ đã nạp TRƯỚC bản v3.20.209 (lúc đó còn mang số PN/PX,
+   xem stockGenDocNo/whBuildPeriodDocs) sang tiền tố NXT cho đồng bộ với phiếu nạp mới. An toàn: chỉ
+   đổi d.docNo (chuỗi hiển thị) của phiếu có source==='nxt_period_import' — mọi nơi tham chiếu tới
+   phiếu (báo cáo/sổ theo tàu, FIFO costing dòng 73304-73305...) đều đọc thẳng d.docNo LÚC HIỂN THỊ
+   từ chính bản ghi này (không lưu bản sao số cũ ở đâu khác), nên tự động ra đúng số mới ngay, không
+   đứt liên kết nào. Idempotent — gọi lại nhiều lần vô hại (bỏ qua phiếu đã có tiền tố NXT). */
+function whMigrateNxtDocNoPrefix(){
+  try{
+    const docs=(S.stockDocs||[]).filter(d=>d && d.source==='nxt_period_import' && !/^NXT/.test(String(d.docNo||'')));
+    if(!docs.length) return 0;
+    docs.sort((a,b)=>String(a.createdAt||'').localeCompare(String(b.createdAt||'')));
+    const oldNos=[];
+    docs.forEach(d=>{ oldNos.push(d.docNo); d.docNo=stockGenDocNo(d.type,'NXT'); });
+    try{ logAuditEvent('stock_doc_migrate_nxt_prefix',{count:docs.length, old:oldNos, new:docs.map(d=>d.docNo)}); }catch(e){}
+    saveState();
+    return docs.length;
+  }catch(e){ console.warn('[migrate nxt prefix]', e); return 0; }
+}
 function openStockDocs(){
   /* v3.15.72 (Sếp 15/8, nhắc lại "chuyển Nhận hàng - Kiểm kê vào Kho vật tư"): màn Chứng từ kho
      vẫn còn bộ 4 nút riêng cho tàu (Tồn tổng hợp · Nhận hàng · Kiểm kê · Báo cáo kho) — đúng chỗ
@@ -75912,6 +75935,7 @@ function openStockDocs(){
   /* v3.15.59: nhánh office canEdit CHỈ thủ kho/admin (phía tàu có bộ nút riêng, NV thường
      không có nút tạo phiếu). Nút ✓ Nhận hàng trên dòng pending của tàu gate riêng bên dưới. */
   const canEdit=canManageStock()||isAdmin();
+  try{ whMigrateNxtDocNoPrefix(); }catch(e){}   /* v3.20.210: đổi tiền tố phiếu NXT cũ, im lặng, an toàn gọi lại nhiều lần */
   const isVA=(typeof isVesselAccountUser==='function')&&isVesselAccountUser();  // v3.08.48 (Mảng 2)
   const allowed=stockAllowedWarehouses();
   let list=stockScopedDocs(stockDocList().filter(d=>stockCanAccessWarehouse(d.warehouseId)));
@@ -75957,7 +75981,7 @@ function openStockDocs(){
     const st=`<span class="ds-need" style="color:${_lb.color}">${_lb.text}</span>`;
     return `<tr style="border-bottom:1px solid var(--rule)">
       <td style="padding:5px 8px;font-family:monospace;font-size:11px"><b>${esc(d.docNo)}</b></td>
-      <td style="padding:5px 8px;text-align:center">${({IN:'<span class="ds-need" style="color:var(--teal)">Nhập</span>',OUT:'<span class="ds-need" style="color:#9c4221">Xuất</span>',TRANSFER_IN:'<span class="ds-need" style="color:var(--good)">ĐC↑</span>',TRANSFER_OUT:'<span class="ds-need" style="color:#e65100">ĐC↓</span>',ADJUST_IN:'<span class="ds-need" style="color:#6a1b9a">Điều chỉnh+</span>',ADJUST_OUT:'<span class="ds-need" style="color:#6a1b9a">Điều chỉnh−</span>',OPENING:'<span class="ds-need" style="color:#1c5a8c">Tồn đầu</span>'}[d.type])||d.type}</td>
+      <td style="padding:5px 8px;text-align:center">${d.source==='nxt_period_import'?'<span class="ds-need" style="color:#7a5c00" title="Phiếu gộp nạp từ file Nhập-Xuất-Tồn theo kỳ — không phải 1 lần nhận/xuất hàng lẻ">NXT</span>':(({IN:'<span class="ds-need" style="color:var(--teal)">Nhập</span>',OUT:'<span class="ds-need" style="color:#9c4221">Xuất</span>',TRANSFER_IN:'<span class="ds-need" style="color:var(--good)">ĐC↑</span>',TRANSFER_OUT:'<span class="ds-need" style="color:#e65100">ĐC↓</span>',ADJUST_IN:'<span class="ds-need" style="color:#6a1b9a">Điều chỉnh+</span>',ADJUST_OUT:'<span class="ds-need" style="color:#6a1b9a">Điều chỉnh−</span>',OPENING:'<span class="ds-need" style="color:#1c5a8c">Tồn đầu</span>'}[d.type])||d.type)}</td>
       <td style="padding:5px 8px;font-size:11px">${esc(d.date||'')}</td>
       <td style="padding:5px 8px;font-size:11px">${esc(_whName(d.warehouseId))}</td>
       <td style="padding:5px 8px;font-size:11px;color:var(--muted)" title="Số mã vật tư · tổng số lượng trên phiếu">${whFmtQty(nLines)} mã · SL ${whFmtQty(totQty)}</td>
@@ -75966,6 +75990,7 @@ function openStockDocs(){
         <button class="btn-ghost" style="font-size:11px" title="In phiếu PDF theo mẫu chuẩn FAST" onclick="_vlPrint('${d.id}')">🖨 PDF</button>
         <button class="btn-ghost" style="font-size:11px" title="Xuất Excel cùng mẫu, cùng dữ liệu với bản in" onclick="whDocExportXlsxPrompt('${d.id}')">⬇ Excel</button>
         ${d.status!=='confirmed'&&canEdit?`<button class="btn-ghost" style="font-size:11px" onclick="openStockForm('${d.type}','${d.id}')">✏️</button>`:''}
+        ${d.status==='confirmed'&&canEdit?`<button class="btn-ghost" style="font-size:11px" title="Sửa phiếu đã xác nhận — có cảnh báo trước khi mở" onclick="whEditConfirmedPrompt('${d.type}','${d.id}')">✏️</button>`:''}
         ${d.status==='pending'&&(canEdit||whIsVesselSideUser())?(whIsVesselSideUser()?`<button class="btn-ghost" style="font-size:11px;color:#1e7d44" onclick="openVesselReceive('${d.id}')" title="Nhận hàng — tick SL, xác nhận là tồn cộng ngay">✓</button>`:`<button class="btn-ghost" style="font-size:11px;color:#1e7d44" onclick="openConfirmInbound('${d.id}')" title="Nhận hàng & xác nhận">✓</button>`):''}
         ${d.status==='draft'&&canEdit?`<button class="btn-ghost" style="font-size:11px;color:#1e7d44" onclick="stockConfirm('${d.id}')" title="Xác nhận → cập nhật tồn">✓</button>`:''}
         ${(canManageStock()||isAdmin())?`<button class="btn-ghost" style="font-size:11px;color:var(--bad)" onclick="whDeleteDocPrompt('${d.id}')" title="Xóa HẲN phiếu này — hộp xác nhận sẽ nêu hệ quả trước khi xóa">🗑</button>`:''}
@@ -78995,6 +79020,17 @@ function whDeleteDocHard(id, reason){
   toast('✓ Đã xóa hẳn phiếu '+(info.docNo||'')+' ('+info.lines+' dòng)','good');
   return true;
 }
+/* v3.20.209 (Sếp: "cho phép Thủ kho được quyền xóa/sửa các phiếu - ghi log lại"): xóa + ghi log đã
+   có sẵn từ trước (whDeleteDocHard). SỬA thì hàm lưu (_stockSave/whApplyStockEdit) vốn đã hỗ trợ sửa
+   phiếu bất kể trạng thái và đã ghi log (logAuditEvent ..., {edit:true}) — chỉ thiếu LỐI VÀO: nút ✏️
+   trước đây ẩn hẳn khi status==='confirmed', nên phiếu "Đã nhập kho" (mọi phiếu trong ảnh Sếp gửi)
+   không ai sửa được kể cả Thủ kho/admin. Mở lối vào riêng cho phiếu đã xác nhận, kèm cảnh báo rõ vì
+   sửa phiếu đã xác nhận sẽ đổi NGAY tồn kho hiện tại (không giống sửa phiếu nháp — chưa ai dùng số
+   liệu). Bấm tiếp mới mở form; hủy thì không mở. */
+function whEditConfirmedPrompt(type, id){
+  if(!confirm('⚠ Phiếu này ĐÃ XÁC NHẬN — tồn kho hiện tại đã tính theo số trên phiếu.\nSửa lại sẽ đổi NGAY tồn kho, có thể ảnh hưởng các phiếu xuất/báo cáo đã lập sau đó.\nChỉ dùng khi phiếu cũ bị nhập sai. Việc sửa sẽ được ghi vào nhật ký.\n\nVẫn mở form sửa?')) return;
+  openStockForm(type, id);
+}
 function whDeleteDocPrompt(id){
   const d=InventoryService.stockDocById(id); if(!d){ toast('Không tìm thấy phiếu','bad'); return; }
   const warns=whDeleteWarnings(d, InventoryService.stockDocs());
@@ -80358,7 +80394,7 @@ function whBuildPeriodDocs(whId, items, fromDate, toDate, by, genDocNo){
   const now=new Date().toISOString();
   const gen=genDocNo||stockGenDocNo;
   const mk=(type, lines, note)=>({id:(typeof uid==='function'?uid():'d'+Math.random()),
-    docNo:gen(type), type, date:toDate, warehouseId:whId, apId:'', costObject:null, lines,
+    docNo:gen(type,'NXT'), type, date:toDate, warehouseId:whId, apId:'', costObject:null, lines,
     deliveredBy:'', receivedBy:by, note, status:'confirmed',
     createdBy:by, createdAt:now, confirmedBy:by, confirmedAt:now, source:'nxt_period_import',
     periodFrom:fromDate, periodTo:toDate});
