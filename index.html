@@ -4000,7 +4000,7 @@ const WH_TYPES = {
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.20.238';
+const APP_VERSION='3.20.240';
 /* HOTFIX 3.12.17-email: CHẶN TRIỆT ĐỂ gửi email TỰ ĐỘNG (mất kiểm soát — spam quota Google).
    Email phải do NV được phân quyền CHỦ ĐỘNG chọn gửi. Cờ này:
    (1) chặn auto-SCAN tạo email (hrmScanExpiries/vesselCertScanExpiries);
@@ -4952,7 +4952,8 @@ function showSetupBackupPasswordPrompt(){
     </div>
   `;
   const footer = `
-    <button class="btn-sec" onclick="closeModal();_skipBackupPasswordSetup()">Để sau</button>
+    <button class="btn-ghost" style="color:var(--bad)" onclick="_dismissBackupPasswordSetup()">✕ Không hỏi lại</button>
+    <button class="btn-sec" onclick="closeModal();_skipBackupPasswordSetup()">Để sau (kỳ đăng nhập sau vẫn hỏi)</button>
     <button class="btn-primary" onclick="_saveBackupPasswordSetup()">✓ Lưu Backup Password</button>
   `;
   openModal('🔑 Đặt Backup Password', body, footer);
@@ -4992,6 +4993,19 @@ async function _saveBackupPasswordSetup(){
 /* v1.61.0: Skip backup password setup (postpone) */
 function _skipBackupPasswordSetup(){
   toast('⚠ Bỏ qua tạm — KHÔNG có auto-backup. Có thể setup sau trong Cài đặt.','warn');
+}
+/* v3.20.239 (Sếp: "TẮT THÔNG BÁO NÀY" — ảnh popup "Đặt Backup Password" hiện lại mỗi lần đăng nhập):
+   nút "Để sau" cũ CHỈ hiện 1 câu toast, không lưu gì — nên hiện lại y hệt mọi lần đăng nhập sau, dù
+   bấm bao nhiêu lần. Thêm nút mới lưu THẬT vào localStorage (đúng máy/trình duyệt này, giống cách
+   cfg.backupPassword đang lưu) — tắt hẳn, không hỏi lại nữa trên máy này. Vẫn bật lại được trong Cài
+   đặt (nút "🔑 Cài đặt Backup Password" vẫn còn nguyên, không mất tính năng, chỉ tắt lời nhắc tự động). */
+function _dismissBackupPasswordSetup(){
+  try{
+    const cfg=getAuthConfig();
+    if(cfg){ cfg.backupPasswordPromptDismissed=true; localStorage.setItem(AUTH_KEY, JSON.stringify(cfg)); }
+  }catch(e){}
+  closeModal();
+  toast('✓ Đã tắt lời nhắc — có thể bật lại trong Cài đặt bất cứ lúc nào ("🔑 Cài đặt Backup Password")','good');
 }
 
 /* v1.61.0: Prompt for backup password during login (if missing in session) */
@@ -6918,7 +6932,7 @@ async function authAction(){
       setTimeout(()=>{
         try{
           if(!cfg.backupPassword || !cfg.backupPassword.hash){
-            showSetupBackupPasswordPrompt();
+            if(!cfg.backupPasswordPromptDismissed) showSetupBackupPasswordPrompt();   // v3.20.239: đã tắt hẳn thì không tự bật lại
           } else {
             // Try silent cloud backup if password is in session
             cloudBackupSilent().catch(e => console.warn('[cloud-backup]',e));
@@ -7447,6 +7461,7 @@ function _auditUnmappedFields(){
  * saveState() (xem trên). (e) có ghi log (S.viewAsLog). (f) tự thoát sau 15 phút không thao tác.
  * ========================================================================== */
 let _viewAsActive=false;
+let _lastLandingKey=undefined;   // v3.20.240: theo dõi "vừa đổi người dùng" cho luồng mở trang mặc định (hrm/vm_dashboard)
 let _viewAsSnapshot=null;   // bản chụp S lúc bắt đầu — phục hồi khi thoát, không sót thay đổi tạm
 let _viewAsLogId=null;
 let _viewAsIdleTimer=null;
@@ -16637,7 +16652,20 @@ function applyRoleUI(){
   // If current active tab is hidden, switch to first allowed
   const activePage=document.querySelector('.page.active');
   const activePageId=activePage?activePage.id.replace('page-',''):null;
-  if(user && allowedTabs && activePageId && !allowedTabs.includes(activePageId)){
+  /* v3.20.240 (Sếp — ảnh nav: "chưa mặc định mở tab Nhân sự khi mở app"): GỐC LỖI — điều kiện bọc
+     ngoài `!allowedTabs.includes(activePageId)` chỉ chuyển trang khi trang CŨ (của người trước, VD
+     admin) KHÔNG hợp lệ với người MỚI. "Phải trả" hợp lệ với CẢ admin LẪN Nhân sự (đúng, vừa mở AP
+     cho NV thường ở bản trước) → app thấy "trang hiện tại vẫn hợp lệ", im lặng ở nguyên chỗ cũ, không
+     bao giờ chạy tới nhánh mở 'hrm'. Sửa: theo dõi riêng "vừa đổi sang người khác" (so _lastLandingKey
+     với người hiện tại) — đổi người + là Nhân sự + có tab hrm → LUÔN mở 'hrm' đúng 1 lần tại thời điểm
+     đổi, bất kể trang cũ còn hợp lệ hay không. Không đụng luồng "trang cũ mất quyền" bên dưới — dùng
+     chung, không trùng nhau (else if). */
+  const _landKey=(CURRENT_ROLE==='admin')?'admin':((CURRENT_USER&&CURRENT_USER.name)||'');
+  const _freshUserEntry=(_landKey!==_lastLandingKey);
+  _lastLandingKey=_landKey;
+  if(_freshUserEntry && user && allowedTabs && typeof isHrDeptUser==='function' && isHrDeptUser() && allowedTabs.includes('hrm')){
+    navigateToPage('hrm');
+  } else if(user && allowedTabs && activePageId && !allowedTabs.includes(activePageId)){
     if(typeof isVesselManager==='function' && isVesselManager() && CURRENT_ROLE!=='admin'){
       navigateToPage('vm_dashboard');   // v3.16.60: VM đăng nhập vào thẳng trang tổng quan đội tàu
     } else if(typeof isHrDeptUser==='function' && isHrDeptUser() && allowedTabs.includes('hrm')){
