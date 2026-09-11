@@ -4000,7 +4000,7 @@ const WH_TYPES = {
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.20.247';
+const APP_VERSION='3.20.251';
 /* HOTFIX 3.12.17-email: CHẶN TRIỆT ĐỂ gửi email TỰ ĐỘNG (mất kiểm soát — spam quota Google).
    Email phải do NV được phân quyền CHỦ ĐỘNG chọn gửi. Cờ này:
    (1) chặn auto-SCAN tạo email (hrmScanExpiries/vesselCertScanExpiries);
@@ -14270,7 +14270,13 @@ function deleteSeafarerCert(empId, certId){
   toast('✓ Đã xóa','good');
   openSeafarerProfile(empId);
 }
-function crewQuickChangeReopen(){ hrmSwitchView('crew'); }
+function crewQuickChangeReopen(){
+  /* v3.20.248 (Sếp — ảnh 5: "Nút QUAY LẠI/Đóng: không hoạt động"): hàm này ĐÚNG lẽ ra chuyển về view
+     Crew Change, nhưng THIẾU đóng modal đang mở trước — nên bấm xong, view phía sau đã đổi đúng, nhưng
+     bị modal cũ (Danh sách thuyền viên) che mất, nhìn như "không có gì xảy ra". */
+  closeModal();
+  hrmSwitchView('crew');
+}
 
 function crewRenderPlans(hostId, filterVid){
   const host=document.getElementById(hostId||'crew-plan-list'); if(!host) return;
@@ -26146,9 +26152,18 @@ function _hrQuickAssignSave(empId, mode, retFn){
 function _hrQuickShowVesselCrew(vesselIds, retFn){
   const cols=vesselIds.map(vid=>{
     const v=(VesselService.vessels()||[]).find(x=>x.id===vid);
-    const rows=(HRService.crewAssignments()||[]).filter(a=>a.vesselId===vid && !a.actualSignoffDate && a.status!=='signed_off' && a.status!=='transfer_out')
-      .map(a=>{ const e=crewEmpInfo(a.empId); const rk=crewRankOf(a.title||(e?e.title:'')); return {e,a,rk}; })
-      .sort((x,y)=>(x.rk||'').localeCompare(y.rk||''));
+    let rows=(HRService.crewAssignments()||[]).filter(a=>a.vesselId===vid && !a.actualSignoffDate && a.status!=='signed_off' && a.status!=='transfer_out')
+      .map(a=>{ const e=crewEmpInfo(a.empId); const rk=crewRankOf(a.title||(e?e.title:'')); return {e,a,rk}; });
+    /* v3.20.248 (Sếp — ảnh 4: "list xổ ra từ 2 tàu: trùng lặp nhân sự"): dữ liệu
+       HRService.crewAssignments() có thể tồn tại NHIỀU bản ghi "đang hiệu lực" cho CÙNG 1 NV tại CÙNG
+       1 tàu (lịch sử cũ chưa đóng đúng) — màn này chỉ ĐỌC (không sửa gốc), nên khử trùng ngay ở đây:
+       mỗi NV chỉ giữ đúng 1 dòng — bản ghi có ngày lên tàu (onboardDate) MỚI NHẤT. */
+    const byEmp={};
+    rows.forEach(r=>{
+      const k=r.a.empId; const cur=byEmp[k];
+      if(!cur || String(r.a.onboardDate||r.a.createdAt||'') > String(cur.a.onboardDate||cur.a.createdAt||'')) byEmp[k]=r;
+    });
+    rows=Object.values(byEmp).sort((x,y)=>(x.rk||'').localeCompare(y.rk||''));
     const body=rows.length?rows.map(r=>`<div style="padding:5px 0;border-bottom:1px dotted var(--rule);font-size:12.5px">
         <b>${esc(r.e?(r.e.fullName||r.e.name):'?')}</b> <span style="color:var(--muted)">· ${esc(CREW_RANK_LABEL[r.rk]||r.a.title||'')}</span>
       </div>`).join(''):'<div style="padding:8px;color:var(--muted);font-size:12px">Chưa có thuyền viên</div>';
@@ -26160,7 +26175,12 @@ function _hrQuickShowVesselCrew(vesselIds, retFn){
 }
 
 function hrReqOpen(){
-  const list=(S.hrRequests||[]).slice().sort((a,b)=>(b.createdAt||'').localeCompare(a.createdAt||''));
+  /* v3.20.248 (Sếp — ảnh 2: "Phần này: Ẩn TT Nháp/Trình. Đây là bảng kê/ list danh sách cập nhật để
+     NV phụ trách xem lại"): từ v3.20.199, Quick Crew Change ÁP DỤNG NGAY, không còn tạo "Nháp" qua
+     đúng hệ Đề xuất này nữa — nên các dòng "Nháp" còn sót (như ảnh: 3 dòng trùng của cùng 1 NV) là
+     RÁC CŨ từ trước khi đổi luồng, không ai bấm "Trình" nữa. Ẩn hẳn khỏi bảng kê này (không xoá dữ
+     liệu — chỉ không hiển thị) — đúng tinh thần "bảng kê để xem lại", không phải màn thao tác nữa. */
+  const list=(S.hrRequests||[]).filter(r=>r.status!=='draft').slice().sort((a,b)=>(b.createdAt||'').localeCompare(a.createdAt||''));
   const emps=HRService.employees(); const byId={}; emps.forEach(e=>byId[e.id]=e);
   const stLbl={draft:'<span class="ds-need" style="color:#9a5b12">Nháp</span>',submitted:'<span class="ds-need" style="color:#a61e69">Chờ duyệt</span>',approved:'<span class="ds-need" style="color:#1e7d44">Đã duyệt</span>',rejected:'<span class="ds-need" style="color:#b3261e">Từ chối</span>',effected:'<span class="ds-need" style="color:var(--teal)">Đã thi hành</span>'};
   const rowsH=list.map(r=>{
@@ -26172,7 +26192,6 @@ function hrReqOpen(){
       <td style="padding:4px 6px;font-size:11px">${esc((r.reason||'').slice(0,40))}</td>
       <td style="padding:4px 6px;font-size:11px">${stLbl[r.status]||esc(r.status)}</td>
       <td style="padding:4px 6px;white-space:nowrap">
-        ${r.status==='draft'?`<button class="btn-sec" style="font-size:10px" onclick="hrReqSetStatus('${r.id}','submitted')">📤 Trình</button>`:''}
         ${r.status==='submitted'&&hrReqCanApprove()?`<button class="btn-sec" style="font-size:10px" onclick="hrReqSetStatus('${r.id}','approved')">✅ Duyệt</button><button class="btn-sec" style="font-size:10px" onclick="hrReqSetStatus('${r.id}','rejected')">✕</button>`:''}
         ${due?`<button class="btn-primary" style="font-size:10px" onclick="hrReqEffect('${r.id}')">⚡ Thi hành</button>`:''}
         ${r.type==='terminate'&&(r.status==='approved')?`<button class="btn-sec" style="font-size:10px" onclick="hrReqChecklist('${r.id}')">📋 Checklist</button>`:''}
@@ -34130,8 +34149,13 @@ const DocEngine = (function(){
       : `<tr>
       <td colspan="5" style="border:1px solid #333;padding:4px;text-align:right;font-weight:700;font-size:11px">Tổng cộng</td>
       <td style="border:1px solid #333;padding:4px;text-align:right;font-weight:700;font-size:11px">${_esc(rows.reduce((a,r)=>a+(+r.qty||0),0).toLocaleString('vi-VN'))}</td></tr>`;
-    /* v3.17.03 (Sếp, ảnh bản in): không có logo thì KHÔNG in tên công ty thay logo — tên đã in ngay bên cạnh → bị lặp 2 lần */
-    const logo = co.logoUrl ? `<img src="${_esc(co.logoUrl)}" style="max-height:54px;max-width:170px" crossorigin="anonymous">` : '';
+    /* v3.20.250 (Sếp: "thêm logo và thông tin đầy đủ trên phiếu — góc trái hiện chỉ có tên công ty.
+       Chuẩn rồi. Ẩn thông tin: số điện thoại/tài khoản nợ/có"): đã duyệt mẫu xem trước. Thêm logo
+       (đúng field co.logo — trước ghi nhầm co.logoUrl, field này KHÔNG tồn tại trong S.companyInfo
+       nên logo không bao giờ hiện) + Website ngay dưới địa chỉ. KHÔNG thêm điện thoại (Sếp yêu cầu
+       ẩn). Giữ nguyên tên/địa chỉ tiếng Việt — đây là mẫu thống kê theo TT 200/2014/TT-BTC, không
+       đổi tên công ty sang tiếng Anh ở riêng mẫu này. */
+    const logo = co.logo ? `<img src="${_esc(co.logo)}" style="max-height:48px;max-width:150px" crossorigin="anonymous">` : '';
     const parties=(spec.parties||[]).map(p=>`<div style="font-size:11px;margin:1px 0"><b>${_esc(p.label)}:</b> ${_esc(p.name||'')}</div>`).join('');
     const sigs=(spec.signatures||[]);
     const sigCells=sigs.map(s=>`<div style="text-align:center;flex:1">
@@ -34143,7 +34167,7 @@ const DocEngine = (function(){
     return `<div id="doc-render" style="position:relative;font-family:'Times New Roman',serif;color:#111;max-width:760px;margin:0 auto;padding:20px;background:#fff">
       ${spec.watermark?`<div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;pointer-events:none;z-index:5"><div style="transform:rotate(-24deg);font-size:34px;font-weight:700;color:rgba(180,40,40,.16);border:3px solid rgba(180,40,40,.16);padding:8px 22px;border-radius:8px;white-space:nowrap">${_esc(spec.watermark)}</div></div>`:''}
       <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:4px">
-        <div style="display:flex;gap:10px;align-items:flex-start">${logo}<div><div style="font-size:13px;font-weight:700">${_esc(co.name||'')}</div><div style="font-size:10px;color:#333;max-width:340px">${_esc(co.address||'')}</div></div></div>
+        <div style="display:flex;gap:10px;align-items:flex-start">${logo}<div><div style="font-size:13px;font-weight:700">${_esc(co.name||'')}</div><div style="font-size:10px;color:#333;max-width:340px">${_esc(co.address||'')}</div>${co.website?`<div style="font-size:10px;color:#333">${_esc(co.website)}</div>`:''}</div></div>
         ${spec.formCode?`<div style="text-align:center;font-size:10px;color:#333"><div style="font-weight:700">${_esc(spec.formCode)}</div><div style="font-style:normal">${_esc(spec.formNote||'')}</div></div>`:''}
       </div>
       <div style="text-align:center;margin:10px 0 4px">
@@ -34159,7 +34183,7 @@ const DocEngine = (function(){
         }</div>
         <div style="text-align:right;font-size:11px;min-width:140px">
           <div>${isTransfer?'Số phiếu':'Số'}: <b>${_esc(spec.docNo||'')}</b></div>
-          ${showVal?`<div>Nợ: ${_esc(spec.debitAcc||'1561')}</div><div>Có: ${_esc(spec.creditAcc||'1561')}</div>`:''}
+          ${/* v3.20.250 (Sếp: "Ẩn thông tin: ... tài khoản nợ/có"): bỏ hẳn dòng Nợ/Có khỏi bản in */''}
         </div>
       </div>
       <table style="width:100%;border-collapse:collapse;margin-bottom:8px"><thead>${colHead}</thead><tbody>${bodyRows.join('')}${totalRow}</tbody></table>
@@ -76251,7 +76275,11 @@ function openStockDocs(){
        trên hàng ngoài. (c) Bỏ hẳn nút PDF/Excel/Sửa/Xóa khỏi hàng ngoài (chuyển vào trong phiếu —
        Xóa thêm mới vào footer form Sửa, xem _stockRenderForm) — CHỈ giữ lại đúng các nút hành động
        luồng (Nhận hàng/Xác nhận/nút xanh vessel-receive) + Gửi email (thao tác nhanh, không phải
-       xem/sửa nên vẫn hợp lý để ngoài). */
+       xem/sửa nên vẫn hợp lý để ngoài).
+       v3.20.249 (Sếp: "In để chung với sửa: phức tạp. Trả lại vị trí cũ in/tải về bên ngoài dòng
+       phiếu"): HOÀN TÁC riêng phần PDF/Excel của (c) — trả 2 nút 🖨/⬇ về lại hàng ngoài (dùng
+       _stockPrintById, không cần mở form). Giữ nguyên phần (a)/(b) và nút trong form (không đụng) —
+       chỉ tách riêng việc IN ra khỏi việc SỬA, đúng góp ý mới nhất. */
     const a=d.apId?AccountingService.payableById(d.apId):null;
     const partner=(a&&a.partner)||d.deliveredBy||'—';
     return `<tr style="border-bottom:1px solid var(--rule)">
@@ -76266,6 +76294,8 @@ function openStockDocs(){
         ${d.status==='draft'&&canEdit?`<button class="btn-ghost" style="font-size:11px;color:#1e7d44" onclick="stockConfirm('${d.id}')" title="Xác nhận → cập nhật tồn">✓ Xác nhận</button>`:''}
         ${_stockVesselReceiveBtn(d)}
         <button class="btn-ghost" style="font-size:11px" onclick="stockDocSendEmail('${d.id}')" title="Gửi email kèm PDF">📧</button>
+        <button class="btn-ghost" style="font-size:11px" onclick="_stockPrintById('${d.id}','pdf')" title="In phiếu PDF ngay tại đây — khỏi phải mở Sửa">🖨</button>
+        <button class="btn-ghost" style="font-size:11px" onclick="_stockPrintById('${d.id}','xlsx')" title="Xuất Excel ngay tại đây — khỏi phải mở Sửa">⬇</button>
       </td></tr>`;
   }).join('')
     : `<tr><td colspan="7" style="padding:14px;text-align:center;color:var(--muted)">Chưa có chứng từ kho.</td></tr>`;
@@ -77203,6 +77233,7 @@ function openStockInUnified(apId){
   _usiState={ batchId, apIds, partner:records[0].partner||'', warehouseId:allowed[0].id,
     date:(_sugDate||new Date().toISOString().slice(0,10)),
     contractNo:String(records[0].contractNo||''), contractDate:'', invoiceNoHdr:String(records[0].invoiceNo||''),
+    expectedBatches:Math.max(1,+records[0].expectedBatches||1),   /* v3.20.251: đọc lại số đợt đã khai từ lần trước, nếu có */
     rows:records.map(r=>({ apId:r.id, desc:r.desc||'', invoiceNo:r.invoiceNo||'', amount:+r.amountGross||+r.amount||0,
       amountNet:(+r.amountNet||(+r.amountGross||+r.amount||0))||0,   /* v3.20.116: đối chiếu chi tiết (không VAT) phải so với NET, không phải Gross */
       picked:false, code:'', qty:'', orderedQty:'', isApRef:true,   /* v3.20.113: dòng AP chỉ để THAM KHẢO/khớp — không cộng tổng */
@@ -77300,12 +77331,14 @@ function _usiRender(){
     `<div style="font-size:11px;color:#1c5a8c;margin-bottom:8px;padding:6px 10px;border:1px dashed #1c5a8c;border-radius:6px">Đây CHƯA phải xác nhận đã nhận hàng — chỉ đối chiếu SL/Đơn giá/Giá trị với báo giá rồi gửi cả phiếu vào <b>Theo dõi nhập kho → Chờ giao hàng</b>. Khi hàng về thật (có BBGN), Thủ kho mới xác nhận SL thực nhận ở bước riêng.</div>
      <datalist id="usi-codes">${matCodes}</datalist>
      ${banner}
-     <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:8px">
+     <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:8px;margin-bottom:8px">
        <label style="font-size:11px;color:var(--muted)">Nhà cung cấp<input id="usi-partner" value="${esc(s.partner)}" style="width:100%;font-size:12px;padding:5px;margin-top:2px" onchange="_usiState.partner=this.value"></label>
        <label style="font-size:11px;color:var(--muted)">Số hợp đồng<input id="usi-contract-no" value="${esc(s.contractNo||'')}" placeholder="(nếu có)" style="width:100%;font-size:12px;padding:5px;margin-top:2px" onchange="_usiState.contractNo=this.value"></label>
        <label style="font-size:11px;color:var(--muted)">Ngày hợp đồng<input id="usi-contract-date" type="date" value="${esc(s.contractDate||'')}" style="width:100%;font-size:12px;padding:5px;margin-top:2px" onchange="_usiState.contractDate=this.value"></label>
        <label style="font-size:11px;color:var(--muted)">Số hóa đơn<input id="usi-invoice" value="${esc(s.invoiceNoHdr||'')}" placeholder="(nếu có)" style="width:100%;font-size:12px;padding:5px;margin-top:2px" onchange="_usiState.invoiceNoHdr=this.value"></label>
+       <label style="font-size:11px;color:var(--text-accent, #1c5a8c)" title="Khai báo hàng về mấy đợt — 1 = gửi xong là đóng phiếu như trước giờ; >1 = phiếu vẫn mở, gửi thêm đợt sau khi hàng về tiếp">Số đợt giao hàng dự kiến<input id="usi-exp-batches" type="number" min="1" value="${+s.expectedBatches||1}" style="width:100%;font-size:12px;padding:5px;margin-top:2px" onchange="_usiState.expectedBatches=Math.max(1,+this.value||1)"></label>
      </div>
+     ${(+s.expectedBatches>1||s.priorDocs.length)?`<div style="font-size:11px;color:var(--muted);margin:-4px 0 8px">📦 ${_usiBatchSummaryLabel(s)}</div>`:''}
      <div style="display:flex;gap:8px;margin-bottom:8px;align-items:center">
        <label style="font-size:11px;color:var(--muted)">Kho nhận </label><select style="font-size:13px;padding:5px" onchange="_usiState.warehouseId=this.value">${whOpts}</select>
        <label style="font-size:11px;color:var(--muted)">Ngày </label><input type="date" value="${esc(s.date)}" style="font-size:13px;padding:5px" onchange="_usiState.date=this.value">
@@ -77484,9 +77517,31 @@ function _usiSave(){
     quoteFile:s.quoteFile||undefined,   /* v3.20.60: file báo giá/HĐ đã tải lên Drive lúc "Import chi tiết" — giữ lại để xem sau */
     createdBy:actorName(), createdAt:new Date().toISOString(), confirmedBy:'', confirmedAt:'' };
   InventoryService.addStockDoc(doc);
+  /* v3.20.251 (Sếp: "thêm ô Số đợt giao hàng dự kiến"): lưu số đợt khai báo lên TẤT CẢ hóa đơn AP
+     trong cùng cụm (batchId) — để còn đọc lại lần sau (mở lại màn này, hoặc mở dòng AP xem tóm tắt),
+     không mất khi đóng modal. */
+  try{
+    const exp=Math.max(1,+s.expectedBatches||1);
+    (AccountingService.payables()||[]).forEach(r=>{ if(s.apIds.includes(r.id)) r.expectedBatches=exp; });
+  }catch(e){}
   try{ logAuditEvent('stock_pending_create',{docNo:doc.docNo, apId:doc.apId, apBatchId:doc.apBatchId, lines:lines.length, dot:s.priorDocs.length+1}); }catch(e){}
   saveState(); toast('✓ Đã tạo phiếu chờ nhập '+doc.docNo+(s.priorDocs.length?(' (đợt '+(s.priorDocs.length+1)+')'):'')+' — thủ kho sẽ xác nhận','good');
   _usiState=null; closeModal(); if(typeof renderAll==='function') renderAll();
+}
+/* v3.20.251: dòng tóm tắt "Đã NK (đợt X) — Chờ giao hàng đợt Y" — dùng chung cho cả banner màn này
+   và (khi rảnh làm tiếp) màn mở dòng AP. Đếm theo đúng priorDocs đã có (không đoán/không tạo dữ liệu
+   mới), so với expectedBatches khai báo. */
+function _usiBatchSummaryLabel(s){
+  const exp=Math.max(1,+s.expectedBatches||1);
+  const done=(s.priorDocs||[]).filter(d=>d.status==='confirmed').length;
+  const waiting=(s.priorDocs||[]).filter(d=>d.status!=='confirmed').length;
+  if(exp<=1 && !s.priorDocs.length) return 'Dự kiến giao 1 đợt — gửi xong là đóng phiếu.';
+  const parts=[];
+  if(done) parts.push('Đã NK (đợt '+done+(exp>1?('/'+exp):'')+')');
+  if(waiting) parts.push('Chờ giao hàng đợt '+(done+waiting)+(exp>1?('/'+exp):''));
+  const remain=exp-done-waiting;
+  if(remain>0) parts.push(remain+' đợt chưa gửi');
+  return parts.join(' — ')||'Chưa có đợt nào.';
 }
 function stockInFromAp(apId){
   /* v3.20.56 (Sếp — dùng lại đúng chi tiết báo giá đã đọc, không bắt đọc lại): nếu phiếu AP này có
@@ -81377,7 +81432,14 @@ function _stockSave(confirmNow, stay){   // v3.17.01: stay=true → lưu xong �
    Không tự lưu nháp khi in. Màn bờ → bản có giá. */
 function _stockPrint(kind){
   if(!_stockDraft||!_stockDraft.id){ toast('Lưu phiếu trước rồi mới in / xuất','warn'); return; }
-  const id=_stockDraft.id;
+  _stockPrintById(_stockDraft.id, kind);
+}
+/* v3.20.249 (Sếp: "In để chung với sửa: phức tạp. Trả lại vị trí cũ in/tải về bên ngoài dòng phiếu"):
+   hoàn tác 1 phần v3.20.217 — PDF/Excel từng bị dồn hẳn vào bên TRONG form Sửa (phải mở phiếu ra mới
+   in được). Tách lõi gọi bằng ID thật (không phụ thuộc _stockDraft — trạng thái CHỈ có khi đang mở
+   form) để dùng lại được cho cả nút TRONG form (giữ nguyên) LẪN nút NGOÀI hàng Sổ chứng từ kho (thêm
+   mới) — in/tải được ngay tại danh sách, không phải mở Sửa trước. */
+function _stockPrintById(id, kind){
   if(kind==='xlsx') whDocExportXlsx(id,true);
   else DocEngine.preview(_stockSpec(stockDocById(id),{showValue:true}));
 }
@@ -81596,7 +81658,7 @@ function _stockSpec(d, opts){
     toWh:(d.type==='TRANSFER_OUT')?(d.pairToWh?_whName(d.pairToWh):''):((d.type==='TRANSFER_IN')?_whName(d.warehouseId):''),
     formCode: showVal?'Mẫu số 01-VT':'', formNote: showVal?'(Ban hành theo TT 200/2014/TT-BTC)':'',
     debitAcc:'1561', creditAcc:'1561',
-    company:{name:co.name||'CÔNG TY CỔ PHẦN HÀNG HẢI VÀ NĂNG LƯỢNG HẢI MÃ', address:co.address||'', logoUrl:co.logoUrl||''},
+    company:{name:co.name||'CÔNG TY CỔ PHẦN HÀNG HẢI VÀ NĂNG LƯỢNG HẢI MÃ', address:co.address||'', logo:co.logo||'', website:co.website||''},   /* v3.20.250: sửa field logoUrl→logo (field cũ không tồn tại trong S.companyInfo nên logo không bao giờ lên được) + thêm website */
     parties, rows:lines, attachedDocs:'',
     signatures:sigs,
     // C2a: watermark phân biệt — hồ sơ thanh toán chỉ dùng bản đã xác nhận
@@ -81641,6 +81703,7 @@ function whDocSpecToAoa(spec, opts){
   put(['', '', '', '', '', spec.formCode||'']);
   put([co.name||'', '', '', '', '', spec.formNote||'']);
   put([co.address||'']);
+  if(co.website) put([co.website]);   /* v3.20.250 (Sếp: "thông tin đầy đủ trên phiếu" — đã áp cho PDF, làm tiếp cho Excel) */
   put([]);
   put([]);
   put(['', '', spec.docTitle||'CHỨNG TỪ KHO']);
