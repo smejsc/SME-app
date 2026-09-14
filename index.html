@@ -1291,7 +1291,7 @@ span.chip.chip-fixed{display:inline-flex;align-items:center;gap:4px}
       <div class="hrm-side-item" id="tm-tab-templates" onclick="tmSwitchView('templates')">📝 Hợp đồng mẫu</div>
       <div class="hrm-side-hdr">Contract Review</div>
       <div class="hrm-side-item" id="tm-tab-review" onclick="tmSwitchView('review')">🔍 Đọc &amp; phân tích HĐ</div>
-      <div class="hrm-side-hdr">Performance</div>
+      <div class="hrm-side-hdr" id="tm-hdr-perf">Performance</div>
       <!-- v3.20.383 (Sếp — ảnh: "Phần này nên tách khỏi Vessel performance. Tạo 1 tab: expected
            revenue trên hoặc dưới Vessel Performance" — đặt TRÊN: nhập liệu trước, xem đánh giá sau). -->
       <div class="hrm-side-item" id="tm-tab-revexp" onclick="tmSwitchView('revexp')">💰 Expected Revenue</div>
@@ -4285,7 +4285,7 @@ const WH_TYPES = {
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.20.421';
+const APP_VERSION='3.20.427';
 /* HOTFIX 3.12.17-email: CHẶN TRIỆT ĐỂ gửi email TỰ ĐỘNG (mất kiểm soát — spam quota Google).
    Email phải do NV được phân quyền CHỦ ĐỘNG chọn gửi. Cờ này:
    (1) chặn auto-SCAN tạo email (hrmScanExpiries/vesselCertScanExpiries);
@@ -18330,9 +18330,17 @@ function bccRosterForScope(scope){
   // v3.20.330 (Sếp: "NV Nhân sự + Chấm công: được thấy tab timesheet"): scope 'dept' đến từ hrScopes
   // (không có value — nghĩa là "Phòng ban" gộp chung, xem hrEmpMatchesScope) khác với scope 'dept' cũ
   // của BCC (LUÔN có value = mã phòng ban cụ thể). Không value = trả về TẤT CẢ NV văn phòng.
+  // v3.20.422 (Sếp — ảnh: "Ban Dự án" ra 0 người (thực có 2), "Phòng Quản lý Tàu" ra 3 (thực có 9,
+  // ảnh danh sách phòng ban) — "Kiểm bộ lọc: đang sai hoàn toàn"): CÙNG LỖI đã sửa cho scope 'om'
+  // (v3.20.409) và checkbox bccScopes (v3.20.366) nhưng scope 'dept' (chọn TRỰC TIẾP 1 phòng ban khi
+  // Tạo BCC) vẫn còn so khớp THÔ — hồ sơ NV lưu Phòng ban ở NHIỀU DẠNG CHỮ khác nhau (mã "QLT", tên
+  // đầy đủ "Phòng Quản lý Tàu", hoặc "Tên [MÃ]") nên e.dept===scope.value chỉ khớp đúng 1 dạng, bỏ
+  // lọt các dạng khác — ĐÚNG khớp bằng chứng ảnh (đếm thiếu, không phải 0 tuyệt đối). Đổi sang
+  // hrDeptCanon(e.dept) — quy MỌI dạng chữ về đúng 1 mã chuẩn trước khi so, giống cách hrmRenderList/
+  // engine lương đang làm ở mọi nơi khác.
   if(scope.type==='dept'){
     if(!scope.value) return all.filter(e=>e.type==='office');
-    return all.filter(e=>e.dept===scope.value);
+    return all.filter(e=>hrDeptCanon(e.dept)===scope.value);
   }
   if(scope.type==='vessel') return all.filter(e=>hrEmpMatchesScope(e, scope));   // v3.20.330: từ hrScopes
   if(scope.type==='company'){
@@ -24648,6 +24656,10 @@ function openPayPeriodDetail(id){
   const _fm=v=>v?Math.round(v).toLocaleString(ccy==='USD'?'en-US':'vi-VN'):'—';
   const _resPick=(res,keys)=>{ for(const k of keys){ if(res&&res[k]!=null&&isFinite(res[k])) return +res[k]; } return null; };
   const _srtAll=_paySortedRows(p);   /* v3.14.80: sort MỘT LẦN — mảng HTML và nhóm tàu dùng CHUNG thứ tự, chỉ số khớp 1-1 */
+  // v3.20.427 (Sếp — ảnh: "Thêm dòng Tổng cộng cho từng cột"): cộng dồn NGAY TRONG cùng vòng map dựng
+  // rowsArr — tránh lặp lại logic map cột/BHXH/thuế/Khoản PS ở 1 vòng riêng (rủi ro lệch công thức).
+  let _sumBh=0, _sumTax=0, _sumPs=0, _sumNoPc=0;
+  const _pcSums=_pcCols?_pcCols.map(()=>0):null;
   const rowsArr=_srtAll.map((r,i)=>{   /* v3.14.63: hiển thị theo Bộ phận→Chức vụ→MSNV */
     const base=(r.result&&(r.result.takeHome!=null?r.result.takeHome:r.result.total))||0;
     const adj=payRowAdjustTotal(r); const th=base+adj;
@@ -24659,6 +24671,11 @@ function openPayPeriodDetail(id){
     const _rm=_RES_MAP[p.profile]||{};
     const bh=(_rm.bh&&res[_rm.bh]!=null&&isFinite(res[_rm.bh]))?+res[_rm.bh]:null;
     const tax=(_rm.tax&&res[_rm.tax]!=null&&isFinite(res[_rm.tax]))?+res[_rm.tax]:null;
+    // v3.20.427: cộng dồn cho dòng "TỔNG CỘNG" — CÙNG công thức đang dùng để hiện từng ô bên dưới.
+    if(_pcCols){ _pcCols.forEach(([lb,fn],ci)=>{ _pcSums[ci]+=(+fn(inp)||0); }); }
+    else { _sumNoPc+=(+_resPick(res,['AB','AC','total'])||0); }
+    _sumBh+=(bh||0); _sumTax+=(tax||0);
+    try{ const _ex=payExtrasFor(r.empId,p.period); _sumPs+=_ex.reduce((s,x)=>s+(x.sign<0?-1:1)*(+x.amount||0),0); }catch(e){}
     const comp=_pcCols?_pcCols.map(([lb,fn,kind])=>`<td style="padding:5px 6px;text-align:right;font-family:monospace;font-size:12px${kind==='days'&&!(+fn(inp))?';color:var(--bad);font-weight:600':''}" ${kind==='days'?'title="Ngày công kéo từ BCC (biển+dock+bờ+DP) — 0 = BCC tháng chưa có công của người này"':''}>${kind==='days'?((+fn(inp))?(+fn(inp)).toLocaleString('vi-VN',{maximumFractionDigits:2}):'0'):_fm(fn(inp))}</td>`).join('')
       :`<td style="padding:5px 6px;text-align:right;font-family:monospace;font-size:12px">${_fm(_resPick(res,['AB','AC','total']))}</td>`;
     return `<tr style="border-bottom:1px solid var(--rule)">
@@ -24688,6 +24705,22 @@ function openPayPeriodDetail(id){
   const _pcHead=_pcCols?_pcCols.map(([lb])=>`<th style="padding:5px 6px;text-align:center;font-size:11px;color:#fff;font-weight:700" title="Mức theo thẻ lương / ô nhập của kỳ">${lb}</th>`).join('')
     :'<th style="padding:5px 6px;text-align:center;font-size:11px;color:#fff;font-weight:700">Tổng lương</th>';
   const auditHtml=(p.audit||[]).slice().reverse().slice(0,40).map(a=>`<div style="font-size:10px;padding:3px 0;border-bottom:1px dotted var(--rule)"><span style="color:var(--muted)">${esc(a.ts.replace('T',' ').slice(0,16))}</span> · <b>${esc(a.user)}</b> · ${esc(a.action)}${a.detail?' — '+esc(a.detail):''}</div>`).join('')||'<div style="color:var(--muted);font-size:11px">Chưa có nhật ký</div>';
+  // v3.20.427 (Sếp — ảnh: "Thêm dòng Tổng cộng cho từng cột"): 1 dòng TỔNG duy nhất cho CẢ kỳ (khác
+  // các dòng "TỔNG — {nhóm tàu}" đã có sẵn — dòng đó theo TỪNG nhóm tàu, dòng này tổng TOÀN kỳ, mọi
+  // nhóm lương). Thực lĩnh dùng lại đúng biến `total` (đã hiện ở dòng "Tổng thực lĩnh" phía trên) —
+  // không tính lại, tránh lệch số giữa 2 chỗ.
+  const _footComp=_pcCols
+    ?_pcCols.map(([lb,fn,kind],ci)=>`<td style="padding:6px 6px;text-align:right;font-family:monospace;font-size:12px">${kind==='days'?(_pcSums[ci]?_pcSums[ci].toLocaleString('vi-VN',{maximumFractionDigits:2}):'0'):_fm(_pcSums[ci])}</td>`).join('')
+    :`<td style="padding:6px 6px;text-align:right;font-family:monospace;font-size:12px">${_fm(_sumNoPc)}</td>`;
+  const _footRow=`<tr style="background:#eef3f8;font-weight:700;border-top:2px solid var(--rule)">
+      <td style="padding:6px 8px;font-size:12px">TỔNG CỘNG <span style="font-weight:400;color:var(--muted)">· ${_srtAll.length} người</span></td>
+      ${_footComp}
+      <td style="padding:6px 6px;text-align:right;font-family:monospace;font-size:12px">${_fm(_sumBh)}</td>
+      <td style="padding:6px 6px;text-align:right;font-family:monospace;font-size:12px">${_fm(_sumTax)}</td>
+      <td style="padding:6px 6px;text-align:right;font-family:monospace;font-size:12px">${_fm(_sumPs)}</td>
+      <td style="padding:6px 8px;text-align:right;font-family:monospace;color:#1e7d44">${total?total.toLocaleString(ccy==='USD'?'en-US':'vi-VN'):'—'}</td>
+      <td></td>
+    </tr>`;
   // nút hành động theo trạng thái
   let actions='';
   const btn=(fn,label,style)=>`<button class="btn-${style||'sec'}" style="font-size:11px;${style==='danger'?'background:var(--bad);border-color:var(--bad);color:var(--paper-2)':''}" onclick="${fn}('${id}')">${label}</button>`;
@@ -24776,7 +24809,7 @@ function openPayPeriodDetail(id){
     <!-- v3.20.406 (Sếp: "Các Bảng xem trước: BCC/Bảng lương... phải trình bày như mẫu xem trước AP/AR:
          định dạng dòng cột/định dạng chữ số"): đổi tiêu đề bảng từ nền xám nhạt/chữ đen sang ĐÚNG
          chuẩn AP/AR đã chốt (nền navy #123a5c đậm, chữ trắng đậm, căn giữa — xem _finQvThead()). -->
-    <div style="max-height:280px;overflow:auto;border:1px solid var(--rule);border-radius:6px"><table style="width:100%;border-collapse:collapse;font-size:13px"><thead><tr style="background:#123a5c;position:sticky;top:0"><th style="padding:5px 8px;color:#fff;font-weight:700;text-align:center">Nhân viên</th>${_pcHead}<th style="padding:5px 6px;text-align:center;font-size:11px;color:#fff;font-weight:700">BHXH</th><th style="padding:5px 6px;text-align:center;font-size:11px;color:#fff;font-weight:700">Thuế TNCN</th><th style="padding:5px 6px;text-align:center;font-size:11px;color:#fff;font-weight:700" title="v3.18.76: Σ khoản PS đã duyệt của người này trong kỳ — bấm số để xem từng khoản">Khoản PS</th><th style="padding:5px 8px;text-align:center;color:#fff;font-weight:700">Thực lĩnh (${ccy})</th><th style="padding:5px 8px"></th></tr></thead><tbody>${_rowsPayHtml}</tbody></table></div>
+    <div style="max-height:280px;overflow:auto;border:1px solid var(--rule);border-radius:6px"><table style="width:100%;border-collapse:collapse;font-size:13px"><thead><tr style="background:#123a5c;position:sticky;top:0"><th style="padding:5px 8px;color:#fff;font-weight:700;text-align:center">Nhân viên</th>${_pcHead}<th style="padding:5px 6px;text-align:center;font-size:11px;color:#fff;font-weight:700">BHXH</th><th style="padding:5px 6px;text-align:center;font-size:11px;color:#fff;font-weight:700">Thuế TNCN</th><th style="padding:5px 6px;text-align:center;font-size:11px;color:#fff;font-weight:700" title="v3.18.76: Σ khoản PS đã duyệt của người này trong kỳ — bấm số để xem từng khoản">Khoản PS</th><th style="padding:5px 8px;text-align:center;color:#fff;font-weight:700">Thực lĩnh (${ccy})</th><th style="padding:5px 8px"></th></tr></thead><tbody>${_rowsPayHtml}</tbody><tfoot>${_footRow}</tfoot></table></div>
     <details style="margin-top:10px"><summary style="cursor:pointer;font-size:13px;font-weight:600">📋 Nhật ký thao tác (Audit Log) — không xóa</summary><div style="margin-top:6px;max-height:160px;overflow:auto">${auditHtml}</div></details>`;
   openModal('📅 Kỳ lương '+esc(p.period)+' · '+(p.companyId?esc(companyName(p.companyId)):'⚠ chưa gán pháp nhân'), body,   /* v3.14.41 (Sếp 06/8): tiêu đề ghi rõ pháp nhân */ `<button class="btn-ghost" onclick="openPayrollPeriods()">← Danh sách</button>`);
 }
@@ -37713,12 +37746,18 @@ function renderProjectData(){
     // dự án CHƯA TRIỂN KHAI (lc==='pending') chưa hề bắt đầu — không có ý nghĩa "kết thúc". Bỏ hẳn
     // archiveBtn ở bảng này (KHÔNG chỉ ẩn nút "KẾT THÚC" mà bỏ luôn cả "↺ Mở lại" — dự án pending
     // không nên có action đóng/mở nào ở đây, việc đó chỉ có ý nghĩa từ "Đang triển khai" trở đi).
+    // v3.20.424 (Sếp — ảnh dự án O&M "Đang triển khai": "Thay KẾT THÚC = BB Offhire: đầy đủ các
+    // trường điền thông tin - ghi vào theo dõi On-Offhire Tàu" — xác nhận CHỈ áp dụng dự án CÓ gắn
+    // tàu, dự án không tàu (O&M/Cảng/Quản lý chung — như dòng Sếp chỉ trong ảnh) GIỮ NGUYÊN "KẾT
+    // THÚC"): dự án CÓ TÀU ở "Đang triển khai" bỏ hẳn nút KẾT THÚC — CHỈ còn "📋 BB Off-hire" (bên
+    // dưới), bấm vào lưu xong VỪA ghi vào theo dõi Off-hire VỪA tự kết thúc dự án luôn (offhmSave đã
+    // sửa tương ứng) — không cần bấm thêm bước nào khác nữa.
     const archiveBtn = (canArchive && lc!=='pending')
       ? (p.ended
           ? `<button class="icon-btn" title="Mở lại dự án (KẾT THÚC)" onclick="toggleProjectEnded('${p.id}')" style="color:var(--good)">↺</button>`
           : (p.archived
           ? `<button class="icon-btn" title="Mở lại dự án" onclick="toggleArchiveProject('${p.id}')" style="color:var(--good)">↺</button>`
-          : `<button class="btn-sec" style="font-size:10px;padding:2px 8px;color:var(--warn);border-color:var(--warn)" onclick="openProjectCompleteForm('${p.id}')">KẾT THÚC</button>`))
+          : ((lc==='active' && p.vesselId) ? '' : `<button class="btn-sec" style="font-size:10px;padding:2px 8px;color:var(--warn);border-color:var(--warn)" onclick="openProjectCompleteForm('${p.id}')">KẾT THÚC</button>`)))
       : '';
     const tbttBtn = showTbtt ? `<button class="btn-sec" style="font-size:10px;padding:2px 8px" onclick="closeModal();openTbttForm('${p.vesselId||''}','${p.id}')" title="Nhập TBTT đầy đủ — xem trước dạng PDF trước khi lưu">🛳 +TBTT</button>` : '';
     // v3.20.419 (Sếp: "TBTT là xác định thời điểm, BBOH có thông tin mở rộng: nhiên liệu... — 2 nút
@@ -37727,7 +37766,7 @@ function renderProjectData(){
     // bảng nhập tay Biên bản Onhire — event (chỉ tối giản: vesselId+projectId+ngày, KHÔNG kèm
     // charterer/cảng/notice giả định) chỉ được tạo lúc bấm "💾 Lưu" ở màn xem trước, không tạo sớm.
     const onhireBtn = (lc==='pending' && p.vesselId) ? `<button class="btn-sec" style="font-size:10px;padding:2px 8px" onclick="arProjQuickOnhire('${p.id}')" title="Lập Biên bản Onhire trực tiếp — không cần khai TBTT trước">📋 BB Onhire</button>` : '';
-    const offhireBtn = (lc==='active' && p.vesselId) ? `<button class="btn-sec" style="font-size:10px;padding:2px 8px" onclick="openOffhireMinutesForm('${p.id}')" title="Lập Biên bản Off-hire — độc lập, KHÔNG tự kết thúc dự án">📋 BB Off-hire</button>` : '';
+    const offhireBtn = (lc==='active' && p.vesselId) ? `<button class="btn-primary" style="font-size:10px;padding:2px 8px" onclick="openOffhireMinutesForm('${p.id}')" title="Lưu Biên bản Off-hire — TỰ ĐỘNG kết thúc dự án luôn (thay nút KẾT THÚC cũ)">📋 BB Off-hire</button>` : '';
     const fmtD=(d)=>d?d.split('-').reverse().join('/'):'—';
     const dateCell = showDates ? (()=>{ const r=dateRangeOf(p); return `<td class="ds-t-sub" style="font-family:var(--font-mono);font-size:11px;white-space:nowrap">${fmtD(r.start)} → ${fmtD(r.end)}</td>`; })() : '';
     return `<tr style="${(p.archived||lc==='done')?'opacity:0.55;background:var(--paper-3)':''}">
@@ -38764,12 +38803,30 @@ function offhmPrintPdf(projectId){
 }
 function offhmSave(projectId){
   const d=window._offhmDraft; if(!d){ toast('Thiếu dữ liệu — quay lại màn nhập','bad'); return; }
+  const p=(S.projects||[]).find(x=>x.id===projectId);
   S.offhireMinutes=S.offhireMinutes||[];
   let m=tmOffhireMinutes(projectId);
   if(m){ Object.assign(m,d); touchRecord(m); }
   else { m={id:uid(), ...d, createdBy:actorName(), createdAt:new Date().toISOString()}; touchRecord(m); S.offhireMinutes.push(m); }
   window._offhmDraft=null;
-  saveState(); closeModal(); toast('Đã lưu Biên bản Off-hire'); renderAll();
+  // v3.20.424 (Sếp: "Thay KẾT THÚC = BB Offhire: đầy đủ các trường điền thông tin - ghi vào theo dõi
+  // On-Offhire Tàu" — xác nhận): dự án CÓ TÀU không còn nút KẾT THÚC riêng ở "Đang triển khai" nữa —
+  // lưu Biên bản Off-hire này GIỜ CŨNG tự kết thúc dự án luôn (gộp 2 bước cũ — trước đây phải bấm KẾT
+  // THÚC rồi mới TÙY CHỌN mở Biên bản Off-hire — thành 1 bước duy nhất). Chỉ áp khi dự án CÓ gắn tàu
+  // (đúng nơi nút BB Off-hire hiện) và CHƯA kết thúc (an toàn nếu gọi lại từ nơi khác/redo).
+  let _endedNow=false;
+  if(p && p.vesselId && !p.ended){
+    p.end = d.actualAt ? d.actualAt.slice(0,10) : p.end;
+    p.ended=true; p.endedBy=actorName(); p.endedAt=new Date().toISOString();
+    try{ touchRecord(p); }catch(e){}
+    try{ logAuditEvent('end_project', {projectId, projectName:p.name, ended:true, endDate:p.end, via:'offhire_minutes'}); }catch(e){}
+    _endedNow=true;
+  }
+  saveState(); closeModal();
+  toast(_endedNow?('Đã lưu Biên bản Off-hire — dự án "'+(p&&p.name||'')+'" đã KẾT THÚC'):'Đã lưu Biên bản Off-hire');
+  try{ renderProjects(); }catch(e){}
+  try{ renderProjectData(); }catch(e){}
+  renderAll();
 }
 function toggleArchiveProject(id){
   if(!canArchiveItem()){toast('Chỉ admin / BOD / Kế toán trưởng được đóng dự án','bad');return;}
@@ -42747,7 +42804,10 @@ function renderProjects(){
     esel.value=_prjFilterEndClient||''; if(esel.value!==(_prjFilterEndClient||'')) { _prjFilterEndClient=''; esel.value=''; }
   }
   const canArchive=canArchiveItem();
-  let list=S.projects.filter(p=>p&&!p._deleted);   /* v3.19.40 */
+  // v3.20.423 (Sếp — ảnh: "dự án O&M vẫn xuất hiện trong module thương mại"): SÓT — v3.20.388 chốt
+  // "loại OM/Cảng biển/Quản lý chung khỏi CẢ module" đã áp cho Tổng quan/2 biểu đồ/Vessel Performance
+  // (TM_VESSEL_SEGMENTS) nhưng quên áp cho chính bảng "Danh sách dự án" này. Bổ sung đúng 1 điều kiện.
+  let list=S.projects.filter(p=>p&&!p._deleted&&TM_VESSEL_SEGMENTS.includes(p.segment));   /* v3.19.40 */
   if(_prjFilterEndClient==='__none__') list=list.filter(p=>!p.endClient);
   else if(_prjFilterEndClient) list=list.filter(p=>_ecKey(p.endClient)===_prjFilterEndClient);
   if(_prjFilterVessel==='__none__') list=list.filter(p=>!p.vesselId);
@@ -42811,7 +42871,7 @@ function renderProjectsFull(){
     fsel.innerHTML=opts.join('');
     fsel.value=cur;
   }
-  let list=S.projects.slice();
+  let list=S.projects.filter(p=>p&&!p._deleted&&TM_VESSEL_SEGMENTS.includes(p.segment));   /* v3.20.423: cùng lý do như renderProjects() ở trên — Sếp: "dự án O&M vẫn xuất hiện trong module thương mại" */
   if(_prjFullFilterVessel==='__none__') list=list.filter(p=>!p.vesselId);
   else if(_prjFullFilterVessel) list=list.filter(p=>p.vesselId===_prjFullFilterVessel);
   let html=`<thead><tr><th>Tên / Khách hàng</th><th>Tàu</th><th>Thời gian</th><th class="r">Đơn giá</th><th class="r">Giá trị HĐ</th><th class="r">DT thực</th><th class="r">CP thực</th><th class="r">Margin</th><th></th></tr></thead><tbody>`;
@@ -44013,6 +44073,9 @@ function tmEditVesselRevenuePlan(id){
 }
 function renderTmPerf(){
   const box=document.getElementById('tm-perf-body'); if(!box) return;
+  // v3.20.425: chốt lớp 2 — phòng trường hợp có nơi khác gọi thẳng renderTmPerf()/renderTmRevExpected()
+  // không qua tmSwitchView() (đã chặn ở đó rồi, đây chỉ là dự phòng, giống các hàm ghi khác trong app).
+  if(!_tmCanPerf()){ box.innerHTML='<div style="padding:20px;text-align:center;color:var(--muted)">🔒 Chỉ Admin/BOD/Trưởng bộ phận Thương mại được xem mục này.</div>'; return; }
   const _esc=x=>(typeof esc==='function')?esc(x):String(x==null?'':x);
   const year=window._tmPerfYear||new Date().getFullYear();
   const now=new Date();
@@ -44275,6 +44338,65 @@ function tmPerfShowDetail(vid, year){
 // khỏi CẢ module"): hằng số DÙNG CHUNG cho mọi phần trong Thương mại (Tổng quan, 2 biểu đồ mới,
 // Vessel Performance) — chỉ 3 mảng thực sự gắn tàu, loại hẳn OM/PORT/OTHER.
 const TM_VESSEL_SEGMENTS=['VESSEL_SERVICE','VESSEL_TECH','VESSEL_MGMT'];
+// v3.20.425: 3 hàm dùng CHUNG cho renderThuongMai() + modal "Công nợ khách hàng" mới (Sếp: "Tích mỗi
+// dòng mở bảng xem nhanh, chi tiết theo khách hàng, không chuyển tab") — tránh viết trùng logic lọc
+// TM_VESSEL_SEGMENTS + tính công nợ ở 2 nơi (rủi ro lệch số như đã gặp ở Danh sách dự án).
+function _tmVesselProjectIds(){ return (S.projects||[]).filter(p=>p&&!p._deleted&&TM_VESSEL_SEGMENTS.includes(p.segment)).map(p=>p.id); }
+function _tmArAll(){ const ids=_tmVesselProjectIds(); return (AccountingService.receivables()||[]).filter(r=>r && !r._isCreditNote && !r.excludeFromPl && ids.includes(r.projectId)); }
+// v3.20.425 (Sếp: "Kiểm tra lại: số phải thu trong module Thương Mại" — RÀ RA LỖI KHÁC: arOverdue cũ
+// cộng thẳng remain của MỌI đồng tiền, không toDisplay() — CÙNG LỖI đã sửa cho "Top khách hàng" ở
+// v3.20.400 nhưng lúc đó bỏ sót đúng số này): map theo khách hàng, cả 2 số ĐÃ quy đổi displayCcy().
+function _tmDebtByClient(){
+  const today=todayISO(), _dispCcy=displayCcy(); const map={};
+  _tmArAll().forEach(r=>{
+    const remain=(typeof arRemaining==='function'?arRemaining(r):0);
+    if(remain<=0.5) return;
+    const ccy=(r.ccy||'VND').toUpperCase();
+    const remainDisp=toDisplay(remain, ccy);
+    const overdue=!!(r.dueDate && r.dueDate<today);
+    const k=r.partner||'(chưa đặt tên)';
+    map[k]=map[k]||{total:0, overdue:0};
+    map[k].total+=remainDisp;
+    if(overdue) map[k].overdue+=remainDisp;
+  });
+  return map;
+}
+// v3.20.425 (Sếp: "Tích mỗi dòng mở bảng xem nhanh, chi tiết theo khách hàng, không chuyển tab"):
+// bấm KPI "Công nợ khách hàng" ở Tổng quan Thương mại → mở MODAL (không chuyển trang) — breakdown
+// từng khách hàng, bấm 1 dòng khách hàng → mở tiếp modal chi tiết (danh sách từng phiếu AR còn nợ).
+function openTmDebtByCustomerModal(){
+  const _dispCcy=displayCcy();
+  const map=_tmDebtByClient();
+  const rows=Object.entries(map).sort((a,b)=>b[1].total-a[1].total);
+  const body=`<div style="font-size:11px;color:var(--muted);margin-bottom:8px">Chỉ tính dự án gắn Tàu (đúng phạm vi Tổng quan Thương mại) — bấm 1 dòng để xem chi tiết từng phiếu.</div>
+    <div class="tbl-scroll" style="max-height:60vh"><table class="tbl">
+      <thead><tr><th>Khách hàng</th><th class="r">Tổng công nợ</th><th class="r">Quá hạn</th></tr></thead>
+      <tbody>${rows.length?rows.map(([name,c])=>`<tr style="cursor:pointer" onclick="openTmCustomerArDetail('${esc(name)}')">
+          <td>${esc(name)}</td>
+          <td class="r num">${fmt(c.total)} ${esc(_dispCcy)}</td>
+          <td class="r num" style="${c.overdue>0.5?'color:var(--bad);font-weight:600':''}">${c.overdue>0.5?fmt(c.overdue)+' '+esc(_dispCcy):'—'}</td>
+        </tr>`).join(''):'<tr><td class="empty" colspan="3">Không có công nợ</td></tr>'}</tbody>
+    </table></div>`;
+  openModal('💳 Công nợ khách hàng', body, `<button class="btn-sec" onclick="closeModal()">Đóng</button>`);
+}
+function openTmCustomerArDetail(name){
+  const today=todayISO(), _dispCcy=displayCcy();
+  const rows=_tmArAll().filter(r=>(r.partner||'(chưa đặt tên)')===name).map(r=>({r, remain:(typeof arRemaining==='function'?arRemaining(r):0)}))
+    .filter(x=>x.remain>0.5).sort((a,b)=>String(a.r.dueDate||'').localeCompare(String(b.r.dueDate||'')));
+  const body=`<div class="tbl-scroll" style="max-height:60vh"><table class="tbl">
+      <thead><tr><th>Số HĐ</th><th>Ngày lập</th><th>Hạn TT</th><th class="r">Còn phải thu</th></tr></thead>
+      <tbody>${rows.length?rows.map(({r,remain})=>{
+        const overdue=!!(r.dueDate && r.dueDate<today);
+        return `<tr>
+          <td class="ds-t-sub" style="font-family:var(--font-mono)">${esc(r.invoiceNo||String(r.id).slice(-6))}</td>
+          <td>${esc(r.issueDate||'—')}</td>
+          <td style="${overdue?'color:var(--bad);font-weight:600':''}">${esc(r.dueDate||'—')}${overdue?' ⚠':''}</td>
+          <td class="r num">${fmt(toDisplay(remain,(r.ccy||'VND').toUpperCase()))} ${esc(_dispCcy)}</td>
+        </tr>`;
+      }).join(''):'<tr><td class="empty" colspan="4">Không có công nợ</td></tr>'}</tbody>
+    </table></div>`;
+  openModalWithBack('📋 Công nợ — '+esc(name), body, `<button class="btn-sec" onclick="closeModal()">Đóng</button>`, ()=>openTmDebtByCustomerModal(), '← Quay lại danh sách');
+}
 function renderThuongMai(){
   const box=document.getElementById('thuong-mai-body'); if(!box) return;
   const _esc=x=>(typeof esc==='function')?esc(x):String(x==null?'':x);
@@ -44300,16 +44422,19 @@ function renderThuongMai(){
   const soon30=new Date(Date.now()+30*86400000).toISOString().slice(0,10);
   const expiringSoon=activeProjects.filter(p=>p.end && p.end<=soon30).length;
 
-  // ---- Doanh thu YTD (AR, mọi công ty — trang này chỉ Admin/BOD/KTT vào được, không cần lọc thêm) ----
-  const arAll=(AccountingService.receivables()||[]).filter(r=>r && !r._isCreditNote && !r.excludeFromPl && _vProjectIds.includes(r.projectId));
-  let revenueYtd=0, arOverdue=0;
-  arAll.forEach(r=>{
-    if(String(r.issueDate||'').slice(0,4)===_yr) revenueYtd+=(+r.amountNet||+r.amount||0);
-    const gross=+r.amountGross||+r.amount||0;
-    const paid=(r.payments||[]).reduce((s,p)=>s+(+p.amount||0),0);
-    const remain=gross-paid;
-    if(remain>0.5 && r.dueDate && r.dueDate<today) arOverdue+=remain;
-  });
+  // ---- Doanh thu YTD + Công nợ khách hàng (AR, mọi công ty — trang này Admin/BOD/KTT/nhóm TM vào được) ----
+  const arAll=_tmArAll();   /* v3.20.425: dùng hàm chung */
+  // v3.20.425 (Sếp: "Kiểm tra lại: số phải thu"): revenueYtd cũ cộng thẳng mọi đồng tiền, không
+  // toDisplay() — cùng lỗi đã sửa cho Top khách hàng (v3.20.400), sửa nốt ở đây.
+  let revenueYtd=0;
+  arAll.forEach(r=>{ if(String(r.issueDate||'').slice(0,4)===_yr) revenueYtd+=toDisplay(+r.amountNet||+r.amount||0, (r.ccy||'VND').toUpperCase()); });
+  // v3.20.425 (Sếp — ảnh: "Công nợ khách hàng: tổng công nợ và ghi chú: công nợ quá hạn. Tích mỗi
+  // dòng mở bảng xem nhanh, chi tiết theo khách hàng, không chuyển tab"): đổi KPI cũ "Công nợ khách
+  // hàng quá hạn" (chỉ hiện phần quá hạn) → "Công nợ khách hàng" hiện TỔNG công nợ, quá hạn xuống ghi
+  // chú; bấm mở modal breakdown theo khách hàng (_tmDebtByClient() — dùng hàm chung, không tính lại).
+  const _tmDebtMap=_tmDebtByClient();
+  const arRemainTotal=Object.values(_tmDebtMap).reduce((s,c)=>s+c.total,0);
+  const arOverdue=Object.values(_tmDebtMap).reduce((s,c)=>s+c.overdue,0);
 
   // ---- Top khách hàng (theo doanh thu, top 5) ----
   // v3.20.400 (Sếp — ảnh: "Có doanh thu = ngoại tệ: quy đổi + ghi chú số tiền gốc"): PHÁT HIỆN LỖI —
@@ -44393,7 +44518,7 @@ function renderThuongMai(){
     <div class="co-grid" style="margin-bottom:20px">
       ${kpi('Giá trị HĐ đang hiệu lực', _f(totalContractValue), activeProjects.length+' hợp đồng'+(expiringSoon?' · ⚠ '+expiringSoon+' sắp hết hạn (≤30 ngày)':''))}
       ${kpi('Doanh thu YTD '+_yr, _f(revenueYtd))}
-      ${kpi('Công nợ khách hàng quá hạn', _f(arOverdue))}
+      ${kpi('Công nợ khách hàng', _f(arRemainTotal), 'Quá hạn: '+_f(arOverdue), 'openTmDebtByCustomerModal()')}
       ${kpi('Đội tàu On-hire/Available', (fleetCount.onhire||0)+'/'+(fleetCount.available||0), _fleet.length+' tàu tổng')}
     </div>
 
@@ -94823,7 +94948,12 @@ const FUNC_GROUPS=[
   // quyền thao tác nào.
   {k:'TAU',   label:'Quản lý tàu',            tabs:['vessels','operations','inventory']},
   {k:'KHO',   label:'Tài sản – Kho',          tabs:['fixed_assets','tools','inventory']},
-  {k:'TV',    label:'Thư viện',               tabs:['catalog','library']}
+  {k:'TV',    label:'Thư viện',               tabs:['catalog','library']},
+  // v3.20.425 (Sếp: "Thêm nhóm chức năng Thương mại trong phân quyền, NV thuộc nhóm: sử dụng giao
+  // diện Thương mại"): NV tick nhóm này thấy tab Thương mại (canAccessTab đã sửa thêm ở dưới) — TRỪ
+  // mục "Performance" (Expected Revenue + Vessel Performance), vẫn chỉ Admin/BOD/Trưởng bộ phận nhóm
+  // này mới thấy (chặn riêng trong tmSwitchView(), không liên quan gì đến việc cấp tab ở đây).
+  {k:'TM',    label:'Thương mại',             tabs:['thuong_mai']}
 ];
 function funcGroupLabel(k){ const g=FUNC_GROUPS.find(x=>x.k===k); return g?g.label:k; }
 function funcGroupTabs(k){ const g=FUNC_GROUPS.find(x=>x.k===k); return g?g.tabs.slice():[]; }
@@ -94832,7 +94962,10 @@ function funcGroupTabs(k){ const g=FUNC_GROUPS.find(x=>x.k===k); return g?g.tabs
 //   bằng 1 hàm tổng quát, đọc đúng thứ tự funcGroups đã tick, dễ mở rộng thêm TCKT sau này mà không
 //   phải viết nhánh mới): map nhóm chức năng → trang dashboard tương ứng (nhóm nào chưa có dashboard
 //   riêng — KHO/TV — thì không có trong bảng này, tự rơi về hành vi cũ allowedTabs[0]).
-const FUNC_GROUP_DASHBOARD_PAGE={TCKT:'fin_accounting', HR:'hrm', TAU:'vm_dashboard'};
+// v3.20.426 (Sếp: "NV thuộc nhóm Thương mại: khi mở phải mở ngay Giao diện thương mại?" — đúng, khớp
+// cơ chế đã có cho TCKT/HR/TAU): thêm TM → 'thuong_mai' vào bảng ánh xạ — NV thuộc nhóm Thương mại
+// giờ vào app là thẳng dashboard Thương mại luôn, không cần tự bấm tab.
+const FUNC_GROUP_DASHBOARD_PAGE={TCKT:'fin_accounting', HR:'hrm', TAU:'vm_dashboard', TM:'thuong_mai'};
 function defaultGroupDashboardPage(allowedTabs){
   if(!CURRENT_USER || CURRENT_ROLE==='admin') return null;
   // Quản lý tàu (VM): quyền RIÊNG BIỆT (isVesselManager), không thuộc cơ chế Nhóm chức năng/Trưởng bộ
@@ -99375,7 +99508,11 @@ function canAccessTab(tabId){
   if(tabId==='dashboard') return false;  // admin-only
   // v3.20.342 (Sếp: "Ai được xem Dashboard Thương mại: Admin/BOD/KTT (như Báo cáo)"): isAdmin() đã
   // bypass từ đầu hàm — chỉ cần thêm BOD/canManageUsers (KTT) ở đây.
-  if(tabId==='thuong_mai') return !!(CURRENT_USER && (CURRENT_USER.isBOD || CURRENT_USER.canManageUsers));
+  // v3.20.425 (Sếp: "Thêm nhóm chức năng Thương mại... NV thuộc nhóm: sử dụng giao diện Thương mại"):
+  // MỞ THÊM cho NV thuộc funcGroups TM — không thay 2 điều kiện cũ (BOD/KTT vẫn giữ nguyên như trước).
+  // Riêng mục "Performance" trong module vẫn CHỈ Admin/BOD/Trưởng bộ phận TM — chặn RIÊNG trong
+  // tmSwitchView()/_tmCanPerf(), không phải ở đây (ở đây chỉ quyết định có vào được module hay không).
+  if(tabId==='thuong_mai') return !!(CURRENT_USER && (CURRENT_USER.isBOD || CURRENT_USER.canManageUsers || (Array.isArray(CURRENT_USER.funcGroups) && CURRENT_USER.funcGroups.includes('TM'))));
   if(tabId==='salary_fund') return false;  // v1.32: admin-only
   // v3.20.314 (Sếp: "Tạo quyền: chấm công - Chọn bộ phận/công ty con/chuyên gia/O&M"): tab Timesheet
   // chỉ cần có ÍT NHẤT 1 phạm vi BCC được cấp (bccScopes) — không liên quan gì Nhóm chức năng/isDeptHead.
@@ -101015,7 +101152,24 @@ function tmOffhireDaysNew(vid, winStartMs, winEndMs){
   });
   return Math.max(0, totalDays-onDays-mobDemobDays-dockDays);
 }
+// v3.20.425 (Sếp: "Chỉ chặn Performance: admin và Trưởng bộ phận TM" — xác nhận cả 2 mục Expected
+// Revenue+Vessel Performance, và BOD vẫn được xem): Admin/BOD luôn qua; NV thường CHỈ qua khi là
+// Trưởng bộ phận (isDeptHead) CỦA ĐÚNG nhóm chức năng Thương mại (funcGroups includes 'TM') — đúng
+// khuôn "Trưởng bộ phận X" đã dùng cho TCKT (dòng ~95050)/HR (dòng ~17053), không phải quyền riêng.
+function _tmCanPerf(){
+  return isAdmin() || !!(CURRENT_USER && (CURRENT_USER.isBOD || (CURRENT_USER.isDeptHead && Array.isArray(CURRENT_USER.funcGroups) && CURRENT_USER.funcGroups.includes('TM'))));
+}
 function tmSwitchView(v){
+  // v3.20.425: chặn CỨNG tại đây (không chỉ ẩn nút) — gọi thẳng tmSwitchView('perf') qua console/link
+  // vẫn bị chặn, rơi về 'dash'. Đồng thời ẩn/hiện 2 mục dưới header Performance mỗi lần vào trang —
+  // chạy lại thường xuyên đề phòng đổi quyền (isDeptHead/funcGroups) giữa session.
+  const _canPerf=_tmCanPerf();
+  if((v==='revexp'||v==='perf') && !_canPerf){ toast('Chỉ Admin/BOD/Trưởng bộ phận Thương mại được xem mục này','bad'); v='dash'; }
+  try{
+    const _hdr=document.getElementById('tm-hdr-perf'); if(_hdr) _hdr.style.display=_canPerf?'':'none';
+    const _r1=document.getElementById('tm-tab-revexp'); if(_r1) _r1.style.display=_canPerf?'':'none';
+    const _r2=document.getElementById('tm-tab-perf'); if(_r2) _r2.style.display=_canPerf?'':'none';
+  }catch(e){}
   window._tmCurView=v;
   const views={dash:'tm-view-dash', create:'tm-view-create', list:'tm-view-list', pending:'tm-view-pending', active:'tm-view-active', done:'tm-view-done', contracts:'tm-view-contracts', templates:'tm-view-templates', review:'tm-view-review', revexp:'tm-view-revexp', perf:'tm-view-perf'};
   const tabs={dash:'tm-tab-dash', create:'tm-tab-create', list:'tm-tab-list', pending:'tm-tab-pending', active:'tm-tab-active', done:'tm-tab-done', contracts:'tm-tab-contracts', templates:'tm-tab-templates', review:'tm-tab-review', revexp:'tm-tab-revexp', perf:'tm-tab-perf'};
