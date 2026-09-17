@@ -4292,7 +4292,7 @@ const WH_TYPES = {
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.63.17';
+const APP_VERSION='3.63.23';
 /* HOTFIX 3.12.17-email: CHẶN TRIỆT ĐỂ gửi email TỰ ĐỘNG (mất kiểm soát — spam quota Google).
    Email phải do NV được phân quyền CHỦ ĐỘNG chọn gửi. Cờ này:
    (1) chặn auto-SCAN tạo email (hrmScanExpiries/vesselCertScanExpiries);
@@ -6967,7 +6967,6 @@ async function authAction(){
     try{ logAuditEvent('login',{role:CURRENT_ROLE}); }catch(e){}
     resetIdleTimer();
     startMaxSessionTimer();
-    // v3.09.63 (ADR-010 Bước 1): cảnh báo sớm dung lượng localStorage sau khi đăng nhập (chỉ cảnh báo, không xóa)
     try{ setTimeout(()=>{ try{ storageHealthAutoCheck(); }catch(_){} }, 1500); }catch(e){}
     // v3.03.30: chế độ song song — NV vừa đăng nhập bằng tên cũ nhưng đã có email công ty → nhắc nhẹ
     if(window._emailLoginReminder){
@@ -24238,20 +24237,33 @@ function payVerifyExportBB(){
   const dCells=R.cells.filter(c=>c.xls==null);
   sumRow('Ô trống/không phải số — lỗi file (Phần D)',dCells.length);
   push([]);
-  wide(SB('PHẦN B — CHI TIẾT Ô LỆCH (app KHÔNG tự sửa — hai bộ phận rà từng dòng, chọn Phân loại + ghi nguyên nhân)'));
-  push(['STT','MSNV','Họ tên','Chỉ tiêu','Cột Excel nguồn','Số APP','Số EXCEL','Lệch (Excel−App)','Phân loại (chọn 1)*','Ghi chú nguyên nhân — bộ phận rà điền'].map((t,i)=>HC(t,i>=5&&i<=7?'right':'left')));
-  let stt=0, sumApp=0, sumXls=0, sumAbs=0;
-  R.cells.filter(c=>!c.ok && c.xls!=null).forEach(c=>{
-    stt++; const d=Math.round(c.xls-c.app);
-    sumApp+=Math.round(c.app); sumXls+=Math.round(c.xls); sumAbs+=Math.abs(d);
-    const bg=(stt%2===0&&styled)?EE.C.zebra:null;
-    push([DC(stt,{align:'center',bg}),DC(c.msnv,{bg}),DC(c.name||'',{bg}),DC(fLabel(c.key),{bg,color:'9C3A2E',bold:true}),DC(colTitle(c.key),{bg}),
-      DC(Math.round(c.app),{num:NUMF,align:'right',bg}),DC(Math.round(c.xls),{num:NUMF,align:'right',bg}),
-      DC(d,{num:NUMF,align:'right',bg,color:'9C3A2E',bold:true}),DC('',{bg}),DC('',{bg})]);
+  wide(SB('PHẦN B — CHI TIẾT LỆCH THEO NHÂN VIÊN (mỗi NV 1 dòng — Số APP/Số HR là Thực lãnh; các cột phía sau là lệch từng chỉ tiêu cấu thành, app KHÔNG tự sửa — hai bộ phận rà, chọn Phân loại + ghi nguyên nhân)'));
+  // v3.63.22 (Sếp: "Không. Mỗi NV 1 dòng. Số trên app - Số HR. Chi tiết lệch: các cột mở rộng tiếp
+  // sau"): đổi từ 1-dòng-mỗi-cặp-NV×cột sang 1-dòng-mỗi-NV, Thực lãnh (Số APP/Số HR/Lệch) làm 3 cột
+  // đầu, các chỉ tiêu cấu thành khác (BHXH/Thuế TNCN/Lương cơ bản...) mở rộng thành cột riêng phía
+  // sau — chỉ điền số khi CHÍNH chỉ tiêu đó lệch, để trống nếu khớp (không suy diễn/gộp).
+  const _detailKeys=PAY_VERIFY_FIELDS.filter(f=>f.key!=='takeHome' && R.cells.some(c=>c.key===f.key));
+  const _empRows=(()=>{ const byMs={}; R.cells.forEach(c=>{ (byMs[c.msnv]=byMs[c.msnv]||{msnv:c.msnv,name:c.name,cells:{}}).cells[c.key]=c; }); return Object.values(byMs); })();
+  const _empBad=_empRows.filter(e=>Object.values(e.cells).some(c=>!c.ok && c.xls!=null));
+  push(['STT','MSNV','Họ tên','Số APP (Thực lãnh)','Số HR (Thực lãnh)','Lệch Thực lãnh', ..._detailKeys.map(f=>'Lệch '+f.label),'Phân loại (chọn 1)*','Ghi chú nguyên nhân — bộ phận rà điền']
+    .map((t,i)=>HC(t,i>=3&&i<3+3+_detailKeys.length?'right':'left')));
+  let stt2=0;
+  _empBad.forEach(e=>{
+    stt2++;
+    const th=e.cells['takeHome'];
+    const thApp=th?Math.round(th.app):null, thXls=(th&&th.xls!=null)?Math.round(th.xls):null;
+    const thDiff=(thApp!=null&&thXls!=null)?(thXls-thApp):null;
+    const bg=(stt2%2===0&&styled)?EE.C.zebra:null;
+    const detailCells=_detailKeys.map(f=>{ const c=e.cells[f.key];
+      if(!c || c.ok || c.xls==null) return DC('',{bg,align:'right'});
+      return DC(Math.round(c.xls-c.app),{num:NUMF,align:'right',bg,color:'9C3A2E',bold:true});
+    });
+    push([DC(stt2,{align:'center',bg}),DC(e.msnv,{bg}),DC(e.name||'',{bg}),
+      DC(thApp,{num:NUMF,align:'right',bg}),DC(thXls,{num:NUMF,align:'right',bg}),
+      DC(thDiff,{num:NUMF,align:'right',bg,color:thDiff?'9C3A2E':undefined,bold:!!thDiff}),
+      ...detailCells, DC('',{bg}),DC('',{bg})]);
   });
-  if(!stt) wide(DC('(Không có ô lệch số — mọi lệch nếu có nằm ở Phần C/D)'));
-  else{ merges.push({s:{r:r,c:0},e:{r:r,c:4}});
-    push([TC('TỔNG LỆCH TUYỆT ĐỐI','','','','',),'','','','',TC(sumApp,{num:NUMF,align:'right'}),TC(sumXls,{num:NUMF,align:'right'}),TC(sumAbs,{num:NUMF,align:'right'}),TC(''),TC('')].slice(0,10)); }
+  if(!_empBad.length) wide(DC('(Không có NV lệch — mọi lệch nếu có nằm ở Phần C/D)'));
   wide(DC('* Phân loại: ① Khác định nghĩa cột · ② Khác công thức tính · ③ Lệch dữ liệu nguồn (thẻ lương/BCC/phát sinh) · ④ Lỗi file Excel · ⑤ Nghi sai app (chuyển IT kiểm engine) · ⑥ Khác',{color:'6B7280'}));
   push([]);
   wide(SB('PHẦN C — KHÔNG KHỚP HAI CHIỀU'));
@@ -24271,7 +24283,11 @@ function payVerifyExportBB(){
   const U=styled?XS.utils:XLSX.utils;
   const ws=U.aoa_to_sheet(aoa);
   ws['!merges']=merges;
-  ws['!cols']=[{wch:14},{wch:11},{wch:22},{wch:12},{wch:26},{wch:14},{wch:14},{wch:15},{wch:18},{wch:42}];
+  // v3.63.22: Phần B giờ có SỐ CỘT THAY ĐỔI theo số chỉ tiêu chi tiết thực tế đã so trong kỳ (mở
+  // rộng động) — độ rộng cột không còn cố định 10, tính theo đúng độ dài dòng dài nhất trong aoa.
+  const _maxCols=Math.max(...aoa.map(row=>row.length));
+  const _fixedW=[14,11,22,14,14,13];   // STT/MSNV/Họ tên/Số APP/Số HR/Lệch Thực lãnh
+  ws['!cols']=Array.from({length:_maxCols},(_,i)=>({wch:_fixedW[i]||(i>=_maxCols-2?(i===_maxCols-2?18:42):13)}));
   ws['!rows']=aoa.map((_,i)=>({hpt:(i===3)?24:((i===4)?20:15)}));
   const wb=U.book_new(); U.book_append_sheet(wb,ws,'Biên bản lệch');
   (styled?XS:XLSX).writeFile(wb,bbNo+'.xlsx');
@@ -75669,6 +75685,24 @@ function renderExecDashboard(){
     }).filter(r=>r.rev!==0||r.cost!==0);
     if(_omRev!==0||_omCost!==0) _vesselPnlRows.push({id:'__OM__', name:'O&M (không gắn tàu)', icon:'⚙', rev:_omRev, cost:_omCost, margin:_omRev-_omCost});
     _vesselPnlRows.sort((a,b)=>b.margin-a.margin);
+    // v3.63.18 (Sếp: "Mỗi tàu tạo 1 bảng P/L theo dự án"): thay vì 1 bảng gộp + bấm mở modal, mỗi
+    // tàu/O&M hiện ngay 1 bảng riêng (tập hợp theo dự án) NGAY TRÊN TRANG — bấm 1 dự án vẫn mở tiếp
+    // chi tiết chứng từ qua dashProjectPnlOpen() có sẵn, không đổi cách đó.
+    const _vesselPnlBlocks=_vesselPnlRows.map(r=>{
+      const isOm=(r.id==='__OM__');
+      const rprojs=(S.projects||[]).filter(p=>p&&!p.archived&&(isOm?p.segment==='OM':p.vesselId===r.id)).map(p=>{
+        const pr=projectRev(p.id), pc=projectCost(p.id); return {p, rev:pr, cost:pc, margin:pr-pc};
+      }).filter(x=>x.rev!==0||x.cost!==0).sort((a,b)=>b.margin-a.margin);
+      const rows=rprojs.map(x=>`<tr style="cursor:pointer" onclick="dashProjectPnlOpen('${esc(x.p.id)}')"><td>${esc(x.p.code||x.p.name)}</td><td style="text-align:right;font-family:var(--font-mono)">${fmt(x.rev)}</td><td style="text-align:right;font-family:var(--font-mono)">${fmt(x.cost)}</td><td style="text-align:right;font-family:var(--font-mono);font-weight:700;color:${x.margin>=0?'var(--good)':'var(--bad)'}">${fmt(x.margin)}</td></tr>`).join('');
+      return `<div style="margin-bottom:16px">
+        <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:6px">
+          <div style="font-size:12.5px;font-weight:700">${r.icon} ${esc(r.name)}</div>
+          <div style="font-size:11px;color:var(--muted)">Doanh thu ${fmt(r.rev)} · Chi phí ${fmt(r.cost)} · Margin <b style="color:${r.margin>=0?'var(--good)':'var(--bad)'}">${fmt(r.margin)}</b></div>
+        </div>
+        <table class="co-tbl"><thead><tr><th>Dự án</th><th style="text-align:right">Doanh thu</th><th style="text-align:right">Chi phí</th><th style="text-align:right">Margin</th></tr></thead>
+        <tbody>${rows||'<tr><td colspan="4" style="padding:10px;text-align:center;color:var(--muted);font-size:11px">Chưa có dự án phát sinh</td></tr>'}</tbody></table>
+      </div>`;
+    }).join('');
     // ---- DỰ ÁN ----
     const activeProj=projects.filter(p=>p.projStatus==='active'||!p.projStatus).length;
     let totRev=0,totCost=0;
@@ -75747,15 +75781,9 @@ function renderExecDashboard(){
           <div style="font-family:var(--font-display);font-size:16px;font-weight:700">📊 Tổng quan điều hành (CEO/BOD)</div>
           <div style="font-size:10px;color:var(--muted)">Cập nhật realtime · ${esc(new Date().toLocaleString('vi-VN'))}</div>
         </div>
-        <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:18px">
-          <div>
-            <div style="font-size:12px;font-weight:600;margin-bottom:8px">1. P&amp;L hợp nhất — doanh thu và lợi nhuận theo tháng ${_yr}</div>
-            <div style="position:relative;width:100%;height:220px"><canvas id="ed-c1" role="img" aria-label="Doanh thu và lợi nhuận theo tháng, so với kế hoạch"></canvas></div>
-          </div>
-          <div>
-            <div style="font-size:12px;font-weight:600;margin-bottom:8px">2. P&amp;L theo mảng — đóng góp doanh thu</div>
-            <div style="position:relative;width:100%;height:220px"><canvas id="ed-c2" role="img" aria-label="Doanh thu theo từng mảng kinh doanh"></canvas></div>
-          </div>
+        <div style="margin-bottom:18px">
+          <div style="font-size:12px;font-weight:600;margin-bottom:8px">2. P&amp;L theo mảng — đóng góp doanh thu</div>
+          <div style="position:relative;width:100%;height:220px"><canvas id="ed-c2" role="img" aria-label="Doanh thu theo từng mảng kinh doanh"></canvas></div>
         </div>
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:18px">
           <div>
@@ -75772,9 +75800,13 @@ function renderExecDashboard(){
           <div style="position:relative;width:100%;height:200px"><canvas id="ed-c5" role="img" aria-label="Dòng tiền vào, ra và số dư cuối kỳ 6 tháng tới"></canvas></div>
         </div>
         <div style="font-size:11px;color:var(--muted);text-align:right;margin-bottom:6px">Bấm vào cột/thanh trên biểu đồ để xem chi tiết chứng từ ngay tại đây (không chuyển tab)</div>
-        <div style="font-size:12px;font-weight:600;margin:10px 0 8px">6. P&L theo tàu — bấm dòng xem chi tiết theo dự án</div>
-        <table class="co-tbl" style="margin-bottom:14px"><thead><tr><th>Tàu</th><th style="text-align:right">Doanh thu</th><th style="text-align:right">Chi phí</th><th style="text-align:right">Margin</th></tr></thead>
-        <tbody>${_vesselPnlRows.length?_vesselPnlRows.map(r=>`<tr style="cursor:pointer" onclick="dashVesselPnlOpen('${esc(r.id)}')"><td>${r.icon} ${esc(r.name)}</td><td style="text-align:right;font-family:var(--font-mono)">${fmt(r.rev)}</td><td style="text-align:right;font-family:var(--font-mono)">${fmt(r.cost)}</td><td style="text-align:right;font-family:var(--font-mono);font-weight:700;color:${r.margin>=0?'var(--good)':'var(--bad)'}">${fmt(r.margin)}</td></tr>`).join(''):'<tr><td colspan="4" style="padding:14px;text-align:center;color:var(--muted)">Chưa có tàu/O&amp;M phát sinh doanh thu/chi phí</td></tr>'}</tbody></table>
+        <div style="font-size:12px;font-weight:600;margin:10px 0 10px">6. P&L theo tàu — mỗi tàu 1 bảng theo dự án, bấm dòng xem chi tiết chứng từ</div>
+        ${_vesselPnlBlocks || '<div style="font-size:11px;color:var(--muted);margin-bottom:14px">Chưa có tàu/O&amp;M phát sinh doanh thu/chi phí</div>'}
+        <!-- v3.63.18 (Sếp: "Chuyển P/L hợp nhất xuống cuối dashboard"): biểu đồ 1 dời xuống cuối cùng. -->
+        <div style="margin:18px 0 4px">
+          <div style="font-size:12px;font-weight:600;margin-bottom:8px">1. P&amp;L hợp nhất — doanh thu và lợi nhuận theo tàu/dự án (năm ${_yr})</div>
+          <div style="position:relative;width:100%;height:220px"><canvas id="ed-c1" role="img" aria-label="Doanh thu và lợi nhuận theo tháng, so với kế hoạch"></canvas></div>
+        </div>
         <!-- v3.63.17 (Sếp — ảnh: "Ẩn 2 phần này" — khối Dự án/Đội tàu/Nhân sự tàu/Kho): ẨN bằng
              display:none (không xoá — dễ bật lại nếu Sếp đổi ý sau). -->
         <div style="display:none">
@@ -75794,11 +75826,13 @@ function renderExecDashboard(){
       if(!els['ed-c1']) return;   // đổi tab giữa lúc tải CDN — bỏ qua
       ids.forEach(id=>{ if(els[id]&&els[id]._chart) els[id]._chart.destroy(); });
       const _mLabels=['T1','T2','T3','T4','T5','T6','T7','T8','T9','T10','T11','T12'];
-      els['ed-c1']._chart=new Chart(els['ed-c1'],{type:'bar',data:{labels:_mLabels,datasets:[
-        {type:'bar',label:'Doanh thu',data:_monthRev,backgroundColor:'#2a78d6',borderRadius:4,order:2},
-        {type:'line',label:'Lợi nhuận',data:_monthProfit,borderColor:'#008300',backgroundColor:'#008300',borderWidth:2,pointRadius:3,tension:0.3,order:1},
-        {type:'line',label:'Kế hoạch',data:_monthBudget,borderColor:'#898781',borderDash:[5,4],borderWidth:2,pointRadius:0,order:0}
-      ]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false}},onClick:(evt,elems)=>{ if(elems&&elems.length) dashMonthArOpen(elems[0].index,_yr); },scales:{y:{ticks:{callback:v=>_short(v)}},x:{grid:{display:false}}}}});
+      // v3.63.19 (Sếp: "Biểu đồ doanh thu-lợi nhuận theo tháng: thay bằng doanh thu lợi nhuận theo
+      // tàu/dự án trong năm tài chính"): đổi trục X từ tháng sang từng tàu/O&M (dùng lại đúng
+      // _vesselPnlRows đã tính cho bảng 6 — không tính lại, không thêm nguồn số liệu mới).
+      els['ed-c1']._chart=new Chart(els['ed-c1'],{type:'bar',data:{labels:_vesselPnlRows.map(r=>r.name),datasets:[
+        {type:'bar',label:'Doanh thu',data:_vesselPnlRows.map(r=>r.rev),backgroundColor:'#2a78d6',borderRadius:4,order:2},
+        {type:'line',label:'Lợi nhuận',data:_vesselPnlRows.map(r=>r.margin),borderColor:'#008300',backgroundColor:'#008300',borderWidth:2,pointRadius:3,tension:0.3,order:1}
+      ]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false}},onClick:(evt,elems)=>{ if(elems&&elems.length) dashVesselPnlOpen(_vesselPnlRows[elems[0].index].id); },scales:{y:{ticks:{callback:v=>_short(v)}},x:{grid:{display:false}}}}});
       els['ed-c2']._chart=new Chart(els['ed-c2'],{type:'bar',data:{labels:_segRows.map(r=>r.label),datasets:[{data:_segRows.map(r=>r.val),backgroundColor:'#2a78d6',borderRadius:4}]},
         options:{indexAxis:'y',responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false}},onClick:(evt,elems)=>{ if(elems&&elems.length) dashSegmentOpen(_segRows[elems[0].index].key,_segRows[elems[0].index].label); },scales:{x:{ticks:{callback:v=>_short(v)}},y:{grid:{display:false}}}}});
       els['ed-c3']._chart=new Chart(els['ed-c3'],{type:'bar',data:{labels:['Phải thu '+_yr],datasets:[
@@ -100743,50 +100777,43 @@ function hrmExportExcel(){
     if(ra!==rb) return ra-rb;
     return empIdSort(a,b);   /* v3.13.82 */
   });
-  const rows=sorted.map((e,i)=>({
-    'STT':i+1,
-    'MSNV':e.smartId||'',
-    'Họ và tên':e.fullName||'',
-    'Giới tính':genderLabel(e.gender),
-    'Ngày sinh':e.dob||'',
-    'Nơi sinh':e.pob||'',
-    'Tình trạng hôn nhân':e.maritalStatus||'',
-    'Quốc tịch':e.nationality||'',
-    'CCCD/CMND':e.idNo||'',
-    'Ngày cấp CCCD':e.idIssueDate||'',
-    'Nơi cấp CCCD':e.idIssuePlace||'',
-    'Điện thoại':e.phone||'',
-    'Email':e.email||'',
-    'Địa chỉ thường trú':e.addrPermanent||'',
-    'Địa chỉ hiện tại':e.addrCurrent||'',
-    'Liên hệ khẩn cấp':e.emergencyContact||'',
-    'Loại nhân sự':typeLabel(e.type),
-    'Bộ phận':deptFull(e.dept),
-    'Chức danh':e.title||'',
-    'Tàu gắn (crew)':vName(e.linkVesselId),
-    'Ngày nhận việc':e.startDate||'',
-    'Ngày thử việc':e.probationDate||'',
-    'Ngày ký HĐLĐ':e.contractSignDate||'',
-    'Loại HĐLĐ':ctLabel(e.contractType),
-    'Ngày hết hạn HĐLĐ':e.contractEndDate||'',
-    'Hết hạn Visa':e.visaExpiry||'',
-    'Hết hạn Work Permit':e.wpExpiry||'',
-    'Hết hạn Hộ chiếu':e.passportExpiry||'',
-    'Ngân hàng':e.bankName||'',
-    'Chủ tài khoản':e.bankAccName||'',
-    'Số tài khoản':e.bankAccNo||'',
-    'Chi nhánh NH':e.bankBranch||'',
-    'Trạng thái':statusLabel(e.status),
-    'Ghi chú':e.note||''
-  }));
-  const ws=XLSX.utils.json_to_sheet(rows);
+  const cols=['STT','MSNV','Họ và tên','Giới tính','Ngày sinh','Nơi sinh','Tình trạng hôn nhân','Quốc tịch','CCCD/CMND','Ngày cấp CCCD','Nơi cấp CCCD','Điện thoại','Email','Địa chỉ thường trú','Địa chỉ hiện tại','Liên hệ khẩn cấp','Loại nhân sự','Bộ phận','Chức danh','Tàu gắn (crew)','Ngày nhận việc','Ngày thử việc','Ngày ký HĐLĐ','Loại HĐLĐ','Ngày hết hạn HĐLĐ','Hết hạn Visa','Hết hạn Work Permit','Hết hạn Hộ chiếu','Ngân hàng','Chủ tài khoản','Số tài khoản','Chi nhánh NH','Trạng thái','Ghi chú'];
+  const rows=sorted.map((e,i)=>[
+    i+1, e.smartId||'', e.fullName||'', genderLabel(e.gender), e.dob||'', e.pob||'', e.maritalStatus||'', e.nationality||'',
+    e.idNo||'', e.idIssueDate||'', e.idIssuePlace||'', e.phone||'', e.email||'', e.addrPermanent||'', e.addrCurrent||'', e.emergencyContact||'',
+    typeLabel(e.type), deptFull(e.dept), e.title||'', vName(e.linkVesselId), e.startDate||'', e.probationDate||'', e.contractSignDate||'',
+    ctLabel(e.contractType), e.contractEndDate||'', e.visaExpiry||'', e.wpExpiry||'', e.passportExpiry||'',
+    e.bankName||'', e.bankAccName||'', e.bankAccNo||'', e.bankBranch||'', statusLabel(e.status), e.note||''
+  ]);
+  // v3.63.20 (Sếp: "tất cả các file excel trong app" phải cùng định dạng như file trong app — đợt
+  // Nhân sự): đổi từ XLSX.utils.json_to_sheet thô (không màu/khung) sang ĐÚNG chuẩn ExcelExporter
+  // dùng chung (title/header/data cell có màu-khung-font, zebra xen dòng) — cùng cách bccExportExcel/
+  // _arExportExcelStyled/_opExportExcelStyled/_vatExportExcelStyled đã làm.
+  const XS=window.XLSXStyle;
+  const styled=!!(ExcelExporter.ready&&ExcelExporter.ready()&&XS);
+  if(!styled) toast('⚠ Thư viện định dạng Excel chưa tải được — xuất bản THÔ (không màu/khung). Tải lại trang rồi thử lại.','warn');
+  const EE=ExcelExporter;
+  const aoa=[];
+  const R=(...cells)=>aoa.push(cells);
+  if(styled){
+    R(EE.title('DANH SÁCH NHÂN SỰ — SEAHORSE MARINE AND ENERGY JSC'));
+    R(EE.sub('Xuất lúc: '+new Date().toLocaleString('vi-VN')+' · Tổng: '+rows.length+' nhân viên'));
+    R();
+    R(...cols.map(h=>EE.headerCell(h)));
+    rows.forEach((r,idx)=>{ R(...r.map(v=>EE.dataCell(v,{bg:idx%2?EE.colors.zebra:undefined}))); });
+  } else {
+    R(cols);
+    rows.forEach(r=>R(r));
+  }
+  const ws=(styled?XS:XLSX).utils.aoa_to_sheet(aoa);
   // set độ rộng cột hợp lý
-  const keys=Object.keys(rows[0]||{});
-  ws['!cols']=keys.map(k=>{ const maxLen=Math.max(k.length,...rows.map(r=>String(r[k]==null?'':r[k]).length)); return {wch:Math.min(Math.max(maxLen+2,8),40)}; });
-  const wb=XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb, ws, 'DANH SACH NV');
+  ws['!cols']=cols.map((k,ci)=>{ const maxLen=Math.max(k.length,...rows.map(r=>String(r[ci]==null?'':r[ci]).length)); return {wch:Math.min(Math.max(maxLen+2,8),40)}; });
+  if(styled) ws['!merges']=[{s:{r:0,c:0},e:{r:0,c:cols.length-1}},{s:{r:1,c:0},e:{r:1,c:cols.length-1}}];
+  const U=(styled?XS:XLSX).utils;
+  const wb=U.book_new();
+  U.book_append_sheet(wb, ws, 'DANH SACH NV');
   const fname='DS-Nhan-Su-Day-Du-'+new Date().toISOString().slice(0,10)+'.xlsx';
-  XLSX.writeFile(wb, fname);
+  (styled?XS:XLSX).writeFile(wb, fname);
   toast('✓ Đã xuất '+rows.length+' nhân viên ra Excel');
 }
 
