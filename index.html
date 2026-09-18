@@ -4423,7 +4423,7 @@ const WH_TYPES = {
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.63.89';
+const APP_VERSION='3.63.92';
 /* HOTFIX 3.12.17-email: CHẶN TRIỆT ĐỂ gửi email TỰ ĐỘNG (mất kiểm soát — spam quota Google).
    Email phải do NV được phân quyền CHỦ ĐỘNG chọn gửi. Cờ này:
    (1) chặn auto-SCAN tạo email (hrmScanExpiries/vesselCertScanExpiries);
@@ -18870,6 +18870,14 @@ function bccAllPossibleScopes(){
   // (đa số trường hợp thật). Phòng ban trộn nhiều công ty → ra nhiều scope, mỗi công ty 1 bảng riêng.
   const todayIso=new Date().toISOString().slice(0,10);
   const allEmps=(HRService.employees()||[]).filter(e=>e && e.status!=='inactive' && e.hrVisibility!=='PAYROLL_ONLY');
+  // v3.63.92 (Sếp — ảnh dropdown "Tạo BCC": "công ty con chỉ hiện 1 dòng cho toàn bộ công ty con —
+  // không tách bộ phận"): TÌM RA LỖI THẬT — vòng lặp dưới đang tách scope 'dept' RIÊNG cho MỖI công
+  // ty (kể cả công ty con), ra hàng chục dòng "Phòng X · Công ty con Y" trùng lặp với đúng 1 dòng
+  // {type:'company'} đã có sẵn cho công ty con đó (dòng dưới, comment v3.20.361) — 2 đường cho cùng
+  // NV công ty con, đúng như Sếp đã chốt SAI ở "Chấm công — Phạm vi BCC" trước đây (v3.63.72), giờ
+  // sửa Y HỆT nguyên tắc đó cho đúng danh sách này: CHỈ tách scope 'dept' riêng cho CÔNG TY MẸ (và NV
+  // chưa gán công ty) — công ty con đã có đủ qua đúng 1 dòng {type:'company'}.
+  const _parentCoId=(typeof getParentCompanyId==='function')?getParentCompanyId():'';
   (HRService.departments()||[]).forEach(d=>{
     const inDept=allEmps.filter(e=>hrDeptCanon(e.dept)===d.code);
     const companiesHere=new Set();
@@ -18879,7 +18887,7 @@ function bccAllPossibleScopes(){
       else companiesHere.add('');   // NV chưa gán công ty nào — vẫn phải có 1 scope để không mất người
     });
     if(!companiesHere.size){ out.push({type:'dept', value:d.code}); return; }   // phòng ban trống hẳn — giữ hành vi cũ
-    companiesHere.forEach(cid=>out.push({type:'dept', value:d.code, companyId:cid||undefined}));
+    companiesHere.forEach(cid=>{ if(!cid || cid===_parentCoId) out.push({type:'dept', value:d.code, companyId:cid||undefined}); });
   });
   (VesselService.vessels()||[]).filter(v=>v&&!v._deleted&&v.status!=='inactive').forEach(v=>out.push({type:'vessel', value:v.id}));
   // v3.20.361 (Sếp — ảnh Công ty con: "tạo BCC không có công ty con?"): THIẾU HẲN loại phạm vi 'company'
@@ -96603,33 +96611,46 @@ function renderKyThuatModule(){
   // ngay sau khi lên bản này, trước khi HR kịp vào gắn).
   const _ktAssigned=(HRService.departments()||[]).filter(d=>d&&d.dashboardModule==='TECH').map(d=>d.code);
   const KT_DEPTS=_ktAssigned.length?_ktAssigned:['BDA','DRILL','LABTECH'];
+  // v3.63.90 (Sếp: "Hiện đang có chuyên gia tại bộ phận Thương mại và BDA" — nguyên tắc đã chốt: NV
+  // Chuyên gia (e.type='expert'/'expert_om') dùng engine lương + BCC khác hẳn NV phòng thường, dù
+  // vẫn đứng tên ĐÚNG phòng BDA/DRILL/LABTECH như ai khác — không tách được theo mã phòng (khác VPQN
+  // có mã phòng riêng 'OM'), phải tách theo type). Danh sách "Nhân viên" tách riêng khối Chuyên gia;
+  // nút tạo BCC Chuyên gia dùng {type:'expert'} — Sếp xác nhận: 1 BCC CHUNG cho mọi Chuyên gia toàn
+  // công ty là đúng (không tách theo module) vì tham số cột BCC đi theo ĐÚNG scope 'expert' (khớp
+  // engine lương) — không phụ thuộc bấm nút từ module nào.
+  const _isExpert=e=>e&&(e.type==='expert'||e.type==='expert_om');
   if(_ktModView==='timesheet'){
-    const sheets=_modBccSheetsFor(sc=>sc.type==='dept'&&KT_DEPTS.includes(sc.value));
+    const sheets=_modBccSheetsFor(sc=>(sc.type==='dept'&&KT_DEPTS.includes(sc.value))||sc.type==='expert');
     // v3.63.80 (anh: "Không cần tách? App đã có?" — đúng, bccOpenCreateModal() nhận 1 MẢNG nhiều
     // phạm vi đã tự hiện dropdown chọn, không cần 3 nút cứng như v3.63.78 vừa làm dư — quay lại 1 nút
     // duy nhất, đúng khuôn coBccOpenCreateModal() (Công ty con) đã dùng từ trước.
     box.innerHTML=`<div style="font-family:var(--font-display);font-size:16px;font-weight:700;margin-bottom:14px">🗓️ Timesheet Kỹ thuật</div>`
-      +_modBccListHtml(sheets, `<button class="btn-primary" style="font-size:12px" onclick='bccOpenCreateModal(${JSON.stringify(KT_DEPTS.map(code=>({type:'dept',value:code})))})'>➕ Tạo bảng chấm công</button>`);
+      +_modBccListHtml(sheets, `<button class="btn-primary" style="font-size:12px" onclick='bccOpenCreateModal(${JSON.stringify(KT_DEPTS.map(code=>({type:'dept',value:code})))})'>➕ Tạo bảng chấm công</button> <button class="btn-primary" style="font-size:12px" onclick="bccOpenCreateModal({type:'expert',value:'expert'})">➕ BCC Chuyên gia O&amp;M</button>`);
     return;
   }
   if(_ktModView==='staff'){
     // v3.63.78 (Sếp — ảnh: "Tách theo bộ phận"): 3 bộ phận giờ hiện thành 3 khối riêng (mỗi khối 1
     // tiêu đề + 1 bảng), không còn gộp phẳng thành 1 bảng duy nhất như trước.
     const groupsHtml=KT_DEPTS.map(code=>{
-      const emps=_modEmpsByDept(code);
+      const emps=_modEmpsByDept(code).filter(e=>!_isExpert(e));   // v3.63.90: khối phòng ban thường — loại Chuyên gia ra
       const label=esc(typeof hrDeptDisplay==='function'?hrDeptDisplay(code):code);
       return `<div style="margin-bottom:18px">
         <div style="font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);font-weight:700;margin-bottom:6px">${label} <span style="font-weight:400">(${emps.length})</span></div>
         ${_modStaffTable(emps)}
       </div>`;
     }).join('');
+    const experts=_modEmpsByDept(KT_DEPTS).filter(_isExpert);   // v3.63.90: khối Chuyên gia riêng — vẫn đúng người thuộc phòng Kỹ thuật, chỉ tách hiển thị
+    const expertsHtml=experts.length?`<div style="margin-bottom:18px">
+        <div style="font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);font-weight:700;margin-bottom:6px">🎓 Chuyên gia O&amp;M <span style="font-weight:400">(${experts.length})</span></div>
+        ${_modStaffTable(experts)}
+      </div>`:'';
     const emps=_modEmpsByDept(KT_DEPTS);
     box.innerHTML=`
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
         <div style="font-family:var(--font-display);font-size:16px;font-weight:700">👤 Nhân viên Kỹ thuật</div>
         <div style="font-size:10px;color:var(--muted)">${emps.length} người đang làm việc</div>
       </div>
-      ${groupsHtml}`;
+      ${groupsHtml}${expertsHtml}`;
     return;
   }
   const emps=_modEmpsByDept(KT_DEPTS);
@@ -103042,21 +103063,35 @@ function tmOffhireDaysNew(vid, winStartMs, winEndMs){
 function _tmCanPerf(){
   return isAdmin() || !!(CURRENT_USER && (CURRENT_USER.isBOD || (CURRENT_USER.isDeptHead && Array.isArray(CURRENT_USER.funcGroups) && CURRENT_USER.funcGroups.includes('TM'))));
 }
+// v3.63.90 (Sếp: "Hiện đang có chuyên gia tại bộ phận Thương mại và BDA") — cùng nguyên tắc: tách
+// khối Chuyên gia khỏi danh sách NV TMHD thường + thêm nút tạo BCC Chuyên gia (dùng chung 1 BCC
+// {type:'expert'} cho toàn công ty, không tách riêng theo module — Sếp đã xác nhận đúng).
 function renderTmStaff(){
   const box=document.getElementById('tm-staff-body'); if(!box) return;
-  const emps=_modEmpsByDept('TMHD');
+  // v3.63.91 (Sếp — ảnh: "sai nghiêm trọng: BCC chuyên gia TM mở nhầm nhóm Chuyên gia O&M. Yêu cầu:
+  // phân biệt nghiêm 2 nhóm: Chuyên gia O&M và Chuyên gia VP (Expat), BCC mảng nào lọc đúng mảng đó"):
+  // TM dùng đúng type='expat' (Chuyên gia VP), KHÔNG dùng chung type='expert'/'expert_om' (Chuyên gia
+  // O&M) như Kỹ thuật — 2 nhóm khác hẳn, không được lẫn.
+  const _isExpat=e=>e&&e.type==='expat';
+  const all=_modEmpsByDept('TMHD');
+  const emps=all.filter(e=>!_isExpat(e));
+  const experts=all.filter(_isExpat);
   box.innerHTML=`
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
       <div style="font-family:var(--font-display);font-size:16px;font-weight:700">👤 Nhân viên Thương mại</div>
-      <div style="font-size:10px;color:var(--muted)">${emps.length} người đang làm việc</div>
+      <div style="font-size:10px;color:var(--muted)">${all.length} người đang làm việc</div>
     </div>
-    ${_modStaffTable(emps)}`;
+    ${_modStaffTable(emps)}
+    ${experts.length?`<div style="margin-top:18px">
+      <div style="font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);font-weight:700;margin-bottom:6px">🎓 Chuyên gia VP (Expat) <span style="font-weight:400">(${experts.length})</span></div>
+      ${_modStaffTable(experts)}
+    </div>`:''}`;
 }
 function renderTmTimesheet(){
   const box=document.getElementById('tm-timesheet-body'); if(!box) return;
-  const sheets=_modBccSheetsFor(sc=>sc.type==='dept'&&sc.value==='TMHD');
+  const sheets=_modBccSheetsFor(sc=>(sc.type==='dept'&&sc.value==='TMHD')||sc.type==='expat');
   box.innerHTML=`<div style="font-family:var(--font-display);font-size:16px;font-weight:700;margin-bottom:14px">🗓️ Timesheet Thương mại</div>`
-    +_modBccListHtml(sheets, `<button class="btn-primary" style="font-size:12px" onclick="bccOpenCreateModal({type:'dept',value:'TMHD'})">➕ Tạo bảng chấm công</button>`);
+    +_modBccListHtml(sheets, `<button class="btn-primary" style="font-size:12px" onclick="bccOpenCreateModal({type:'dept',value:'TMHD'})">➕ Tạo bảng chấm công</button> <button class="btn-primary" style="font-size:12px" onclick="bccOpenCreateModal({type:'expat',value:'expat'})">➕ BCC Chuyên gia VP (Expat)</button>`);
 }
 function tmSwitchView(v){
   // v3.20.425: chặn CỨNG tại đây (không chỉ ẩn nút) — gọi thẳng tmSwitchView('perf') qua console/link
