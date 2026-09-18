@@ -2763,6 +2763,7 @@ span.chip.chip-fixed{display:inline-flex;align-items:center;gap:4px}
 
     <div class="hrm-side-hdr">Phải trả</div>
     <div class="hrm-side-item" data-page="payables" onclick="finGoSection('payables',null,()=>openMultiRowModal('ap'))">+ Thêm Phải trả</div>
+    <div class="hrm-side-item" data-page="payables" onclick="finGoSection('payables',null,()=>openProvisionalAp())">+ Phải trả dự kiến</div>
     <div class="hrm-side-item" data-page="payables" onclick="finGoSection('payables')">📤 Sổ theo dõi Phải trả</div>
     <div class="hrm-side-item" data-page="advances" onclick="navigateToPage('advances')">💸 Theo dõi tạm ứng</div>
 
@@ -4389,7 +4390,7 @@ const WH_TYPES = {
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.63.65';
+const APP_VERSION='3.63.72';
 /* HOTFIX 3.12.17-email: CHẶN TRIỆT ĐỂ gửi email TỰ ĐỘNG (mất kiểm soát — spam quota Google).
    Email phải do NV được phân quyền CHỦ ĐỘNG chọn gửi. Cờ này:
    (1) chặn auto-SCAN tạo email (hrmScanExpiries/vesselCertScanExpiries);
@@ -8550,16 +8551,34 @@ function userEditorModal(initial,idx){
             <input type="checkbox" id="user-isdepthead" ${initial.isDeptHead?'checked':''} style="margin:0">
             <b>👤 Trưởng bộ phận</b> <span style="color:var(--muted);font-weight:400">— thấy TẤT CẢ tab của (các) nhóm chức năng đã chọn. NV thường chỉ thấy tab được tick riêng bên dưới.</span>
           </label>
-          <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer;margin-top:6px">
-            <input type="checkbox" id="user-issubcomanager" ${initial.isSubCoManager?'checked':''} style="margin:0" onchange="_onSubCoManagerToggle(this.checked)">
-            <b>🏢 Quản lý công ty con</b> <span style="color:var(--muted);font-weight:400">— toàn quyền TẤT CẢ mảng (Nhân sự/Kế toán/NSNN) của ĐÚNG 1 công ty ở ô "Công ty" bên dưới. Độc lập với Nhóm chức năng — không cần tick nhóm nào.</span>
-          </label>
         </div>
       </div>
       <div class="field">
         <label>⏱ Chấm công — phạm vi được lập BCC <span style="font-weight:400;color:var(--muted)">(NV được cấp sẽ thấy tab Chấm công, lập bảng chấm công tháng cho đúng phạm vi đã tick)</span></label>
         <div style="display:flex;flex-wrap:wrap;gap:10px;padding:8px 10px;border:1px solid var(--rule);border-radius:6px;background:var(--paper)">
-          ${(S.departments||[]).map(d=>`<label style="display:flex;align-items:center;gap:5px;font-size:12.5px;cursor:pointer;white-space:nowrap">
+          <!-- v3.63.72 (Sếp — ảnh: "Các công ty con: không tách phòng: chỉ 1 dòng (đủ nhân sự các bộ
+               phận)"): TÌM RA LỖI THẬT — ô tick phòng ban ở đây LIỆT KÊ THẲNG S.departments (danh mục
+               chung, không phân biệt công ty), nên phòng ban CHỈ có người ở công ty con (VD "LABTECH ·
+               Phòng Kỹ thuật và báo cáo") vẫn hiện thành 1 ô riêng CẠNH ô công ty con — trùng 2 đường
+               cho cùng NV, đúng ý Sếp gọi "tách phòng" không mong muốn. bccAllPossibleScopes() (dùng
+               cho luồng Công ty con ở module riêng) đã tự tránh đúng lỗi này từ trước ("công ty mẹ đã
+               có đủ qua Phòng ban rồi, tránh trùng 2 đường") — áp lại ĐÚNG tiêu chí đó ở đây: phòng ban
+               CHỈ ẨN khỏi danh sách khi 100% nhân sự phòng đó đều thuộc công ty con (không ai ở công ty
+               mẹ/chưa gán công ty) — vì đã có sẵn đúng 1 ô công ty con bên dưới phủ hết. Phòng ban trộn
+               cả công ty mẹ (đa số trường hợp) vẫn hiện riêng như cũ, không mất gì. -->
+          ${(S.departments||[]).filter(d=>{
+            try{
+              const _todayIso=new Date().toISOString().slice(0,10);
+              const _emps=(HRService.employees()||[]).filter(e=>e && e.status!=='inactive' && hrDeptCanon(e.dept)===d.code);
+              if(!_emps.length) return true;   // phòng trống hẳn — vẫn hiện như cũ (không đủ dữ liệu để ẩn)
+              const _parentId=(typeof getParentCompanyId==='function')?getParentCompanyId():'';
+              return _emps.some(e=>{
+                const asg=(typeof empAssignments==='function')?empAssignments(e.id,_todayIso):[];
+                if(!asg.length) return true;   // NV chưa gán công ty nào — coi như thuộc phạm vi chung, vẫn hiện
+                return asg.some(a=>!a.companyId || a.companyId===_parentId);
+              });
+            }catch(e){ return true; }   // lỗi bất kỳ → an toàn giữ hành vi cũ (hiện), không ẩn nhầm
+          }).map(d=>`<label style="display:flex;align-items:center;gap:5px;font-size:12.5px;cursor:pointer;white-space:nowrap">
             <!-- v3.20.366 (Sếp — ảnh: "Phòng Kế toán" báo "Không tìm thấy nhân viên nào thuộc phạm vi
                  này"): LỖI GỐC CÓ SẴN TỪ v3.20.314 — value dùng d.id||d.code, nhưng NV lưu phòng ban
                  theo d.CODE (xem hrmMigrateDeptApply: so sánh d.code===cur, không phải d.id). d.id
@@ -8618,20 +8637,18 @@ function userEditorModal(initial,idx){
           }).map(c=>`<option value="${esc(c.id)}" ${initial.companyId===c.id?'selected':''}>${esc(c.name)}${c.isParent?' (mẹ)':''}</option>`).join('')}
         </select>
         <div style="font-size:11px;color:var(--muted);font-style:normal;margin-top:4px">NV/NV KT gán 1 công ty → chỉ thấy dữ liệu công ty đó. Để trống = thấy tất cả. KTT/Admin/BOD luôn thấy hết bất kể cài đặt này.</div>
-      </div>
-      <!-- v3.63.61 (Sếp: "KT cũng cần tích chọn công ty con... Module công ty con được tích sẽ mở
-           toàn bộ, bao gồm cả nhân sự, NSNN... Khác với NV chỉ tích chọn công ty con: giao diện là
-           công ty con"): field MỚI, ĐỘC LẬP với "Quản lý công ty con" (không đổi giao diện chính —
-           NV vẫn dùng dashboard TCKT như thường) và ĐỘC LẬP với "Công ty được gán" (dropdown 1 công
-           ty, đổi hẳn phạm vi toàn app) — tick NHIỀU công ty ở đây, đúng công ty đã tick thì mở TOÀN
-           BỘ module "Công ty con" (Kế toán/NSNN/Nhân sự/P&L/MMTB-CCDC) cho công ty đó, công ty chưa
-           tick thì không thấy gì. Cùng khuôn checkbox-list với khối "⏱ Chấm công" ở trên, để đồng bộ. -->
-      <div class="field">
-        <label>🏢 Công ty con — mở toàn bộ module <span style="font-weight:400;color:var(--muted)">(Kế toán/NSNN/Nhân sự/P&amp;L/MMTB-CCDC của đúng công ty đã tick — giao diện chính vẫn không đổi)</span></label>
-        <div style="display:flex;flex-wrap:wrap;gap:10px;padding:8px 10px;border:1px solid var(--rule);border-radius:6px;background:var(--paper)">
-          ${(S.companies||[]).filter(c=>!c.isParent).map(c=>`<label style="display:flex;align-items:center;gap:5px;font-size:12.5px;cursor:pointer;white-space:nowrap">
-            <input type="checkbox" class="user-comanagescope-chk" value="${esc(c.id)}" ${(Array.isArray(initial.coManageScopeIds)&&initial.coManageScopeIds.includes(c.id))?'checked':''} style="margin:0">🏭 ${esc(c.name)}</label>`).join('')}
-        </div>
+        <!-- v3.63.66 (Sếp: "Sắp xếp lại theo nhóm chức năng/logic chọn quyền: đơn giản/dễ hiểu"):
+             chuyển "Quản lý công ty con" (isSubCoManager) xuống NGAY SAU ô "Công ty được gán" mà nó
+             phụ thuộc (trước đây nằm TRƯỚC ô này, tham chiếu "ô Công ty bên dưới" — ngược thứ tự đọc).
+             Bỏ hẳn khối "Công ty con — mở toàn bộ module" (coManageScopeIds) — đã dư thừa với "Nhóm
+             chức năng: <tên công ty con>" (v3.63.64) làm đúng việc này qua cơ chế chung, khiến 1 công
+             ty con từng hiện lặp ở 2 nơi trong form gây rối. KHÔNG xoá field coManageScopeIds trong dữ
+             liệu NV đã lưu trước đây (_coCanFinance/_coCanHr vẫn đọc, không vỡ hồ sơ cũ) — chỉ bỏ ô
+             tick khỏi form, không còn ai bật thêm được nữa. -->
+        <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer;margin-top:8px">
+          <input type="checkbox" id="user-issubcomanager" ${initial.isSubCoManager?'checked':''} style="margin:0" onchange="_onSubCoManagerToggle(this.checked)">
+          <b>🏢 Quản lý công ty con</b> <span style="color:var(--muted);font-weight:400">— toàn quyền TẤT CẢ mảng (Nhân sự/Kế toán/NSNN) của ĐÚNG 1 công ty ở ô "Công ty được gán" bên trên. Độc lập với Nhóm chức năng — không cần tick nhóm nào.</span>
+        </label>
       </div>
       <div class="field">
         <label>${isEdit?'Mật khẩu mới (để trống = giữ nguyên)':'Mật khẩu'} (tối thiểu 8 ký tự)</label>
@@ -10372,7 +10389,9 @@ async function saveUser(idx){
   const companyId=document.getElementById('user-company')?.value||'';
   // v3.63.61: mảng công ty con NV Kế toán được tick riêng — mở toàn bộ module "Công ty con" cho
   // đúng công ty đã tick (độc lập với companyId/isSubCoManager ở trên).
-  const coManageScopeIds=Array.from(document.querySelectorAll('.user-comanagescope-chk:checked')).map(c=>c.value);
+  // v3.63.66: bỏ ô tick "Công ty con — mở toàn bộ module" khỏi form (xem lý do ở khối HTML "Công ty
+  // được gán") — không còn đọc được gì từ DOM nữa, giá trị cũ (nếu có) được GIỮ NGUYÊN thẳng tại 2 nơi
+  // gán u.coManageScopeIds/coManageScopeIds bên dưới, không qua biến này nữa.
   /* v3.20.86 (Sếp: "Kho kỹ thuật là kho riêng, giống Kho VPCT — app đang xây kho kỹ thuật = tàu,
      không phù hợp nữa" — xác nhận đảo lại quyết định v3.16.24): khôi phục đọc ô "Kho phụ trách" —
      UI đã khôi phục lại ở _whAssignHtml bên dưới (nhóm 📦 Kho & Tài sản, cờ whPicker vẫn còn từ
@@ -10472,7 +10491,7 @@ async function saveUser(idx){
       // khối hrScopes/canPayroll) coi như đã rà soát — không cần bấm gì thêm, tự đánh dấu khi Lưu.
       u.permsReviewed=true;
       u.companyId=companyId;
-      u.coManageScopeIds=_itBasic?(u.coManageScopeIds||[]):coManageScopeIds;   // v3.63.61
+      u.coManageScopeIds=u.coManageScopeIds||[];   // v3.63.66: hết ô tick trên form — chỉ GIỮ NGUYÊN giá trị cũ, không ai bật thêm được nữa
       u.isBOD=_itBasic?(u.isBOD||false):isBOD;
       u.isCEO=_itBasic?(u.isCEO||false):isCEO;
       u.canManageUsers=_itBasic?(u.canManageUsers||false):canManageUsersFlag;  // v1.40.0
@@ -10527,7 +10546,7 @@ async function saveUser(idx){
         payrollHrScopes:_emptyPerm?[]:payrollHrScopes,
         permsReviewed:true,   // v3.20.332: tạo mới qua đúng form này = đã rà soát ngay từ đầu
         companyId,
-        coManageScopeIds:_emptyPerm?[]:coManageScopeIds,   // v3.63.61
+        coManageScopeIds:[],   // v3.63.66: hết ô tick trên form — NV mới luôn trống, không còn cách bật qua UI
         tabs:_emptyPerm?[]:finalTabs,
         canConfirmPayment:(_emptyPerm||isViewer)?false:canConfirmPayment,
         canApproveL1:(_emptyPerm||isViewer)?false:canApproveL1,
@@ -17569,6 +17588,12 @@ function applyRoleUI(){
     // (data-fin-group="1": Công nợ/Ngân quỹ/QL vận hành tàu/Phê duyệt/NSNN) vẫn hiện song song vì
     // _finGrouped trước đây chỉ true cho admin — ra 2 đường trùng nhau (VD "06 QL vận hành tàu" lẻ
     // trùng đúng trang với dropdown "Quản lý hoạt động tàu"). Đồng bộ 1 điều kiện DUY NHẤT cho cả 2.
+    // v3.63.70 (Sếp: "Việc nhỏ: quay về 1 lối vào + nhân bản sidebar nội bộ sang cả 10 trang"): ĐẢO
+    // LẠI v3.63.67 — trả về đúng điều kiện gốc trước đó (khôi phục nhánh "có Nhóm chức năng" đã bỏ ở
+    // v3.63.67). Lý do đảo: v3.63.67 làm lộ NHIỀU nhóm nav rời rạc (04 Công nợ/05 Ngân quỹ/07 Phê
+    // duyệt/10 NSNN...) lên thanh nav chính — khác hẳn 1 lối vào gọn của HR/TM. Hướng đúng để "mở tại
+    // chỗ" là nhân bản sidebar #fin-sidebar sang cả 10 trang con (xem _finEnsureSidebar() ngay dưới
+    // _finInjectBackButton), không phải mở khoá nav chính.
     const _finGrouped = isAdmin() || (CURRENT_USER && (CURRENT_USER.canManageUsers || CURRENT_USER.isBOD || (Array.isArray(CURRENT_USER.funcGroups) && CURRENT_USER.funcGroups.length>0)));   // v3.07.04: CHỈ admin (nghiên cứu); BOD + mọi người dùng giao diện cũ
     /* v3.20.238 (Sếp — "Lỗi không hiện nút AP... khi tạo Giao diện riêng cho NHÂN SỰ", chứng minh qua
        3 lượt kiểm Console thật: canAccessTab('payables')=true nhưng nhóm cha "04 Công nợ" (mang
@@ -41793,6 +41818,42 @@ function _finKpiVisible(){
 //   tránh chèn lặp mỗi lần navigateToPage), không đụng gì khác trong page-head.
 const FIN_BACK_PAGES=['receivables','payables','op_input','advances','cashfund','banking','cashflow','operations','approval','nsnn'];
 function _finInjectBackButton(pageId,pageEl){
+  // v3.63.69 (Sếp: "TCKT: mở tab chức năng phải mở NGAY TẠI CHỖ, không chuyển tab — giống các module
+  // khác đang làm"): BỎ hẳn nút "← Dashboard" tự chèn — nút này chỉ cần khi rời hẳn trang TCKT sang
+  // trang khác (chuyển tab thật). Từ khi mọi mục sidebar TCKT đi qua navOpenAt() (overlay full-screen
+  // có nút "✕ Đóng" riêng, giống HR/TM/mọi module khác — xem navOpenAt() ~dòng 41972), nút này thành
+  // dư — bấm vào nó khi đang ở TRONG overlay chỉ đổi trang bên dưới lớp overlay (không đổi gì đang
+  // hiển thị), gây rối đúng như phản ánh. Giữ nguyên hàm rỗng (không xoá lời gọi ở navigateToPage) để
+  // không phải sửa nhiều nơi — chỉ cần bật lại nếu sau này cần.
+  return;
+}
+// v3.63.70 (Sếp: "Việc nhỏ: quay về 1 lối vào + nhân bản sidebar nội bộ sang cả 10 trang — cảm giác
+//   liền mạch, không cần nút quay lại, giữ nguyên 10 trang thật"): NHÂN BẢN #fin-sidebar (đã có sẵn
+//   trong page-fin_accounting) sang từng trang con TCKT — mỗi trang tự có 1 bản sidebar riêng (DOM
+//   riêng, không di chuyển node gốc đi đâu), luôn hiện cùng nội dung trang đó → đi lại tự do giữa
+//   Phải thu/Phải trả/Ngân quỹ/Phê duyệt/NSNN... không cần rời hẳn về "Tổng quan TCKT" mới đổi được
+//   tab khác, y hệt cảm giác "mở tại chỗ" mà không phải viết lại 10 trang thành 1 trang (rủi ro cao).
+//   Chỉ chạy 1 LẦN mỗi trang (cờ dataset.finSidebarWrapped) — không đụng lại DOM nội dung gốc của
+//   trang (chỉ bọc thêm 1 lớp flex bên ngoài), không ảnh hưởng chức năng có sẵn bên trong.
+const FIN_SIDEBAR_PAGES=['receivables','payables','op_input','advances','cashfund','banking','cashflow','operations','approval','nsnn','fin_report'];
+function _finEnsureSidebar(pageId,pageEl){
+  if(!FIN_SIDEBAR_PAGES.includes(pageId)) return;
+  if(!pageEl || pageEl.dataset.finSidebarWrapped==='1') return;
+  const src=document.getElementById('fin-sidebar');
+  if(!src) return;   // v.d. chưa render page-fin_accounting lần nào — bỏ qua, không lỗi
+  const sideClone=src.cloneNode(true);
+  const wrap=document.createElement('div');
+  wrap.style.cssText='display:flex;gap:20px;align-items:flex-start';
+  const contentWrap=document.createElement('div');
+  contentWrap.className='fin-page-content';
+  contentWrap.style.cssText='flex:1;min-width:0';
+  while(pageEl.firstChild) contentWrap.appendChild(pageEl.firstChild);   // dời NGUYÊN nội dung gốc, không đụng bên trong
+  wrap.appendChild(sideClone);
+  wrap.appendChild(contentWrap);
+  pageEl.appendChild(wrap);
+  pageEl.dataset.finSidebarWrapped='1';
+}
+function _finInjectBackButtonOld_unused(pageId,pageEl){
   if(!FIN_BACK_PAGES.includes(pageId)) return;
   if(pageEl.dataset.finBack==='1') return;
   const head=pageEl.querySelector('.page-head');
@@ -41813,30 +41874,32 @@ function finGoSection(page,sectionId,afterFn){
   navigateToPage(page);
   setTimeout(()=>{
     const pageEl=document.getElementById('page-'+page);
+    // v3.63.70: page có thể đã bị _finEnsureSidebar() bọc thêm 1 lớp flex (sidebar+content) — khi đó
+    //   .section KHÔNG còn là con trực tiếp của pageEl nữa, mà nằm trong .fin-page-content. Lấy đúng
+    //   gốc để quét (root), KHÔNG đổi hành vi cho trang chưa bị bọc (root=pageEl như cũ).
+    const root = pageEl ? (pageEl.querySelector(':scope > div > .fin-page-content') || pageEl) : null;
     const ids=Array.isArray(sectionId)?sectionId:(sectionId?[sectionId]:[]);
     if(ids.length && pageEl){
       const targets=ids.map(id=>document.getElementById(id)).filter(Boolean);
       if(targets.length){
-        pageEl.querySelectorAll(':scope > .section').forEach(sec=>{
+        root.querySelectorAll(':scope > .section').forEach(sec=>{
           if(!targets.includes(sec)) sec.dataset.finFocusHidden = sec.style.display==='none'?'':(sec.style.display||'__unset__');
         });
-        pageEl.querySelectorAll(':scope > .section').forEach(sec=>{ if(!targets.includes(sec)) sec.style.display='none'; });
+        root.querySelectorAll(':scope > .section').forEach(sec=>{ if(!targets.includes(sec)) sec.style.display='none'; });
         targets.forEach(t=>t.classList.remove('collapsed'));
-        if(!pageEl.querySelector('.fin-focus-restore')){
+        if(!root.querySelector('.fin-focus-restore')){
           const r=document.createElement('button');
           r.className='fin-focus-restore';
           r.textContent='↺ Xem toàn bộ trang';
           r.style.cssText='border:1px solid var(--rule);border-radius:6px;background:var(--paper);padding:5px 10px;font-size:11px;cursor:pointer;margin-bottom:10px';
           r.onclick=()=>{
-            pageEl.querySelectorAll(':scope > .section').forEach(sec=>{
+            root.querySelectorAll(':scope > .section').forEach(sec=>{
               const saved=sec.dataset.finFocusHidden;
               if(saved!=null){ sec.style.display = saved==='__unset__'?'':saved; delete sec.dataset.finFocusHidden; }
             });
             r.remove();
           };
-          const backBtn=pageEl.querySelector('[onclick*="fin_accounting"]');
-          if(backBtn && backBtn.parentNode) backBtn.parentNode.insertBefore(r, backBtn.nextSibling);
-          else pageEl.insertBefore(r, pageEl.firstChild);
+          root.insertBefore(r, root.firstChild);
         }
         targets[0].scrollIntoView({behavior:'smooth',block:'start'});
       }
@@ -41887,6 +41950,7 @@ function navigateToPage(pageId){
   if(!pageEl) return;
   pageEl.classList.add('active');
   try{ _finInjectBackButton(pageId, pageEl); }catch(e){}
+  try{ _finEnsureSidebar(pageId, pageEl); }catch(e){}
   // v3.11.50 — NGUYÊN TẮC TOÀN APP: mở tab → mọi module (section collapsible) ở trạng thái GẬP, hiển thị gọn.
   try{ pageEl.querySelectorAll('.section.collapsible').forEach(sec=>sec.classList.add('collapsed')); }catch(e){}
 
@@ -71889,9 +71953,16 @@ function _opMrSave(){
     VesselService.addOpTransaction(rec); n++;
   });
   // vế ĐÒI khoán (1 dòng/phiếu) nếu có nhập số đòi
+  // v3.63.71 (Sếp: "Khoán đòi phải ghi vào bảng CHI HỘ, vào báo cáo đối chiếu chủ tàu như các khoản
+  // chi hộ khác — không phải Thu hộ, Thu hộ là khoản thực thu"): SỬA type:'IN'→'OUT' — TÌM RA LỖI THẬT:
+  // 2 luồng tạo "Khoán đòi" khác (phiếu lương ~L67928, phiếu AP đơn "pair" ~L72099) đều dùng ĐÚNG
+  // type:'OUT' (vào Chi hộ, trừ số dư — khớp đúng ghi chú thiết kế v3.03.40 "Dòng 'doi' TÍNH như chi
+  // hộ"). Riêng luồng Chi hộ NHIỀU DÒNG (multi-row) này SÓT — để type:'IN' khiến dòng đòi bị cộng
+  // nhầm vào "Thu hộ" (opBalanceBreakdown.thu) VÀ không được hàm khoanReconcile nhận diện (hàm đó lọc
+  // cứng type==='OUT' — dòng lưu type IN trước đây BỊ BỎ QUA hoàn toàn khỏi Sổ theo dõi Khoán).
   if(s.khoanChk && s.khoanCat && (+s.khoanDoiAmt>0)){
     const cvD=_opConvert(+s.khoanDoiAmt||0, s.ccy, +s.fxInput||0);
-    VesselService.addOpTransaction({ id:uid(), date:s.date||todayISO(), vesselId:s.vesselId, type:'IN',
+    VesselService.addOpTransaction({ id:uid(), date:s.date||todayISO(), vesselId:s.vesselId, type:'OUT',
       desc:'Khoán đòi chủ tàu · '+s.khoanCat, amount:+s.khoanDoiAmt||0, ccy:s.ccy, fxToUsd:cvD.fxToUsd||0,
       amountUsd:cvD.usd||0, khoanCat:s.khoanCat, khoanRole:'doi', khoanPeriod:s.khoanPeriod||String(s.date||'').slice(0,7),
       reportToOwner:true, createdBy:actorName(), createdAt:new Date().toISOString() });  // v3.09.88 FIX: khoán ĐÒI = đòi chủ tàu → PHẢI lên báo cáo (trước set false → phiếu biến mất khỏi báo cáo)
