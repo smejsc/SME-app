@@ -4477,7 +4477,7 @@ const WH_TYPES = {
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.64.20';
+const APP_VERSION='3.64.21';
 /* HOTFIX 3.12.17-email: CHẶN TRIỆT ĐỂ gửi email TỰ ĐỘNG (mất kiểm soát — spam quota Google).
    Email phải do NV được phân quyền CHỦ ĐỘNG chọn gửi. Cờ này:
    (1) chặn auto-SCAN tạo email (hrmScanExpiries/vesselCertScanExpiries);
@@ -80122,15 +80122,26 @@ function stockScopedDocs(list){
 // dashboardModule='TECH', hoặc nhóm chức năng TECH) — dùng CHỈ để mở khóa canManageStock()/phạm vi
 // kho cho ĐÚNG 1 kho loại TECH (xem stockAllowedWarehouses/whMySiteWarehouse) — KHÔNG mở thêm bất kỳ
 // kho nào khác của công ty, không đụng gì tới isWarehouse/assignedWarehouseIds/quyền Admin cũ.
+// v3.64.21 (Sếp: "đăng nhập rất chậm, còn bị out ra, màn hình trắng" — SỬA NGAY): _ktStockAccess()
+// bị gọi TRONG canManageStock() — hàm này gọi RẤT NHIỀU LẦN khắp app (mỗi dòng bảng kho, mỗi nút...).
+// Mỗi lần gọi lại quét TOÀN BỘ HRService.employees() để tìm phòng ban — với NV thường (không phải
+// Admin/Thủ kho), việc quét lặp lại hàng trăm lần mỗi lần render → app đứng/chậm nặng. NHỚ LẠI kết
+// quả — chỉ tính 1 lần/phiên đăng nhập (theo đúng object CURRENT_USER, tự tính lại khi đăng nhập
+// lại/đổi user), các lần gọi sau chỉ đọc biến, không quét lại.
+let _ktStockAccessCache=null, _ktStockAccessCacheUser=null;
 function _ktStockAccess(){
   if(!CURRENT_USER || isAdmin()) return false;
+  if(_ktStockAccessCacheUser===CURRENT_USER) return _ktStockAccessCache;
+  let result=false;
   try{
     const _ktAssigned=(HRService.departments()||[]).filter(d=>d&&d.dashboardModule==='TECH').map(d=>d.code);
     const KT_DEPTS=_ktAssigned.length?_ktAssigned:['BDA','DRILL','LABTECH'];
     const emp=(HRService.employees()||[]).find(e=>e&&!e._deleted&&(e.linkUserId===CURRENT_USER.id||e.linkUserId===CURRENT_USER.name));
-    if(emp && KT_DEPTS.includes(typeof hrDeptCanon==='function'?hrDeptCanon(emp.dept):emp.dept)) return true;
+    if(emp && KT_DEPTS.includes(typeof hrDeptCanon==='function'?hrDeptCanon(emp.dept):emp.dept)) result=true;
   }catch(e){}
-  return !!(Array.isArray(CURRENT_USER.funcGroups) && CURRENT_USER.funcGroups.includes('TECH'));
+  if(!result) result=!!(Array.isArray(CURRENT_USER.funcGroups) && CURRENT_USER.funcGroups.includes('TECH'));
+  _ktStockAccessCache=result; _ktStockAccessCacheUser=CURRENT_USER;
+  return result;
 }
 function canManageStock(){ return isAdmin() || !!(CURRENT_USER && (CURRENT_USER.isWarehouse || CURRENT_USER.isCentralWarehouse || (Array.isArray(CURRENT_USER.assignedWarehouseIds) && CURRENT_USER.assignedWarehouseIds.length))) || _ktStockAccess(); }   // v3.20.86: NV có "Kho phụ trách" cũng thao tác được (nhập/xuất/kiểm kê/điều chuyển), phạm vi đã lọc đúng ở stockAllowedWarehouses()
 function isCaptain(){ return !!(CURRENT_USER && CURRENT_USER.isCaptain); }
