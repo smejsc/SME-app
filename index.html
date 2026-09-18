@@ -4389,7 +4389,7 @@ const WH_TYPES = {
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.63.63';
+const APP_VERSION='3.63.65';
 /* HOTFIX 3.12.17-email: CHẶN TRIỆT ĐỂ gửi email TỰ ĐỘNG (mất kiểm soát — spam quota Google).
    Email phải do NV được phân quyền CHỦ ĐỘNG chọn gửi. Cờ này:
    (1) chặn auto-SCAN tạo email (hrmScanExpiries/vesselCertScanExpiries);
@@ -8539,6 +8539,12 @@ function userEditorModal(initial,idx){
           <div style="display:flex;flex-wrap:wrap;gap:10px;padding:8px 10px;border:1px solid var(--rule);border-radius:6px;background:var(--paper)">
             ${FUNC_GROUPS.map(g=>`<label style="display:flex;align-items:center;gap:5px;font-size:13px;cursor:pointer;white-space:nowrap">
               <input type="checkbox" class="user-funcgroup-chk" value="${g.k}" ${(Array.isArray(initial.funcGroups)&&initial.funcGroups.includes(g.k))?'checked':''} style="margin:0">${esc(g.label)}</label>`).join('')}
+            <!-- v3.63.64 (Sếp: "1 công ty con = 1 Nhóm chức năng"): mỗi công ty con tự thêm 1 ô tick ở
+                 đây, dùng chung input/class user-funcgroup-chk như nhóm tĩnh ở trên — không cần form
+                 riêng, không cần preset "Quản lý công ty con" cũ. Tick đúng công ty → tự đủ tab + tự
+                 lọc dữ liệu về công ty đó (xem funcGroupTabs()/getActorCompanyId()). -->
+            ${(S.companies||[]).filter(c=>c&&!c.isParent).map(c=>`<label style="display:flex;align-items:center;gap:5px;font-size:13px;cursor:pointer;white-space:nowrap">
+              <input type="checkbox" class="user-funcgroup-chk" value="${esc(c.id)}" ${(Array.isArray(initial.funcGroups)&&initial.funcGroups.includes(c.id))?'checked':''} style="margin:0">🏢 ${esc(c.name||c.id)}</label>`).join('')}
           </div>
           <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer;margin-top:8px">
             <input type="checkbox" id="user-isdepthead" ${initial.isDeptHead?'checked':''} style="margin:0">
@@ -13191,6 +13197,8 @@ function _coManageScopeIds(){
 // sách coManageScopeIds không rỗng (đã được tick ÍT NHẤT 1 công ty).
 function _coCanFinance(coId){
   if(isSubCoManager()) return true;
+  // v3.63.64: Nhóm chức năng = 1 công ty con → toàn quyền mảng Kế toán/NSNN của đúng công ty đó.
+  { const g=(typeof userCoGroupId==='function')?userCoGroupId():''; if(g){ if(coId){ if(g===coId) return true; } else return true; } }
   const ids=_coManageScopeIds();
   if(coId) { if(ids.includes(coId)) return true; } else if(ids.length) return true;
   return !!(CURRENT_USER && CURRENT_USER.canCheckAcc && isCompanyScoped());
@@ -13198,6 +13206,8 @@ function _coCanFinance(coId){
 // Nhân sự được gán đúng công ty (không cần isSubCoManager) — toàn quyền mảng Nhân sự của công ty đó.
 function _coCanHr(coId){
   if(isSubCoManager()) return true;
+  // v3.63.64: Nhóm chức năng = 1 công ty con → toàn quyền mảng Nhân sự của đúng công ty đó.
+  { const g=(typeof userCoGroupId==='function')?userCoGroupId():''; if(g){ if(coId){ if(g===coId) return true; } else return true; } }
   const ids=_coManageScopeIds();
   if(coId) { if(ids.includes(coId)) return true; } else if(ids.length) return true;
   return !!(CURRENT_USER && (CURRENT_USER.isHrStaff || (Array.isArray(CURRENT_USER.funcGroups)&&CURRENT_USER.funcGroups.includes('HR'))) && isCompanyScoped());
@@ -15232,7 +15242,13 @@ function canPickCompany(){
 }
 function getActorCompanyId(){
   if(CURRENT_ROLE==='admin') return '';
-  return (CURRENT_USER && CURRENT_USER.companyId) || '';
+  if(CURRENT_USER && CURRENT_USER.companyId) return CURRENT_USER.companyId;
+  // v3.63.64 (Sếp: "1 công ty con = 1 Nhóm chức năng"): chưa có "Công ty được gán" riêng thì thử suy
+  // ra từ Nhóm chức năng — nếu NV được tick đúng 1 công ty con làm Nhóm chức năng, coi như đã "được
+  // gán" công ty đó, dùng lại NGUYÊN cơ chế lọc dữ liệu theo công ty đã chuẩn từ lâu (không viết lọc
+  // mới ở nơi khác) — xem hàm userCoGroupId().
+  try{ const g=(typeof userCoGroupId==='function')?userCoGroupId():''; if(g) return g; }catch(e){}
+  return '';
 }
 /* v1.76.0: NV có bị giới hạn theo công ty không?
    KTT/Admin/BOD luôn thấy hết. NV/NV KT bị giới hạn nếu được gán 1 công ty. */
@@ -17179,6 +17195,21 @@ function applyNavPermissions(){
       let ok=false; try{ ok=canAccessTab(pg); }catch(e){ ok=false; }
       if(!ok) el.style.display='none';   // CHỈ ẩn khi thiếu quyền; có quyền → không đụng (giữ style gốc)
     });
+    // v3.63.65 (Sếp: "1 công ty con = 1 module, giống TCKT/HR"): NV chỉ có Nhóm-chức-năng-công-ty-con
+    // (không đồng thời có TCKT/HR riêng) — 6 tab công ty con cần đã hiện ĐỦ ngay trong module "🏢 Công
+    // ty con" (renderCtyConSubmenu). Ẩn bản GỐC của 6 tab đó trong nhóm TCKT/Nhân sự để khỏi trùng 2
+    // nơi — không đụng NV nào khác (NV có TCKT/HR thật vẫn thấy đủ ở đúng chỗ cũ, không bị ẩn nhầm).
+    try{
+      const _myCoGrp=(typeof userCoGroupId==='function')?userCoGroupId():'';
+      if(_myCoGrp && !(Array.isArray(CURRENT_USER.funcGroups)&&(CURRENT_USER.funcGroups.includes('TCKT')||CURRENT_USER.funcGroups.includes('HR')))){
+        COMPANY_GROUP_TABS.forEach(pg=>{
+          document.querySelectorAll(`[data-page="${pg}"]`).forEach(el=>{
+            if(el.closest('#submenu-ctycon')) return;   // giữ nguyên bản trong module Công ty con
+            el.style.display='none';
+          });
+        });
+      }
+    }catch(e){}
     /* v3.16.50 (Sếp: 'lỗi nghiêm trọng — check đủ'): LUẬT ẨN CHỦ ĐÍCH THẮNG QUYỀN. Rà toàn nav cho
        thấy lỗ CẢ LỚP, không riêng Chi phí legacy: với nav PHẲNG (VM/NV/captain) CSS display:contents
        bung nhóm, và tab con QUYẾT ĐỊNH hiển thị — tab con thuộc NV_CORE_TABS thì canAccessTab=true nên
@@ -44732,9 +44763,25 @@ function renderCtyConSubmenu(){
   }
   cos.sort((a,b)=>String(a.name||'').localeCompare(String(b.name||'')));
   if(!cos.length){ box.innerHTML='<div style="padding:8px 14px;font-size:11px;color:var(--muted);font-style:normal">Chưa có công ty con</div>'; return; }
-  // "📊 Tổng quan" chỉ dành cho người toàn quyền công ty đó (isSubCoManager) — NV Kế toán/Nhân sự
-  // chỉ được gán 1 mảng thì bấm thẳng vào tên công ty, vào đúng mảng mình có quyền (renderCoDashboard tự lọc).
-  const rows=cos.map(c=>`<button class="nav-sub-item" onclick="openCoHub('${esc(c.id)}')" title="Mở Tổng quan công ty ${esc(c.name)}"><span class="sub-dot"></span>${esc(c.name)}</button>`).join('');
+  // v3.63.65 (Sếp: "1 công ty con = 1 module, giống TCKT/HR có mục riêng"): NV được tick ĐÚNG công ty
+  // này làm Nhóm chức năng → bung thêm đủ 6 tab công ty con cần (khớp COMPANY_GROUP_TABS) ngay trong
+  // submenu này — "Công ty con" thành 1 module đầy đủ như TCKT/HR, không cần bấm vòng qua Tổng quan
+  // mới thấy Phải thu/Phải trả. Admin/BOD/KTT xem nhiều công ty vẫn chỉ thấy 1 dòng "Tổng quan" mỗi
+  // công ty như cũ — chỉ bung đủ tab cho ĐÚNG công ty của người đang xem (myGroupCo).
+  const myGroupCo=(typeof userCoGroupId==='function')?userCoGroupId():'';
+  const _tabRow=(page,label)=>(typeof canAccessTab==='function' && canAccessTab(page))
+    ? `<button class="nav-sub-item" data-page="${page}" onclick="navOpenAt('${page}')" style="padding-left:26px"><span class="sub-dot"></span>${esc(label)}</button>` : '';
+  const rows=cos.map(c=>{
+    const head=`<button class="nav-sub-item" onclick="openCoHub('${esc(c.id)}')" title="Mở Tổng quan công ty ${esc(c.name)}"><span class="sub-dot"></span>📊 ${esc(c.name)}</button>`;
+    if(c.id!==myGroupCo) return head;
+    return head
+      + _tabRow('receivables','Phải thu')
+      + _tabRow('payables','Phải trả')
+      + _tabRow('banking','Ngân hàng · Tín dụng')
+      + _tabRow('approval','Phê duyệt')
+      + _tabRow('nsnn','NSNN')
+      + _tabRow('pay_periods','Kỳ lương');
+  }).join('');
   box.innerHTML=rows;
 }
 
@@ -45725,7 +45772,7 @@ function renderCoDashboard(){
   // v3.63.61 (Sếp: "Module công ty con được tích sẽ mở toàn bộ, bao gồm cả... P&L, MMTB/CCDC"): NV
   // Kế toán được tick công ty này qua coManageScopeIds giờ CŨNG mở toàn bộ (không riêng Kế toán/NSNN
   // như trước — đúng ý "mở toàn bộ" của Sếp), dùng lại _coCanFinance(coId) (đã gộp coManageScopeIds).
-  const _canFull=((typeof isSubCoManager==='function')&&isSubCoManager()) || (typeof _coManageScopeIds==='function' && _coManageScopeIds().includes(coId));
+  const _canFull=((typeof isSubCoManager==='function')&&isSubCoManager()) || (typeof _coManageScopeIds==='function' && _coManageScopeIds().includes(coId)) || (typeof userCoGroupId==='function' && userCoGroupId()===coId);   // v3.63.64: Nhóm chức năng = đúng công ty này → toàn quyền như isSubCoManager
   const plSecHtml=_canFull?`<div class="co-sec">P/L</div>
     <div class="co-grid" style="margin-bottom:20px">
       ${kpi('Net Profit YTD ('+_plYear+')', (plNet>=0?'+':'−')+_f(Math.abs(plNet)))}
@@ -96244,8 +96291,35 @@ const FUNC_GROUPS=[
   {k:'TECH',  label:'Kỹ thuật',               tabs:['ky_thuat']},
   {k:'VPQN',  label:'CN Quảng Ngãi',          tabs:['vpqn']}
 ];
-function funcGroupLabel(k){ const g=FUNC_GROUPS.find(x=>x.k===k); return g?g.label:k; }
-function funcGroupTabs(k){ const g=FUNC_GROUPS.find(x=>x.k===k); return g?g.tabs.slice():[]; }
+// v3.63.64 (Sếp: "1 công ty con = 1 Nhóm chức năng" — thay preset/ô riêng "Quản lý công ty con" bằng
+// đúng cơ chế Nhóm chức năng chung mọi NV đang dùng): mỗi công ty con (S.companies, !isParent) tự là
+// 1 "khóa nhóm chức năng" ĐỘNG — khóa chính là company.id (khác FUNC_GROUPS tĩnh ở trên). Tick đúng
+// công ty đó vào Nhóm chức năng của NV → tự có đủ tab công ty con cần (funcGroupTabs bên dưới), tự
+// lọc dữ liệu về ĐÚNG công ty qua getActorCompanyId() (dùng lại y cơ chế "Công ty được gán" đã chuẩn
+// từ lâu), và tự vào thẳng "Tổng quan công ty con" như Trưởng bộ phận nhóm khác (xem
+// defaultGroupDashboardPage). KHÔNG đụng isSubCoManager/coManageScopeIds — 2 field cũ vẫn còn, chỉ
+// không phải cách làm mặc định nữa.
+const COMPANY_GROUP_TABS=['receivables','payables','banking','approval','nsnn','pay_periods'];
+function companyFuncGroupIds(){
+  try{ return (S.companies||[]).filter(c=>c&&!c.isParent).map(c=>c.id); }catch(e){ return []; }
+}
+function userCoGroupId(){
+  try{
+    if(!(CURRENT_USER && Array.isArray(CURRENT_USER.funcGroups))) return '';
+    const ids=companyFuncGroupIds();
+    return CURRENT_USER.funcGroups.find(g=>ids.includes(g))||'';
+  }catch(e){ return ''; }
+}
+function funcGroupLabel(k){
+  const g=FUNC_GROUPS.find(x=>x.k===k); if(g) return g.label;
+  try{ const co=(S.companies||[]).find(c=>c&&c.id===k); if(co) return '🏢 '+(co.name||k); }catch(e){}
+  return k;
+}
+function funcGroupTabs(k){
+  const g=FUNC_GROUPS.find(x=>x.k===k); if(g) return g.tabs.slice();
+  try{ if(companyFuncGroupIds().includes(k)) return COMPANY_GROUP_TABS.slice(); }catch(e){}
+  return [];
+}
 // v3.20.288 (Sếp: "Viết lại theo logic chung: mở app vào đúng dashboard của nhóm chức năng được
 //   phân quyền" — thay 2 nhánh hard-code riêng isHrDeptUser()/isVesselManager() ở luồng đăng nhập
 //   bằng 1 hàm tổng quát, đọc đúng thứ tự funcGroups đã tick, dễ mở rộng thêm TCKT sau này mà không
@@ -96276,7 +96350,10 @@ function defaultGroupDashboardPage(allowedTabs){
   //   năng đúng cách. SỬA: bỏ hẳn allowedTabs.includes(page) — dùng đúng canAccessTab(page)
   //   (đã tự đọc funcGroups/canCheckAcc/canManageUsers bên trong, đúng ngữ nghĩa "có vào được không").
   for(let i=0;i<groups.length;i++){
-    const page=FUNC_GROUP_DASHBOARD_PAGE[groups[i]];
+    let page=FUNC_GROUP_DASHBOARD_PAGE[groups[i]];
+    // v3.63.64: khóa nhóm là 1 công ty con (companyFuncGroupIds) → dashboard mặc định là co_dashboard,
+    // y hệt TCKT→fin_accounting/HR→hrm ở trên, không cần thêm khóa tĩnh vào FUNC_GROUP_DASHBOARD_PAGE.
+    if(!page){ try{ if(companyFuncGroupIds().includes(groups[i])) page='co_dashboard'; }catch(e){} }
     if(page && (typeof canAccessTab!=='function' || canAccessTab(page))) return page;
   }
   return null;
