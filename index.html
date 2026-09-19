@@ -4513,7 +4513,7 @@ const WH_TYPES = {
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.64.31';
+const APP_VERSION='3.64.32';
 /* HOTFIX 3.12.17-email: CHẶN TRIỆT ĐỂ gửi email TỰ ĐỘNG (mất kiểm soát — spam quota Google).
    Email phải do NV được phân quyền CHỦ ĐỘNG chọn gửi. Cờ này:
    (1) chặn auto-SCAN tạo email (hrmScanExpiries/vesselCertScanExpiries);
@@ -7499,7 +7499,11 @@ async function authAction(){
       // Mark that we just logged in — block auto-push for next 5s so pull completes cleanly
       _suppressAutoSync=true;
       setTimeout(()=>{ _suppressAutoSync=false; }, 5000);
-      setTimeout(()=>cloudSync('pull')
+      // v3.64.32 (Phase 2 "Tải theo module"): NV thường (Module TM/KT/VPQN/TAU/KHO) đi qua
+      // lightSyncPull() — tự rơi về cloudSync('pull') y hệt dòng dưới nếu không đủ điều kiện
+      // (xem shouldUseLightSync/quy tắc #5 đã chốt). TCKT/HR/BOD/CEO/admin/chưa gán Vai trò
+      // KHÔNG đổi gì — vẫn đúng cloudSync('pull') như trước.
+      setTimeout(()=>(typeof lightSyncPull==='function' ? lightSyncPull() : cloudSync('pull'))
         .then(()=>{ try{ let ch=0; if(pruneDeletedIds(180)>0) ch++; if(_healCatalogTombstones()>0) ch++; if(enforcePurgedBatches()>0) ch++; if(ch) saveState(); }catch(e){} })
         .catch(e=>console.warn('[post-login pull]', e&&e.message))
         .finally(()=>{
@@ -35271,6 +35275,97 @@ function _stateRecordCount(s){
         +(s.fixedAssets||[]).length+(s.companies||[]).length+(s.projects||[]).length
         +(s.transactions||[]).length+(s.opTransactions||[]).length+(s.opVessels||[]).length
         +(s.bankAccounts||[]).length+(s.loans||[]).length+((s.taxes&&s.taxes.records)||[]).length;  // v2.99.41: đủ kho
+}
+
+/* ════════════════════════════════════════════════════════════════════════════
+ * v3.64.32 (Phase 2 "Tải theo module" — đã rà 5 mục + xác nhận đủ Phase 1):
+ * LIGHT SYNC — đường tải MỚI, RIÊNG cho NV thường (Module TM/KT/VPQN/TAU/KHO),
+ * KHÔNG đụng 1 dòng nào trong cloudSync()/_cloudSyncRaw()/mergeStateByFields()/key='data'.
+ * TCKT/HR/BOD/TV/Công ty con/CEO/admin/chưa gán Vai trò → LUÔN dùng đường cũ (cloudSync),
+ * vì (a) vốn cần thấy dữ liệu toàn công ty, (b) chưa có domain key cho TV/Công ty con —
+ * KHÔNG được tự tạo domain mới ở Phase 2 (đã chốt).
+ * Bất kỳ bước nào không xác định rõ (domain/field/mạng lỗi) → fallback cloudSync('pull')
+ * — không tự chế cách lấy dữ liệu nào khác, không để NV đứng im không có dữ liệu.
+ * ════════════════════════════════════════════════════════════════════════════ */
+// Đúng 5 domain key đã mở ở backend (Giai đoạn 1) — map funcGroup → domain. TAU+KHO gộp
+// chung 1 domain (đã chốt). BOD/TV/Công ty con KHÔNG có mặt ở đây == cố ý, để rơi về false.
+const LIGHT_DOMAIN_MAP={TM:'data_tm', TECH:'data_kt', VPQN:'data_vpqn', TAU:'data_tau_kho', KHO:'data_tau_kho'};
+
+/* Trả về MẢNG domain key cần tải (đã khử trùng), hoặc false nếu KHÔNG đủ điều kiện light-sync
+   (mọi trường hợp false đều rơi về cloudSync('pull') tại nơi gọi — xem lightSyncPull()). */
+function shouldUseLightSync(){
+  if(CURRENT_ROLE==='admin') return false;
+  if(!CURRENT_USER) return false;
+  const rt=CURRENT_USER.roleTier;
+  if(rt!=='nv' && rt!=='nv_chamcong') return false;   // Trưởng bộ phận/NV Kế toán/NV NS lương/Quản lý cty con/Tàu/Thủ kho/CEO/chưa gán → false
+  const groups=Array.isArray(CURRENT_USER.funcGroups)?CURRENT_USER.funcGroups:[];
+  if(!groups.length) return false;
+  const domains=new Set();
+  for(let i=0;i<groups.length;i++){
+    const d=LIGHT_DOMAIN_MAP[groups[i]];
+    if(!d) return false;   // gặp ĐÚNG 1 nhóm không có domain (TCKT/HR/BOD/TV/công ty con) → false cho CẢ NGƯỜI, không light-sync 1 phần
+    domains.add(d);
+  }
+  return domains.size ? Array.from(domains) : false;
+}
+
+/* Field cần cho đúng các Nhóm chức năng của NV — tính TRỰC TIẾP từ FUNC_GROUPS[k].tabs (nguồn tĩnh,
+   ĐÃ XÁC NHẬN đúng), KHÔNG dùng allowedFieldsForUser() — hàm đó chỉ đọc CURRENT_USER.tabs (tick tay
+   riêng lẻ), KHÔNG đọc funcGroups → sẽ THIẾU field cho NV chỉ có quyền qua Nhóm chức năng (đã chứng
+   minh bằng code: finalTabs=tabs ở form Sửa NV, không gộp tab từ Nhóm chức năng vào CURRENT_USER.tabs). */
+function _lightSyncFields(groups){
+  const fields=new Set(SHARED_FIELDS);
+  (groups||[]).forEach(k=>{
+    const g=FUNC_GROUPS.find(x=>x.k===k);
+    if(!g) return;
+    g.tabs.forEach(t=>{ (TAB_TO_FIELDS[t]||[]).forEach(f=>fields.add(f)); });
+  });
+  return Array.from(fields);
+}
+
+/* Tải ĐÚNG 1 domain key — KHÔNG qua cloudSync()/_cloudSyncRaw(), fetch độc lập. Trả về object
+   (fragment dữ liệu domain đó) hoặc null nếu cloud chưa có gì cho domain này (KHÔNG phải lỗi). */
+async function _lightFetchDomain(cfg, domainKey){
+  const res=await fetchWithTimeout(cfg.scriptUrl+'?action=load&key='+encodeURIComponent(domainKey), {method:'GET'}, 30000);
+  const data=await safeJson(res);
+  if(!data || !data.ok) throw new Error('Backend lỗi (domain '+domainKey+'): '+(data&&data.error||'không rõ'));
+  let payloadObj;
+  if(data.gz && data.payload_gz){
+    const decompressed=await gzipDecompress(data.payload_gz);
+    payloadObj=JSON.parse(decompressed);
+  } else if(data.payload){
+    payloadObj=data.payload;
+  } else {
+    return null;   // cloud chưa có dữ liệu cho domain này — không phải lỗi (domain mới tinh)
+  }
+  return await decryptJSONgz(payloadObj);
+}
+
+/* Điểm vào chính — gọi TỪ nơi trước đây gọi cloudSync('pull') cho NV thường (đúng 1 điểm, dòng
+   ~7502). KHÔNG tự động thay thế cloudSync() ở 13 điểm gọi còn lại — Phase 2 chỉ cài đúng 1 chỗ đã
+   thống nhất, các điểm khác để nguyên, làm sau nếu cần. */
+async function lightSyncPull(){
+  try{
+    const domains=shouldUseLightSync();
+    if(!domains) return cloudSync('pull');   // không đủ điều kiện → đường cũ
+    const cfg=getAuthConfig();
+    if(!cfg||!cfg.scriptUrl) return cloudSync('pull');
+    const groups=Array.isArray(CURRENT_USER.funcGroups)?CURRENT_USER.funcGroups:[];
+    const fields=_lightSyncFields(groups);
+    if(!fields.length) return cloudSync('pull');
+    const cloudPartial={};
+    for(let i=0;i<domains.length;i++){
+      const frag=await _lightFetchDomain(cfg, domains[i]);
+      if(frag && typeof frag==='object') Object.assign(cloudPartial, frag);
+    }
+    const mp=mergeStateByFields(Object.assign({}, cloudPartial), S, fields);   // TÁI DÙNG nguyên hàm có sẵn — không sửa bên trong
+    fields.forEach(f=>{ if(mp.merged[f]!==undefined) S[f]=mp.merged[f]; });
+    console.log('[lightSyncPull] OK — domain: '+domains.join(',')+' · field: '+fields.length);
+    return true;
+  }catch(e){
+    console.warn('[lightSyncPull] lỗi — fallback cloudSync(pull):', e&&e.message);
+    return cloudSync('pull');   // ĐÚNG quy tắc #5 đã chốt — không tự chế cách lấy data khác
+  }
 }
 
 function mergeStateByFields(cloudFull, localFull, fields){
