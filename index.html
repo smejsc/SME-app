@@ -4513,7 +4513,7 @@ const WH_TYPES = {
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.64.32';
+const APP_VERSION='3.64.33';
 /* HOTFIX 3.12.17-email: CHẶN TRIỆT ĐỂ gửi email TỰ ĐỘNG (mất kiểm soát — spam quota Google).
    Email phải do NV được phân quyền CHỦ ĐỘNG chọn gửi. Cờ này:
    (1) chặn auto-SCAN tạo email (hrmScanExpiries/vesselCertScanExpiries);
@@ -18131,14 +18131,24 @@ async function saveStateEncrypted(){
     }
   }catch(e){ console.warn('[saveStateEncrypted] guard check lỗi (bỏ qua, vẫn lưu):', e); }
   try{
-    const payload=await encryptJSON(S);
+    // v3.64.33 (Sếp: app treo đúng lúc "đang lưu & đồng bộ trước khi cập nhật" — đúng chỗ đã tìm ra
+    // từ trước nhưng chưa sửa): GIẢI PHÓNG SỚM từng biến chuỗi lớn ngay khi không còn cần — giảm số
+    // bản sao TOÀN BỘ dữ liệu công ty cùng tồn tại 1 lúc trong bộ nhớ (trước đây tới 4-5 bản cùng
+    // lúc). KHÔNG bỏ bước xác nhận chống mất dữ liệu (Hướng an toàn đã chọn, không phải Hướng rủi ro
+    // bỏ verify) — chỉ đổi cách giữ biến, hành vi/logic xác nhận giữ nguyên 100%.
+    // v3.64.33: đổi sang encryptJSONgz (nén TRƯỚC khi mã hóa, đã có sẵn — dùng cho cloud sync từ
+    // v3.02.24, "1,1MB → ~150KB" theo đúng comment gốc) thay vì encryptJSON (không nén). AN TOÀN:
+    // loadEncryptedLocal() đã sẵn decryptJSONgz() "tự nhận biết gz" từ trước — không cần sửa gì ở
+    // chỗ đọc. Giảm mạnh kích thước _serialized → giảm đúng gốc bộ nhớ đỉnh gây treo/OOM lúc lưu.
+    let payload=await encryptJSONgz(S);
     const _serialized=JSON.stringify(payload);
+    payload=null;   // đã có _serialized, không cần payload (object {iv,ct}) nữa
     const _key=_storeKeyForUser();
     // PHASE 2b WRITE CUTOVER: admin → ghi/đọc/rollback qua IDB (đồng bộ, await);
     //   NV/chưa-login → giữ nguyên localStorage. Rollback = PERSIST_READ_FROM_IDB_ROLES=[].
     const _useIdbWrite = (typeof _persistRoleUsesIdb==='function') && _persistRoleUsesIdb();
     // _prevValue: CHỈ cần cho nhánh localStorage (để rollback khi verify quota fail). Admin/IDB không readback nên không cần.
-    const _prevValue = _useIdbWrite ? null : localStorage.getItem(_key);
+    let _prevValue = _useIdbWrite ? null : localStorage.getItem(_key);
     if(_useIdbWrite){
       // PHASE 2b Hướng A: IDBBackend.set là async có await — nếu KHÔNG throw = ghi thành công.
       //   KHÔNG readback-verify cho IDB: readback (await get) tạo cửa sổ race — một saveStateEncrypted
@@ -18150,8 +18160,10 @@ async function saveStateEncrypted(){
     }else{
       localStorage.setItem(_key,_serialized);           // NV/chưa-login: v2.99.52 key riêng theo user
       // v3.09.49 RUNTIME AUDIT — VERIFY (chỉ localStorage): đọc lại đồng bộ, so length. Bắt quota đầy.
-      const _readback = localStorage.getItem(_key);
-      if(_readback===null || _readback.length!==_serialized.length){
+      let _readback = localStorage.getItem(_key);
+      const _rbIsNull=(_readback===null), _rbLen=_rbIsNull?-1:_readback.length;
+      _readback=null;   // v3.64.33: đã lấy xong độ dài cần so — giải phóng ngay, không giữ thêm 1 bản sao lớn
+      if(_rbIsNull || _rbLen!==_serialized.length){
         // v3.09.60: ROLLBACK — khôi phục giá trị cũ để KHÔNG để lại bản ghi hỏng.
         try{
           if(_prevValue!==null && _prevValue!==undefined){ localStorage.setItem(_key,_prevValue); }
@@ -18159,6 +18171,7 @@ async function saveStateEncrypted(){
         }catch(_rb){ console.error('[saveStateEncrypted] rollback lỗi:', _rb&&_rb.message); }
         throw new Error('Verify thất bại: dữ liệu đọc lại không khớp dữ liệu vừa ghi (có thể bộ nhớ đầy). Đã khôi phục bản trước.');
       }
+      _prevValue=null;   // v3.64.33: verify đã qua, không còn cần cho rollback nữa — giải phóng sớm
       window._lastSaveVerifiedAt=Date.now();  // mốc xác nhận đã ghi thành công
     }
     // PHASE 1 · COMMIT 5 — SHADOW WRITE: chỉ cần khi ghi localStorage (NV). Admin đã ghi thẳng IDB.
