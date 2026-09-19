@@ -4513,7 +4513,7 @@ const WH_TYPES = {
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.64.38';
+const APP_VERSION='3.64.39';
 /* HOTFIX 3.12.17-email: CHẶN TRIỆT ĐỂ gửi email TỰ ĐỘNG (mất kiểm soát — spam quota Google).
    Email phải do NV được phân quyền CHỦ ĐỘNG chọn gửi. Cờ này:
    (1) chặn auto-SCAN tạo email (hrmScanExpiries/vesselCertScanExpiries);
@@ -4775,6 +4775,20 @@ window._suppressAutoSync = window._suppressAutoSync || false;
 
 /* v3.10.01 — CẬP NHẬT NGAY (nút bấm cho doanh nghiệp, không cần Ctrl+Shift+R).
    Gọi registration.update() → chờ SW mới activate (nếu có) → reload. */
+// v3.64.39 (Sếp: "bấm cập nhật: app chớp thay đổi nhưng vẫn giữ bản cũ"): TÌM RA GỐC — cả 2 luồng
+// cập nhật (applyUpdateNow + checkForUpdate) gửi SKIP_WAITING rồi ĐOÁN cố định 300-800ms là đủ để
+// Service Worker mới NẮM QUYỀN KIỂM SOÁT tab (controllerchange) — đoán sai (máy chậm/CPU bận) →
+// reload quá sớm → tab vẫn bị SW CŨ phục vụ, hiện lại bản cũ dù đã "cập nhật". SỬA: chờ ĐÚNG sự
+// kiện controllerchange (có trần thời gian an toàn, không chờ mãi nếu vì lý do gì đó không bao giờ
+// tới) rồi mới reload — dùng chung cho cả 2 luồng.
+function _waitForNewSwAndReload(maxWaitMs){
+  return new Promise(resolve=>{
+    let done=false;
+    const finish=()=>{ if(done) return; done=true; resolve(); };
+    try{ navigator.serviceWorker.addEventListener('controllerchange', finish, {once:true}); }catch(e){}
+    setTimeout(finish, maxWaitMs||4000);
+  });
+}
 async function applyUpdateNow(targetVer){
   try{ toast('🔄 Đang cập nhật lên bản mới'+(targetVer?' v'+targetVer:'')+'...','good'); }catch(e){}
   // lưu + sync trước để không mất dữ liệu
@@ -4789,18 +4803,21 @@ async function applyUpdateNow(targetVer){
     if('serviceWorker' in navigator){
       const reg=await navigator.serviceWorker.getRegistration();
       if(reg){
+        let _skipSent=false;
         await Promise.race([
           new Promise(async resolve=>{
             try{
               await reg.update();
-              if(reg.waiting){ try{ reg.waiting.postMessage('SKIP_WAITING'); }catch(e){} return resolve(); }
+              if(reg.waiting){ try{ reg.waiting.postMessage('SKIP_WAITING'); _skipSent=true; }catch(e){} return resolve(); }
               const w=reg.installing;
-              if(w){ w.addEventListener('statechange',()=>{ if(w.state==='installed'||w.state==='activated'){ try{ w.postMessage('SKIP_WAITING'); }catch(e){} resolve(); } }); }
+              if(w){ w.addEventListener('statechange',()=>{ if(w.state==='installed'||w.state==='activated'){ try{ w.postMessage('SKIP_WAITING'); _skipSent=true; }catch(e){} resolve(); } }); }
               else resolve();
             }catch(e){ resolve(); }
           }),
           new Promise(r=>setTimeout(r,6000))
         ]);
+        // v3.64.39: chờ ĐÚNG controllerchange thay vì đoán giờ — sửa lỗi "chớp thay đổi nhưng vẫn bản cũ"
+        if(_skipSent){ await _waitForNewSwAndReload(4000); }
       }
     }
   }catch(e){}
@@ -4932,6 +4949,9 @@ async function checkForUpdate(){
               }),
               new Promise(r=>setTimeout(r, 6000))   // không chờ quá 6s
             ]);
+            // v3.64.39: SW mới đã nhận SKIP_WAITING — chờ ĐÚNG controllerchange (SW mới thực sự nắm
+            // quyền kiểm soát tab) thay vì đoán giờ cố định, trước khi cho phép reload bên dưới.
+            if(_swReady){ await _waitForNewSwAndReload(4000); }
           }
         }
       }catch(e){ console.warn('[update] sw soft-update:', e&&e.message); }
@@ -4940,7 +4960,7 @@ async function checkForUpdate(){
       toast('✅ Đã lưu & đồng bộ — đang tải bản mới v'+data.version+'...', 'good');
       setTimeout(() => {
         window.location.reload();
-      }, _swReady ? 300 : 800);   // SW mới sẵn sàng → reload nhanh; chưa → chờ thêm chút
+      }, 300);   // v3.64.39: đã chờ controllerchange thật ở trên rồi, không cần đoán 300 vs 800 nữa
       return false;   // sắp reload → KHÔNG chào
     }
     return true;   // không có bản mới → an toàn để hiện popup chào
