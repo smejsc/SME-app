@@ -4537,7 +4537,7 @@ const WH_TYPES = {
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.64.52';
+const APP_VERSION='3.64.55';
 /* HOTFIX 3.12.17-email: CHẶN TRIỆT ĐỂ gửi email TỰ ĐỘNG (mất kiểm soát — spam quota Google).
    Email phải do NV được phân quyền CHỦ ĐỘNG chọn gửi. Cờ này:
    (1) chặn auto-SCAN tạo email (hrmScanExpiries/vesselCertScanExpiries);
@@ -8028,6 +8028,20 @@ function allowedFieldsForUser(){
   tabs.forEach(t=>{
     (TAB_TO_FIELDS[t]||[]).forEach(f=>fields.add(f));
   });
+  // v3.64.53 (Sếp: "kiểm tra chốt chặn... khi chuyển sang tải app theo phân quyền" → PHÁT HIỆN LỖ
+  // ĐÃ TỪNG DUYỆT NHƯNG CHƯA CODE THẬT): hàm này chỉ đọc CURRENT_USER.tabs (tick tay cũ) — không hề
+  // đọc funcGroups (Module), trong khi đây CHÍNH là hàm quyết định field nào được PUSH lên cloud
+  // (dùng ở 13/14 điểm gọi cloudSync còn lại, ngoài đúng 1 điểm Light Sync pull). NV chỉ có quyền
+  // qua Module (đúng cách gán mới, không tick .tabs) → tạo/sửa gì trong module đó cũng KHÔNG đẩy lên
+  // cloud được, dù Light Sync đã tải về đúng — vá TẬN GỐC, không phải vá từng field/module 1 nữa,
+  // đúng khuôn _lightSyncFields() đã làm đúng từ trước.
+  if(Array.isArray(CURRENT_USER&&CURRENT_USER.funcGroups)){
+    CURRENT_USER.funcGroups.forEach(k=>{
+      const g=FUNC_GROUPS.find(x=>x.k===k);
+      if(!g) return;
+      g.tabs.forEach(t=>{ (TAB_TO_FIELDS[t]||[]).forEach(f=>fields.add(f)); });
+    });
+  }
   // v3.02.96: Tạm ứng NV mở cho MỌI NV → luôn cấp field của tab advances (gồm payables để hoàn ứng chứng từ)
   (TAB_TO_FIELDS['advances']||[]).forEach(f=>fields.add(f));
   /* v3.20.159 (Sếp — "Máy admin không cập nhật... kiểm tra luồng sync các phần liên quan đến kho vật
@@ -8081,6 +8095,45 @@ function auditFieldCoverage(){
     console.warn('[audit] '+rows.length+' tab CÓ THỂ ĐANG MẤT DỮ LIỆU khi đồng bộ — tài khoản: '+(CURRENT_USER&&CURRENT_USER.name));
     console.table(rows);
   }catch(e){ console.warn('[audit] lỗi khi rà:', e&&e.message); }
+}
+// v3.64.54 (Sếp: "Có [ai bị ảnh hưởng bởi việc bỏ tick tay 7 tab]" → "có" [làm công cụ quét]): quét
+// TOÀN BỘ Danh sách NV 1 lần — tìm đúng người từng được tick tay riêng lẻ 1 trong 7 tab đã BỎ đường
+// tick tay ở v3.64.46/49 (vessels/hrm/approval/pay_periods/pay_config/pay_engine/project_data) NHƯNG
+// không có sẵn cờ/Module tương đương để giữ quyền — thay vì phải mở Xem thử + gõ Console từng người.
+// Tạm mượn CURRENT_USER/CURRENT_ROLE của TỪNG NV (như canAccessTab() thật đọc) để gọi ĐÚNG hàm thật
+// (canAccessTab) — không chép lại luật quyền ở đây, tránh lệch với luật gốc. Gọi tay từ Console
+// (auditLegacyTabLeftovers()) — không tự chạy, không đụng gì tới dữ liệu.
+function auditLegacyTabLeftovers(){
+  const cfg=getAuthConfig(); if(!cfg||!cfg.users){ console.warn('[audit-legacy] không đọc được Danh sách NV'); return; }
+  const savedUser=CURRENT_USER, savedRole=CURRENT_ROLE;
+  const TAB_CHECKS=[
+    {tab:'vessels (Quản lý tàu)', had:u=>(Array.isArray(u.tabs)&&u.tabs.includes('vessels'))||(Array.isArray(u.assignedVesselIds)&&u.assignedVesselIds.length>0)||(Array.isArray(u.assignedOpVesselIds)&&u.assignedOpVesselIds.length>0)},
+    {tab:'hrm (Nhân sự)', had:u=>(Array.isArray(u.tabs)&&u.tabs.includes('hrm'))||(Array.isArray(u.bccScopes)&&u.bccScopes.length>0)||(Array.isArray(u.hrScopes)&&u.hrScopes.length>0)},
+    {tab:'approval (Phê duyệt)', had:u=>Array.isArray(u.tabs)&&u.tabs.includes('approval')},
+    {tab:'pay_periods (Kỳ lương)', had:u=>Array.isArray(u.tabs)&&u.tabs.includes('pay_periods')},
+    {tab:'pay_config/pay_engine (Cấu hình lương)', had:u=>Array.isArray(u.tabs)&&(u.tabs.includes('pay_config')||u.tabs.includes('pay_engine'))},
+    {tab:'project_data (Dự án trong Danh mục)', had:u=>Array.isArray(u.tabs)&&u.tabs.includes('project_data')},
+  ];
+  const rows=[];
+  try{
+    (cfg.users||[]).forEach(u=>{
+      if(!u || u.isVesselAccount || u.isAdmin) return;   // Tàu/Admin không dính, luôn có đường khác
+      CURRENT_ROLE='user'; CURRENT_USER=u;
+      TAB_CHECKS.forEach(c=>{
+        if(!c.had(u)) return;
+        const tabId=c.tab.split(' ')[0].split('/')[0];   // 'pay_config/pay_engine' → kiểm cả 2
+        let still=false;
+        try{
+          if(c.tab.indexOf('pay_config')===0){ still=canAccessTab('pay_config')||canAccessTab('pay_engine'); }
+          else { still=canAccessTab(tabId); }
+        }catch(e){ still=false; }
+        if(!still) rows.push({ho_ten:u.fullName||u.name, email:u.email||u.name||'', tab_mat_quyen:c.tab});
+      });
+    });
+  }finally{ CURRENT_USER=savedUser; CURRENT_ROLE=savedRole; }
+  if(!rows.length){ console.log('[audit-legacy] OK — không NV nào bị mất quyền do bỏ tick tay riêng lẻ ở 7 tab đã sửa.'); return; }
+  console.warn('[audit-legacy] '+rows.length+' dòng — NV có thể đã MẤT quyền, cần gán lại Vai trò/Module:');
+  console.table(rows);
 }
 
 /* v3.09.51 — SỬA LỖI KIẾN TRÚC DATA LOSS.
@@ -18218,6 +18271,21 @@ function applyRoleUI(){
   } else if(CURRENT_ROLE==='admin'){
     const cp=document.getElementById('cpw-btn');
     if(cp) cp.remove();
+  }
+  // v3.64.55 (Sếp: "nút dọn máy... đặt trong app... admin bật, tự ẩn sau khi dọn xong"): tự tạo/tự
+  // gỡ theo đúng cờ CURRENT_USER.needCleanup mỗi lần applyRoleUI() chạy lại (đăng nhập, F5, Xem thử,
+  // hoặc ngay sau khi startMachineCleanup() tắt cờ xong) — không cần đăng xuất/đăng nhập lại mới ẩn.
+  if(CURRENT_ROLE==='user' && CURRENT_USER && CURRENT_USER.needCleanup && !document.getElementById('cleanup-btn')){
+    const cb=document.createElement('button');
+    cb.id='cleanup-btn';
+    cb.className='btn btn-ghost';
+    cb.style.cssText='border:1px solid #e0a43b;color:#e0a43b;padding:4px 10px;font-size:11px';
+    cb.innerHTML='🧹 Dọn máy';
+    cb.title='Admin vừa đổi Module/Vai trò cho bạn — dọn bớt dữ liệu ngoài phạm vi mới trên máy này';
+    cb.onclick=()=>startMachineCleanup();
+    document.querySelector('.topbar-actions').appendChild(cb);
+  } else if(!(CURRENT_USER && CURRENT_USER.needCleanup)){
+    const cb=document.getElementById('cleanup-btn'); if(cb) cb.remove();
   }
   // Logout button
   if(!document.getElementById('logout-btn')){
@@ -95479,6 +95547,66 @@ function saveUserRow(idx, btnEl){
     if(!u.companyId && !hasCoGroup) toast('⚠ Chưa chọn Công ty/Module — "Quản lý công ty con" đang thấy TOÀN CÔNG TY','bad');
   }
 }
+// v3.64.55 (Sếp — cả loạt: "Cần: nút dọn máy... đặt trong app... admin bật, NV bấm... đổi module xong
+// nút tự ẩn"): Bước 1 — Admin bật/tắt cờ u.needCleanup ngay trong dòng NV. Chỉ ghi dữ liệu, KHÔNG tự
+// xoá gì — bước xoá thật nằm ở startMachineCleanup() (chạy TRÊN MÁY của chính NV đó, không chạy được
+// từ đây vì dữ liệu cần dọn nằm vật lý trên máy NV, không đồng bộ/điều khiển từ xa được).
+function toggleUserNeedCleanup(idx, btnEl){
+  const cfg=getAuthConfig(); if(!cfg||!cfg.users||!cfg.users[idx]) return;
+  const u=cfg.users[idx];
+  u.needCleanup=!u.needCleanup;
+  setAuthConfig(cfg);
+  toast(u.needCleanup?'Đã bật — NV sẽ thấy nút "🧹 Dọn máy" ở lần đăng nhập/tải trang tiếp theo':'Đã tắt yêu cầu dọn máy');
+  try{
+    if(btnEl){
+      btnEl.innerHTML='🧹 '+(u.needCleanup?'Đang chờ dọn':'Bật dọn máy');
+      btnEl.title=u.needCleanup?'Đang chờ NV dọn máy — bấm để huỷ':'Bật cờ: lần đăng nhập sau, NV sẽ thấy nút Dọn máy trên máy họ';
+      btnEl.style.borderColor=u.needCleanup?'#e0a43b':''; btnEl.style.color=u.needCleanup?'#e0a43b':'';
+    }
+  }catch(e){}
+}
+// v3.64.55 — Bước 3: hàm chạy THẬT trên máy NV khi họ bấm nút "🧹 Dọn máy" ở topbar. Thứ tự an toàn
+// ĐÃ CHỐT với Sếp, không đảo được: (1) ĐẨY TOÀN BỘ dữ liệu máy lên cloud — mượn tạm allowedFieldsForUser()
+// trả về MỌI field (không giới hạn Module hiện tại, vì dữ liệu ngoài phạm vi vẫn có thể là việc dở
+// dang hợp lệ trước đây) — TÁI DÙNG NGUYÊN cloudSync('push') thật, không viết lại logic push/2 lưới
+// an toàn (chặn rỗng/chặn sụt giảm) đã có. (2) CHỈ khi window._syncSignal.status==='ok' (tín hiệu
+// state machine T1B đã có sẵn, xem updateSyncStatus()) mới XOÁ field ngoài phạm vi khỏi S + lưu lại.
+// Bất kỳ dấu hiệu lỗi/mạng yếu nào → DỪNG NGAY, không xoá gì — đúng cam kết đã nói với Sếp.
+async function startMachineCleanup(){
+  if(!(CURRENT_USER && CURRENT_USER.needCleanup)){ toast('Không có yêu cầu dọn máy nào đang chờ','bad'); return; }
+  if(!confirm('🧹 DỌN MÁY THEO MODULE\n\n'
+    +'Bước 1: Đẩy TOÀN BỘ dữ liệu trên máy này lên cloud (không giới hạn theo Module hiện tại).\n'
+    +'Bước 2: Sau khi đẩy XONG, xoá khỏi máy phần dữ liệu NGOÀI phạm vi Module/Vai trò hiện tại của bạn.\n\n'
+    +'⚠ Hãy LƯU HẾT mọi việc đang làm dở trước khi tiếp tục — quá trình này sẽ tải lại trang khi xong.\n\n'
+    +'Tiếp tục?')) return;
+  if(!confirm('XÁC NHẬN LẦN 2: Bạn đã lưu xong mọi việc đang làm dở chưa?\n\nBấm OK để bắt đầu dọn máy.')) return;
+  toast('🧹 Đang đẩy toàn bộ dữ liệu lên cloud trước khi dọn — đừng tắt trang…','warn');
+  const _origAllowed=allowedFieldsForUser;
+  window.allowedFieldsForUser=function(){ return ALL_DATA_FIELDS.concat(SHARED_FIELDS); };
+  let pushOk=false;
+  try{
+    window._syncSignal=null;
+    await cloudSync('push', {interactive:true});
+    pushOk=!!(window._syncSignal && window._syncSignal.status==='ok');
+  }catch(e){ pushOk=false; }
+  finally{ window.allowedFieldsForUser=_origAllowed; }
+  if(!pushOk){
+    toast('⚠ Đẩy lên cloud CHƯA thành công — ĐÃ DỪNG, KHÔNG xoá gì cả. Kiểm tra mạng rồi bấm lại nút "🧹 Dọn máy".','bad');
+    return;
+  }
+  const keep=new Set(allowedFieldsForUser());
+  let removed=0;
+  ALL_DATA_FIELDS.forEach(f=>{ if(!keep.has(f) && S[f]!==undefined){ delete S[f]; removed++; } });
+  try{ saveState(); }catch(e){}
+  try{
+    const cfg=getAuthConfig();
+    const me=(cfg.users||[]).find(u=>u.name===CURRENT_USER.name);
+    if(me){ me.needCleanup=false; setAuthConfig(cfg); }
+    CURRENT_USER.needCleanup=false;
+  }catch(e){}
+  toast('✓ Đã đẩy xong lên cloud và dọn '+removed+' nhóm dữ liệu ngoài phạm vi Module — đang tải lại trang…','good');
+  setTimeout(()=>{ window.location.reload(); }, 1500);
+}
 function renderStaff(){
   const host=document.getElementById('staff-by-dept'); if(!host) return;
   const cfg=getAuthConfig();
@@ -95554,6 +95682,7 @@ function renderStaff(){
           : `${isAdmin()?`<button class="btn-primary" style="font-size:10px;padding:3px 10px" title="Lưu Vai trò + Module + Công ty của dòng này" onclick="saveUserRow(${g.idx}, this)">💾 Lưu</button>`:''}
              <button class="btn-sec" style="font-size:10px;padding:3px 10px" title="Reset Password — cấp mật khẩu mới + đẩy lên cloud" onclick="resetUserPw(${g.idx})">🔑 Reset Password</button>`}
         ${isAdmin()?`<button class="btn-sec" style="font-size:10px;padding:3px 10px" title="Xem đúng giao diện NV này đang thấy — chỉ xem, có ghi log" onclick="viewAsStart('${esc(u.name)}')">🖥 Xem thử</button>`:''}
+        ${isAdmin()?`<button class="btn-sec" style="font-size:10px;padding:3px 10px;${u.needCleanup?'border-color:#e0a43b;color:#e0a43b':''}" title="${u.needCleanup?'Đang chờ NV dọn máy — bấm để huỷ':'Bật cờ: lần đăng nhập sau, NV sẽ thấy nút Dọn máy trên máy họ'}" onclick="toggleUserNeedCleanup(${g.idx}, this)">🧹 ${u.needCleanup?'Đang chờ dọn':'Bật dọn máy'}</button>`:''}
       </td>
     </tr>`;
   };
