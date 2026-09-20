@@ -4513,7 +4513,7 @@ const WH_TYPES = {
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.64.39';
+const APP_VERSION='3.64.40';
 /* HOTFIX 3.12.17-email: CHẶN TRIỆT ĐỂ gửi email TỰ ĐỘNG (mất kiểm soát — spam quota Google).
    Email phải do NV được phân quyền CHỦ ĐỘNG chọn gửi. Cờ này:
    (1) chặn auto-SCAN tạo email (hrmScanExpiries/vesselCertScanExpiries);
@@ -23747,10 +23747,10 @@ function _paySyncPaidStatus(){
 }
 function payStatusChip(s){ const m=PAY_STATUS_META[s]||PAY_STATUS_META.draft; const[bg,fg]=m.chip.split(','); return `<span class="ds-need" style="background:var(--paper-3);color:${fg}">${m.icon} ${m.label}</span>`; }
 /* v3.12.07 PHÂN QUYỀN LƯƠNG (chỉ đạo Sếp): HR/TP HR KHÔNG tính/xem/duyệt bảng lương — chỉ KT (canCheckAcc/L1) và KTT (canApproveL2), CEO/admin. */
-function payCanViewPayroll(){ return isAdmin() || !!(CURRENT_USER&&(CURRENT_USER.isCEO||canSignHr()/*v3.17.25 Sếp: TP HR full lương*/||CURRENT_USER.isPayrollAcc||canCheckAcc()||CURRENT_USER.canViewPayroll)) || canApproveL1() || canApproveL2(); }  /* v3.12.34: isPayrollAcc trực tiếp; v3.12.38: + cờ canViewPayroll (HR/Trưởng BP HR được admin bật riêng); v3.64.24: L1/L2 đổi sang gọi hàm */
+function payCanViewPayroll(){ return isAdmin() || !!(CURRENT_USER&&(CURRENT_USER.isCEO||canSignHr()/*v3.17.25 Sếp: TP HR full lương*/||CURRENT_USER.isPayrollAcc||canCheckAcc()||CURRENT_USER.canViewPayroll)) || canApproveL1() || canApproveL2() || _roleTierPerm('isPayrollAcc')===true; }  /* v3.12.34: isPayrollAcc trực tiếp; v3.12.38: + cờ canViewPayroll (HR/Trưởng BP HR được admin bật riêng); v3.64.24: L1/L2 đổi sang gọi hàm; v3.64.40 FIX: Vai trò "NV nhân sự lương" (roleTier) chưa được đọc ở đây — vẫn không xem được lương dù đã gán Vai trò */
 /* v3.20.07 (Sếp 03/9 — bỏ phân quyền KT/KTT trong HR): không còn đòi canCheckAcc (KT)/canApproveL1
    (KTT) — chỉ cần isPayrollAcc (NS/KT tiền lương, vai riêng của HR-Lương, không phải KT/KTT chung). */
-function payCanApprovePeriod(){ return isAdmin() || !!(CURRENT_USER&&CURRENT_USER.isPayrollAcc); }
+function payCanApprovePeriod(){ return isAdmin() || !!(CURRENT_USER&&CURRENT_USER.isPayrollAcc) || _roleTierPerm('isPayrollAcc')===true; }  /* v3.64.40 FIX: cùng lỗi thiếu roleTier như payCanViewPayroll ở trên */
 /* v3.12.38 (lệnh Sếp 22/7) — QUYỀN FULL NGHIỆP VỤ LƯƠNG: chính sách, tham số, kỹ thuật lương,
    tính lương, sửa + các điểm quyết toán nhạy cảm (khóa/amendment/khóa hồ sơ).
    FIX BUG: 15 chỗ trước đây dùng CURRENT_ROLE==='ktt' — nhưng CURRENT_ROLE CHỈ nhận 'admin'|'user'
@@ -27153,7 +27153,7 @@ window.pexPresetPick=function(){ try{ var v=document.getElementById('pex-srctype
   if(!pr) return; document.getElementById('pex-sign').value=String(pr.sign);
   document.getElementById('pex-tax').checked=!!pr.taxable;
   var h=document.getElementById('pex-hint'); if(h) h.textContent=pr.hint||''; }catch(e){} };
-function pexCanCreate_(){ try{ return (typeof isAdmin==='function'&&isAdmin()) || hasPfWrite_() || (CURRENT_USER&&(CURRENT_USER.isPayrollAcc||canSignHr())); }catch(e){ return false; } }   /* v3.20.07: bỏ canCheckAcc (KT) khỏi cổng tạo Khoản PS/Đợt chi riêng */
+function pexCanCreate_(){ try{ return (typeof isAdmin==='function'&&isAdmin()) || hasPfWrite_() || (CURRENT_USER&&(CURRENT_USER.isPayrollAcc||canSignHr())) || (typeof _roleTierPerm==='function'&&_roleTierPerm('isPayrollAcc')===true); }catch(e){ return false; } }   /* v3.20.07: bỏ canCheckAcc (KT) khỏi cổng tạo Khoản PS/Đợt chi riêng; v3.64.40 FIX: cùng lỗi thiếu roleTier */
 /* duyệt/hủy khoản kỳ nào → mọi kỳ pf tháng đó (chưa khóa) STALE — cùng đường với import công mới */
 function pexStalePeriods_(month){
   try{ (S.payrollPeriods||[]).forEach(function(p){
@@ -95326,6 +95326,36 @@ function setUserRoleTier(idx, val){
   if(val==='ceo') u.isCEO = true;
   setAuthConfig(cfg);
   toast(val?'Đã gán Vai trò — quyền hạn áp dụng ngay':'Đã bỏ Vai trò — quay về dùng cờ tick tay cũ');
+  // v3.64.40 (Sếp): "Quản lý công ty con" chỉ thật sự bị giới hạn 1 công ty nếu có companyId HOẶC
+  // đã tick đúng 1 công ty con làm Module (xem getActorCompanyId()) — thiếu cả 2 thì canCheckAcc/
+  // canApproveL1 vừa cấp ở trên áp dụng cho TOÀN CÔNG TY, rộng hơn ý định. Nhắc admin chọn ngay ở
+  // 2 cột Module/Công ty mới thêm cạnh đây.
+  if(val==='quan_ly_cty_con'){
+    const hasCoGroup=(Array.isArray(u.funcGroups)?u.funcGroups:[]).some(k=>{ try{ return companyFuncGroupIds().includes(k); }catch(e){ return false; } });
+    if(!u.companyId && !hasCoGroup) toast('⚠ Chưa chọn Công ty/Module — "Quản lý công ty con" đang thấy TOÀN CÔNG TY, chọn ngay ở 2 cột bên cạnh','bad');
+  }
+}
+// v3.64.40: gán/bỏ 1 Module (Nhóm chức năng) cho NV ngay trong bảng Danh sách NV — cạnh cột Vai trò,
+// không cần mở form Sửa. Ghi thẳng u.funcGroups (field đã có sẵn, không tạo field mới).
+function toggleUserFuncGroup(idx, key, checked){
+  const cfg=getAuthConfig(); if(!cfg||!cfg.users||!cfg.users[idx]) return;
+  const u=cfg.users[idx];
+  const cur=Array.isArray(u.funcGroups)?u.funcGroups.slice():[];
+  const i=cur.indexOf(key);
+  if(checked && i<0) cur.push(key);
+  if(!checked && i>=0) cur.splice(i,1);
+  u.funcGroups=cur;
+  setAuthConfig(cfg);
+  toast('Đã cập nhật Module');
+}
+// v3.64.40: gán/bỏ Công ty (companyId — field cũ, dùng lại nguyên isCompanyScoped()/getActorCompanyId())
+// ngay trong bảng Danh sách NV, cạnh cột Vai trò.
+function setUserCompany(idx, val){
+  const cfg=getAuthConfig(); if(!cfg||!cfg.users||!cfg.users[idx]) return;
+  const u=cfg.users[idx];
+  u.companyId=val||'';
+  setAuthConfig(cfg);
+  toast(val?'Đã gán Công ty — giới hạn dữ liệu áp dụng ngay':'Đã bỏ giới hạn Công ty');
 }
 function renderStaff(){
   const host=document.getElementById('staff-by-dept'); if(!host) return;
@@ -95368,11 +95398,25 @@ function renderStaff(){
     const roleOpts=['<option value="">— Chưa gán —</option>'].concat(
       Object.entries(ROLE_TIERS).map(([k,label])=>`<option value="${k}" ${u.roleTier===k?'selected':''}>${esc(label)}</option>`)
     ).join('');
+    // v3.64.40: 2 ô chọn nhanh cạnh Vai trò — Module (funcGroups, tick nhiều) và Công ty (companyId,
+    // chọn 1) — để gán luôn tại đây thay vì phải mở form Sửa riêng; đặc biệt cần cho "Quản lý công ty
+    // con" (xem cảnh báo trong setUserRoleTier()).
+    const curFg=Array.isArray(u.funcGroups)?u.funcGroups:[];
+    const fgCell = !isAdmin() ? esc(curFg.map(k=>{const f=FUNC_GROUPS.find(x=>x.k===k); return f?f.label:k;}).join(', ')||'—')
+      : `<details style="font-size:11px"><summary style="cursor:pointer;color:var(--muted);list-style:none">${curFg.length?curFg.length+' nhóm ▾':'— Chưa chọn — ▾'}</summary>
+          <div style="display:flex;flex-direction:column;gap:2px;padding:6px 0 2px;max-height:160px;overflow-y:auto">
+            ${FUNC_GROUPS.map(f=>`<label style="display:flex;align-items:center;gap:5px;white-space:nowrap;cursor:pointer"><input type="checkbox" value="${f.k}" ${curFg.includes(f.k)?'checked':''} onchange="toggleUserFuncGroup(${g.idx}, '${f.k}', this.checked)">${esc(f.label)}</label>`).join('')}
+          </div></details>`;
+    const coOpts=(S.companies||[]).map(c=>`<option value="${c.id}" ${u.companyId===c.id?'selected':''}>${esc(c.name)}${c.isParent?' (mẹ)':''}</option>`).join('');
+    const coCell = !isAdmin() ? esc((S.companies||[]).find(c=>c.id===u.companyId)?.name||'—')
+      : `<select style="font-size:11px;padding:2px 4px;max-width:130px" onchange="setUserCompany(${g.idx}, this.value)"><option value="">— Không giới hạn —</option>${coOpts}</select>`;
     return `<tr style="border-top:1px solid var(--rule)">
       <td style="padding:8px 14px"><b style="font-size:13px">${esc(u.fullName||u.name)}</b>${u.fullName?`<span style="color:var(--muted);font-size:11px;margin-left:6px">${esc(u.name)}</span>`:''}</td>
       <td style="padding:8px 10px;font-size:13px;color:var(--muted)">${esc(u.email||'—')}</td>
       ${_hideRights?'':`<td style="padding:8px 10px;font-size:11px">${nTabs} tab ${roleChips(u)}</td>`}
       <td style="padding:8px 10px;font-size:11px">${isAdmin()?`<select style="font-size:11px;padding:2px 4px" onchange="setUserRoleTier(${g.idx}, this.value)">${roleOpts}</select>`:esc(ROLE_TIERS[u.roleTier]||'—')}</td>
+      <td style="padding:8px 10px;font-size:11px">${fgCell}</td>
+      <td style="padding:8px 10px;font-size:11px">${coCell}</td>
       <td style="padding:8px 10px;text-align:center;white-space:nowrap">
         ${locked
           ? '<span style="font-size:10px;color:var(--muted)" title="NV có quyền cao — chỉ admin sửa">🔒 admin</span>'
@@ -95388,6 +95432,8 @@ function renderStaff(){
       <th style="padding:7px 10px;text-align:left">Email</th>
       ${_hideRights?'':'<th style="padding:7px 10px;text-align:left">Quyền</th>'}
       <th style="padding:7px 10px;text-align:left">Vai trò</th>
+      <th style="padding:7px 10px;text-align:left">Module</th>
+      <th style="padding:7px 10px;text-align:left">Công ty</th>
       <th style="padding:7px 10px;text-align:center;width:90px"></th>
     </tr></thead><tbody>${list.map(rowHtml).join('')}</tbody></table>`;
 
