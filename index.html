@@ -2063,7 +2063,7 @@ span.chip.chip-fixed{display:inline-flex;align-items:center;gap:4px}
             </div>
           </div>
           <span style="width:1px;height:22px;background:var(--rule);margin:0 2px"></span>
-          <button class="btn-sec" style="font-size:13px;border-color:#1c5a8c;color:#1c5a8c" onclick="openStockInTracking()" title="Theo dõi tiến độ giao hàng - nhập kho các đơn mua của bạn (kể cả đã nhập xong)">📦 Theo dõi nhập kho <span id="pnk-unseen-badge"></span></button>
+          <button class="btn-sec" style="font-size:13px;border-color:#1c5a8c;color:#1c5a8c" onclick="_sitModuleScope=null;openStockInTracking()" title="Theo dõi tiến độ giao hàng - nhập kho các đơn mua của bạn (kể cả đã nhập xong)">📦 Theo dõi nhập kho <span id="pnk-unseen-badge"></span></button>
           <button id="ap-payorder-btn" class="btn-sec" onclick="openApPaymentOrder()" title="Lệnh trình duyệt — NV KT chọn phiếu + hình thức chi (tiền mặt/CK) + ngân hàng → in PDF trình KTT duyệt" style="font-size:13px;display:none">📋 Lệnh trình duyệt</button>
           <div style="position:relative;display:inline-block">
             <button class="btn-sec" onclick="apToggleDropdown(event,'ap-dd-other')" style="font-size:13px">⋯ Khác ▾</button>
@@ -4540,7 +4540,7 @@ const WH_TYPES = {
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.64.71';
+const APP_VERSION='3.64.74';
 /* HOTFIX 3.12.17-email: CHẶN TRIỆT ĐỂ gửi email TỰ ĐỘNG (mất kiểm soát — spam quota Google).
    Email phải do NV được phân quyền CHỦ ĐỘNG chọn gửi. Cờ này:
    (1) chặn auto-SCAN tạo email (hrmScanExpiries/vesselCertScanExpiries);
@@ -4818,14 +4818,15 @@ function _waitForNewSwAndReload(maxWaitMs){
 }
 async function applyUpdateNow(targetVer){
   try{ toast('🔄 Đang cập nhật lên bản mới'+(targetVer?' v'+targetVer:'')+'...','good'); }catch(e){}
-  // lưu + sync trước để không mất dữ liệu
+  // v3.64.72 (Sếp: "máy admin mở app rất chậm... Aw Snap Out of Memory khi báo có bản cập nhật" —
+  // đã duyệt hướng sửa): BỎ bước cloudSync('push') ở đây — đây là bước NẶNG thật sự gây OOM (vừa tải
+  // cả cloud về vừa gộp vừa đẩy lại, 2 bản dữ liệu lớn cùng lúc trong bộ nhớ, đặc biệt với dữ liệu
+  // Admin giờ đã lớn hơn hẳn từ khi thêm field bccSheets/equipment/equipMaint — v3.64.45). Vẫn GIỮ
+  // saveStateEncrypted() (chỉ lưu vào máy — IndexedDB, nhẹ, không phải nguyên nhân OOM) — lưới an
+  // toàn cục bộ vẫn còn nguyên, không mất dữ liệu khỏi máy. Đồng bộ nền vẫn chạy đều như thường,
+  // không cần bước đẩy "dồn" ngay lúc bấm nút nữa — độ trễ chỉ còn đúng 1 chu kỳ sync nền bình
+  // thường (không phải mất hẳn), đổi lại tránh crash trắng trang.
   try{ if(CRYPTO_KEY && typeof saveStateEncrypted==='function'){ await saveStateEncrypted(); } }catch(e){}
-  try{
-    const cfg=(typeof getAuthConfig==='function')?getAuthConfig():null;
-    if(CRYPTO_KEY && cfg && cfg.scriptUrl && navigator.onLine){
-      await Promise.race([ cloudSync('push'), new Promise(r=>setTimeout(r,8000)) ]);
-    }
-  }catch(e){}
   try{
     if('serviceWorker' in navigator){
       const reg=await navigator.serviceWorker.getRegistration();
@@ -13331,6 +13332,14 @@ function apPendingForMe(opts){
 function docStatusInfo(r){
   if(!r) return {label:'—', who:'', cls:'', icon:''};
   const st=wfStatus(r);
+  // v3.64.73 (Sếp: "Chốt" — luồng AP có điều kiện: phiếu kho): AP đang tạo phiếu kho (stockDocs.apId
+  // khớp) mà phiếu kho CHƯA được Thủ kho xác nhận — hiện ĐÈ nhãn "🚚 Chờ giao hàng" thay cho "Nháp"
+  // bình thường, ở ĐÚNG 1 điểm trung tâm này nên áp dụng mọi nơi đang hiện trạng thái AP (Sổ phải
+  // trả gốc, Sổ theo dõi Phải trả từng module...). Chỉ áp khi còn draft — nếu đã gửi duyệt được thì
+  // chắc chắn phiếu kho đã confirmed (arSubmit() chặn từ trước, xem _apHasUnconfirmedStockDoc()).
+  if(st==='draft' && typeof _apHasUnconfirmedStockDoc==='function' && _apHasUnconfirmedStockDoc(r.id)){
+    return {label:'Chờ giao hàng', who:esc(r.createdBy||''), cls:'chip-warn', icon:'🚚'};
+  }
   const paidEnough = (typeof arRemaining==='function') ? (arRemaining(r)<=0.001) : false;
   // ĐÃ thanh toán đủ
   if(st==='approved' && paidEnough){
@@ -62058,8 +62067,19 @@ function _batchDeleteLine(kind,batchId,id){
 /* Gửi duyệt cả phiếu */
 function _batchSubmitAll(kind,batchId){
   const list=kind==='ap'?'payables':'receivables';
-  const recs=(S[list]||[]).filter(r=>r.batchId===batchId && (wfStatus(r)==='draft'||wfStatus(r)==='rejected'));
+  let recs=(S[list]||[]).filter(r=>r.batchId===batchId && (wfStatus(r)==='draft'||wfStatus(r)==='rejected'));
   if(!recs.length){toast('Không có dòng nào để gửi duyệt','warn');return;}
+  // v3.64.73 (Sếp: "Chốt" — cùng nguyên tắc arSubmit()): loại khỏi lượt gửi duyệt CẢ PHIẾU những dòng
+  // đang có phiếu kho chưa xác nhận — các dòng khác trong cùng phiếu (không liên quan kho) vẫn gửi
+  // duyệt bình thường, không bị kẹt lây.
+  if(kind==='ap'){
+    const blocked=recs.filter(r=>_apHasUnconfirmedStockDoc(r.id));
+    if(blocked.length){
+      recs=recs.filter(r=>!_apHasUnconfirmedStockDoc(r.id));
+      toast('🚚 '+blocked.length+' dòng đang Chờ giao hàng — cần Thủ kho xác nhận trước, đã bỏ qua khi gửi duyệt','warn');
+    }
+    if(!recs.length) return;
+  }
   commitMutation(()=>{ recs.forEach(r=>{ try{ wfSubmit(r,kind); }catch(e){} }); }, {action:'batch_submit', fields:[list], onOk:()=>{ renderAll();closeModal(); toast(`Đã gửi duyệt cả phiếu (${recs.length} dòng)`,'good'); }});
 }
 /* Duyệt cả phiếu theo cấp */
@@ -62696,10 +62716,23 @@ function _bodApDelete(id){
 }
 
 /* === Workflow actions for AR/AP === */
+// v3.64.73 (Sếp: "Chốt" — Việc 2: "Chỉ chặn phiếu AP có Phiếu kho — Phiếu AP có điều kiện"): true khi
+// AP này có ÍT NHẤT 1 phiếu kho (S.stockDocs, apId khớp) mà CHƯA được Thủ kho xác nhận. AP KHÔNG có
+// phiếu kho nào (phiếu dịch vụ/chi phí thuần, không hàng hoá) → luôn false, không bị chặn gì thêm.
+function _apHasUnconfirmedStockDoc(apId){
+  if(!apId) return false;
+  return (S.stockDocs||[]).some(d=>d && !d._deleted && d.apId===apId && d.status!=='confirmed');
+}
 function arSubmit(kind,id){
   const list=kind==='ap'?'payables':'receivables';
   const r=S[list].find(x=>x.id===id);if(!r)return;
   if(!wfCanEdit(r)){toast('Không thể gửi duyệt từ trạng thái này','bad');return;}
+  // v3.64.73 (Sếp: "Chốt"): AP có phiếu kho CHƯA xác nhận → chặn Gửi duyệt tại đúng cửa chính (không
+  // chỉ chặn nút 📤 riêng của phiếu kho như trước — whSendToAccounting() vẫn giữ nguyên gate cũ).
+  if(kind==='ap' && _apHasUnconfirmedStockDoc(r.id)){
+    toast('🚚 Phiếu đang Chờ giao hàng — cần Thủ kho xác nhận nhập kho trước khi Gửi duyệt','bad');
+    return;
+  }
   // v3.07.09: 1 PHIẾU = gửi duyệt CẢ PHIẾU (mọi dòng cùng batchId còn ở trạng thái sửa được)
   const sibs = r.batchId ? S[list].filter(x=>x.batchId===r.batchId && wfCanEdit(x)) : [r];
   commitMutation(()=>{ sibs.forEach(x=>{ try{ wfSubmit(x, kind); }catch(e){} }); }, {action:'ar_submit', fields:[list], onOk:()=>{
@@ -82254,10 +82287,10 @@ function openStockDocs(){
            xem tồn tổng hợp trước khi mua, và theo dõi đơn mua của chính mình. Thủ kho/admin thì
            bỏ vì đã có đủ ở Thao tác kho. */''}
       ${(!whIsVesselSideUser() && !(canManageStock()||isAdmin()))?`<button class="btn-sec" style="font-size:13px" onclick="openStockOverview()" title="Xem tồn tất cả kho — check trước khi mua, tránh mua trùng">📊 Tồn tổng hợp</button>
-      <button class="btn-sec" style="font-size:13px;border-color:#1c5a8c;color:#1c5a8c" onclick="openStockInTracking()" title="Theo dõi tiến độ giao hàng - nhập kho các đơn mua của bạn">📦 Theo dõi nhập kho</button>`:''}
+      <button class="btn-sec" style="font-size:13px;border-color:#1c5a8c;color:#1c5a8c" onclick="_sitModuleScope=null;openStockInTracking()" title="Theo dõi tiến độ giao hàng - nhập kho các đơn mua của bạn">📦 Theo dõi nhập kho</button>`:''}
     </div>
     ${(!whIsVesselSideUser()&&(canManageStock()||isAdmin()))?`<div id="wh-more" style="display:none;gap:8px;flex-wrap:wrap;margin:-4px 0 10px;padding:8px 10px;border:1px dashed var(--rule);border-radius:8px">
-      <button class="btn-sec" style="font-size:13px;border-color:#1c5a8c;color:#1c5a8c" onclick="openStockInTracking()" title="Theo dõi tiến độ giao hàng - nhập kho các đơn mua">📦 Theo dõi nhập kho</button>
+      <button class="btn-sec" style="font-size:13px;border-color:#1c5a8c;color:#1c5a8c" onclick="_sitModuleScope=null;openStockInTracking()" title="Theo dõi tiến độ giao hàng - nhập kho các đơn mua">📦 Theo dõi nhập kho</button>
       <button class="btn-sec" style="font-size:13px" onclick="openPendingInbound()">⏳ Chờ nhận hàng</button>
       <button class="btn-sec" style="font-size:13px${whReqPendingCount()?';border-color:#1c5a8c;color:#1c5a8c':''}" onclick="openTransferReqQueue()" title="Tàu xin điều chuyển vật tư từ kho khác — duyệt là hàng lên đường">🔄 Đề xuất điều chuyển${whReqPendingCount()?` <span style="background:#1c5a8c;color:#fff;border-radius:8px;padding:0 6px;font-size:10px">${whReqPendingCount()}</span>`:''}</button>
       <button class="btn-sec" style="font-size:13px" onclick="openStockOnHand()" title="Tồn từng kho, lọc theo nhóm hàng hải">📊 Tồn theo kho</button>
@@ -83604,6 +83637,16 @@ function whAttachApToStockDoc(doc, apRec){
   return doc;
 }
 let _sitFilter={state:'', q:'', days:30};
+// v3.64.74 (Sếp: "Sổ theo dõi Phải trả/Theo dõi nhập kho từng module: cần ngang bằng TCKT, NV đã
+// dùng quen — giữ nguyên"): thay vì XÂY LẠI 1 bản riêng cho từng module (rủi ro lệch logic thật —
+// hàm này gộp nhóm/progress bar/phát hiện phiếu mồ côi/link PNK khá sâu), TÁI DÙNG NGUYÊN
+// openStockInTracking() — chỉ thêm 1 lớp lọc THEO MODULE qua biến trạng thái này (giữ nguyên chữ ký
+// hàm — không đổi cách gọi ở 3 điểm TCKT hiện có, tránh vỡ gì). null = không lọc gì (TCKT gốc).
+let _sitModuleScope=null;   // {creators:Set<string>, label:string} khi mở từ 1 module cụ thể
+function openStockInTrackingForModule(creators, label){
+  _sitModuleScope={creators, label};
+  openStockInTracking();
+}
 function openStockInTracking(){
   // v3.20.413 (Sếp: "NV chỉ được thao tác tại nút KHO trên dòng phiếu AP hoặc: NHẬN HÀNG tại
   // THEO DÕI KHO — KHO chỉ mở cho TÀU và THỦ KHO"): TÌM RA XUNG ĐỘT VỚI BẢN VÁ TRƯỚC (v3.20.412 siết
@@ -83616,7 +83659,19 @@ function openStockInTracking(){
   // họ phụ trách); NV thường bỏ hẳn lớp lọc kho — dựa 100% vào whScopeStockDocs (phiếu của mình/qua
   // AP của mình) đã có sẵn, không phụ thuộc "có quyền Thủ kho" nào cả.
   const _base=stockDocList();
-  const all=stockCanSeeAllDocs() ? stockScopedDocs(_base.filter(d=>stockCanAccessWarehouse(d.warehouseId))) : stockScopedDocs(_base);
+  let all=stockCanSeeAllDocs() ? stockScopedDocs(_base.filter(d=>stockCanAccessWarehouse(d.warehouseId))) : stockScopedDocs(_base);
+  // v3.64.74: lớp lọc THEO MODULE — chỉ áp khi mở qua openStockInTrackingForModule(). Xác định người
+  // tạo qua AP gốc (d.apId) trước, phiếu tự do (không AP) thì theo d.createdBy. Cùng nguyên tắc
+  // "chỉ phiếu của mình / Trưởng bộ phận thấy hết" đã áp cho Sổ theo dõi Phải trả (_finLedgerCanSeeAll()).
+  if(_sitModuleScope && _sitModuleScope.creators){
+    const _apById={}; (typeof AccountingService!=='undefined'?AccountingService.payables():[]).forEach(a=>{ _apById[a.id]=a; });
+    all=all.filter(d=>{
+      const creator=(d.apId && _apById[d.apId]) ? _apById[d.apId].createdBy : d.createdBy;
+      if(!_sitModuleScope.creators.has(creator)) return false;
+      if(typeof _finLedgerCanSeeAll==='function' && !_finLedgerCanSeeAll()) return creator===(CURRENT_USER&&CURRENT_USER.name);
+      return true;
+    });
+  }
   const _aps=(typeof AccountingService!=='undefined')?AccountingService.payables():[];
   const groups=whGroupTrackingDocs(all, _aps);
   /* v3.15.80: phiếu trỏ về hóa đơn đã bị xóa — nêu rõ tại chỗ thay vì để người dùng ngơ ngác */
@@ -83704,7 +83759,7 @@ function openStockInTracking(){
      "Đường B" cũ, hầu như không còn phát sinh). Giữ nguyên _whOrphanBanner (cảnh báo phiếu trỏ về hóa
      đơn ĐÃ BỊ XÓA — khác hẳn trường hợp này, vẫn cần thiết). */
   const oH='';
-  openModal('📦 Theo dõi nhập kho',
+  openModal((_sitModuleScope?'📦 Theo dõi nhập kho — '+esc(_sitModuleScope.label):'📦 Theo dõi nhập kho'),
     _whOrphanBanner+
     `<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:8px">
        <div style="background:var(--rule);border-radius:6px;padding:6px 10px"><div style="font-size:10px;color:var(--muted)" title="Hàng chưa về — đơn đã tạo phiếu, đang chờ NCC giao">Chờ giao hàng</div><div style="font-size:18px;font-weight:600;color:var(--warn)">${nPend}</div></div>
@@ -83718,7 +83773,7 @@ function openStockInTracking(){
        <select style="font-size:12px;padding:5px" onchange="_sitFilter.days=+this.value;openStockInTracking()"><option value="30" ${_sitFilter.days===30?'selected':''}>30 ngày</option><option value="90" ${_sitFilter.days===90?'selected':''}>90 ngày</option><option value="3650" ${_sitFilter.days===3650?'selected':''}>Tất cả</option></select>
      </div>
      <div class="tbl-scroll" style="max-height:430px">${gH}${oH}</div>`,
-    `<button class="btn-ghost" onclick="closeModal()">Đóng</button>`);
+    `<button class="btn-ghost" onclick="_sitModuleScope=null;closeModal()">Đóng</button>`);
 }
 /* v3.20.23: bấm dòng phiếu trong Theo dõi nhập kho → bung/thu chi tiết từng vật tư TẠI CHỖ, không
    rời màn. Hiện đủ 2 loại mã (mã FAST nội bộ + mã bên bán/NCC) như Sếp yêu cầu. */
@@ -83759,7 +83814,7 @@ function _sitAttachOpen(docId){
   openModal('🔗 Gắn hóa đơn cho '+esc(d.docNo),
     `<input value="${esc(window._sitAttachQ||'')}" placeholder="🔎 Tìm NCC / diễn giải / số HĐ…" style="width:100%;font-size:12px;padding:6px;margin-bottom:6px;box-sizing:border-box" oninput="window._sitAttachQ=this.value" onkeydown="if(event.key==='Enter')_sitAttachOpen('${docId}')">
      <div class="tbl-scroll" style="max-height:300px"><table style="width:100%;border-collapse:collapse;border:1px solid var(--rule)"><tbody>${rows||'<tr><td style="padding:8px;color:var(--muted);font-size:11px">Không có AP khớp.</td></tr>'}</tbody></table></div>`,
-    `<button class="btn-ghost" onclick="openStockInTracking()">← Quay lại</button>`);
+    `<button class="btn-ghost" onclick="_sitModuleScope=null;openStockInTracking()">← Quay lại</button>`);
 }
 function _sitAttachPick(apId){
   const d=InventoryService.stockDocById(window._sitAttachDoc); if(!d) return;
@@ -97593,15 +97648,33 @@ function _renderFinLedgerModal(){
   const users=Array.from(new Set(s.list.map(p=>p.createdBy).filter(Boolean))).sort();
   const statuses=Array.from(new Set(s.list.map(p=>p.status).filter(Boolean))).sort();
   const filtered=s.list.filter(p=>(!s.byUser||p.createdBy===s.byUser)&&(!s.byStatus||p.status===s.byStatus));
-  const rows=filtered.map(p=>`<tr>
+  // v3.64.74 (Sếp: "cần ngang bằng TCKT — NV đã dùng quen"): 2 KPI hàng đợi KT như TCKT gốc
+  // (v3.10.05 FLAG_KT_QUEUE_NAV) — đếm trong ĐÚNG phạm vi module (s.list, trước khi lọc người
+  // lập/trạng thái), bấm vào tự set bộ lọc trạng thái tương ứng.
+  const nKtKiem=s.list.filter(p=>p.status==='pending_acc').length;
+  const nChoChi=s.list.filter(p=>p.status==='approved' && (typeof arRemaining==='function'?arRemaining(p):0)>0.001).length;
+  const _canCheck=(typeof canCheckAcc==='function')&&canCheckAcc();
+  const rows=filtered.map(p=>{
+    const si=(typeof docStatusInfo==='function')?docStatusInfo(p):null;   // v3.64.73: dùng nhãn trạng thái chuẩn (gồm cả "🚚 Chờ giao hàng" mới) thay vì hiện thẳng mã trạng thái thô
+    return `<tr>
       <td style="font-size:11px">${esc(p.issueDate||'')}</td>
       <td>${esc(p.partner||'')}</td>
       <td class="r num">${fmt(p.amount,p.ccy)}</td>
-      <td style="font-size:11px">${esc(p.status||'')}</td>
+      <td style="font-size:11px">${si?(esc(si.icon||'')+' '+esc(si.label||'')):esc(p.status||'')}</td>
       <td style="font-size:11px;color:var(--muted)">${esc(p.createdBy||'')}</td>
-      <td><button class="icon-btn" title="Mở" onclick="openPayableModal('${p.id}')">✎</button></td>
-    </tr>`).join('');
+      <td>
+        <button class="icon-btn" title="Mở" onclick="openPayableModal('${p.id}')">✎</button>
+        <button class="icon-btn" style="color:#1c5a8c" title="Tạo phiếu nhập kho từ hóa đơn này" onclick="event.stopPropagation();stockInFromAp('${p.id}')">📦</button>
+        ${(_canCheck && p.status==='pending_acc')?`<button class="icon-btn good" title="Trình ký KTT — KT viên đã kiểm đủ chứng từ" onclick="event.stopPropagation();_finLedgerQuickCheck('${p.id}')">✓</button>`:''}
+        ${(p.status==='draft'||p.status==='rejected')?`<button class="icon-btn danger" title="Xoá phiếu (chỉ khi còn Nháp/Bị từ chối)" onclick="event.stopPropagation();_finLedgerQuickDelete('${p.id}')">✕</button>`:''}
+      </td>
+    </tr>`;
+  }).join('');
   const body=`
+    <div style="display:flex;gap:8px;margin-bottom:10px">
+      <div onclick="_finLedgerState.byStatus='pending_acc';_renderFinLedgerModal()" style="cursor:pointer;background:var(--rule);border-radius:6px;padding:6px 12px;flex:1"><div style="font-size:10px;color:var(--muted)">🧾 Chờ KT kiểm</div><div style="font-size:18px;font-weight:600;color:#5a4a8c">${nKtKiem}</div></div>
+      <div onclick="_finLedgerState.byStatus='approved';_renderFinLedgerModal()" style="cursor:pointer;background:var(--rule);border-radius:6px;padding:6px 12px;flex:1"><div style="font-size:10px;color:var(--muted)">💰 Chờ chi tiền</div><div style="font-size:18px;font-weight:600;color:#1c5a8c">${nChoChi}</div></div>
+    </div>
     <div style="display:flex;gap:8px;margin-bottom:10px;flex-wrap:wrap">
       <select onchange="_finLedgerState.byUser=this.value;_renderFinLedgerModal()" style="font-size:11px;padding:4px 8px;border:1px solid var(--rule);border-radius:6px">
         <option value="">— Tất cả người lập —</option>
@@ -97619,24 +97692,28 @@ function _renderFinLedgerModal(){
     </table></div>`;
   openModal('📤 Sổ theo dõi Phải trả — '+esc(s.moduleLabel), body, `<button class="btn-sec" onclick="closeModal()">Đóng</button>`);
 }
+// v3.64.74: nút ✓ Trình ký nhanh ngay tại dòng — dùng ĐÚNG wfCheckAcc() (hàm thật, không viết lại),
+// bọc commitMutation để lưu/sync/audit đúng chuẩn như mọi thao tác khác trong app.
+function _finLedgerQuickCheck(id){
+  const r=AccountingService.payableById(id); if(!r){ toast('Không tìm thấy phiếu','bad'); return; }
+  commitMutation(()=>{ wfCheckAcc(r); }, {action:'check_acc', fields:['payables'], onOk:()=>{ toast('✓ Đã trình ký lên KTT','good'); _renderFinLedgerModal(); }});
+}
+// v3.64.74: nút ✕ Xoá nhanh — dùng ĐÚNG deleteAr('ap', id) đã có, cùng khuôn confirm() như mọi nơi
+// khác trong app (VD _batchDeleteLine).
+function _finLedgerQuickDelete(id){
+  const r=AccountingService.payableById(id); if(!r){ toast('Không tìm thấy phiếu','bad'); return; }
+  if(!confirm('Xoá phiếu "'+(r.partner||r.desc||'')+'"?')) return;
+  deleteAr('ap', id);
+  _finLedgerState.list=_finLedgerState.list.filter(p=>p.id!==id);
+  _renderFinLedgerModal();
+  toast('Đã xoá phiếu','good');
+}
+// v3.64.74 (Sếp: "cần ngang bằng TCKT, NV đã dùng quen — giữ nguyên"): BỎ bản rút gọn tự vẽ (chỉ 1
+// bảng phẳng, thiếu KPI/nhóm/tiến độ/nút Nhận hàng) — gọi thẳng hàm THẬT openStockInTrackingForModule()
+// (mở openStockInTracking() với lớp lọc module) — cùng 1 trải nghiệm với TCKT, không phải bản giống-giống.
 function finOpenInboundFor(moduleLabel, depts){
   const creators=_finModuleCreators(depts);
-  let list=stockDocList().filter(d=>d&&(d.type==='IN'||d.type==='TRANSFER_IN')&&d.status==='pending'&&creators.has(d.createdBy));
-  if(!_finLedgerCanSeeAll()) list=list.filter(d=>d.createdBy===(CURRENT_USER&&CURRENT_USER.name));   // v3.64.62: cùng nguyên tắc "chỉ thấy phiếu của mình"
-  list=list.sort((a,b)=>String(b.createdAt||'').localeCompare(String(a.createdAt||'')));
-  const rows=list.map(d=>`<tr>
-      <td style="font-family:var(--font-mono);font-size:11px">${esc(d.docNo||'')}</td>
-      <td style="font-size:11px">${esc(d.date||'')}</td>
-      <td style="font-size:11px">${esc(_whName(d.warehouseId)||'')}</td>
-      <td style="font-size:11px;color:var(--muted)">${esc(d.createdBy||'')}</td>
-      <td><button class="icon-btn" title="Mở" onclick="openStockForm('IN','${d.id}')">✎</button></td>
-    </tr>`).join('');
-  openModal('⏳ Theo dõi nhập kho — '+esc(moduleLabel), `
-    <div style="font-size:10px;color:var(--muted);margin-bottom:8px">${list.length} phiếu đang chờ — ${_finLedgerCanSeeAll()?('chỉ hiện phiếu do NV thuộc '+esc(moduleLabel)+' tạo'):'chỉ hiện phiếu do CHÍNH BẠN tạo (Trưởng bộ phận trở lên mới thấy toàn bộ module)'}</div>
-    <div class="tbl-scroll"><table class="tbl">
-      <thead><tr><th>Số phiếu</th><th>Ngày</th><th>Kho</th><th>Người tạo</th><th></th></tr></thead>
-      <tbody>${rows||'<tr><td class="empty" colspan="5">Không có phiếu chờ</td></tr>'}</tbody>
-    </table></div>`, `<button class="btn-sec" onclick="closeModal()">Đóng</button>`);
+  openStockInTrackingForModule(creators, moduleLabel);
 }
 // v3.64.45 (Sếp — Module Quản lý tàu: "Chỉ cần xây: Chi hộ chủ tàu và Sổ CHI HỘ — đầy đủ"): TẠO MỚI
 // đã có sẵn (openOpMultiRow() — vốn đã là modal độc lập, không phụ thuộc DOM trang op_input, dùng
