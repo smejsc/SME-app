@@ -4651,7 +4651,7 @@ const WH_TYPES = {
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.65.19';
+const APP_VERSION='3.65.21';
 /* HOTFIX 3.12.17-email: CHẶN TRIỆT ĐỂ gửi email TỰ ĐỘNG (mất kiểm soát — spam quota Google).
    Email phải do NV được phân quyền CHỦ ĐỘNG chọn gửi. Cờ này:
    (1) chặn auto-SCAN tạo email (hrmScanExpiries/vesselCertScanExpiries);
@@ -19695,6 +19695,11 @@ const BCC_CREW_COLS=[['DB1','Công biển VN','ngày'],['DB2','Công biển NN',
 // .expat (H,I,K,L — chữ engine trực tiếp, khớp luôn cách BCC_EXPAT Excel-import đã đọc sẵn).
 const BCC_OM_COLS=[['NORMAL','Giờ thường','giờ'],['OT12','OT×1.2','giờ'],['OT15','OT×1.5','giờ'],['ALLOW_DAYS','Ngày trợ cấp','ngày']];
 const BCC_EXPAT_SUM_COLS=[['H','Công thường','ngày'],['I','Phép','ngày'],['K','OT×1.5','giờ'],['L','OT×2','giờ']];
+// v3.65.21 (Sếp: "BCC chuyên gia O&M: tính công và OT theo giờ" — đúng khuôn BCC_OM_COLS/
+// BCC_EXPAT_SUM_COLS ở trên, mix ngày+giờ): cột riêng cho Drill-Geo (NTP) — khớp ĐÚNG tên cột B1/B2/
+// OT1/OT2 trong file thật GEOMARINE PTE.LTD, để ntpComputeSalaryRow() đọc thẳng row.sums không cần
+// đổi tên field.
+const BCC_NTP_COLS=[['B2','Công onshore','ngày'],['B1','Công biển','ngày'],['OT1','OT×1.5','giờ'],['OT2','OT×2','giờ']];
 function bccRowSumsTotalGeneric(sums){ sums=sums||{}; return Object.keys(sums).reduce((s,c)=>s+(+sums[c]||0),0); }
 // v3.63.08/09: khai báo theo scope.type — cols hiển thị, cách tính "Tổng" hiển thị, và NGĂN hrAttendance
 // (profile) mà mỗi dòng phải ghi vào. Thêm loại mới chỉ cần thêm 1 mục ở đây.
@@ -19710,7 +19715,8 @@ const BCC_SUMMARY_SCHEMAS={
     profileOf:e=>(typeof deptImpliedEngine==='function'&&deptImpliedEngine(e.dept)==='tech')?'BCC_KYTHUAT':'BCC_VP' },
   vessel: { cols:BCC_CREW_COLS, total:bccRowSumsTotalGeneric, profileOf:()=>'BCC_DOITAU' },
   om:     { cols:BCC_OM_COLS, total:bccRowSumsTotalGeneric, profileOf:()=>'BCC_CHUYENGIA' },
-  expat:  { cols:BCC_EXPAT_SUM_COLS, total:bccRowSumsTotalGeneric, profileOf:()=>'BCC_EXPAT' }
+  expat:  { cols:BCC_EXPAT_SUM_COLS, total:bccRowSumsTotalGeneric, profileOf:()=>'BCC_EXPAT' },
+  ntp:    { cols:BCC_NTP_COLS, total:bccRowSumsTotalGeneric, profileOf:()=>'BCC_NTP' }   /* v3.65.21 */
 };
 // v3.63.09 (rà ra thêm khi thêm scope 'expat' riêng): phạm vi chọn PHÒNG BAN chung (scope.type==='dept',
 // dùng ở checkbox "Phòng ban" gán quyền NV) và phạm vi 'om'/'expat' riêng của admin (bccAllPossibleScopes)
@@ -19724,6 +19730,7 @@ function bccSchemaForScope(scope){
     const eng=(typeof deptImpliedEngine==='function')?deptImpliedEngine(scope.value):'';
     if(eng==='expert_om') return BCC_SUMMARY_SCHEMAS.om;
     if(eng==='expat') return BCC_SUMMARY_SCHEMAS.expat;
+    if(eng==='ntp') return BCC_SUMMARY_SCHEMAS.ntp;   /* v3.65.21: Drill-Geo — phòng ban khai payEngine='ntp' */
   }
   return BCC_SUMMARY_SCHEMAS[scope.type]||null;
 }
@@ -20146,15 +20153,18 @@ function renderBccGridEditor(id){
 }
 
 function bccAutoCreatePayPeriod(s){
-  const profile = s.scope.type==='dept' ? 'office' : (s.scope.type==='vessel' ? 'crew' : null);
+  // v3.65.20 (Sếp — Drill-Geo là Nhóm lương 'ntp' mới): dùng THẲNG _bccWebEngineOfDeptSheet() thay vì
+  // hardcode chỉ dept/vessel — hàm đó đã xử lý đủ cả expat/om/expert/ntp (qua payEngine phòng ban),
+  // tránh viết 2 nơi 2 kiểu dễ lệch nhau như đã từng xảy ra (bài học BCC↔Kỳ lương hôm qua).
+  const profile = (typeof _bccWebEngineOfDeptSheet==='function') ? _bccWebEngineOfDeptSheet(s) : '';
   if(!profile){ toast('✓ Đã xác nhận BCC — phạm vi này chưa tự tạo kỳ lương, vào Kỳ lương tạo tay','warn'); return; }
-  const ccy='VND';
+  const ccy=(profile==='ntp'||profile==='expat'||profile==='project'||profile==='expert_om') ? 'USD' : 'VND';   // v3.65.20: NTP/Expat/Chuyên gia đều USD, trước chỉ hardcode VND
   const existed=(PayrollService.periods()||[]).some(p=>p && !p._deleted && p.period===s.period && p.profile===profile && (p.companyId||'')==='' && _payCcy(p)===ccy);
   if(existed){ toast('✓ Đã xác nhận BCC — kỳ lương '+s.period+' ('+PAY_PROFILE_LABEL[profile]+') đã có sẵn, không tạo trùng','good'); return; }
   const empMap={}; (HRService.employees()||[]).forEach(e=>{empMap[e.id]=e;});
-  // v3.65.18: lưới an toàn — loại NTP khỏi cả đường TỰ ĐỘNG tạo Kỳ lương (phòng khi NTP lỡ lẫn vào
-  // BCC dept/vessel do dùng chung Bộ phận với NV thường — đúng thiết kế NTP không qua Kỳ lương).
-  const rows=(s.rows||[]).filter(r=>{ const e=empMap[r.empId]; return e && e.type!=='ntp'; }).map(r=>{ const e=empMap[r.empId]||{}; return {empId:r.empId, name:e.fullName||e.name||'', smartId:e.smartId||'', inputs:{}, result:{}}; });
+  // v3.65.20: TINH lại lưới v3.65.18 — NTP chỉ bị loại khi profile của SHEET này KHÔNG PHẢI 'ntp'
+  // (an toàn khỏi lẫn vào Văn phòng/Đội tàu); khi đúng profile 'ntp' thì giữ nguyên, không loại nữa.
+  const rows=(s.rows||[]).filter(r=>{ const e=empMap[r.empId]; return e && !(e.type==='ntp' && profile!=='ntp'); }).map(r=>{ const e=empMap[r.empId]||{}; return {empId:r.empId, name:e.fullName||e.name||'', smartId:e.smartId||'', inputs:{}, result:{}}; });
   const _sd=+s.workDays||0;
   const p={ id:uid(), createdAt:new Date().toISOString(), updatedAt:new Date().toISOString(),
     period:s.period, profile, status:'draft', companyId:'', ccy, versionId:(payEngine().activeVersion||''),
@@ -23322,6 +23332,17 @@ function defaultPayProfiles(){
       otCoef15: 1.5, otCoef20: 2,
       note:'Lương = mức/ngày × (công thường + phép) + OT (F/8 × giờ × hệ số) + thưởng + phụ cấp đi lại + ăn trưa + hoàn trả.'
     },
+    // v3.65.20 (Sếp: "Đơn giản: để ở bước lưu nháp - không chuyển KT - chi phí được ghi"): NTP
+    // (Drill-Geo, đội khoan GEOMARINE) — ĐÚNG dạng đơn giản như expat/project ở trên: KHÔNG GTGC,
+    // KHÔNG BHXH, KHÔNG biểu thuế TNCN (khớp đúng cách expat/project đã làm từ trước, không phải
+    // trường hợp đặc biệt). Công thức RIÊNG (khác hẳn office/crew/expat) — xem ntpComputeSalaryRow()
+    // đã đối chiếu khớp 100% với file thật GEOMARINE PTE.LTD.
+    ntp: {
+      label:'Lương Nhà thầu phụ — Drill-Geo (USD)',
+      ccy:'USD',
+      basicDay: 20,              // "Số công chuẩn theo tháng" — đúng file GEOMARINE (khác 21 của expat)
+      note:'Lương cơ bản = nguyên đơn giá. Phụ cấp biển = đơn giá × Công biển. OT1.5/OT2 = (Lương cơ bản÷Ngày công chuẩn÷8)×hệ số×giờ OT. Phiếu chi tạo ra dừng ở NHÁP — không qua KT/L1/L2 (đã chốt).'
+    },
     tech: {
       label:'Lương Bộ phận Kỹ thuật (VND)',
       standardDays: 21,
@@ -24091,10 +24112,17 @@ function _payProfForPeriod(profile, period){
    để dùng thêm ở CỔNG TÍNH + VALIDATE — NV đổi thẻ SAU khi kỳ đã nạp sẽ bị máy phát hiện,
    không tính bằng engine sai nhóm một cách âm thầm. */
 const PAY_PERIOD_ENGINES={office:['office'],crew:['crew'],crew_khoan:['crew_khoan'],tech:['tech'],
-  project:['project','expert','expert_om'],expat:['expat'],office_gross:['office_gross']};
+  project:['project','expert','expert_om'],expat:['expat'],office_gross:['office_gross'],ntp:['ntp']};
 /* Kiểm 1 NV trong kỳ: thẻ hiệu lực có đúng nhóm kỳ không.
    → {ok:true, cardEngine} | {ok:false, cardEngine|null (null = chưa có thẻ)} */
 function _payRowEngineCheck(p, empId){
+  // v3.65.21: NTP dùng hệ thẻ lương RIÊNG (ntpPayCards/ntpPayCardAt), không phải salaryProfileAt()
+  // dùng chung cho office/crew/expat/... — tra nhầm hệ sẽ luôn ra "chưa có thẻ", chặn tính lương dù
+  // đã nhập đủ đơn giá ở màn "💰 Thẻ lương NTP".
+  if(p.profile==='ntp'){
+    const c=(typeof ntpPayCardAt==='function')?ntpPayCardAt(empId, (p.period||'')+'-15'):null;
+    return c ? {ok:true, cardEngine:'ntp'} : {ok:false, cardEngine:null};
+  }
   let v=null; try{ v=salaryProfileAt(empId, p.period); }catch(e){}
   const allowed=PAY_PERIOD_ENGINES[p.profile]||[];
   if(!v) return {ok:false, cardEngine:null};
@@ -24147,10 +24175,33 @@ function payDispatchCompute(profile, inputs, period){
     case 'office_gross': return payComputeOfficeGross(inputs, prof);   /* v3.13.84 GĐ1 — lương GROSS công ty con */
     case 'expat':  return payComputeExpat(inputs, prof);
     case 'tech':   return payComputeTech(inputs, prof);
+    case 'ntp':    return payComputeNtp(inputs, prof);   /* v3.65.21 */
     default: return {takeHome:0};
   }
 }
-const PAY_PROFILE_LABEL={office:'Văn phòng',crew:'Đội tàu',crew_khoan:'Nhân sự khoan (Khoán)',project:'Chuyên gia/Dự án',expert_om:'Chuyên gia/Dự án',expat:'Chuyên gia VP (Expat)',tech:'Bộ phận Kỹ thuật',office_gross:'Lương GROSS — công ty con (STER)'};  /* v3.14.11 (Sếp 04/8): Cảnh/Cẩn thuộc NHÂN SỰ KHOAN, không phải Đội tàu — đổi nhãn phân loại, engine khoán GIỮ NGUYÊN */
+// v3.65.21 (Sếp: "BCC chuyên gia O&M: tính công và OT theo giờ" — cùng khuôn payComputeExpat ngay
+// trên): đọc THẲNG inputs.B1/B2/OT1/OT2 (đúng tên cột BCC_NTP_COLS vừa thêm — khớp tên cột file thật
+// GEOMARINE, không cần đổi tên) + đơn giá đã injected vào inputs tại payComputeRow() (basicSalary/
+// offshoreAllowance/basicDay — đọc từ ntpPayCardAt(), thẻ lương RIÊNG của NTP, khác hệ thẻ lương
+// salaryProfileAt() dùng cho office/expat/crew). Dùng lại ĐÚNG công thức ntpComputeSalaryRow() đã
+// đối chiếu khớp 100% với file thật — không viết công thức lần 2, tránh lệch nếu sau sửa 1 chỗ quên
+// chỗ kia.
+function payComputeNtp(inputs, prof){
+  inputs=inputs||{};
+  const card={
+    basicSalary: +inputs._ntpBasicSalary||0,
+    offshoreAllowance: +inputs._ntpOffshoreAllowance||0,
+    basicDay: +inputs._ntpBasicDay || (prof&&prof.basicDay) || 20
+  };
+  const bcc={ B1:+inputs.B1||0, OT1:+inputs.OT1||0, OT2:+inputs.OT2||0, other:+inputs.OTHER||0 };
+  const r=(typeof ntpComputeSalaryRow==='function') ? ntpComputeSalaryRow(card, bcc) : {basicPaid:0,offshorePaid:0,ot15Paid:0,ot2Paid:0,other:0,total:0};
+  return {
+    basicPaid:r.basicPaid, offshorePaid:r.offshorePaid, ot15Paid:r.ot15Paid, ot2Paid:r.ot2Paid, other:r.other,
+    total:r.total, takeHome:r.total, ccy:'USD',
+    _hasCard: card.basicSalary>0
+  };
+}
+const PAY_PROFILE_LABEL={office:'Văn phòng',crew:'Đội tàu',crew_khoan:'Nhân sự khoan (Khoán)',project:'Chuyên gia/Dự án',expert_om:'Chuyên gia/Dự án',expat:'Chuyên gia VP (Expat)',tech:'Bộ phận Kỹ thuật',office_gross:'Lương GROSS — công ty con (STER)',ntp:'Nhà thầu phụ — Drill-Geo'};  /* v3.65.20: +ntp */
 /* v3.20.373 (phát hiện lúc xây bảng Thẻ lương tổng hợp): thêm key 'expert_om' — dữ liệu thật LƯU
    engine='expert_om' (xem spImportParse_: eng==='expert'||eng==='project' → chuẩn hóa về 'expert_om'),
    nhưng map gốc chỉ có key 'project' → mọi nơi khác đang đọc map này cho thẻ expert_om (kể cả
@@ -26595,9 +26646,13 @@ function _payCreateApBatch(p, etypes){
   const totalCost = t.usd ? t.takeHome : (t.takeHome + t.pit + bhxh32);
   const totalTxt=_negU(t.usd?`${totalCost.toLocaleString('en-US')} ${t.ccy}`:`${totalCost.toLocaleString('vi-VN')} đ`);
   const newIds=[]; const nowIso=new Date().toISOString(); const who=(typeof actorName==='function'?actorName():'admin');
+  // v3.65.20 (Sếp: "Đơn giản: để ở bước lưu nháp - không chuyển KT - chi phí được ghi"): NHÓM ntp
+  // dừng ở Nháp — KHÔNG gửi KT/L1/L2 (apCountsInPL() đã xác nhận không xét trạng thái duyệt, Nháp
+  // vẫn vào P&L ngay). Mọi nhóm khác (office/crew/expat/tech...) giữ nguyên pending_acc như cũ.
+  const _isNtp = p.profile==='ntp';
   keys.forEach((k,i)=>{
     const g=groups[k]; const isFirst=(i===0);
-    const et=(etypes&&etypes[k]) || _payCcExpenseType(k).code;
+    const et=(etypes&&etypes[k]) || (_isNtp ? 'NTP_LUONG' : _payCcExpenseType(k).code);
     const lineAmt=t.usd ? Math.round(g.net*100)/100 : Math.round(g.net);
     const ap={
       id:uid(), batchId,
@@ -26615,7 +26670,9 @@ function _payCreateApBatch(p, etypes){
       pitAmount: (isFirst&&!t.usd)?t.pit:0,
       bhxhAmount: (isFirst&&!t.usd)?bhxh32:0,   /* v3.18.66: trọn 32% (NV+DN) — NSNN INSURANCE_SOCIAL nhận đúng số phải nộp cơ quan BH; health n9_bridge_bhxh_dn hết cảnh báo phần DN ngoài app */
       _payroll:true, payrollPeriod:period, _payrollPeriodId:p.id, _netScheme:true,   /* v3.18.66: dấu cụm ghi NET (phân biệt cụm GROSS cũ cho health/n9) */
-      status:'pending_acc', submittedBy:who, submittedAt:nowIso, approvedL1By:'',approvedL1At:'',approvedL2By:'',approvedL2At:'',
+      status: _isNtp?'draft':'pending_acc',
+      submittedBy: _isNtp?'':who, submittedAt: _isNtp?'':nowIso,
+      approvedL1By:'',approvedL1At:'',approvedL2By:'',approvedL2At:'',
       createdBy:who, createdAt:nowIso,
       _origin:'payroll_submit'   /* v3.15.32: phân biệt với 'payroll_period' (Ghi sổ cũ tại locked) */
     };
@@ -27816,6 +27873,15 @@ function payComputeRow(p, row){
   if(p && p.profile==='tech'){
     if(p.projAllow!==true){ inp.P=0; }
   }
+  // v3.65.21: bơm đơn giá thẻ lương NTP (RIÊNG từng NV, khác hệ thẻ lương salaryProfileAt() của các
+  // nhóm khác) vào inputs trước khi tính — payComputeNtp() chỉ đọc, không tự tra thẻ (giữ đúng khuôn
+  // "engine thuần, không side-effect" như payComputeOffice/Expat/...).
+  if(p && p.profile==='ntp'){
+    const _card=(typeof ntpPayCardAt==='function')?ntpPayCardAt(row.empId, (p.period||'')+'-15'):null;
+    inp._ntpBasicSalary=_card?_card.basicSalary:0;
+    inp._ntpOffshoreAllowance=_card?_card.offshoreAllowance:0;
+    inp._ntpBasicDay=_card?_card.basicDay:20;
+  }
   if(F && taxSum) inp[F]=(+inp[F]||0)+taxSum;
   row._extrasTaxApplied=taxSum||0;
   // non-taxable → adjustments (thay toàn bộ entries nguồn payExtra — idempotent)
@@ -28875,6 +28941,11 @@ function _bccWebEngineOfDeptSheet(s){
   //    trả '' ở đây, _bccWebRowsForPeriodProfile() tự lọc TỪNG DÒNG theo đúng Loại nhân sự thật.
   if(s.scope.type==='dept'){
     const eng=(typeof deptImpliedEngine==='function')?deptImpliedEngine(s.scope.value):'';
+    // v3.65.20 (Sếp: "Drill-Geo thuộc module Kỹ thuật" + Nhóm lương NTP mới): TRƯỚC đây ép CỨNG mọi
+    // dept về tech/office — nay cho phép phòng ban khai payEngine tuỳ ý (VD DRILL-GEO → 'ntp') đi
+    // thẳng qua, đúng cơ chế deptImpliedEngine() đã đọc d.payEngine sẵn có từ trước (v3.19.34) —
+    // chỉ mặc định về tech/office khi phòng KHÔNG khai gì (giữ hành vi cũ cho mọi dept khác).
+    if(eng && PAY_PROFILE_LABEL[eng]) return eng;
     return eng==='tech' ? 'tech' : 'office';
   }
   if(s.scope.type==='vessel') return 'crew';
@@ -28888,7 +28959,11 @@ function _bccWebEngineOfDeptSheet(s){
 // đúng thiết kế đã chốt (NTP trả qua AP mã NTP_LUONG, không qua BCC/Kỳ lương).
 function _empPayProfile(emp){
   if(!emp) return null;
-  if(emp.type==='ntp') return null;
+  // v3.65.20 (Sếp: "để ở bước lưu nháp - không chuyển KT - chi phí được ghi", đã chốt Drill-Geo là 1
+  // Nhóm lương thật): ĐẢO NGƯỢC v3.65.18 — trước đó type='ntp' → null (chặn tuyệt đối khỏi Kỳ
+  // lương). Nay NTP có Nhóm lương riêng ('ntp', không GTGC/BHXH/thuế — xem defaultPayProfiles()),
+  // nên map thẳng 'ntp' như mọi loại khác — không còn lý do chặn nữa.
+  if(emp.type==='ntp') return 'ntp';
   if(emp.type==='crew') return 'crew';
   if(emp.type==='expert'||emp.type==='expert_om') return 'expert_om';
   if(emp.type==='expat') return 'expat';
@@ -28906,8 +28981,10 @@ function _bccWebRowsForPeriodProfile(period, profile, periodCompanyId){
       const sheetUnit=(s.scope&&s.scope.companyId)?_companyIdToUnitTag(s.scope.companyId):'';
       (s.rows||[]).forEach(r=>{
         const e=emps[r.empId]; if(!e) return;
-        // v3.65.18: lưới an toàn — NTP không bao giờ vào Kỳ lương dù lẫn ở sheet nào.
-        if(e.type==='ntp') return;
+        // v3.65.20: lưới an toàn TINH hơn v3.65.18 — NTP chỉ vào ĐÚNG profile 'ntp' của chính họ, dù
+        // lỡ lẫn vào sheet dept/vessel khác (sheetEngine khác 'ntp') KHÔNG bao giờ tính vào profile
+        // đó. Không chặn tuyệt đối như trước (v3.65.18) vì giờ 'ntp' đã là Nhóm lương hợp lệ.
+        if(e.type==='ntp' && profile!=='ntp') return;
         if(isMixedScope && _empPayProfile(e)!==profile) return;   // sheet nhiều loại NV — lọc đúng từng người
         const unit=(s.scope&&s.scope.companyId)?sheetUnit:_bccWebUnitTagOf(r.empId,period);
         rows.push({_empId:r.empId, msnv:e.smartId||'', name:e.fullName||e.name||'', unit:unit, cols:r.sums||{}});
