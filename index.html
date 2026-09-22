@@ -4652,7 +4652,7 @@ const WH_TYPES = {
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.65.46';
+const APP_VERSION='3.65.47';
 /* HOTFIX 3.12.17-email: CHẶN TRIỆT ĐỂ gửi email TỰ ĐỘNG (mất kiểm soát — spam quota Google).
    Email phải do NV được phân quyền CHỦ ĐỘNG chọn gửi. Cờ này:
    (1) chặn auto-SCAN tạo email (hrmScanExpiries/vesselCertScanExpiries);
@@ -76900,13 +76900,19 @@ function opExportExcel(){
     // Bộ phận: ưu tiên field lưu sẵn, fallback tra theo tên NV. Ngày lập = createdAt (khác cột Ngày giao dịch).
     const dept=t.createdByDept || (typeof lookupUserDeptName==='function'?lookupUserDeptName(t.createdBy):'') || '—';
     const madeDate=(t.createdAt||'').slice(0,10);
+    // v3.65.47 (Sếp: "nên tách cột thu riêng ra"): TÁCH cột "Giá trị" thành 2 cột Thu/Chi riêng biệt
+    // (thay vì 1 cột chung + cột "Nguồn" phải đọc chữ mới biết cộng hay trừ) — Thu hộ vào đúng cột
+    // Thu, Chi hộ/Dự kiến chi vào đúng cột Chi, cột kia để trống. SUM() theo cột giờ tự nhiên đúng,
+    // không cần đọc "Nguồn" nữa.
+    const isIn=t.type==='IN';
     const row=[
-      t.type==='IN'?'Thu hộ':(t._isBudget?'Dự kiến chi':'Chi hộ'),
+      isIn?'Thu hộ':(t._isBudget?'Dự kiến chi':'Chi hộ'),
       t.date||'',
       t.vendor||'',
       t.desc||'',
       (t.invoiceNo||t.contractNo||''),
-      gross,
+      isIn?gross:'',
+      isIn?'':gross,
       feeRaw,
       t.ccy||'',
       usdTotal,
@@ -76924,8 +76930,8 @@ function opExportExcel(){
   //   BỎ phần "AP toàn công ty" trước đây — nó kéo cả công nợ không liên quan tàu QL hộ vào file (SAI phạm vi).
 
   if(!rows.length && !budgetExcelRows.length){ toast('Không có giao dịch thu/chi hộ nào khớp bộ lọc','warn'); return; }
-  // v3.10.08: sắp theo TÊN NV (cột 9) rồi NGÀY giao dịch (cột 1) — NV gom nhóm, dễ đối chiếu khi in.
-  const _sortByNv=(a,b)=>((a[9]||'').localeCompare(b[9]||'')) || ((a[1]||'').localeCompare(b[1]||''));
+  // v3.10.08: sắp theo TÊN NV (cột 10 — dời từ 9 sau khi tách cột Thu/Chi) rồi NGÀY giao dịch (cột 1).
+  const _sortByNv=(a,b)=>((a[10]||'').localeCompare(b[10]||'')) || ((a[1]||'').localeCompare(b[1]||''));
   rows.sort(_sortByNv);
   budgetExcelRows.sort(_sortByNv);
 
@@ -76934,8 +76940,8 @@ function opExportExcel(){
   const sub=[`Phạm vi: ${fV?((VesselService.opVessels().find(v=>v.id===fV)||{}).name||''):'Tất cả tàu QL hộ'}`
     +` · Tháng: ${fM||'Tất cả'} · Người nhập: ${_seeAll?(fC||'Tất cả'):me}`
     +` · Xuất: ${todayISO()} bởi ${me}`];
-  const header=['Nguồn','Ngày','Nhà cung cấp','Diễn giải','Số HĐ/Hóa đơn','Giá trị','Phí NH','Tiền tệ','Quy đổi USD','NV nhập','Bộ phận','Ngày lập','Tình trạng hồ sơ'];
-  const _LASTCOL=12;   // 13 cột (0-based cột cuối = 12)
+  const header=['Nguồn','Ngày','Nhà cung cấp','Diễn giải','Số HĐ/Hóa đơn','Thu','Chi','Phí NH','Tiền tệ','Quy đổi USD','NV nhập','Bộ phận','Ngày lập','Tình trạng hồ sơ'];
+  const _LASTCOL=13;   // 14 cột (0-based cột cuối = 13) — v3.65.47: +1 cột do tách Thu/Chi
   // Bảng 1: ĐÃ PHÁT SINH (thu hộ + chi hộ thực). Bảng 2: DỰ KIẾN CHI (chưa phát sinh) — khớp dòng tổng Trang 1 Statement.
   let aoa=[title,sub,[],['I. CÁC KHOẢN ĐÃ PHÁT SINH (đã chi thực tế / thu thực)'],header,...rows];
   let _budgetHeaderRowIdx=-1;
@@ -76959,7 +76965,7 @@ function opExportExcel(){
   }
 
   const ws=XLSX.utils.aoa_to_sheet(aoa);
-  ws['!cols']=[{wch:9},{wch:11},{wch:24},{wch:42},{wch:16},{wch:15},{wch:12},{wch:7},{wch:15},{wch:16},{wch:18},{wch:11},{wch:18}];
+  ws['!cols']=[{wch:9},{wch:11},{wch:24},{wch:42},{wch:16},{wch:15},{wch:15},{wch:12},{wch:7},{wch:15},{wch:16},{wch:18},{wch:11},{wch:18}];
   ws['!merges']=[
     {s:{r:0,c:0},e:{r:0,c:_LASTCOL}},
     {s:{r:1,c:0},e:{r:1,c:_LASTCOL}},
@@ -76968,15 +76974,15 @@ function opExportExcel(){
   // merge tiêu đề "II. DỰ KIẾN CHI" nếu có (hàng = _budgetHeaderRowIdx-1, 0-based)
   if(_budgetHeaderRowIdx>=0){ ws['!merges'].push({s:{r:_budgetHeaderRowIdx-1,c:0},e:{r:_budgetHeaderRowIdx-1,c:_LASTCOL}}); }
   ws['!freeze']={xSplit:0,ySplit:5};
-  // auto-filter trên hàng header bảng 1 (hàng index 4 → A5:M5, 13 cột)
+  // auto-filter trên hàng header bảng 1 (hàng index 4 → A5:N5, 14 cột — v3.65.47: M→N do +1 cột)
   const lastRow1=5+rows.length;
-  ws['!autofilter']={ref:`A5:M${lastRow1}`};
-  // v3.10.08: format số có phân cách cho cột Giá trị (F), Phí NH (G), Quy đổi USD (I) — mọi dòng dữ liệu.
-  const _numCols=['F','G','I'];
+  ws['!autofilter']={ref:`A5:N${lastRow1}`};
+  // v3.10.08/v3.65.47: format số có phân cách cho cột Thu(F)/Chi(G)/Phí NH(H)/Quy đổi USD(J).
+  const _numCols=['F','G','H','J'];
   for(let r=0;r<aoa.length;r++){
     _numCols.forEach(col=>{
       const cell=ws[col+(r+1)];
-      if(cell && typeof cell.v==='number'){ cell.t='n'; cell.z = (col==='I')?'#,##0.00':'#,##0'; }
+      if(cell && typeof cell.v==='number'){ cell.t='n'; cell.z = (col==='J')?'#,##0.00':'#,##0'; }
     });
   }
   const wb=XLSX.utils.book_new();
@@ -76992,8 +76998,8 @@ function _opExportExcelStyled(P){
   const NCOL=P.header.length, LAST=NCOL-1;
   const colL=(i)=>XS.utils.encode_col(i);
   const aoa=[]; const meta={merges:[], headerRows:[]};
-  const NUM_COLS={5:'#,##0;(#,##0);"–"', 6:'#,##0;(#,##0);"–"', 8:'#,##0.00;(#,##0.00);"–"'};
-  const ALIGN=(c)=>{ if(c===5||c===6||c===8) return 'right'; if(c===0||c===1||c===4||c===7||c===11) return 'center'; return 'left'; };
+  const NUM_COLS={5:'#,##0;(#,##0);"–"', 6:'#,##0;(#,##0);"–"', 7:'#,##0;(#,##0);"–"', 9:'#,##0.00;(#,##0.00);"–"'};   // v3.65.47: Thu(5)/Chi(6)/PhíNH(7)/QuyĐổiUSD(9) — dời sau khi tách cột Thu/Chi
+  const ALIGN=(c)=>{ if(c===5||c===6||c===7||c===9) return 'right'; if(c===0||c===1||c===4||c===8||c===12) return 'center'; return 'left'; };
   function pushTitle(t){ const r=aoa.length; aoa.push([EE.title(t)]); meta.merges.push({s:{r,c:0},e:{r,c:LAST}}); }
   function pushSub(t){ const r=aoa.length; aoa.push([EE.sub(t)]); meta.merges.push({s:{r,c:0},e:{r,c:LAST}}); }
   function pushSection(t,which){ const r=aoa.length; aoa.push([EE.sectionBar(t,which)]); meta.merges.push({s:{r,c:0},e:{r,c:LAST}}); }
@@ -77007,7 +77013,7 @@ function _opExportExcelStyled(P){
         const o={bg:zebra, align:ALIGN(c), wrap:(c===2||c===3)};
         if(NUM_COLS[c]) o.num=NUM_COLS[c];
         if(c===0){ o.bold=true; o.color=srcColor; }
-        if(c===8 && src==='Thu hộ') o.color=EE.colors.green;
+        if(c===9 && src==='Thu hộ') o.color=EE.colors.green;   // v3.65.47: cột Quy đổi USD dời từ 8→9
         return EE.dataCell(v,o);
       });
       aoa.push(cells);
@@ -77016,17 +77022,17 @@ function _opExportExcelStyled(P){
   // v3.65.46 (Sếp: "Lỗi xuất file Excel: thu chi hộ chủ tàu: tổng cộng bao gồm cả thu+chi"): TÌM RA
   // GỐC — dòng TỔNG CỘNG trước đây SUM() nguyên khối cột Giá trị/Phí/USD bất kể dòng là "Thu hộ" hay
   // "Chi hộ"/"Dự kiến chi" (2 khoản này ngược chiều, không được cộng chung) → ra 1 con số vô nghĩa.
-  // Sửa: nhận thêm dataRows thật (không chỉ số dòng) — nếu khối có CẢ 2 loại, tách 2 dòng tổng riêng
-  // (Tổng Thu hộ/Tổng Chi hộ, tính cộng tay theo đúng dòng, không dùng SUM() nữa để chắc chắn tách
-  // đúng dù dòng thu/chi nằm xen kẽ không theo khối liền); chỉ 1 loại (VD khối II toàn "Dự kiến chi")
-  // thì giữ nguyên 1 dòng TỔNG CỘNG như cũ.
+  // v3.65.47 (Sếp: "nên tách cột thu riêng ra"): Thu/Chi (VND gốc) giờ đã tách 2 CỘT riêng (5/6) nên
+  // tự nhiên không còn lẫn nữa dù SUM cả cột — NHƯNG Phí NH (7) và Quy đổi USD (9) vẫn CHUNG 1 cột
+  // cho cả Thu lẫn Chi, nên VẪN cần tách 2 dòng tổng riêng (Tổng Thu hộ/Tổng Chi hộ) như bản trước,
+  // chỉ đổi lại đúng số cột mới.
   function pushTotal(startRow, endRow, dataRows){
     const sumCol=(rs,idx)=>rs.reduce((a,r)=>a+(+r[idx]||0),0);
     const mkRow=(label, rs, color)=>{
       const cells=[]; for(let c=0;c<NCOL;c++){
         if(c===0) cells.push(EE.totalCell(label,{align:'left', color}));
-        else if(c===5||c===6) cells.push(EE.totalCell(sumCol(rs,c),{align:'right',num:'#,##0', color}));
-        else if(c===8) cells.push(EE.totalCell(sumCol(rs,c),{align:'right',num:'#,##0.00', color}));
+        else if(c===5||c===6||c===7) cells.push(EE.totalCell(sumCol(rs,c),{align:'right',num:'#,##0', color}));
+        else if(c===9) cells.push(EE.totalCell(sumCol(rs,c),{align:'right',num:'#,##0.00', color}));
         else cells.push(EE.totalCell(null,{}));
       }
       aoa.push(cells);
@@ -77055,7 +77061,7 @@ function _opExportExcelStyled(P){
     pushTotal(i2,i2end,P.budgetRows);
   }
   const ws=XS.utils.aoa_to_sheet(aoa);
-  ws['!cols']=[{wch:9},{wch:11},{wch:24},{wch:42},{wch:16},{wch:15},{wch:12},{wch:7},{wch:15},{wch:16},{wch:18},{wch:11},{wch:18}];
+  ws['!cols']=[{wch:9},{wch:11},{wch:24},{wch:42},{wch:16},{wch:15},{wch:15},{wch:12},{wch:7},{wch:15},{wch:16},{wch:18},{wch:11},{wch:18}];
   ws['!merges']=meta.merges;
   ws['!freeze']={xSplit:0,ySplit:hdrRow1+1};
   const lastRow1=hdrRow1+P.rows.length;
