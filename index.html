@@ -4652,7 +4652,7 @@ const WH_TYPES = {
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.65.54';
+const APP_VERSION='3.65.64';
 /* HOTFIX 3.12.17-email: CHẶN TRIỆT ĐỂ gửi email TỰ ĐỘNG (mất kiểm soát — spam quota Google).
    Email phải do NV được phân quyền CHỦ ĐỘNG chọn gửi. Cờ này:
    (1) chặn auto-SCAN tạo email (hrmScanExpiries/vesselCertScanExpiries);
@@ -7598,6 +7598,11 @@ async function authAction(){
       // v3.07.49: workflow NCC + chốt giá trị báo cáo chủ tàu
       try{ const _r=_migrateOpWorkflow(); if(_r.n||_r.b||_r.ap) saveState(); }catch(e){console.warn('[migrate v3.07.49 op-workflow] failed:',e);}
       try{ const _rc=_migrateContractValue(); if(_rc.c) saveState(); }catch(e){console.warn('[migrate v3.09.32 contract-value] failed:',e);}
+      // v3.65.60 (Sếp: "nên sửa các dòng cũ cho sạch"): dọn Diễn giải các dòng "Khoán đòi chủ tàu"
+      // ĐÃ CÓ SẴN trong dữ liệu — trước v3.65.59 app tự nối tiền tố vào Diễn giải, giờ bỏ nốt tiền tố
+      // đó khỏi các bản ghi cũ (idempotent — chạy lại nhiều lần vẫn an toàn, không match lần 2).
+      try{ const _rk=_migrateKhoanDoiDescClean(); if(_rk>0){ saveState(); dlog('[migrate v3.65.60] dọn Diễn giải khoán-đòi cho '+_rk+' dòng cũ'); } }catch(e){console.warn('[migrate v3.65.60 khoan-desc] failed:',e);}
+      try{ const _rm=_migrateMgmtFeeDescClean(); if(_rm>0){ saveState(); dlog('[migrate v3.65.61] dọn Diễn giải phí quản lý cho '+_rm+' dòng cũ'); } }catch(e){console.warn('[migrate v3.65.61 mgmtfee-desc] failed:',e);}
       // v3.07.60: gắn lô duyệt chi (_payBatchId) cho phiếu AP đã duyệt CŨ (trước 3.07.54) để hiện ở Thư viện hồ sơ chờ chi.
       try{ const _rb=_migratePayBatch(); if(_rb>0){ saveState(); dlog('[migrate v3.07.60] gắn lô duyệt chi cho '+_rb+' phiếu approved cũ'); } }catch(e){console.warn('[migrate v3.07.60 payBatch] failed:',e);}
       // v3.15.18: vá schedule cho khoản vay có trả trước 1 phần cũ (dư nợ đang phồng) — xem _migrateLoanPrepayPartial.
@@ -12205,6 +12210,39 @@ function opReportUsd(t){
 }
 /* Migrate an toàn (chạy 1 lần khi load): khoản chi hộ cũ chưa có ncStatus → gán 'draft';
    khoản đã _locked trước đây nhưng chưa có reportedValue → backfill = amount tại thời điểm này. */
+/* v3.65.61 (Sếp: "Chỉ để phần nhân viên tự gõ cho loại phí quản lý"): dọn Diễn giải các dòng "Cấn trừ
+   phí quản lý" ĐÃ CÓ SẴN trong dữ liệu (tạo trước v3.65.61) — bỏ tiền tố tự động "Cấn trừ phí quản
+   lý", chỉ giữ phần NV tự gõ (kỳ trong ngoặc + ghi chú điều chỉnh nếu có). Idempotent. */
+function _migrateMgmtFeeDescClean(){
+  let n=0;
+  (VesselService.opTransactions()||[]).forEach(t=>{
+    if(!t || !t._mgmtFeeId || !t.desc) return;
+    if(t.desc.indexOf('Cấn trừ phí quản lý')!==0) return;
+    const rest=t.desc.slice('Cấn trừ phí quản lý'.length).trim();
+    let period='', note='';
+    const m=rest.match(/^\(([^)]*)\)\s*(?:—\s*(.*))?$/);
+    if(m){ period=m[1]||''; note=m[2]||''; }
+    else { const m2=rest.match(/^—\s*(.*)$/); if(m2) note=m2[1]||''; }
+    const newDesc=[period,note].filter(Boolean).join(' — ')||'Phí quản lý';
+    if(newDesc!==t.desc){ t.desc=newDesc; n++; }
+  });
+  return n;
+}
+/* v3.65.60 (Sếp: "nên sửa các dòng cũ cho sạch"): dọn Diễn giải các dòng "Khoán đòi chủ tàu" đã lưu
+   sẵn trong dữ liệu (tạo trước v3.65.59, khi app còn tự nối tiền tố vào Diễn giải) — bỏ tiền tố, chỉ
+   giữ lại đúng phần nội dung gốc (tên loại khoản + kỳ). Idempotent: chạy lại nhiều lần vẫn an toàn vì
+   sau lần đầu không còn dòng nào khớp tiền tố để match nữa. */
+function _migrateKhoanDoiDescClean(){
+  const PREFIXES=['Khoán đòi chủ tàu · ', 'Đòi chủ tàu (khoán) — '];
+  let n=0;
+  (VesselService.opTransactions()||[]).forEach(t=>{
+    if(!t || t.khoanRole!=='doi' || !t.desc) return;
+    for(const p of PREFIXES){
+      if(t.desc.indexOf(p)===0){ t.desc=t.desc.slice(p.length); n++; break; }
+    }
+  });
+  return n;
+}
 function _migrateOpWorkflow(){
   let n=0, b=0, ap=0;
   VesselService.opTransactions().forEach(t=>{
@@ -70209,7 +70247,8 @@ async function _mrSave(targetStatus){
           // v3.04.15: SỐ ĐÒI chủ tàu luôn bằng USD (quản lý hộ đồng chuẩn USD), độc lập tiền lương.
           date:s.issueDate, amount:_khoanDoi, ccy:'USD', fxToUsd:0, amountUsd:_khoanDoi,
           category:'Lương thuyền viên (đòi chủ tàu)',
-          desc:'Đòi chủ tàu (khoán) — Lương thuyền viên · kỳ '+(s.period||''),
+          // v3.65.59 (Sếp: "Không ghi chú thêm... bỏ ngay"): bỏ tiền tố "Đòi chủ tàu (khoán) — ".
+          desc:'Lương thuyền viên · kỳ '+(s.period||''),
           khoanRole:'doi', khoanCat:'Lương thuyền viên', khoanPeriod:s.period||'',
           _fromPayrollBatch:batchId,
           createdBy:me, createdAt:nowISO
@@ -72424,8 +72463,12 @@ function opBalanceBreakdown(vid){
     else {
       chi+=amtUsd; if(t._isBudget) chiBudget+=amtUsd;
       if(t._mgmtFeeId) chiMgmt+=amtUsd;   // v3.06.00: phí QL đã phát (cấn trừ) — tách riêng để hiển thị "Đã chi" KHÔNG gồm phí QL
+      // v3.65.63 (Sếp: "đồng bộ để thấy số không khác biệt ở mọi nơi"): trước đây cộng phí NH của
+      // MỌI giao dịch (kể cả Thu hộ và Dự kiến chi) — khác với PDF (sumFee) chỉ cộng phí của Chi hộ
+      // THỰC (loại IN, loại Dự kiến, loại reportToOwner=false) → gây lệch vài đô khi so PDF với Hub.
+      // Sửa: chỉ cộng phí đúng những giao dịch PDF cũng tính, để 2 nơi khớp tuyệt đối.
+      if(!t._isBudget && t.reportToOwner!==false) fees += opTxFeesUsd(t);
     }
-    fees += opTxFeesUsd(t);
   });
   const apChi = -(typeof opApChiHo==='function'?opApChiHo(vid):0);  // dương = tổng chi hộ AP
   let mgmtPending=0;
@@ -72441,7 +72484,13 @@ function opBalanceBreakdown(vid){
   // v3.06.00: 'Đã chi' để HIỂN THỊ (báo cáo + màn hình) KHỚP totReal màn hình:
   //   = chi hộ thực opTx (KHÔNG phí QL đã phát, KHÔNG dự kiến) + AP ảo. KHÔNG cộng phí giao dịch.
   const chiRealDisplay = (chi - chiMgmt - chiBudget) + apChi;
-  const bal = thu - chiTotal - mgmtPending;
+  // v3.65.56 (Sếp: "Tất cả phí quản lý đều ghi vào chi hộ. Bỏ dòng phí quản lý chưa xuất hoá đơn —
+  // đây chỉ note cho kế toán biết việc cần làm - phí đã được ghi rồi"): trước đây `bal` trừ thêm
+  // `mgmtPending` (tháng chưa lập hóa đơn) — SAI, vì toàn bộ phí QL (kể cả tháng chưa xuất HĐ) đã nằm
+  // sẵn trong `chi` qua bút toán "Cấn trừ phí quản lý" ngay khi phát sinh — trừ thêm là trừ đúp.
+  // `mgmtPending` VẪN giữ nguyên cách tính (dùng ở nơi khác — nhắc việc kế toán, theo dõi doanh thu
+  // Seahorse) — chỉ bỏ khỏi công thức `bal` (số dư nợ chủ tàu).
+  const bal = thu - chiTotal;
   return {thu, chiOp:chi, chiAp:apChi, fees, chiTotal, chiBudget, chiReal, chiRealDisplay, chiMgmt, mgmtPending, bal, khoanChiThuc};
 }
 function opBalance(vid){
@@ -72466,19 +72515,11 @@ function opBalance(vid){
   //  Quy ước tránh trừ TRÙNG: phí QL ĐÃ phát hành hóa đơn đã tạo bút toán giảm quỹ (nằm trong
   //  opTransactions/AP rồi). Nên chỉ trừ THÊM phần phí lũy kế dự kiến CHƯA phát hành:
   //   mgmtPending = max(0, phí QL lũy kế − phí QL đã phát hành).
-  try{
-    const v=VesselService.opVessels().find(x=>x.id===vid);
-    if(v){
-      const accrued=opMgmtFeeAccrued(v);            // phí/tháng × số tháng QL (ngoại tệ gốc tàu)
-      const issued=opMgmtFeeIssued(vid);            // đã phát hành (ngoại tệ gốc tàu)
-      const pending=Math.max(0, accrued - issued);
-      if(pending>0){
-        const ccy=v.ccy||'USD';
-        const pendingUsd = ccy==='USD' ? pending : ((+S.fxRate||0)>0 ? pending/(+S.fxRate) : pending);
-        bal -= pendingUsd;
-      }
-    }
-  }catch(e){}
+  // v3.65.56 (Sếp: "Tất cả phí quản lý đều ghi vào chi hộ. Bỏ dòng phí quản lý chưa xuất hoá đơn —
+  // đây chỉ note cho kế toán biết việc cần làm - phí đã được ghi rồi"): giả định "đã phát hành HĐ mới
+  // có bút toán giảm quỹ" ở trên SAI — toàn bộ phí QL (kể cả phần chưa xuất HĐ chính thức) ĐÃ được
+  // ghi bút toán Chi hộ "Cấn trừ phí quản lý" ngay khi phát sinh rồi. Trừ thêm phần "pending" ở đây
+  // là trừ đúp. BỎ HẲN khối trừ thêm này — opApChiHo() ở trên đã đủ, không cần trừ gì thêm cho phí QL.
   return bal;
 }
 /* v3.01.02: tổng AP gắn tàu QL (chi hộ) quy USD — trả về số ÂM (giảm số dư). Mọi trạng thái.
@@ -72770,11 +72811,24 @@ function renderOpVessels(){
     const bal=opBalance(v.id);
     const bd0=opBalanceBreakdown(v.id);
     const balReal = bal + (bd0.chiBudget||0);   // v3.02.71: số dư THỰC = số dư + cộng lại phần dự kiến đã trừ
+    // v3.65.62 (Sếp: "Tàu chấm dứt quản lý: số dư = số dư thực (số dư đã trừ chi dự kiến). Chi dự
+    // kiến đổi diễn giải thành: chưa đủ hồ sơ. Bỏ thông tin ngưỡng số dư"): tàu ĐÃ chấm dứt quản lý
+    // không còn khái niệm "kỳ vọng tương lai" — khoản "Dự kiến chi" lúc này chỉ còn là tiền ĐÃ CHI
+    // THẬT nhưng thiếu hồ sơ/hóa đơn để ghi nhận chính thức, không phải chi phí sẽ phát sinh thêm.
+    // v3.65.64 (Sếp: "Đối với tàu đang quản lý: số dư thực cũng bao gồm chi dự kiến (thống nhất
+    // chung)"): MỞ RỘNG áp dụng cho MỌI tàu (kể cả đang quản lý), không chỉ tàu đã chấm dứt — số dư
+    // CHÍNH hiển thị luôn = bal (đã trừ chi dự kiến), thống nhất 1 cách tính duy nhất ở mọi nơi.
+    // Trạng thái/màu cũng xét theo ĐÚNG số đang hiển thị (bal) để không lệch giữa số và màu.
+    // Riêng nhãn "Chưa đủ hồ sơ" vs "Dự kiến thêm" và cột Ngưỡng/Trạng thái vẫn CHỈ khác theo tàu đã
+    // chấm dứt hay chưa (ý nghĩa khác nhau: tàu đang QL thì dự kiến chi vẫn là chi phí SẼ phát sinh
+    // thật, tàu đã chấm dứt thì chỉ còn là thiếu hồ sơ của tiền đã chi rồi).
+    const _ended=!!v.managementEnded;
+    const _balShown = bal;
     let status,statusCls;
     const minUsd=opMinUsd(v);
-    // trạng thái xét theo SỐ DƯ THỰC
-    if(balReal<minUsd){status='⚠ DƯỚI NGƯỠNG';statusCls='chip-bad';}
-    else if(balReal<minUsd*1.2){status='⚡ GẦN NGƯỠNG';statusCls='chip-warn';}
+    // trạng thái xét theo ĐÚNG số đang hiển thị (bal, đã gồm chi dự kiến)
+    if(bal<minUsd){status='⚠ DƯỚI NGƯỠNG';statusCls='chip-bad';}
+    else if(bal<minUsd*1.2){status='⚡ GẦN NGƯỠNG';statusCls='chip-warn';}
     else{status='✓ AN TOÀN';statusCls='chip-good';}
     const months=opManagedMonths(v);
     const issued=opMgmtFeeIssued(v.id);
@@ -72790,11 +72844,11 @@ function renderOpVessels(){
     return `<tr>
       <td><b>${esc(v.name)}</b>${v.owner?` <span style="color:var(--muted);font-weight:400">· ${esc(v.owner)}</span>`:''}${v.managementEnded?` <span style="color:var(--bad);font-weight:600;font-size:10px">● Chấm dứt QL${v.managementEndDate?' ('+esc(v.managementEndDate)+')':''}</span>`:` <span style="color:var(--good);font-weight:600;font-size:10px">● Đang quản lý</span>`}${v.managedSince?`<div style="font-size:10px;color:var(--muted)">QL từ ${esc(v.managedSince)} · ${months} tháng · phí ${fmt(v.fee,v.ccy)}/tháng${(v.ccy&&v.ccy!=='USD')?' <span style="color:var(--bad);font-size:10px" title="Quy định: mảng QL tàu dùng USD — sửa CCY và kiểm lại số phí/tháng ở ✎">⚠ '+esc(v.ccy)+'</span>':''}</div>`:'<div style="font-size:10px;color:var(--warn)">chưa đặt ngày QL</div>'}</td>
       <td class="r num" style="color:var(--good);font-weight:600">${fmtCcy(bd.thu,'USD')}</td>
-      <td class="r num" style="color:var(--bad);font-weight:600">−${fmtCcy(bd.chiRealDisplay,'USD')}<div style="font-size:10px;color:var(--muted);font-weight:400;line-height:1.4">${bd.chiBudget>0?`Dự kiến thêm: ${fmtCcy(bd.chiBudget,'USD')}`:'(đã chi thực)'}</div></td>
+      <td class="r num" style="color:var(--bad);font-weight:600">−${fmtCcy(bd.chiRealDisplay,'USD')}<div style="font-size:10px;color:var(--muted);font-weight:400;line-height:1.4">${bd.chiBudget>0?`${_ended?'Chưa đủ hồ sơ':'Dự kiến thêm'}: ${fmtCcy(bd.chiBudget,'USD')}`:'(đã chi thực)'}</div></td>
       <td class="r num" title="Tổng phí QL lũy kế (quy USD): đã phát HĐ ${fmtCcy(mgmtIssuedUsd,'USD')} + chưa xuất HĐ ${fmtCcy(mgmtPendingUsd,'USD')}. Theo từng tháng: tháng đã lập dùng số NV nhập, tháng chưa lập dùng mức chuẩn.">${mgmtTotalUsd>0?`<span style="font-weight:600;color:var(--warn)">${fmtCcy(mgmtTotalUsd,'USD')}</span>`:'—'}</td>
-      <td class="r num" style="font-weight:600;color:${balReal<minUsd?'var(--bad)':balReal<minUsd*1.2?'var(--warn)':'var(--ink)'}" title="Số dư THỰC (chưa gồm dự kiến chi). = Thu/ứng − Chi thực − Phí QL.">${fmtCcy(balReal,'USD')}<div style="font-size:10px;color:var(--muted);font-weight:400" title="Quy đổi VND theo tỷ giá ${(+S.fxRate||0).toLocaleString('vi-VN')}">≈ ${(balReal*(+S.fxRate||0)).toLocaleString('vi-VN',{maximumFractionDigits:0})}₫</div>${bd.chiBudget>0?`<div style="font-size:10px;color:var(--warn);font-weight:400;margin-top:2px" title="Nếu chi hết khoản dự kiến, số dư còn lại">sau dự kiến: ${fmtCcy(bal,'USD')}</div>`:''}</td>
-      <td class="r num">${fmtCcy(minUsd,'USD')}</td>
-      <td class="c"><span class="ds-need" data-dot="${((statusCls)||'').indexOf('good')>=0?'good':((statusCls)||'').indexOf('bad')>=0?'bad':((statusCls)||'').indexOf('warn')>=0?'warn':''}">${status}</span></td>
+      <td class="r num" style="font-weight:600;color:${_ended?'var(--ink)':(bal<minUsd?'var(--bad)':bal<minUsd*1.2?'var(--warn)':'var(--ink)')}" title="Số dư thực — đã gồm phần ${_ended?'chưa đủ hồ sơ':'dự kiến chi'}. = Thu/ứng − Chi thực − Phí QL − ${_ended?'Chưa đủ hồ sơ':'Dự kiến chi'}.">${fmtCcy(_balShown,'USD')}<div style="font-size:10px;color:var(--muted);font-weight:400">Bao gồm phí ngân hàng: ${fmtCcy(bd.fees||0,'USD')}</div></td>
+      <td class="r num">${_ended?'—':fmtCcy(minUsd,'USD')}</td>
+      <td class="c">${_ended?'':`<span class="ds-need" data-dot="${((statusCls)||'').indexOf('good')>=0?'good':((statusCls)||'').indexOf('bad')>=0?'bad':((statusCls)||'').indexOf('warn')>=0?'warn':''}">${status}</span>`}</td>
       <td><div class="row-actions">
         <button class="icon-btn" title="Xem chi tiết phí quản lý (theo tháng + lịch sử)" onclick="openMgmtFeeDetail('${v.id}')" style="color:var(--accent)">👁</button>
         <button class="icon-btn" title="Sửa" onclick="editOpVessel('${v.id}')">✎</button>
@@ -72817,17 +72871,18 @@ function renderOpVessels(){
         const _gm=(v.managedSince?opMgmtFeeMonthly(v):{total:0}); const _gc=v.ccy||'USD';
         gMgmt += (_gc==='USD'?(_gm.total||0):((+S.fxRate||0)>0?(_gm.total||0)/(+S.fxRate):(_gm.total||0)));
         gBal+=opBalance(v.id); gMin+=opMinUsd(v); });
-      const gBalReal = gBal + gBudget;   // số dư thực nhóm
+      const gBalReal = gBal + gBudget;   // số dư thực nhóm (trước khi trừ dự kiến) — chỉ dùng tham khảo
       let gStatus,gCls;
-      if(gBalReal<gMin){gStatus='⚠ DƯỚI NGƯỠNG';gCls='chip-bad';}
-      else if(gBalReal<gMin*1.2){gStatus='⚡ GẦN NGƯỠNG';gCls='chip-warn';}
+      // v3.65.64 (Sếp: "thống nhất chung"): xét trạng thái theo ĐÚNG số đang hiển thị (gBal, đã gồm dự kiến).
+      if(gBal<gMin){gStatus='⚠ DƯỚI NGƯỠNG';gCls='chip-bad';}
+      else if(gBal<gMin*1.2){gStatus='⚡ GẦN NGƯỠNG';gCls='chip-warn';}
       else{gStatus='✓ AN TOÀN';gCls='chip-good';}
       html+=`<tr style="background:var(--paper-3);border-top:2px solid var(--rule)">
         <td><b>TỔNG · ${esc(owner)}</b> <span style="font-size:10px;color:var(--muted);font-weight:400">(${vs.length} tàu)</span></td>
         <td class="r num" style="color:var(--good);font-weight:700">${fmtCcy(gThu,'USD')}</td>
         <td class="r num" style="color:var(--bad);font-weight:700">−${fmtCcy(gChiReal,'USD')}${gBudget>0?`<div style="font-size:10px;color:var(--muted);font-weight:400">Dự kiến thêm: ${fmtCcy(gBudget,'USD')}</div>`:''}</td>
         <td class="r num" style="color:var(--warn);font-weight:700" title="Tổng phí QL lũy kế (quy USD) của nhóm">${gMgmt>0?fmtCcy(gMgmt,'USD'):'—'}</td>
-        <td class="r num" style="font-weight:700;color:${gBalReal<gMin?'var(--bad)':gBalReal<gMin*1.2?'var(--warn)':'var(--ink)'}">${fmtCcy(gBalReal,'USD')}${gBudget>0?`<div style="font-size:10px;color:var(--warn);font-weight:400">sau dự kiến: ${fmtCcy(gBal,'USD')}</div>`:''}</td>
+        <td class="r num" style="font-weight:700;color:${gBal<gMin?'var(--bad)':gBal<gMin*1.2?'var(--warn)':'var(--ink)'}" title="Số dư thực — đã gồm dự kiến chi (thống nhất với dòng từng tàu).">${fmtCcy(gBal,'USD')}</td>
         <td class="r num" style="font-weight:600">${fmtCcy(gMin,'USD')}</td>
         <td class="c"><span class="ds-need" data-dot="${((gCls)||'').indexOf('good')>=0?'good':((gCls)||'').indexOf('bad')>=0?'bad':((gCls)||'').indexOf('warn')>=0?'warn':''}">${gStatus}</span></td>
         <td></td>
@@ -73432,7 +73487,10 @@ function issueMgmtFee(vid){
     const fx = ccy==='USD' ? 1 : (+S.fxRate||0);
     VesselService.addOpTransaction({
       id:opTxId, date, vesselId:vid, type:'OUT',
-      desc:'Cấn trừ phí quản lý'+(period?(' ('+period+')'):'')+(adjustNote?(' — '+adjustNote):''),
+      // v3.65.61 (Sếp: "Chỉ để phần nhân viên tự gõ cho loại phí quản lý"): bỏ hẳn tiền tố tự động
+      // "Cấn trừ phí quản lý" — Diễn giải giờ chỉ còn đúng phần NV tự gõ (ô "Kỳ" + ghi chú điều chỉnh
+      // nếu có). Nếu NV không gõ gì cả (để trống) → fallback tối thiểu "Phí quản lý" tránh Diễn giải rỗng.
+      desc:[period, adjustNote].filter(Boolean).join(' — ')||'Phí quản lý',
       amount:gross, ccy, fxToUsd:fx, amountUsd: ccy==='USD'?gross:(fx>0?gross/fx:0),
       vatPercent:0, vatAmount:0, amountGross:gross,
       vendor:'(Phí QL Seahorse)', invoiceNo, contractNo:'',
@@ -74241,7 +74299,10 @@ function _opMrSave(){
   if(s.khoanChk && s.khoanCat && (+s.khoanDoiAmt>0)){
     const cvD=_opConvert(+s.khoanDoiAmt||0, s.ccy, +s.fxInput||0);
     VesselService.addOpTransaction({ id:uid(), date:s.date||todayISO(), vesselId:s.vesselId, type:'OUT',
-      desc:'Khoán đòi chủ tàu · '+s.khoanCat, amount:+s.khoanDoiAmt||0, ccy:s.ccy, fxToUsd:cvD.fxToUsd||0,
+      // v3.65.59 (Sếp: "Không ghi chú thêm: app đang auto ghi chú loại phiếu chi hộ: khoán đòi chủ
+      // tàu vào nội dung. Rà lại những dòng nào bị tự gán: Bỏ ngay"): trước đây tự nối thêm "Khoán đòi
+      // chủ tàu · " vào Diễn giải — bỏ, chỉ còn đúng tên loại khoản (khoanCat).
+      desc:s.khoanCat, amount:+s.khoanDoiAmt||0, ccy:s.ccy, fxToUsd:cvD.fxToUsd||0,
       amountUsd:cvD.usd||0, khoanCat:s.khoanCat, khoanRole:'doi', khoanPeriod:s.khoanPeriod||String(s.date||'').slice(0,7),
       reportToOwner:true, createdBy:actorName(), createdAt:new Date().toISOString() });  // v3.09.88 FIX: khoán ĐÒI = đòi chủ tàu → PHẢI lên báo cáo (trước set false → phiếu biến mất khỏi báo cáo)
   }
@@ -74404,7 +74465,10 @@ function addOpTx(){
       id:uid(),
       date:document.getElementById('opt-date').value||todayISO(),
       vesselId, type:'OUT',
-      desc:'Đòi chủ tàu (khoán) — '+khoanCat+' · kỳ '+khoanPeriod,
+      // v3.65.59 (Sếp: "Không ghi chú thêm: app đang auto ghi chú loại phiếu chi hộ: khoán đòi chủ
+      // tàu vào nội dung. Rà lại những dòng nào bị tự gán: Bỏ ngay"): trước đây tự nối thêm "Đòi chủ
+      // tàu (khoán) — " vào Diễn giải — bỏ, chỉ còn đúng nội dung khoanCat + kỳ.
+      desc:khoanCat+' · kỳ '+khoanPeriod,
       amount:_khoanPairDoi, ccy:_khoanDoiCcy, fxToUsd:_cvDoi.fxToUsd||0,
       fxToVnd:(_khoanDoiCcy==='USD'||_khoanDoiCcy==='VND')?0:(+_khoanDoiFx||0),
       amountUsd: _cvDoi.usd||0,
@@ -77975,6 +78039,17 @@ function unlockOwnerReport(vesselId, period){
 }
 /* v3.16.59 (Sếp): Xuất Excel Báo cáo Thu/Chi hộ — CÙNG bộ lọc (from/to/tàu) và CÙNG quy tắc báo cáo
    chủ tàu như bản PDF (generateOpReport), mỗi tàu 1 sheet. Không đụng hàm PDF. */
+// v3.65.55 (Sếp: "Lọc tìm thông minh để gom chi phí lương thuyền viên các tháng" — hiện tại chỉ lọc
+// theo tên/danh mục opCat='CREW_SALARY', bỏ sót dòng NV quên chọn danh mục nhưng gõ tay "Lương
+// tháng..." vào Diễn giải): gom vào mục Lương thuyền viên nếu opCat ĐÚNG chuẩn HOẶC Diễn giải chứa
+// 1 trong các từ khóa (không phân biệt hoa/thường) — dùng chung cho cả PDF lẫn Excel của màn
+// "Báo cáo Thu/Chi hộ" để 2 bản luôn khớp nhau.
+function _opIsCrewSalaryRow(x){
+  if(!x) return false;
+  if(x.opCat==='CREW_SALARY') return true;
+  const d=(x.desc||'').toLowerCase();
+  return ['lương','luong','thuyền viên','thuyen vien','crew'].some(k=>d.includes(k));
+}
 function generateOpReportExcel(){
   const from=document.getElementById('rep-from').value;
   const to=document.getElementById('rep-to').value;
@@ -78049,7 +78124,10 @@ function generateOpReportExcel(){
     pushSummaryLine('(−) Dự kiến chi', money(data.sumBudget), false, EE.colors.red);
     pushSummaryLine('(−) Phí NH & khác', money(data.sumFee), false, EE.colors.red);
     pushSummaryLine('Số dư cuối kỳ / Balance c/f', money(data.closeBal), true, null);
-    if(data.mgmtUsd) pushSummaryLine('Phí quản lý / Management fee', money(data.mgmtUsd), false, null);
+    // v3.65.58 (Sếp: "Ẩn dòng Phí quản lý trên báo cáo: đây là báo cáo chủ tàu: không liên quan"):
+    // dòng "Phí quản lý" chỉ để tham khảo/nhắc kế toán nội bộ — KHÔNG liên quan đến chủ tàu, không
+    // nên xuất hiện trên báo cáo gửi chủ tàu. Bỏ hẳn khỏi Excel (giữ nguyên phần tính mgmtUsd ở trên
+    // để chỗ khác trong file còn dùng được nếu cần, chỉ không in dòng này ra báo cáo nữa).
     const ws=XS.utils.aoa_to_sheet(aoa);
     ws['!cols']=[{wch:12},{wch:34},{wch:20},{wch:12},{wch:14},{wch:8},{wch:16}];
     ws['!merges']=merges;
@@ -78072,11 +78150,16 @@ function generateOpReportExcel(){
     const _isKhoanChi=(x)=> x.khoanRole==='chi';
     const inRows=period.filter(x=>x.type==='IN');
     const outAll=period.filter(x=>x.type==='OUT' && !x._isBudget && !_isKhoanChi(x));
-    const outRows=outAll.filter(x=>x.opCat!=='CREW_SALARY');
-    const crewRows=outAll.filter(x=>x.opCat==='CREW_SALARY');
+    const outRows=outAll.filter(x=>!_opIsCrewSalaryRow(x));
+    // v3.65.60 (Sếp: "Lọc phí quản lý để xuống cuối bảng chi hộ, không cần tách riêng chỉ tập hợp
+    // xuống cuối"): KHÔNG tách thành mục riêng (khác Lương thuyền viên) — chỉ SẮP XẾP để các dòng
+    // "Cấn trừ phí quản lý" (t._mgmtFeeId) dồn xuống cuối bảng Chi hộ, vẫn nằm trong cùng 1 bảng.
+    // sort() ổn định (stable) — không xáo trộn thứ tự các dòng còn lại trong từng nhóm.
+    outRows.sort((a,b)=>(a._mgmtFeeId?1:0)-(b._mgmtFeeId?1:0));
+    const crewRows=outAll.filter(x=>_opIsCrewSalaryRow(x));
     const budgetRows=period.filter(x=>x.type==='OUT' && x._isBudget && !_isKhoanChi(x));
     let sumIn=0,sumOut=0,sumBudget=0,sumFee=0,sumCrew=0;
-    period.forEach(x=>{ if(_isKhoanChi(x)) return; if(x.type==='IN') sumIn+=opReportUsd(x); else if(x._isBudget) sumBudget+=opReportUsd(x); else { const u=opReportUsd(x); sumOut+=u; if(x.opCat==='CREW_SALARY') sumCrew+=u; } });
+    period.forEach(x=>{ if(_isKhoanChi(x)) return; if(x.type==='IN') sumIn+=opReportUsd(x); else if(x._isBudget) sumBudget+=opReportUsd(x); else { const u=opReportUsd(x); sumOut+=u; if(_opIsCrewSalaryRow(x)) sumCrew+=u; } });
     // v3.65.54 (Sếp: "Kiểm tra các dòng tính. Đối chiếu đúng với file pdf tương ứng?"): TÌM RA 3 CHỖ
     // TÍNH SAI/LỆCH so với generateOpReport() (PDF) — cùng 1 màn, cùng 1 bộ lọc, PHẢI khớp tuyệt đối:
     // (1) sumFee — bản cũ chỉ cộng opTxFeesUsd(x) theo NGÀY PHIẾU GỐC trong period; PDF (v3.09.88)
@@ -78085,9 +78168,6 @@ function generateOpReportExcel(){
     // (2) mgmtUsd — đọc mfP.amountUsd, TRƯỜNG NÀY KHÔNG TỒN TẠI trên object trả về của
     //     opMgmtFeeForPeriod() (chỉ có amount+ccy) → mgmtUsd LUÔN = 0, dòng "Phí quản lý" trong Excel
     //     không bao giờ hiện số dù PDF có. Sửa: tự quy đổi mfP.amount theo mfP.ccy giống PDF.
-    // (3) closeBal — PDF TRỪ THÊM phần phí QL CHƯA XUẤT HÓA ĐƠN (mgmtFeeDeducted, tháng pending) vào
-    //     Số dư cuối kỳ để khớp opBalance thật của app; bản Excel cũ KHÔNG trừ khoản này — Số dư cuối
-    //     kỳ trong Excel bị THỪA đúng bằng phần phí QL chưa xuất hóa đơn của kỳ đó.
     all.forEach(x=>{
       if(x.type!=='OUT' || x._isBudget || _isKhoanChi(x)) return;
       if(x.reportToOwner===false || x.seahorseOwn) return;
@@ -78104,13 +78184,15 @@ function generateOpReportExcel(){
     if(mfCcy==='USD') mgmtUsd=+mfP.amount||0;
     else if(mfCcy==='VND') mgmtUsd=(+S.fxRate||0)>0 ? (+mfP.amount||0)/(+S.fxRate) : (+mfP.amount||0);
     else { const _avg=(typeof fxAvgSuggest==='function')?fxAvgSuggest(mfCcy):0; mgmtUsd=(_avg>0 && typeof _opConvert==='function') ? (_opConvert(+mfP.amount||0, mfCcy, _avg).usd||0) : (+mfP.amount||0); }
-    let mgmtFeeDeducted=0;
-    const _mgmtAlreadyDeducted=(mfP.billedMonths>0 && mfP.pendingMonths===0) ? mfP.anyDeducted : false;
-    if(mfP.pendingMonths>0 && !_mgmtAlreadyDeducted){
-      const pendingNative=(+v.fee||0)*mfP.pendingMonths;
-      mgmtFeeDeducted = mfCcy==='USD' ? pendingNative : ((+S.fxRate||0)>0 ? pendingNative/(+S.fxRate) : pendingNative);
-    }
-    const closeBal=openBal+sumIn-sumOut-sumBudget-sumFee-mgmtFeeDeducted;
+    // v3.65.56 (Sếp: "Tất cả phí quản lý đều ghi vào chi hộ. Bỏ dòng phí quản lý chưa xuất hoá đơn —
+    // đây chỉ note cho kế toán biết việc cần làm - phí đã được ghi rồi"): TOÀN BỘ phí QL — kể cả tháng
+    // CHƯA xuất hóa đơn chính thức — ĐÃ được ghi thành bút toán Chi hộ thật (cấn trừ quỹ) rồi, không
+    // chờ tới lúc xuất HĐ mới trừ. "Chưa xuất HĐ" chỉ là việc hành chính còn thiếu (nhắc kế toán làm
+    // nốt thủ tục hóa đơn), KHÔNG phải tiền chưa trừ. Trước đây closeBal trừ thêm `mgmtFeeDeducted`
+    // (phần tháng pending) — TRỪ ĐÚP vì khoản đó đã nằm trong sumOut qua bút toán Chi hộ "Cấn trừ phí
+    // quản lý" rồi. BỎ HẲN việc trừ thêm — mgmtUsd giờ chỉ còn là dòng THAM KHẢO/NHẮC VIỆC, không ảnh
+    // hưởng closeBal.
+    const closeBal=openBal+sumIn-sumOut-sumBudget-sumFee;
     const _lk=(typeof ownerReportLockFor==='function')?ownerReportLockFor(vid,String(from).slice(0,7)):null;
     const lockLabel=_lk?('Đã khóa · '+(_lk.signedBy||'')):'Chưa khóa';
     const safe=String(v.name||('Tau'+(nSheet+1))).replace(/[\\\/\?\*\[\]:]/g,'').slice(0,28)||('Tau'+(nSheet+1));
@@ -78141,7 +78223,8 @@ function generateOpReportExcel(){
       aoa.push(['(−) Dự kiến chi', money(sumBudget)]);
       aoa.push(['(−) Phí NH & khác', money(sumFee)]);
       aoa.push(['Số dư cuối kỳ / Balance c/f', money(closeBal)]);
-      if(mgmtUsd) aoa.push(['Phí quản lý / Management fee', money(mgmtUsd)]);
+      // v3.65.58 (Sếp: "Ẩn dòng Phí quản lý trên báo cáo — báo cáo chủ tàu, không liên quan, bỏ cả
+      // bản Excel"): bỏ hẳn dòng này khỏi Excel gửi chủ tàu.
       ws=XLSX.utils.aoa_to_sheet(aoa);
       ws['!cols']=[{wch:12},{wch:34},{wch:20},{wch:12},{wch:14},{wch:6},{wch:14}];
     }
@@ -78318,8 +78401,13 @@ function generateOpReport(){
     // v2.99.31: tách Chi hộ THỰC (đã/đang chi) vs DỰ KIẾN CHI (_isBudget — chưa phát sinh).
     // v3.02.61: tách thêm LƯƠNG THUYỀN VIÊN (opCat==='CREW_SALARY') thành section riêng.
     const outAll=period.filter(x=>x.type==='OUT' && !x._isBudget && !_isKhoanChi(x));
-    const outRows=outAll.filter(x=>x.opCat!=='CREW_SALARY');
-    const crewRows=outAll.filter(x=>x.opCat==='CREW_SALARY');
+    const outRows=outAll.filter(x=>!_opIsCrewSalaryRow(x));
+    // v3.65.60 (Sếp: "Lọc phí quản lý để xuống cuối bảng chi hộ, không cần tách riêng chỉ tập hợp
+    // xuống cuối"): KHÔNG tách thành mục riêng (khác Lương thuyền viên) — chỉ SẮP XẾP để các dòng
+    // "Cấn trừ phí quản lý" (t._mgmtFeeId) dồn xuống cuối bảng Chi hộ, vẫn nằm trong cùng 1 bảng.
+    // sort() ổn định (stable) — không xáo trộn thứ tự các dòng còn lại trong từng nhóm.
+    outRows.sort((a,b)=>(a._mgmtFeeId?1:0)-(b._mgmtFeeId?1:0));
+    const crewRows=outAll.filter(x=>_opIsCrewSalaryRow(x));
     const budgetRows=period.filter(x=>x.type==='OUT' && x._isBudget && !_isKhoanChi(x));
     // v3.04.55/61: gom chứng từ (ảnh/PDF) của các khoản chi hộ trong kỳ → phụ lục
     //   gồm cả dòng dự kiến (_isBudget) để chứng từ không bị bỏ sót.
@@ -78334,7 +78422,7 @@ function generateOpReport(){
       if(_isKhoanChi(x)) return;  // v3.03.52: bỏ qua dòng thực chi của khoán (không lên báo cáo chủ tàu)
       if(x.type==='IN') sumIn+=opReportUsd(x);
       else if(x._isBudget) sumBudget+=opReportUsd(x);
-      else { const u=opReportUsd(x); sumOut+=u; if(x.opCat==='CREW_SALARY') sumCrew+=u; }
+      else { const u=opReportUsd(x); sumOut+=u; if(_opIsCrewSalaryRow(x)) sumCrew+=u; }
     });
     // v3.09.88: PHÍ tính theo NGÀY PHÁT SINH PHÍ (paidDate/payment.date), KHÔNG theo ngày phiếu gốc.
     //   Duyệt MỌI phiếu chi hộ của tàu (kể cả phiếu gốc ngoài kỳ). Phí có ngày trong [from,to] → tính kỳ này.
@@ -78402,13 +78490,15 @@ function generateOpReport(){
     //   - Tháng ĐÃ lập (billed): đã có bút toán giảm quỹ trong opTx/AP → KHÔNG trừ lại (tránh trùng).
     //   - Tháng CHƯA lập (pending): trừ THÊM phần dự kiến vào closeBal để khớp số dư app (opBalance).
     //   Kỳ hỗn hợp chỉ trừ ĐÚNG phần pending (số chuẩn × số tháng chưa lập), không trừ phần đã lập.
+    // v3.65.56 (Sếp: "Tất cả phí quản lý đều ghi vào chi hộ. Bỏ dòng phí quản lý chưa xuất hoá đơn —
+    // đây chỉ note cho kế toán biết việc cần làm - phí đã được ghi rồi"): SAI GIẢ ĐỊNH ở trên — tháng
+    // CHƯA lập hóa đơn KHÔNG có nghĩa là tiền chưa trừ; toàn bộ phí QL (mọi tháng) ĐÃ được ghi thành
+    // bút toán Chi hộ "Cấn trừ phí quản lý" ngay khi phát sinh, không chờ xuất HĐ mới trừ quỹ. "Chưa
+    // xuất HĐ" chỉ là việc hành chính còn thiếu (nhắc kế toán hoàn tất thủ tục hóa đơn), không phải
+    // khoản tiền còn nợ. BỎ HẲN việc trừ thêm mgmtFeeDeducted vào closeBal — tránh trừ đúp (khoản đó
+    // đã nằm trong sumOut qua bút toán Chi hộ rồi). Dòng "Phí quản lý" bên dưới giữ lại CHỈ để tham
+    // khảo/nhắc việc kế toán, không còn ảnh hưởng Số dư cuối kỳ.
     let mgmtFeeDeducted=0;
-    if(mgmtFeeInfo && mfP.pendingMonths>0 && !mgmtFeeInfo.deducted){
-      const pendingNative=(+v.fee||0)*mfP.pendingMonths;
-      const pendingUsd = mfCcy==='USD' ? pendingNative : ((+S.fxRate||0)>0 ? pendingNative/(+S.fxRate) : pendingNative);
-      mgmtFeeDeducted = pendingUsd;
-      closeBal -= mgmtFeeDeducted;
-    }
 
     const tableRowsIN=(rows)=>{
       if(!rows.length) return `<tr><td colspan="5" style="text-align:center;font-style:normal;color:#888">— Không có giao dịch —</td></tr>`;
@@ -78487,7 +78577,9 @@ function generateOpReport(){
           <tr style="background:rgba(var(--accent-rgb,65,65,65),.04)"><td class="lbl" style="padding:8pt 12pt"><b>(−) ${t.sumOut}</b><br><span style="font-size:9pt;color:#666">${outRows.length} ${en?"entries":"bút toán"}</span></td><td class="r" style="padding:8pt 12pt;font-size:13pt;color:#a8362b"><b>${fmtMoney(sumOut,'USD')}</b></td></tr>
           ${budgetRows.length?`<tr style="background:rgba(196,138,57,.05)"><td class="lbl" style="padding:8pt 12pt"><b>(−) ${t.sumBudget}</b><br><span style="font-size:9pt;color:#666">${budgetRows.length} ${en?'item(s)':'khoản'} · ${en?'advanced by Owners’ agreement — included in invoice, reconciled on actual':enOrBi?'chủ tàu đồng ý ứng trước · đã vào invoice, đối chiếu theo thực tế':'chủ tàu đồng ý ứng trước · đã tính vào invoice, đối chiếu theo thực tế'}</span></td><td class="r" style="padding:8pt 12pt;font-size:12pt;color:#8a5a1e"><span style="font-size:9pt;font-style:normal">~ </span>${fmtMoney(sumBudget,'USD')}</td></tr>`:''}
           <tr><td class="lbl" style="padding:8pt 12pt">(−) ${t.sumFee}<br><span style="font-size:9pt;color:#666">${en?"Bank &amp; other fees":"Phí NH + phí khác"}</span></td><td class="r" style="padding:8pt 12pt">${fmtMoney(sumFee,'USD')}</td></tr>
-          <tr style="background:rgba(196,138,57,.06)"><td class="lbl" style="padding:8pt 12pt"><b>${mgmtFeeDeducted>0?'(−) ':''}${t.mgmtFee}</b><br><span style="font-size:9pt;color:#666">${mgmtFeeInfo.has?(en?'Invoiced':'Đã xuất HĐ'):(en?'Estimated':'Dự kiến')}</span></td><td class="r" style="padding:8pt 12pt;font-size:12pt;color:#a8362b">${mgmtFeeDeducted>0?'':'<span style="font-size:9pt;font-style:normal">~ </span>'}${mgmtFeeDeducted>0?'−':''}${fmtMoney(mgmtFeeInfo.amountUsd, 'USD')}</td></tr>
+          <!-- v3.65.58 (Sếp: "Ẩn dòng Phí quản lý trên báo cáo: đây là báo cáo chủ tàu: không liên
+               quan, bỏ cả trên bản excel xuất kèm") — bỏ hẳn dòng "Phí quản lý" khỏi báo cáo chủ tàu,
+               đã ghi trong Chi hộ ở trên rồi, không cần nhắc lại ở đây. -->
           <tr class="grand" style="background:rgba(28,58,92,.08);border-top:2pt solid #1c3a5c"><td class="lbl" style="padding:12pt;font-size:14pt"><b>${t.closeBal}</b></td><td class="r" style="padding:12pt;font-size:16pt;color:${closeBal<0?'#a8362b':'#2d6a6a'}"><b>${fmtMoney(closeBal,'USD')}</b></td></tr>
         </table>
       </div>
