@@ -4652,7 +4652,7 @@ const WH_TYPES = {
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.65.39';
+const APP_VERSION='3.65.46';
 /* HOTFIX 3.12.17-email: CHẶN TRIỆT ĐỂ gửi email TỰ ĐỘNG (mất kiểm soát — spam quota Google).
    Email phải do NV được phân quyền CHỦ ĐỘNG chọn gửi. Cờ này:
    (1) chặn auto-SCAN tạo email (hrmScanExpiries/vesselCertScanExpiries);
@@ -39006,7 +39006,7 @@ function _expTreeFindDupes(){
       <td style="padding:6px 8px">${d.typeIcon} ${esc(d.typeLabel)} <span style="color:var(--muted);font-size:11px">(${esc(d.typeCode)})</span></td>
       <td style="padding:6px 8px;text-align:center">${d.used>0?`<span style="color:var(--bad);font-weight:700">${d.used} phiếu</span>`:'<span style="color:var(--good)">0 phiếu</span>'}</td>
       <td style="padding:6px 8px;white-space:nowrap">${d.used>0
-        ?`<span style="font-size:11px;color:var(--muted)" title="Có phiếu cũ đang dùng — gán lại tay từng phiếu sang đúng loại cháu trước khi xoá">⚠ Cần gán lại tay trước</span>`
+        ?`<button class="btn-sec" style="font-size:11px" onclick="_expTreeDupeOpenRecords('${esc(d.typeCode)}','${esc(d.conCode)}')">👁 Xem ${d.used} phiếu</button>`
         :`<button class="btn-sec" style="font-size:11px;color:var(--bad);border-color:var(--bad)" onclick="_expTreeDeleteDupe('${esc(d.typeCode)}')">🗑 Xoá loại thừa</button>`}</td>
     </tr>`).join('') : '<tr><td colspan="5" class="empty">Không tìm thấy nhóm trùng nhánh nào — dữ liệu sạch.</td></tr>';
   openModal('🔍 Loại chi phí trùng nhánh CON', `
@@ -39025,6 +39025,110 @@ function _expTreeDeleteDupe(typeCode){
   }, {action:'exp_type_dupe_delete', fields:['expenseTypes'], onOk:()=>{
     toast('✓ Đã xoá loại chi phí thừa');
     _expTreeFindDupes();
+  }});
+}
+// v3.65.40 (Sếp: "cần mở tại chỗ để sửa" + "phải xem từng phiếu" — thay vì gán mù cả lô 1 nhánh
+// cháu, mở đúng danh sách phiếu thật của 1 mã thừa (M.03 v.v.), NV đọc nội dung/NCC/số tiền từng
+// phiếu rồi tự chọn đúng nhánh cháu — có thể tick nhiều dòng giống nhau gán chung 1 lần cho nhanh,
+// hoặc chọn riêng từng dòng. Dùng lại đúng khuôn AccountingService.payables()/receivables(),
+// _arTypesForTreeCode/expTreePath đã có — không viết cách tra loại chi phí thứ 2.
+function _expTreeDupeAllTypesUnder(conCode){
+  const types=(typeof activeExpenseTypes==='function')?activeExpenseTypes():(S.expenseTypes||[]);
+  return types.filter(t=>t && String(t.treeCode||'').indexOf(conCode+'.')===0)
+    .map(t=>({code:t.code, label:t.label||t.code, icon:t.icon||'',
+      path:(typeof expTreePath==='function'?expTreePath(t.treeCode,t.label):t.treeCode)}))
+    .sort((a,b)=>a.code.localeCompare(b.code,'vi',{numeric:true}));
+}
+function _expTreeDupeRecords(typeCode){
+  const out=[];
+  (S.payables||[]).forEach(r=>{ if(r&&!r._deleted&&r.expenseType===typeCode) out.push({...r, _kind:'payables'}); });
+  (S.receivables||[]).forEach(r=>{ if(r&&!r._deleted&&r.expenseType===typeCode) out.push({...r, _kind:'receivables'}); });
+  out.sort((a,b)=>String(b.issueDate||b.updatedAt||'').localeCompare(String(a.issueDate||a.updatedAt||'')));
+  return out;
+}
+function _expTreeDupeOpenRecords(typeCode, conCode){
+  if(!isAdmin()){ toast('Chỉ admin làm được','bad'); return; }
+  const targets=_expTreeDupeAllTypesUnder(conCode);
+  const recs=_expTreeDupeRecords(typeCode);
+  const targetOpts=targets.map(t=>`<option value="${esc(t.code)}">${t.icon||''} ${esc(t.path||t.label)}</option>`).join('');
+  const rowFor=r=>{
+    const key=r._kind+'::'+r.id;
+    const amt=(typeof fmtCcy==='function')?fmtCcy(+r.amountGross||+r.amount||0, r.ccy||'VND'):((+r.amountGross||+r.amount||0)+' '+(r.ccy||'VND'));
+    const code=esc(r.invoiceNo||r.docNo||r.id||'');
+    const when=String(r.issueDate||r.invoiceDate||'').slice(0,10);
+    const kindLabel=r._kind==='payables'?'AP':'AR';
+    return `<tr data-dupe-row="${esc(key)}" style="border-bottom:1px solid var(--rule)">
+      <td style="padding:4px 6px;text-align:center"><input type="checkbox" data-dupe-chk value="${esc(key)}"></td>
+      <td style="padding:4px 6px;font-size:10.5px;color:var(--muted)">${kindLabel}</td>
+      <td style="padding:4px 6px;font-family:monospace;font-size:11px">${code}</td>
+      <td style="padding:4px 6px;font-size:11px;white-space:nowrap">${esc(when)}</td>
+      <td style="padding:4px 6px;font-size:12px">${esc(r.partner||r.vendor||'—')}</td>
+      <td style="padding:4px 6px;font-size:11px;color:var(--muted);max-width:220px">${esc((r.desc||'').slice(0,80))}</td>
+      <td style="padding:4px 6px;font-family:monospace;font-size:11px;white-space:nowrap">${amt}</td>
+      <td style="padding:4px 6px"><select data-dupe-target="${esc(key)}" style="font-size:11px;padding:3px 4px;max-width:220px">
+        <option value="">— Chọn nhánh —</option>${targetOpts}
+      </select></td>
+    </tr>`;
+  };
+  const body=`
+    <div style="font-size:11px;color:var(--muted);margin-bottom:10px">Đọc nội dung/NCC/số tiền từng phiếu để chọn đúng nhánh cháu. Tick nhiều dòng giống nhau (cùng NCC/nội dung) rồi dùng bộ chọn nhanh bên dưới để gán chung 1 lần; hoặc chọn riêng dropdown từng dòng. Chỉ dòng nào ĐÃ có nhánh mới được lưu — dòng bỏ trống sẽ bỏ qua.</div>
+    <div style="display:flex;gap:8px;align-items:center;margin-bottom:10px;padding:8px;background:var(--rule);border-radius:6px">
+      <label style="font-size:11px"><input type="checkbox" id="dupe-chk-all" onchange="_expTreeDupeToggleAll(this.checked)"> Chọn hết</label>
+      <span style="font-size:11px;color:var(--muted)">Gán nhánh cho các dòng đã tick:</span>
+      <select id="dupe-bulk-target" style="font-size:11px;padding:3px 4px;flex:1;max-width:260px">
+        <option value="">— Chọn nhánh —</option>${targetOpts}
+      </select>
+      <button class="btn-sec" style="font-size:11px" onclick="_expTreeDupeApplyBulk()">Áp dụng cho dòng đã tick</button>
+    </div>
+    <div class="tbl-scroll" style="max-height:420px">
+      <table style="width:100%;border-collapse:collapse;font-size:13px">
+        <thead><tr style="background:#f0f3f7;text-align:left"><th style="padding:4px 6px;width:26px"></th><th style="padding:4px 6px">Loại</th><th style="padding:4px 6px">Số CT</th><th style="padding:4px 6px">Ngày</th><th style="padding:4px 6px">Đối tác</th><th style="padding:4px 6px">Ghi chú</th><th style="padding:4px 6px">Số tiền</th><th style="padding:4px 6px">Gán sang nhánh</th></tr></thead>
+        <tbody>${recs.map(rowFor).join('')||'<tr><td colspan="8" class="empty">Không còn phiếu nào.</td></tr>'}</tbody>
+      </table>
+    </div>
+    <div id="dupe-save-err" style="color:var(--bad);font-size:12px;margin-top:6px"></div>`;
+  openModal('👁 Gán lại phiếu — '+typeCode, body,
+    `<button class="btn-ghost" onclick="_expTreeFindDupes()">← Quay lại danh sách trùng nhánh</button>
+     <button class="btn-primary" onclick="_expTreeDupeSaveAll('${esc(typeCode)}','${esc(conCode)}')">💾 Lưu các dòng đã chọn nhánh</button>`);
+}
+function _expTreeDupeToggleAll(checked){
+  document.querySelectorAll('[data-dupe-chk]').forEach(c=>{ c.checked=checked; });
+}
+function _expTreeDupeApplyBulk(){
+  const target=(document.getElementById('dupe-bulk-target')||{}).value;
+  if(!target){ toast('Chọn nhánh trước','bad'); return; }
+  let n=0;
+  document.querySelectorAll('[data-dupe-chk]:checked').forEach(c=>{
+    const sel=document.querySelector('[data-dupe-target="'+CSS.escape(c.value)+'"]');
+    if(sel){ sel.value=target; n++; }
+  });
+  toast(n?('Đã áp dụng cho '+n+' dòng — bấm "Lưu" để ghi lại'):'Chưa tick dòng nào','good');
+}
+function _expTreeDupeSaveAll(typeCode, conCode){
+  const err=document.getElementById('dupe-save-err'); if(err) err.textContent='';
+  const pending=[];
+  document.querySelectorAll('[data-dupe-target]').forEach(sel=>{
+    const v=sel.value; if(!v) return;
+    const key=sel.getAttribute('data-dupe-target');
+    const [kind,id]=key.split('::');
+    pending.push({kind,id,newCode:v});
+  });
+  if(!pending.length){ if(err) err.textContent='Chưa chọn nhánh cho dòng nào.'; return; }
+  let nMig=0; const byTarget={};
+  commitMutation(()=>{
+    pending.forEach(p=>{
+      const arr=S[p.kind]; if(!Array.isArray(arr)) return;
+      const rec=arr.find(x=>x&&x.id===p.id); if(!rec) return;
+      rec.expenseType=p.newCode;
+      try{ touchRecord(rec); }catch(e){}
+      nMig++; byTarget[p.newCode]=(byTarget[p.newCode]||0)+1;
+    });
+    try{ logAuditEvent('etype_dupe_reassign',{from:typeCode, targets:byTarget, migrated:nMig, actor:actorName()}); }catch(e){}
+  }, {action:'etype_dupe_reassign', fields:['payables','receivables'], onOk:()=>{
+    toast('✓ Đã gán lại '+nMig+' phiếu','good');
+    const remain=_expTreeDupeRecords(typeCode).length;
+    if(remain>0){ _expTreeDupeOpenRecords(typeCode, conCode); }
+    else{ _expTreeFindDupes(); }
   }});
 }
 function _renderExpenseTreeBody(){
@@ -42458,17 +42562,31 @@ function _applyVendorCodeNormalize(){
 }
 
 /* Get-or-create vendor record from a free-text partner name.
-   Returns the vendor object (existing or newly created). */
-function getOrCreateVendor(rawName){
+   Returns the vendor object (existing or newly created).
+   v3.65.41 (Sếp: "App không được tự tạo, chỉ gợi ý, NV sẽ tạo" mã NCC): nhận thêm explicitCode
+   (mã NV đã xác nhận/sửa ở ô "Mã NCC mới" trên form) — dùng đúng mã đó nếu có; KHÔNG còn tự lấy
+   normalizeVendorName(tên) đầy đủ làm mã mặc định (dễ ra mã dài xấu kiểu CTCPBAOBIVATMDKBINHSON) —
+   fallback khi thiếu explicitCode đổi sang _suggestVendorCode() (mã gọn, cùng nguồn với "🏷 Chuẩn
+   hóa mã") thay vì cắt thẳng tên đầy đủ. */
+function getOrCreateVendor(rawName, explicitCode){
   if(!rawName) return null;
   const norm=normalizeVendorName(rawName);
   if(!norm) return null;
   let v=findVendor(rawName);
   if(v) return v;
   // Create new
+  let _code=(explicitCode&&String(explicitCode).trim())
+    ? normalizeVendorName(explicitCode).slice(0,20)
+    : ((typeof _suggestVendorCode==='function'?_suggestVendorCode(rawName):'')||norm.slice(0,20));
+  // chống trùng mã (NV gõ tay có thể trùng NCC khác đã có) — thêm hậu tố số như "🏷 Chuẩn hóa mã" đang làm
+  if(_code && (S.vendors||[]).some(x=>x&&x.code===_code)){
+    let i=2; const base=_code;
+    while((S.vendors||[]).some(x=>x&&x.code===base+i)) i++;
+    _code=base+i;
+  }
   v={
     id:'V-'+uid(),
-    code:norm.slice(0,20),  // short code
+    code:_code,
     name:String(rawName).trim(),  // original display
     normalized:norm,
     taxCode:'',
@@ -48371,7 +48489,9 @@ let _opexVid=null, _opexRange={from:'',to:''};
    Chỉ admin/VM; chặn tuyệt đối tài khoản tàu (whIsVesselSideUser). Dùng hàm data sẵn có, không tự chế lọc. */
 function _vesselOpexMatrix(vid, fromM, toM){
   /* v3.18.62 (Sếp duyệt mẫu opex_mau): CHỈ 2 cây M (Vận hành tàu) + F (Nhiên liệu) theo MÃ PHÂN CẤP.
-     cha M/F → con M.01 → cháu M.01.10; loại chưa gán mã M/F gom nhóm ⚠ cuối. */
+     cha M/F → con M.01 → cháu M.01.10; loại chưa gán mã M/F gom nhóm ⚠ cuối.
+     v3.65.44 (Sếp: "thôi, chuyển về như cũ: 2 loại"): RÚT HẲN thử nghiệm thêm khối C + Quỹ tàu chi
+     tiền mặt (v3.65.42/43) — quay về đúng nguyên bản chỉ 2 cây M/F như trước, không giữ lại gì. */
   const aps=(typeof AccountingService!=='undefined'?AccountingService.payables():[]).filter(p=>p && p.vesselId===vid);
   const monthsSet=new Set();
   const cha={}; const un={}; let unTot=0; const unMonths={};
@@ -65183,8 +65303,14 @@ function _arEditorBody(r,isPayable){
                 // v3.65.35: đang gộp NHIỀU nhóm con — chia optgroup theo từng nhóm cho rõ, khỏi lẫn
                 ? chauList.map(c=>{ const ts=_arTypesForTreeCode(c.code); return ts.length?`<optgroup label="${esc(c.code)} · ${esc(c.name)}">${ts.map(t=>`<option value="${esc(t.code)}" ${r.expenseType===t.code?'selected':''}>${t.icon||''} ${esc(t.label)}</option>`).join('')}</optgroup>`:''; }).join('')
                 : finalTypes.map(t=>`<option value="${esc(t.code)}" ${r.expenseType===t.code?'selected':''}>${t.icon||''} ${esc(t.label)}</option>`).join(''));
+          // v3.65.41 (Sếp: "Phân bổ các ô chọn loại chi phí phải thẳng hàng, tỷ lệ cân đối"): lưới
+          // trước CỐ ĐỊNH 3 cột bằng nhau dù ô 2/3 đang ẩn (display:none) → ô 1 co lại 1/3 bề rộng,
+          // 2/3 còn lại bỏ trống, KHÔNG cân đối. Giờ tự tính số cột = số ô ĐANG THẬT SỰ hiện (xem
+          // _arExpGridRebalance() — gọi lại mỗi khi arExpenseGroupChanged/arExpenseConChanged đổi
+          // hiện/ẩn 1 trong 2 ô sau).
+          const _nCols=1+((curGroup&&!isBudget)?1:0)+(chauList.length?1:0);
           return `
-            <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:6px">
+            <div id="ar-expense-grid" style="display:grid;grid-template-columns:repeat(${_nCols},1fr);gap:8px;margin-bottom:6px">
               <div>
                 <label style="font-size:10px;color:var(--muted)">Nhóm chi phí</label>
                 <select id="ar-expense-group" onchange="arExpenseGroupChanged()">${groupOpts}</select>
@@ -65467,16 +65593,21 @@ function _arEditorBody(r,isPayable){
       <input type="file" id="ap1-invoice-file" accept=".csv,.xml,.xlsx,.xls" style="display:none" onchange="window._provLastQuoteFile=this.files[0]||null;_mrReadInvoiceFile(this.files[0],'ap1')">
       <button type="button" class="btn-sec" style="font-size:11px;padding:5px 12px" onclick="document.getElementById('ap1-invoice-file').click()" title="Đọc ${isPayable?'hóa đơn':'hóa đơn đầu ra'} XML/PDF/CSV + ẢNH & PDF scan (AI Gemini) → tự điền phiếu. Ưu tiên chọn Excel/CSV/XML nếu NCC có gửi — nhanh hơn.">📎 Import file</button>
     </div>` : ''}
-    <div class="form-grid">
-      <div class="field"><label>${isPayable?'Nhà cung cấp':'Khách hàng'} *</label>
+    <!-- v3.65.41 (Sếp: "Ô tên NCC nhỏ lại, ô diễn giải lớn hơn"): tách riêng NCC+Diễn giải khỏi
+         .form-grid (chia đều theo cột chuẩn của modal), đặt tỷ lệ cố định 1:2 — không phụ thuộc số
+         cột modal đang set, đảm bảo Diễn giải luôn rộng hơn NCC đúng 2 lần. -->
+    <div style="display:grid;grid-template-columns:1fr 2fr;gap:14px;margin-bottom:16px">
+      <div class="field" style="margin:0"><label>${isPayable?'Nhà cung cấp':'Khách hàng'} *</label>
         <div style="display:flex;gap:6px;align-items:stretch">
-          <input type="text" id="ar-partner" list="ar-partner-suggestions" value="${(r.partner||'').replace(/"/g,'&quot;')}" placeholder="${isPayable?'VD: Cảng PTSC Vũng Tàu':'VD: PVEP, JVPC, Pertamina...'}" ${lockedAttr} oninput="arPartnerCheck(this)" style="flex:1">
+          <input type="text" id="ar-partner" list="ar-partner-suggestions" value="${(r.partner||'').replace(/"/g,'&quot;')}" placeholder="${isPayable?'VD: Cảng PTSC Vũng Tàu':'VD: PVEP, JVPC, Pertamina...'}" ${lockedAttr} oninput="arPartnerCheck(this)" style="flex:1;min-width:0">
           <button type="button" class="btn-sec" title="Tìm trong danh mục ${isPayable?'NCC':'khách hàng'} — chọn dùng luôn, khỏi gõ lại" onclick="openVendorPicker('${isPayable?'ap':'ar'}')" style="white-space:nowrap;padding:0 12px" ${lockedAttr?'disabled':''}>🔍 Tìm</button>
         </div>
         <datalist id="ar-partner-suggestions">${_vendorDatalistOptions()}</datalist>
         <div id="ar-partner-hint" style="font-size:11px;color:var(--muted);margin-top:4px"></div>
       </div>
-      <div class="field" style="grid-column:span 2"><label>Diễn giải</label><input type="text" id="ar-desc" value="${(r.desc||'').replace(/"/g,'&quot;')}" placeholder="Nội dung — VD: Cước thuê tàu T5/2026" ${lockedAttr}></div>
+      <div class="field" style="margin:0"><label>Diễn giải</label><input type="text" id="ar-desc" value="${(r.desc||'').replace(/"/g,'&quot;')}" placeholder="Nội dung — VD: Cước thuê tàu T5/2026" ${lockedAttr}></div>
+    </div>
+    <div class="form-grid">
       <div class="field"><label>Số hóa đơn ${isPayable?'':'<span style="color:var(--muted);text-transform:none;font-weight:400;font-size:10px">(số HĐ GTGT đầu ra)</span>'}</label><input type="text" id="ar-invoice" value="${(r.invoiceNo||'').replace(/"/g,'&quot;')}" placeholder="VD: 00012345 / Ký hiệu 1C26TYY" ${lockedAttr}></div>
       ${expenseTypeBlock}
       <!-- v3.20.363 (Sếp: "Chốt cứng công ty con khi NV tạo AP/AR trong tab công ty con/ không
@@ -65749,6 +65880,15 @@ function _arResolveFinalType(types){
   tsel.value = types.length ? types[0].code : '';
   arExpenseTypeChanged();
 }
+// v3.65.41: tính lại số cột lưới Nhóm/Loại/Chi phí theo đúng số ô đang HIỆN (không còn cố định 3 cột
+// để trống ô ẩn) — gọi cuối arExpenseGroupChanged()/arExpenseConChanged() mỗi khi đổi hiện/ẩn.
+function _arExpGridRebalance(){
+  const grid=document.getElementById('ar-expense-grid'); if(!grid) return;
+  const conWrap=document.getElementById('ar-expense-con-wrap');
+  const chauWrap=document.getElementById('ar-expense-chau-wrap');
+  const n=1+(conWrap&&conWrap.style.display!=='none'?1:0)+(chauWrap&&chauWrap.style.display!=='none'?1:0);
+  grid.style.gridTemplateColumns='repeat('+n+',1fr)';
+}
 function arExpenseGroupChanged(){
   const gsel=document.getElementById('ar-expense-group');
   const conWrap=document.getElementById('ar-expense-con-wrap');
@@ -65761,12 +65901,14 @@ function arExpenseGroupChanged(){
     const tsel=document.getElementById('ar-expense-type');
     if(tsel){ tsel.innerHTML='<option value="__BUDGET__" selected>📋 Dự kiến chi (chưa phát sinh)</option>'; }
     arExpenseTypeChanged();
+    _arExpGridRebalance();
     return;
   }
   if(conWrap) conWrap.style.display=gk?'':'none';
   const cons=gk?_arTreeConsOf(gk):[];
   conSel.innerHTML='<option value="">— Loại chi phí —</option>'+cons.map(c=>`<option value="${esc(c.code)}">${esc(c.code)} · ${esc(c.name)}</option>`).join('')+(isAdmin()&&gk?`<option value="__NEW_CON__">＋ Tạo nhóm con mới (admin)</option>`:'');
   arExpenseConChanged();
+  _arExpGridRebalance();
 }
 function arExpenseConChanged(){
   const conSel=document.getElementById('ar-expense-con'); if(!conSel) return;
@@ -65787,7 +65929,7 @@ function arExpenseConChanged(){
   const chauWrap=document.getElementById('ar-expense-chau-wrap');
   const chauSel=document.getElementById('ar-expense-chau');
   const conCode=conSel.value;
-  if(!conCode){ if(chauWrap) chauWrap.style.display='none'; _arResolveFinalType([]); return; }
+  if(!conCode){ if(chauWrap) chauWrap.style.display='none'; _arResolveFinalType([]); _arExpGridRebalance(); return; }
   const chau=_arTreeChauOf(conCode);
   if(!chau.length){
     if(chauWrap) chauWrap.style.display='none';
@@ -65797,6 +65939,7 @@ function arExpenseConChanged(){
     if(chauSel) chauSel.innerHTML='<option value="">— Chi phí —</option>'+chau.map(c=>`<option value="${esc(c.code)}">${esc(c.code)} · ${esc(c.name)}</option>`).join('')+(isAdmin()?`<option value="__NEW__">＋ Tạo loại chi phí mới… (admin)</option>`:'');
     arExpenseChauChanged();
   }
+  _arExpGridRebalance();
 }
 function arExpenseChauChanged(){
   const chauSel=document.getElementById('ar-expense-chau'); if(!chauSel) return;
@@ -65999,7 +66142,11 @@ function arPartnerCheck(input){
       const list=similar.map(v=>`<a href="#" onclick="document.getElementById('ar-partner').value='${esc(v.name)}';arPartnerCheck(document.getElementById('ar-partner'));return false" style="color:var(--accent)">${esc(v.name)}</a>`).join(', ');
       hint.innerHTML=`<span style="color:var(--warn)">⚠ Có thể trùng với:</span> ${list}`;
     } else {
-      hint.innerHTML=`<span style="color:var(--muted)">+ NCC mới (sẽ tự tạo khi lưu): <b>${esc(norm)}</b></span>`;
+      // v3.65.41 (Sếp: "App không được tự tạo, chỉ gợi ý, NV sẽ tạo"): thay dòng chữ mờ báo trước
+      // bằng 1 Ô NHẬP thật — tự điền mã gợi ý gọn (_suggestVendorCode, cùng nguồn "🏷 Chuẩn hóa mã"),
+      // NV gõ đè nếu muốn. Giá trị ô này đọc lại lúc Lưu (saveAr) làm explicitCode cho getOrCreateVendor.
+      const sug=(typeof _suggestVendorCode==='function'?_suggestVendorCode(raw):'')||norm;
+      hint.innerHTML=`<span style="color:var(--muted)">+ NCC mới — mã:</span> <input type="text" id="ar-new-vendor-code" value="${esc(sug)}" style="width:160px;padding:3px 6px;font-size:11px;font-family:monospace;text-transform:uppercase" oninput="this.value=this.value.toUpperCase().replace(/[^A-Z0-9_.\\-]/g,'')"> <span style="color:var(--muted)">(sửa nếu muốn — sẽ tạo NCC mới với mã này khi lưu)</span>`;
     }
   }
 }
@@ -68026,8 +68173,11 @@ function _renderMultiRowModal(){
           const curChau=_mrHeaderCurrentChau();
           const chauList=curCon?_arTreeChauOf(curCon):[];
           const chauOpts='<option value="">— Chi phí —</option>'+chauList.map(c=>`<option value="${esc(c.code)}" ${curChau===c.code?'selected':''}>${esc(c.code)} · ${esc(c.name)}</option>`).join('');
+          // v3.65.41 (Sếp: "Phân bổ các ô chọn loại chi phí phải thẳng hàng, tỷ lệ cân đối"): cùng
+          // fix như form đơn dòng (ar-expense-grid) — số cột = số ô đang thật sự hiện, không cố định 3.
+          const _nCols=1+(gcur?1:0)+(chauList.length?1:0);
           return `
-            <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px">
+            <div id="mr-exp-grid" style="display:grid;grid-template-columns:repeat(${_nCols},1fr);gap:8px">
               <div>
                 <label style="font-size:10px" title="Mặc định cho các dòng thêm SAU — từng dòng vẫn tự chọn lại được riêng ở cột Loại chi phí trong bảng">Nhóm chi phí (mặc định dòng)</label>
                 <select id="mr-exp-group" onchange="_mrHeaderGroupChanged(this.value)">${groupOpts}</select>
@@ -69463,6 +69613,15 @@ function _mrApplyHeaderType(code){
   const tb=document.getElementById('mr-lines-body');
   if(tb) tb.innerHTML=_multiRowState.lines.map((l,i)=>_renderMrLine(l,i)).join('');
 }
+// v3.65.41: cùng nguyên tắc _arExpGridRebalance() bên form đơn dòng — tính lại số cột #mr-exp-grid
+// theo đúng số ô đang hiện, gọi cuối mỗi hàm đổi hiện/ẩn bên dưới.
+function _mrExpGridRebalance(){
+  const grid=document.getElementById('mr-exp-grid'); if(!grid) return;
+  const conWrap=document.getElementById('mr-exp-con-wrap');
+  const chauWrap=document.getElementById('mr-exp-chau-wrap');
+  const n=1+(conWrap&&conWrap.style.display!=='none'?1:0)+(chauWrap&&chauWrap.style.display!=='none'?1:0);
+  grid.style.gridTemplateColumns='repeat('+n+',1fr)';
+}
 function _mrHeaderGroupChanged(gk){
   _multiRowState.expenseGroup=gk||'';
   _mrApplyHeaderType('');   // đổi Nhóm chi phí → xóa hẳn Loại đang chọn, bắt chọn lại từ đầu
@@ -69473,11 +69632,12 @@ function _mrHeaderGroupChanged(gk){
   if(chauWrap) chauWrap.style.display='none';
   const cons=gk?_arTreeConsOf(gk):[];
   if(conSel) conSel.innerHTML='<option value="">— Loại chi phí —</option>'+cons.map(c=>`<option value="${esc(c.code)}">${esc(c.code)} · ${esc(c.name)}</option>`).join('');
+  _mrExpGridRebalance();
 }
 function _mrHeaderConChanged(conCode){
   const chauWrap=document.getElementById('mr-exp-chau-wrap');
   const chauSel=document.getElementById('mr-exp-chau');
-  if(!conCode){ if(chauWrap) chauWrap.style.display='none'; _mrApplyHeaderType(''); return; }
+  if(!conCode){ if(chauWrap) chauWrap.style.display='none'; _mrApplyHeaderType(''); _mrExpGridRebalance(); return; }
   const chau=_arTreeChauOf(conCode);
   if(!chau.length){
     if(chauWrap) chauWrap.style.display='none';
@@ -69488,6 +69648,7 @@ function _mrHeaderConChanged(conCode){
     if(chauSel) chauSel.innerHTML='<option value="">— Chi phí —</option>'+chau.map(c=>`<option value="${esc(c.code)}">${esc(c.code)} · ${esc(c.name)}</option>`).join('');
     _mrApplyHeaderType('');
   }
+  _mrExpGridRebalance();
 }
 function _mrHeaderChauChanged(chauCode){
   if(!chauCode){ _mrApplyHeaderType(''); return; }
@@ -69520,7 +69681,9 @@ function _mrPartnerInput(value){
     hint.innerHTML = `<span style="color:var(--good)">✓ Đã có trong hệ thống</span> · mã: <code>${esc(matches[0].code)}</code>`;
   } else {
     _multiRowState.vendorId = '';
-    hint.innerHTML = `<span style="color:var(--muted)">+ NCC mới (sẽ tự tạo khi lưu): <b>${esc(norm)}</b></span>`;
+    // v3.65.41: cùng nguyên tắc như form đơn dòng — ô nhập mã thật, NV xác nhận/sửa trước khi lưu
+    const sug=(typeof _suggestVendorCode==='function'?_suggestVendorCode(raw):'')||norm;
+    hint.innerHTML = `<span style="color:var(--muted)">+ NCC mới — mã:</span> <input type="text" id="mr-new-vendor-code" value="${esc(sug)}" style="width:160px;padding:3px 6px;font-size:11px;font-family:monospace;text-transform:uppercase" oninput="this.value=this.value.toUpperCase().replace(/[^A-Z0-9_.\\-]/g,'')"> <span style="color:var(--muted)">(sửa nếu muốn — sẽ tạo NCC mới với mã này khi lưu)</span>`;
   }
 }
 
@@ -69910,8 +70073,9 @@ async function _mrSave(targetStatus){
   }
 
   try{
-    // Get-or-create vendor
-    const vendor = getOrCreateVendor(s.partner);
+    // Get-or-create vendor — v3.65.41: dùng mã NV đã xác nhận ở ô "mr-new-vendor-code" nếu có
+    const _newVCodeEl=document.getElementById('mr-new-vendor-code');
+    const vendor = getOrCreateVendor(s.partner, _newVCodeEl?_newVCodeEl.value:'');
     const vendorId = vendor ? vendor.id : '';
 
     // Generate batch ID to group all lines from this phiếu
@@ -70437,7 +70601,9 @@ function saveAr(kind,id){
     }
   }
   // Auto-create or link vendor (NCC master)
-  const vendor=getOrCreateVendor(partner);
+  // v3.65.41: NCC mới — dùng đúng mã NV đã xác nhận/sửa ở ô "ar-new-vendor-code" (nếu ô đó đang hiện)
+  const _newVCodeEl=document.getElementById('ar-new-vendor-code');
+  const vendor=getOrCreateVendor(partner, _newVCodeEl?_newVCodeEl.value:'');
   const vendorId=vendor?vendor.id:'';
   // v3.09.78 (ADR-015): validate sửa TRƯỚC commit (return sớm giữ modal mở)
   if(isEdit){
@@ -73774,6 +73940,24 @@ function _renderOpMrModal(){
   const totalGross=s.lines.reduce((a,l)=>a+(+l.gross||0),0);
   const totalUsd=s.lines.reduce((a,l)=>a+_opMrConvUsd(l.gross,s.ccy,s.fxInput),0);
   const body=`
+    <style>
+      /* v3.65.45 (Sếp: "Căn chỉnh mẫu phiếu các ô dòng: thẳng hàng không xô lệch"): modal này dùng
+         class .mr-table/.opmr-table nhưng CSS 2 class đó trước giờ chỉ khai trong <style> của modal
+         Phiếu lương nhiều dòng (_renderPayrollMultiRow) — modal Chi hộ này không tự có, nên cột trôi
+         theo nội dung (table-layout mặc định của trình duyệt), tiêu đề và dòng nhập lệch nhau. Khai
+         riêng ngay đây — độc lập, không phụ thuộc modal khác đã render trước đó hay chưa. */
+      .mr-table { width:100%; border-collapse:collapse; font-size:13px; table-layout:fixed; }
+      .mr-table th { background:var(--ink); color:#fff; padding:8px 6px; text-align:left; font-size:10px; letter-spacing:.05em; text-transform:uppercase; font-weight:600; line-height:1.25; vertical-align:middle; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+      .mr-table td { padding:6px 5px; border-bottom:1px solid rgba(0,0,0,.04); vertical-align:middle; }
+      .mr-table input { width:100%; padding:7px 9px; border:1px solid var(--rule); background:var(--paper); font-size:13px; font-family:inherit; border-radius:4px; box-sizing:border-box; }
+      .mr-table input.num { font-family:var(--font-mono); text-align:right; font-weight:600; }
+      .mr-table input[type=checkbox] { width:auto; transform:scale(1.15); cursor:pointer; }
+      .mr-table .row-idx { width:26px; text-align:center; color:var(--muted); font-family:var(--font-mono); vertical-align:middle; }
+      .mr-table tbody tr:nth-child(even) { background:rgba(0,0,0,.025); }
+      .mr-table tbody tr:hover { background:rgba(var(--accent-rgb,65,65,65),.05); }
+      .mr-del-btn { background:none; border:none; color:var(--bad); cursor:pointer; font-size:13px; padding:4px 8px; }
+      .mr-del-btn:hover { background:rgba(var(--accent-rgb,65,65,65),.1); }
+    </style>
     <div style="background:var(--paper-2);padding:12px 14px;border-radius:6px;margin-bottom:12px">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
         <div style="font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);font-weight:600">Header phiếu chi hộ</div>
@@ -76643,7 +76827,7 @@ const ExcelExporter = (function(){
   }
   function totalCell(v,opts){
     opts=opts||{};
-    const s={fill:{fgColor:{rgb:C.total}},font:{name:FONT,bold:true,sz:10,color:{rgb:C.navy}},
+    const s={fill:{fgColor:{rgb:C.total}},font:{name:FONT,bold:true,sz:10,color:{rgb:opts.color||C.navy}},
              alignment:{horizontal:opts.align||'left',vertical:'center'},border:borderAll};
     if(opts.num) s.numFmt=opts.num;
     if(opts.formula) return {t:'n',f:opts.formula,s};
@@ -76829,27 +77013,46 @@ function _opExportExcelStyled(P){
       aoa.push(cells);
     });
   }
-  function pushTotal(startRow, endRow){
-    const cells=[]; for(let c=0;c<NCOL;c++){
-      if(c===0) cells.push(EE.totalCell('TỔNG CỘNG',{align:'left'}));
-      else if(c===5||c===6) cells.push(EE.totalCell(null,{align:'right',num:'#,##0',formula:`SUM(${colL(c)}${startRow+1}:${colL(c)}${endRow+1})`}));
-      else if(c===8) cells.push(EE.totalCell(null,{align:'right',num:'#,##0.00',formula:`SUM(${colL(c)}${startRow+1}:${colL(c)}${endRow+1})`}));
-      else cells.push(EE.totalCell(null,{}));
+  // v3.65.46 (Sếp: "Lỗi xuất file Excel: thu chi hộ chủ tàu: tổng cộng bao gồm cả thu+chi"): TÌM RA
+  // GỐC — dòng TỔNG CỘNG trước đây SUM() nguyên khối cột Giá trị/Phí/USD bất kể dòng là "Thu hộ" hay
+  // "Chi hộ"/"Dự kiến chi" (2 khoản này ngược chiều, không được cộng chung) → ra 1 con số vô nghĩa.
+  // Sửa: nhận thêm dataRows thật (không chỉ số dòng) — nếu khối có CẢ 2 loại, tách 2 dòng tổng riêng
+  // (Tổng Thu hộ/Tổng Chi hộ, tính cộng tay theo đúng dòng, không dùng SUM() nữa để chắc chắn tách
+  // đúng dù dòng thu/chi nằm xen kẽ không theo khối liền); chỉ 1 loại (VD khối II toàn "Dự kiến chi")
+  // thì giữ nguyên 1 dòng TỔNG CỘNG như cũ.
+  function pushTotal(startRow, endRow, dataRows){
+    const sumCol=(rs,idx)=>rs.reduce((a,r)=>a+(+r[idx]||0),0);
+    const mkRow=(label, rs, color)=>{
+      const cells=[]; for(let c=0;c<NCOL;c++){
+        if(c===0) cells.push(EE.totalCell(label,{align:'left', color}));
+        else if(c===5||c===6) cells.push(EE.totalCell(sumCol(rs,c),{align:'right',num:'#,##0', color}));
+        else if(c===8) cells.push(EE.totalCell(sumCol(rs,c),{align:'right',num:'#,##0.00', color}));
+        else cells.push(EE.totalCell(null,{}));
+      }
+      aoa.push(cells);
+    };
+    const rows2=dataRows||[];
+    const inRows=rows2.filter(r=>r[0]==='Thu hộ');
+    const outRows=rows2.filter(r=>r[0]!=='Thu hộ');
+    if(inRows.length && outRows.length){
+      mkRow('TỔNG THU HỘ', inRows, EE.colors.green);
+      mkRow('TỔNG CHI HỘ', outRows, EE.colors.red);
+    } else {
+      mkRow('TỔNG CỘNG', rows2, null);
     }
-    aoa.push(cells);
   }
   pushTitle(P.title); pushSub(P.sub); aoa.push([]);
   pushSection('I.  CÁC KHOẢN ĐÃ PHÁT SINH  (đã chi thực tế / thu thực)','I');
   pushHeader();
   const i1=aoa.length; pushDataRows(P.rows); const i1end=aoa.length-1;
-  pushTotal(i1,i1end);
+  pushTotal(i1,i1end,P.rows);
   const hdrRow1=meta.headerRows[0];
   if(P.budgetRows && P.budgetRows.length){
     aoa.push([]);
     pushSection('II.  CÁC KHOẢN DỰ KIẾN CHI  (chưa phát sinh — khớp Trang 1 Statement)','II');
     pushHeader();
     const i2=aoa.length; pushDataRows(P.budgetRows); const i2end=aoa.length-1;
-    pushTotal(i2,i2end);
+    pushTotal(i2,i2end,P.budgetRows);
   }
   const ws=XS.utils.aoa_to_sheet(aoa);
   ws['!cols']=[{wch:9},{wch:11},{wch:24},{wch:42},{wch:16},{wch:15},{wch:12},{wch:7},{wch:15},{wch:16},{wch:18},{wch:11},{wch:18}];
@@ -99458,7 +99661,7 @@ function vmOpenChiHoLedger(){
   const vByid={}; VesselService.opVessels().forEach(v=>vByid[v.id]=v);
   const list=(S.opTransactions||[]).filter(t=>t&&!t._deleted&&t.type==='OUT'&&allowed.includes(t.vesselId))
     .sort((a,b)=>String(b.date||'').localeCompare(String(a.date||'')));
-  _chiHoLedgerState={vByid, list, byUser:'', byStatus:''};
+  _chiHoLedgerState={vByid, list, byUser:'', byStatus:'', byVessel:''};
   _renderChiHoLedgerModal();
 }
 function _chiHoStatusOf(t){ return t._locked?'Đã khóa':(t.paid?'Đã TT':(t._isBudget?'Dự kiến':'Chờ TT')); }
@@ -99487,7 +99690,11 @@ function _renderChiHoLedgerModal(){
   const s=_chiHoLedgerState; if(!s) return;
   const users=Array.from(new Set(s.list.map(t=>t.createdBy).filter(Boolean))).sort();
   const statuses=Array.from(new Set(s.list.map(_chiHoStatusOf)));
-  const filtered=s.list.filter(t=>(!s.byUser||t.createdBy===s.byUser)&&(!s.byStatus||_chiHoStatusOf(t)===s.byStatus));
+  // v3.65.45 (Sếp: "Lọc theo tàu"): danh sách tàu QL hộ THẬT SỰ có phiếu trong sổ này (không liệt hết
+  // mọi tàu QL hộ đang cấu hình, tránh dropdown có tàu 0 phiếu gây rối).
+  const vesselIds=Array.from(new Set(s.list.map(t=>t.vesselId).filter(Boolean)))
+    .sort((a,b)=>String((s.vByid[a]&&s.vByid[a].name)||'').localeCompare(String((s.vByid[b]&&s.vByid[b].name)||''),'vi'));
+  const filtered=s.list.filter(t=>(!s.byUser||t.createdBy===s.byUser)&&(!s.byStatus||_chiHoStatusOf(t)===s.byStatus)&&(!s.byVessel||t.vesselId===s.byVessel));
   const statusIcon={'Đã khóa':'🔒 ','Đã TT':'✓ ','Dự kiến':'📋 ','Chờ TT':''};
   const rows=filtered.map(t=>{
     const v=s.vByid[t.vesselId];
@@ -99503,6 +99710,10 @@ function _renderChiHoLedgerModal(){
   }).join('');
   const body=`
     <div style="display:flex;gap:8px;margin-bottom:10px;flex-wrap:wrap">
+      <select onchange="_chiHoLedgerState.byVessel=this.value;_renderChiHoLedgerModal()" style="font-size:11px;padding:4px 8px;border:1px solid var(--rule);border-radius:6px">
+        <option value="">— Tất cả tàu —</option>
+        ${vesselIds.map(vid=>`<option value="${esc(vid)}" ${s.byVessel===vid?'selected':''}>${esc((s.vByid[vid]&&s.vByid[vid].name)||vid)}</option>`).join('')}
+      </select>
       <select onchange="_chiHoLedgerState.byUser=this.value;_renderChiHoLedgerModal()" style="font-size:11px;padding:4px 8px;border:1px solid var(--rule);border-radius:6px">
         <option value="">— Tất cả người lập —</option>
         ${users.map(u=>`<option value="${esc(u)}" ${s.byUser===u?'selected':''}>${esc(u)}</option>`).join('')}
