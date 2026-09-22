@@ -4652,7 +4652,7 @@ const WH_TYPES = {
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.65.33';
+const APP_VERSION='3.65.39';
 /* HOTFIX 3.12.17-email: CHẶN TRIỆT ĐỂ gửi email TỰ ĐỘNG (mất kiểm soát — spam quota Google).
    Email phải do NV được phân quyền CHỦ ĐỘNG chọn gửi. Cờ này:
    (1) chặn auto-SCAN tạo email (hrmScanExpiries/vesselCertScanExpiries);
@@ -9306,11 +9306,13 @@ function userEditorModal(initial,idx){
             <div><div><b style="color:#1c5a8c">⚓ Là Thuyền trưởng</b></div>
               <div style="font-size:11px;color:var(--muted);font-style:normal;margin-top:2px">Chỉ quản lý kho tàu mình được phân công (theo tàu liên kết). Không xem kho tàu khác, không xem giá trị.</div></div>
           </label>
-          <label style="display:flex;align-items:flex-start;gap:8px;padding:6px 0;cursor:pointer;border-top:1px solid var(--rule);background:rgba(28,90,140,.07)">
+          <!-- v3.65.38 (Sếp: "sai, đây là phân quyền cũ, dùng phân quyền mới"): "Thủ kho theo module"
+               đã CHUYỂN sang gán qua Vai trò "11. Thủ kho theo module" (bảng Vai trò+Module gọn) — bỏ ô
+               tick lẻ ở đây, tránh 2 đường cùng ghi 1 cờ isDeptWarehouse gây rối. -->
+          <label style="display:none">
             <input type="checkbox" id="user-is-dept-warehouse" ${initial.isDeptWarehouse?'checked':''} style="margin-top:3px">
-            <div><div><b style="color:#1c5a8c">🔧 Thủ kho theo module — CCDC/MMTB + xác nhận nhập kho vật tư</b></div>
-              <div style="font-size:11px;color:var(--muted);font-style:normal;margin-top:2px">Ghi được giao dịch CCDC-MMTB của ĐÚNG module NV thuộc về (theo Bộ phận trong hồ sơ Nhân sự — VD Kỹ thuật) + xác nhận nhập kho (áp mã vật tư) cho các phiếu do NV cùng module tạo. Không thấy/thao tác được của module khác, không phải Thủ kho trung tâm (không nhập/xuất/điều chuyển vật tư tự do).</div></div>
           </label>
+
           ${isAdmin() ? `
           <label style="display:flex;align-items:flex-start;gap:8px;padding:6px 0;cursor:pointer;border-top:1px solid var(--rule);background:rgba(74,107,44,.08)">
             <input type="checkbox" id="user-can-manage-users" ${initial.canManageUsers?'checked':''} style="margin-top:3px">
@@ -13444,15 +13446,31 @@ function opBatchAdvance(){
   const ids=(typeof _opSelIds==='function')?_opSelIds():[...document.querySelectorAll('[data-opb]:checked')].map(c=>c.getAttribute('data-opb'));   /* v3.17.78: gồm cả phiếu tick đang bị bộ lọc ẩn */
   if(!ids.length){ toast('Chưa tick phiếu chi hộ nào','warn'); return; }
   let n=0;
+  // v3.65.39 (Sếp — ảnh "Không phiếu chi hộ nào chuyển được": lỗi ở Phê duyệt L2): TÌM RA nghi vấn —
+  // opWfStatus() có bước "tự lành" (v3.11.59): phiếu đã payApproved + đã trả đủ tiền → tự coi là
+  // 'approved' dù ncStatus THÔ vẫn ghi 'pending_l2' — danh sách hiện vẫn thấy "cần duyệt L2" (nếu lọc
+  // theo trường khác), nhưng bấm duyệt thì next='' (đã ở bước cuối) → im lặng bỏ qua, đúng hiện tượng
+  // "0 phiếu chuyển được" dù đã tick. Ghi rõ LÝ DO TỪNG PHIẾU thay vì 1 câu chung — vừa giúp xác định
+  // đúng nguyên nhân, vừa tự đóng khoảng lệch (đồng bộ lại ncStatus thô nếu đã tự lành lên 'approved').
+  const reasons=[];
   ids.forEach(id=>{ try{ const t=VesselService.opTransactions().find(x=>x&&x.id===id); if(!t) return;
     const st=(typeof opWfStatus==='function')?opWfStatus(t):(t.ncStatus||'draft');
-    const nx=(OP_WF_STATES[st]||{}).next; if(!nx) return;
+    const nx=(OP_WF_STATES[st]||{}).next;
+    if(!nx){
+      // Đã ở bước cuối theo trạng thái THỰC TẾ (kể cả tự lành) — không phải lỗi quyền, chỉ là đã xong.
+      // Đồng bộ lại ncStatus thô nếu đang lệch (raw≠eff) để danh sách sau này không còn hiện sai nữa.
+      if(t.ncStatus!==st){ commitMutation(()=>{ t.ncStatus=st; try{ touchRecord(t); }catch(e){} }, {action:'op_wf_resync', fields:['opTransactions']}); }
+      reasons.push((t.vendor||t.desc||id)+': đã ở trạng thái cuối ('+((OP_WF_STATES[st]||{}).label||st)+') — không còn gì để chuyển'+(t.ncStatus!==st?' (đã tự đồng bộ lại nhãn)':''));
+      return;
+    }
+    if(!_opCanAdvance(t, nx)){ reasons.push((t.vendor||t.desc||id)+': bạn không có quyền duyệt bước "'+((OP_WF_STATES[nx]||{}).label||nx)+'"'); return; }
     opWfAdvance(id, nx);
     const t2=VesselService.opTransactions().find(x=>x&&x.id===id);
     if(t2 && ((typeof opWfStatus==='function')?opWfStatus(t2):t2.ncStatus)!==st) n++;   /* v3.17.58: đếm thật */
     try{ OP_SELECTED.delete(id); }catch(e){}   /* v3.17.67 */
   }catch(e){} });
-  toast(n>0?('✓ Đã chuyển bước '+n+' phiếu chi hộ'):('⚠ Không phiếu chi hộ nào chuyển được — kiểm tra quyền bước hiện tại'), n>0?'good':'warn');
+  if(n>0) toast('✓ Đã chuyển bước '+n+' phiếu chi hộ'+(reasons.length?(' · '+reasons.length+' phiếu không chuyển (xem chi tiết)'):''),'good');
+  else toast('⚠ Không phiếu nào chuyển được:\n'+reasons.slice(0,5).join('\n')+(reasons.length>5?'\n… và '+(reasons.length-5)+' phiếu khác':''),'warn');
 }
 function opPendingForMe(opts){
   opts=opts||{};
@@ -21609,6 +21627,27 @@ function expGroupsForSegment(seg){
   const Ls=SEGMENT_PREF_LETTERS[String(seg||'')]||[];
   return Ls.map(L=>(typeof etypeLetterGroup==='function')?etypeLetterGroup(L):'').filter(k=>k&&EXPENSE_GROUPS[k]);
 }
+/* v3.65.36 (Sếp: "Khi chọn chi phí tại các dòng... nếu chọn thay đổi: ưu tiên chọn nhóm nhỏ nhất NV
+   đã chọn để mở rộng thêm" — VD dòng đang là Công tác phí/Khách sạn, đổi loại thì nên thấy ngay các
+   loại KHÁC cùng Công tác phí (Thuê xe, Vé máy bay...) lên đầu, đỡ phải lục cả danh sách dài):
+   tìm nhánh "con" gần nhất (VD C.02.30) của 1 mã đang chọn, rồi liệt hết các loại chi phí THẬT cùng
+   nhánh đó (mọi "chau" bên trong) — dùng để chèn thành 1 optgroup riêng, ưu tiên cao nhất, phía trên
+   cả nhóm ưu tiên theo Mảng KD đã có (v3.18.92). Không có mã đang chọn (dòng mới, chưa chọn gì) →
+   trả rỗng, giữ nguyên hành vi cũ. */
+function _expSiblingsOfCode(code){
+  if(!code) return {label:'', types:[]};
+  const t=(S.expenseTypes||[]).find(x=>x.code===code); const tc=t&&t.treeCode;
+  if(!tc) return {label:'', types:[]};
+  const parts=String(tc).split('.');
+  if(parts.length<3) return {label:'', types:[]};   // chưa đủ sâu để có "con" cha — không có anh em cùng nhánh
+  const conCode=parts.slice(0,3).join('.');
+  const nodes=(typeof expTreeList==='function'?expTreeList():[]);
+  const conNode=nodes.find(n=>String(n.code||'')===conCode);
+  const chauCodes=nodes.filter(n=>String(n.code||'').indexOf(conCode+'.')===0).map(n=>n.code);
+  const branchCodes=chauCodes.length?chauCodes:[conCode];   // có chau thì gom theo chau; không thì chính con đó là lá
+  const types=(activeExpenseTypes()||[]).filter(x=>branchCodes.includes(String(x.treeCode||'')));
+  return {label:conNode?conNode.name:conCode, types};
+}
 /* Dropdown loại chi phí có ƯU TIÊN: nhóm ưu tiên lên đầu (optgroup nhãn ★), nhóm khác vẫn còn phía dưới; onlyGroup → chỉ nhóm đó */
 function expenseTypeOptsPref(selectedCode, prefGroups, onlyGroup){
   const types=activeExpenseTypes(); const groups={};
@@ -21619,6 +21658,13 @@ function expenseTypeOptsPref(selectedCode, prefGroups, onlyGroup){
   let order=pref.concat(act.filter(k=>!pref.includes(k)));
   if(onlyGroup && groups[onlyGroup]) order=[onlyGroup];
   let html='<option value="">— Chọn loại chi phí —</option>';
+  /* v3.65.36: chèn nhóm "cùng nhánh" (VD Công tác phí) lên NGAY ĐẦU, trên cả nhóm ưu tiên theo Mảng
+     KD — đúng ý "ưu tiên nhóm nhỏ nhất NV đã chọn để mở rộng thêm". Chỉ hiện khi dòng ĐÃ có sẵn 1
+     loại chi phí (đổi loại), dòng mới trống thì không có gì để "cùng nhánh" cả. */
+  const _sib=_expSiblingsOfCode(selectedCode);
+  if(_sib.types.length>1){
+    html+=`<optgroup label="🔎 Cùng nhánh: ${esc(_sib.label)}">${_sib.types.map(t=>`<option value="${esc(t.code)}" ${selectedCode===t.code?'selected':''}>${t.icon||''} ${esc(t.label)}</option>`).join('')}</optgroup>`;
+  }
   /* loại đang chọn không thuộc nhóm lọc → vẫn giữ để không mất giá trị */
   if(onlyGroup && selectedCode){ const t=types.find(x=>x.code===selectedCode); const dg=t?((typeof etypeDisplayGroup==='function')?(etypeDisplayGroup(t)||t.group):t.group):''; if(t && dg!==onlyGroup) html+=`<optgroup label="Đang chọn"><option value="${esc(t.code)}" selected>${t.icon||''} ${esc(t.label)}</option></optgroup>`; }
   order.forEach(gk=>{ if(!groups[gk]) return;
@@ -38931,6 +38977,56 @@ function openExpenseTreeManager(){
   if(!isAdmin()){ toast('Chỉ admin quản lý bảng tên nhánh','bad'); return; }
   _renderExpenseTreeBody();
 }
+/* v3.65.37 (Sếp — ảnh M.02/M.05: "có thêm 1 nhóm nhánh giống nhóm con: thừa và có thể gây lỗi khi
+   chọn — tìm nguyên nhân và bỏ các nhóm này đi"): TÌM NGUYÊN NHÂN — 1 số nhánh CON (VD M.02 Bảo
+   hiểm) vừa là THƯ MỤC (có nhánh CHÁU riêng: M.02.10 Hull/M.02.20 P&I) vừa CÓ SẴN 1 "loại chi phí"
+   THẬT gắn thẳng treeCode = đúng mã CON đó (VD "Bảo hiểm tàu (H&M, P&I)" gắn treeCode='M.02') — khả
+   năng cao tạo TỪ TRƯỚC lúc chưa tách nhỏ thành M.02.10/M.02.20, sau tách nhánh không dọn lại loại cũ
+   → NV chọn "Chi phí" thấy CẢ nhánh CON (chọn nhầm mất chi tiết Hull/P&I) LẪN 2 loại cháu đúng, dễ
+   chọn nhầm/2 nơi cùng nghĩa. Công cụ này: quét toàn bộ, đếm số phiếu (AP/AR) đang dùng đúng mã CON
+   đó — 0 phiếu thì xoá an toàn ngay; có phiếu thì CHỈ báo số lượng, không tự xoá (tránh mất chứng từ
+   cũ), để Admin tự quyết định gán lại tay từng phiếu trước khi xoá. */
+function _expTreeFindDupes(){
+  const nodes=(typeof expTreeList==='function'?expTreeList():[]);
+  const types=(S.expenseTypes||[]).filter(t=>!t.archived);
+  const dupes=[];
+  nodes.forEach(n=>{
+    const conCode=String(n.code||'');
+    const hasChau=nodes.some(x=>String(x.code||'').indexOf(conCode+'.')===0);
+    if(!hasChau) return;   // không phải thư mục có nhánh cháu — không thuộc diện lỗi này
+    const t=types.find(x=>String(x.treeCode||'')===conCode);
+    if(!t) return;   // không có loại chi phí nào gắn thẳng vào đúng mã CON — bình thường
+    const usedAp=(S.payables||[]).filter(r=>r&&!r._deleted&&r.expenseType===t.code).length;
+    const usedAr=(S.receivables||[]).filter(r=>r&&!r._deleted&&r.expenseType===t.code).length;
+    dupes.push({conCode, conName:n.name||'', typeCode:t.code, typeLabel:t.label||'', typeIcon:t.icon||'', used:usedAp+usedAr});
+  });
+  const rows=dupes.length?dupes.map(d=>`<tr>
+      <td style="padding:6px 8px;font-family:monospace;font-size:12px"><b>${esc(d.conCode)}</b></td>
+      <td style="padding:6px 8px">${esc(d.conName)} <span style="color:var(--muted);font-size:11px">(đã có nhánh cháu riêng)</span></td>
+      <td style="padding:6px 8px">${d.typeIcon} ${esc(d.typeLabel)} <span style="color:var(--muted);font-size:11px">(${esc(d.typeCode)})</span></td>
+      <td style="padding:6px 8px;text-align:center">${d.used>0?`<span style="color:var(--bad);font-weight:700">${d.used} phiếu</span>`:'<span style="color:var(--good)">0 phiếu</span>'}</td>
+      <td style="padding:6px 8px;white-space:nowrap">${d.used>0
+        ?`<span style="font-size:11px;color:var(--muted)" title="Có phiếu cũ đang dùng — gán lại tay từng phiếu sang đúng loại cháu trước khi xoá">⚠ Cần gán lại tay trước</span>`
+        :`<button class="btn-sec" style="font-size:11px;color:var(--bad);border-color:var(--bad)" onclick="_expTreeDeleteDupe('${esc(d.typeCode)}')">🗑 Xoá loại thừa</button>`}</td>
+    </tr>`).join('') : '<tr><td colspan="5" class="empty">Không tìm thấy nhóm trùng nhánh nào — dữ liệu sạch.</td></tr>';
+  openModal('🔍 Loại chi phí trùng nhánh CON', `
+    <div style="font-size:11px;color:var(--muted);margin-bottom:10px">Quét các nhánh CON đã có nhánh CHÁU riêng (VD M.02 → M.02.10/M.02.20) nhưng vẫn còn 1 "loại chi phí" gắn thẳng vào đúng mã CON — dữ liệu thừa từ trước khi tách nhánh nhỏ, dễ chọn nhầm. Phiếu cũ đang dùng KHÔNG bị xoá/đụng gì — chỉ xoá được khi 0 phiếu.</div>
+    <div class="tbl-scroll" style="max-height:420px"><table class="tbl" style="width:100%;border-collapse:collapse;font-size:13px">
+      <thead><tr style="background:#f0f3f7"><th style="text-align:left;padding:6px 8px">Mã CON</th><th style="text-align:left;padding:6px 8px">Tên nhánh</th><th style="text-align:left;padding:6px 8px">Loại chi phí thừa</th><th style="padding:6px 8px">Đang dùng</th><th style="padding:6px 8px"></th></tr></thead>
+      <tbody>${rows}</tbody></table></div>`,
+    `<button class="btn-ghost" onclick="closeModal()">Đóng</button>`);
+}
+function _expTreeDeleteDupe(typeCode){
+  if(!isAdmin()){ toast('Chỉ Admin xoá được','bad'); return; }
+  if(!confirm('Xoá loại chi phí thừa "'+typeCode+'"? Không có phiếu nào đang dùng, an toàn xoá.')) return;
+  commitMutation(()=>{
+    const t=(S.expenseTypes||[]).find(x=>x.code===typeCode);
+    if(t) t.archived=true;
+  }, {action:'exp_type_dupe_delete', fields:['expenseTypes'], onOk:()=>{
+    toast('✓ Đã xoá loại chi phí thừa');
+    _expTreeFindDupes();
+  }});
+}
 function _renderExpenseTreeBody(){
   const list=(typeof expTreeList==='function'?expTreeList():[]).slice()
     .sort((a,b)=>String(a.code).localeCompare(String(b.code),undefined,{numeric:true}));
@@ -38958,6 +39054,7 @@ function _renderExpenseTreeBody(){
         <input id="ndTreeName" placeholder="VD: Vật tư sửa chữa" maxlength="80" style="padding:7px 10px;border:1px solid var(--rule);border-radius:6px"></div>
       <button class="btn-primary" onclick="_expTreeAddRow()">+ Lưu nhánh</button>
       <button class="btn-sec" onclick="_expTreeSeed()" title="Nạp bộ mã Sếp chốt 24/8 — upsert theo mã, chạy lại không hỏng, đồng bộ mọi máy">📥 Nạp bộ mã chuẩn</button>
+      <button class="btn-sec" style="border-color:#b8730a;color:#b8730a" onclick="_expTreeFindDupes()" title="Tìm loại chi phí gắn thẳng vào nhánh CON dù nhánh đó đã có nhánh CHÁU riêng (VD M.02 vừa là nhánh vừa là 1 loại chi phí) — dữ liệu thừa, dễ chọn nhầm">🔍 Tìm nhóm trùng nhánh</button>
     </div>
     <div style="overflow:auto;border:1px solid var(--rule);border-radius:8px;max-height:400px">
       <table class="tbl" style="width:100%;border-collapse:collapse;font-size:13px">
@@ -53041,16 +53138,18 @@ function _apprToggleBatch(batchId, checked){
 }
 
 function toggleSelectAllApproval(){
-  // v3.65.27 (Sếp: "Phê duyệt L1/L2 — bấm 1 lần chọn hết OK, bấm lần 2 để bỏ chọn hết KHÔNG ăn"):
-  // KHÔNG đọc checkbox.checked nữa (nghi bị lệch với dữ liệu thật lúc nào đó, gây bấm lần 2 vô hiệu)
-  // — tự tính THẲNG từ dữ liệu: đang chọn đủ hết thì BỎ hết, còn lại (kể cả chưa chọn/chọn 1 phần)
-  // thì CHỌN hết. Chắc chắn không phụ thuộc trạng thái DOM tức thời của ô tick.
+  // v3.65.34 (Sếp: "Chỉ tích chọn hết - không tích bỏ hết được" — bản v3.65.27 vẫn chưa dứt điểm):
+  // ĐỔI HẲN cách tiếp cận — không tính "đã chọn đủ hết chưa" dựa vào so sánh candidates nữa (nghi
+  // danh sách candidates có thể đổi giữa 2 lần bấm do lọc/cấp duyệt/dữ liệu mới về, khiến phép so
+  // sánh sai). Dùng THẲNG trạng thái Ô TICK ngay tại thời điểm bấm (browser đã tự đổi .checked ĐÚNG
+  // trước khi onchange chạy — đây là hành vi chuẩn, đáng tin hơn phép tính lại) làm nguồn duy nhất.
+  const cb=document.getElementById('appr-select-all');
+  const wantSelect = cb ? !!cb.checked : true;
   const candidates=approvalGetCandidates();
-  const allSelected=candidates.length>0 && candidates.every(c=>APPROVAL_SELECTED.has(c.id));
-  if(allSelected){
-    candidates.forEach(c=>APPROVAL_SELECTED.delete(c.id));
-  } else {
+  if(wantSelect){
     candidates.forEach(c=>APPROVAL_SELECTED.add(c.id));
+  } else {
+    APPROVAL_SELECTED.clear();   // bỏ hết TUYỆT ĐỐI — không chỉ xoá đúng candidates hiện tại, phòng lệch do đổi lọc giữa 2 lần bấm
   }
   renderApprovalList();
 }
@@ -54760,18 +54859,18 @@ function _toolMoveNextDocNo(type){
   const n=(S.toolMovements||[]).filter(m=>m&&String(m.docNo||'').startsWith(pre+y)).length+1;
   return pre+y+'-'+String(n).padStart(4,'0');
 }
-// v3.65.28 (Sếp: "Tạo quyền Thủ kho cho NV thuộc module Kỹ thuật — chỉ CCDC/MMTB riêng Kỹ thuật,
-// không đụng Kho trung tâm"): xác định ĐÚNG 1 module CCDC/MMTB mà NV này được phép thao tác, dựa vào
-// Bộ phận trong hồ sơ Nhân sự → dashboardModule của phòng ban đó (đúng cơ chế _ktStockAccess() đã
-// dùng cho Kho trung tâm — tái dùng NGUỒN, không tạo thêm 1 cách tra khác). '' = không có quyền này.
+// v3.65.28/38 (Sếp: "Tạo quyền Thủ kho cho NV thuộc module Kỹ thuật — chỉ CCDC/MMTB riêng Kỹ thuật,
+// không đụng Kho trung tâm" → "sai, đây là phân quyền cũ, dùng phân quyền mới"): xác định ĐÚNG 1
+// module CCDC/MMTB mà NV này được phép thao tác. v3.65.38: đọc THẲNG funcGroups (ô "Module" ngay
+// trong dòng Vai trò+Module — hệ phân quyền mới, 1 nguồn duy nhất) — bỏ cách tra qua hồ sơ Nhân sự
+// (dễ thiếu liên kết linkUserId). Nhiều module tick cùng lúc → lấy module ĐẦU TIÊN khớp trong các
+// mã module đã biết. '' = không có quyền này.
 function _deptWarehouseModuleFor(u){
   if(!u || !u.isDeptWarehouse) return '';
-  try{
-    const emp=(HRService.employees()||[]).find(e=>e&&!e._deleted&&(e.linkUserId===u.id||e.linkUserId===u.name));
-    if(!emp) return '';
-    const dept=(HRService.departments()||[]).find(d=>d && d.code===(typeof hrDeptCanon==='function'?hrDeptCanon(emp.dept):emp.dept));
-    return (dept && dept.dashboardModule) ? dept.dashboardModule : '';
-  }catch(e){ return ''; }
+  const fg=Array.isArray(u.funcGroups)?u.funcGroups:[];
+  const known=['TECH','TM','VPQN','QN','TAU_MGMT','HR'];
+  const hit=fg.find(k=>known.includes(k));
+  return hit==='QN' ? 'VPQN' : (hit||'');
 }
 /* Mở form ghi 1 giao dịch — chỉ Thủ kho/Admin. presetToolId: mở sẵn đúng CCDC (gọi từ dòng đang giữ). */
 function openToolMovementModal(type, presetToolId){
@@ -65067,10 +65166,23 @@ function _arEditorBody(r,isPayable){
           const conOpts='<option value="">— Loại chi phí —</option>'+cons.map(c=>`<option value="${esc(c.code)}" ${curCon===c.code?'selected':''}>${esc(c.code)} · ${esc(c.name)}</option>`).join('')+((isAdmin()&&curGroup&&!isBudget)?'<option value="__NEW_CON__">＋ Tạo nhóm con mới (admin)</option>':'');
           const chauList=curCon?_arTreeChauOf(curCon):[];
           const chauOpts='<option value="">— Chi phí —</option>'+chauList.map(c=>`<option value="${esc(c.code)}" ${curChau===c.code?'selected':''}>${esc(c.code)} · ${esc(c.name)}</option>`).join('')+(isAdmin()?'<option value="__NEW__">＋ Tạo loại chi phí mới… (admin)</option>':'');
-          const finalTypes = isBudget ? [] : (chauList.length ? (curChau?_arTypesForTreeCode(curChau):[]) : (curCon?_arTypesForTreeCode(curCon):[]));
+          const finalTypes = isBudget ? [] : (chauList.length
+            ? (curChau ? _arTypesForTreeCode(curChau)
+                       // v3.65.35 (Sếp: "Phần chọn chi phí... không hiển thị lọc đến nhóm chắt — phải
+                       // tự mở thêm nếu các loại chi phí có nhóm nhỏ hơn"): TRƯỚC ĐÂY chưa chọn "Chi
+                       // phí" (ô ghi "không bắt buộc") thì danh sách cuối RỖNG TRẮNG — sai, vì loại chi
+                       // phí thật gắn ở ĐÚNG cấp "chau" (C.0X.XX.XXX), không gắn ở cấp "con" (C.0X.XX)
+                       // khi con có nhóm con. Tự GỘP hết mọi nhóm con lại để NV vẫn chọn được thẳng,
+                       // không bắt buộc phải chọn qua ô "Chi phí" trước.
+                       : chauList.reduce((acc,c)=>acc.concat(_arTypesForTreeCode(c.code)),[]))
+            : (curCon?_arTypesForTreeCode(curCon):[]));
           const typeOptsHtml = isBudget
             ? '<option value="__BUDGET__" selected>📋 Dự kiến chi (chưa phát sinh)</option>'
-            : (finalTypes.length ? finalTypes.map(t=>`<option value="${esc(t.code)}" ${r.expenseType===t.code?'selected':''}>${t.icon||''} ${esc(t.label)}</option>`).join('') : '<option value="">— Chưa có loại chi phí ở nhánh này —</option>');
+            : (!finalTypes.length ? '<option value="">— Chưa có loại chi phí ở nhánh này —</option>'
+              : (chauList.length && !curChau)
+                // v3.65.35: đang gộp NHIỀU nhóm con — chia optgroup theo từng nhóm cho rõ, khỏi lẫn
+                ? chauList.map(c=>{ const ts=_arTypesForTreeCode(c.code); return ts.length?`<optgroup label="${esc(c.code)} · ${esc(c.name)}">${ts.map(t=>`<option value="${esc(t.code)}" ${r.expenseType===t.code?'selected':''}>${t.icon||''} ${esc(t.label)}</option>`).join('')}</optgroup>`:''; }).join('')
+                : finalTypes.map(t=>`<option value="${esc(t.code)}" ${r.expenseType===t.code?'selected':''}>${t.icon||''} ${esc(t.label)}</option>`).join(''));
           return `
             <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:6px">
               <div>
@@ -96876,7 +96988,12 @@ const ROLE_TIERS={
   // chuyên gia/O&M"): Vai trò MỚI, riêng — khác "4. NV nhân sự lương" (không giới hạn loại NV) và
   // khác "5. Trưởng bộ phận" (thấy hết mọi loại). Chỉ áp trong module Nhân sự — lọc hồ sơ theo
   // e.type==='crew', loại hẳn 'office'/'expert'/'expert_om' (xem _hrCrewOnlyScope()/hrmVisibleEmps()).
-  nv_ns_thuyenvien:'10. NV Nhân sự — Thuyền viên'
+  nv_ns_thuyenvien:'10. NV Nhân sự — Thuyền viên',
+  // v3.65.38 (Sếp: "sai, đây là phân quyền cũ, dùng phân quyền mới"): "Thủ kho theo module" nối vào
+  // ĐÚNG hệ Vai trò + Module (chọn 1 dòng gọn) thay vì form tick từng ô dài (isDeptWarehouse) đã thêm
+  // ở v3.65.28 — Module quét CHUNG đúng ô "Module" (funcGroups) đã có sẵn ngay trong dòng đó, không
+  // cần tra qua hồ sơ Nhân sự riêng nữa.
+  thu_kho_module:'11. Thủ kho theo module'
 };
 // v3.64.31 (Đợt 2 — Sếp: "code", đã duyệt đủ bảng qua nhiều lần rà soát Excel): CHỐT bảng suy luận
 // Vai trò × Module → cờ quyền. Trả true/false = ÁP DỤNG (đè lên cờ cũ); trả null = "không có ý
@@ -96928,6 +97045,8 @@ function saveUserRow(idx, btnEl){
   // đặc biệt dataScope()/_tmCanPerf() — không sửa), CEO tự kèm isCEO.
   u.isDeptHead=(role==='truong_bp');
   if(role==='ceo') u.isCEO=true;
+  // v3.65.38: "11. Thủ kho theo module" — bundling giống CEO/Trưởng bộ phận, KHÔNG cần form tick riêng.
+  u.isDeptWarehouse=(role==='thu_kho_module');
   u.funcGroups=fgVals;
   u.companyId=coSel?coSel.value:(u.companyId||'');
   setAuthConfig(cfg);
