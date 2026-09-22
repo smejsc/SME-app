@@ -4652,7 +4652,7 @@ const WH_TYPES = {
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.65.47';
+const APP_VERSION='3.65.49';
 /* HOTFIX 3.12.17-email: CHẶN TRIỆT ĐỂ gửi email TỰ ĐỘNG (mất kiểm soát — spam quota Google).
    Email phải do NV được phân quyền CHỦ ĐỘNG chọn gửi. Cờ này:
    (1) chặn auto-SCAN tạo email (hrmScanExpiries/vesselCertScanExpiries);
@@ -76863,7 +76863,7 @@ function opExportExcel(){
   };
   const apStt=r=>{ const i=docStatusInfo(r); return i.label; };
 
-  const rows=[];  // mỗi dòng: [nguồn,ngày,ncc,diễn giải,sốHĐ,giá trị,ccy,nv,tình trạng]
+  const rows=[];  // mỗi dòng: [nguồn,ngày,ncc,diễn giải,sốHĐ,thu,...chi theo từng loại tiền,phí,ccy,usd,nv,bộ phận,ngày lập,tình trạng]
 
   // ===== 1) THU/CHI HỘ (tab 06) theo bộ lọc =====
   const allowedIds=userAssignedOpVesselIds();
@@ -76877,7 +76877,12 @@ function opExportExcel(){
   };
   const _apVirtual=_opApVirtualTx().filter(t=>allowedIds.includes(t.vesselId));
   const opAll=VesselService.opTransactions().filter(t=>allowedIds.includes(t.vesselId)).concat(_apVirtual);
-  const budgetExcelRows=[];  // v3.06.00: gom dòng DỰ KIẾN CHI riêng để thêm phần khớp Trang 1 Statement
+  // v3.65.49 (Sếp: "tách chi hộ ra theo các loại tiền gốc: mỗi loại 1 cột"): 2 bước — (1) gom ENTRY
+  // thô trước (chưa dựng thành dòng Excel), để biết hết các loại tiền Chi hộ đang dùng trong đợt xuất
+  // này; (2) mới dựng cột "Chi <tiền>" ĐỘNG theo đúng số loại tiền thực tế có — không cố định số cột,
+  // tránh cột thừa trống khi tàu chỉ chi 1 loại tiền, và tự thêm cột khi có tiền tệ mới. Thu hộ giữ 1
+  // cột chung (Sếp chỉ yêu cầu tách Chi) — nếu sau này thấy Thu cũng cần tách, báo lại.
+  const entries=[], budgetEntries=[];
   opAll.filter(t=>{
     if(!_mineOnly(t)) return false;     // v3.04.08: giới hạn theo người nhập (NV thường)
     // v3.06.00: Excel GỬI CHỦ TÀU — đồng bộ với PDF: GIẤU thực chi khoán (khoanRole='chi', bí mật KD)
@@ -76900,38 +76905,49 @@ function opExportExcel(){
     // Bộ phận: ưu tiên field lưu sẵn, fallback tra theo tên NV. Ngày lập = createdAt (khác cột Ngày giao dịch).
     const dept=t.createdByDept || (typeof lookupUserDeptName==='function'?lookupUserDeptName(t.createdBy):'') || '—';
     const madeDate=(t.createdAt||'').slice(0,10);
-    // v3.65.47 (Sếp: "nên tách cột thu riêng ra"): TÁCH cột "Giá trị" thành 2 cột Thu/Chi riêng biệt
-    // (thay vì 1 cột chung + cột "Nguồn" phải đọc chữ mới biết cộng hay trừ) — Thu hộ vào đúng cột
-    // Thu, Chi hộ/Dự kiến chi vào đúng cột Chi, cột kia để trống. SUM() theo cột giờ tự nhiên đúng,
-    // không cần đọc "Nguồn" nữa.
     const isIn=t.type==='IN';
-    const row=[
-      isIn?'Thu hộ':(t._isBudget?'Dự kiến chi':'Chi hộ'),
-      t.date||'',
-      t.vendor||'',
-      t.desc||'',
-      (t.invoiceNo||t.contractNo||''),
-      isIn?gross:'',
-      isIn?'':gross,
-      feeRaw,
-      t.ccy||'',
-      usdTotal,
-      t.createdBy||'',
-      dept,
-      madeDate,
-      opStt(t)
-    ];
-    // v3.06.00: ĐÃ CHI THỰC TẾ → bảng chính; DỰ KIẾN CHI → bảng riêng (khớp dòng tổng Trang 1 Statement).
-    if(t._isBudget) budgetExcelRows.push(row); else rows.push(row);
+    const e={
+      src: isIn?'Thu hộ':(t._isBudget?'Dự kiến chi':'Chi hộ'),
+      date: t.date||'', vendor: t.vendor||'', desc: t.desc||'', inv: (t.invoiceNo||t.contractNo||''),
+      isIn, thu: gross, ccy: t.ccy||'', fee: feeRaw, usd: usdTotal,
+      creator: t.createdBy||'', dept, made: madeDate, stt: opStt(t)
+    };
+    if(t._isBudget) budgetEntries.push(e); else entries.push(e);
   });
 
   // v3.04.06: Sổ tab 06 CHỈ liên quan tàu quản lý hộ chủ tàu.
   //   AP gắn tàu QL hộ ĐÃ được gộp vào phần (1) qua _apVirtual (chi hộ ảo).
   //   BỎ phần "AP toàn công ty" trước đây — nó kéo cả công nợ không liên quan tàu QL hộ vào file (SAI phạm vi).
 
-  if(!rows.length && !budgetExcelRows.length){ toast('Không có giao dịch thu/chi hộ nào khớp bộ lọc','warn'); return; }
-  // v3.10.08: sắp theo TÊN NV (cột 10 — dời từ 9 sau khi tách cột Thu/Chi) rồi NGÀY giao dịch (cột 1).
-  const _sortByNv=(a,b)=>((a[10]||'').localeCompare(b[10]||'')) || ((a[1]||'').localeCompare(b[1]||''));
+  if(!entries.length && !budgetEntries.length){ toast('Không có giao dịch thu/chi hộ nào khớp bộ lọc','warn'); return; }
+
+  // v3.65.49: tập hợp toàn bộ loại tiền CHI hộ thật sự có mặt (cả bảng I lẫn bảng II — dùng CHUNG 1
+  // bộ cột giữa 2 bảng cho dễ đối chiếu, kể cả tiền chỉ xuất hiện ở 1 trong 2 bảng, cột đó bảng kia
+  // để trống). VND lên đầu nếu có, còn lại xếp theo abc.
+  const chiCcySet=new Set();
+  entries.concat(budgetEntries).forEach(e=>{ if(!e.isIn) chiCcySet.add(e.ccy||'?'); });
+  const chiCcys=Array.from(chiCcySet).sort((a,b)=>{ if(a==='VND') return -1; if(b==='VND') return 1; return a.localeCompare(b); });
+  if(!chiCcys.length) chiCcys.push('VND');   // v3.65.49: không có dòng Chi nào vẫn cần tối thiểu 1 cột Chi để bảng không vỡ cột
+
+  const THU_COL=5, CHI_COL0=6, CHI_N=chiCcys.length;
+  const FEE_COL=CHI_COL0+CHI_N, CCY_COL=FEE_COL+1, USD_COL=CCY_COL+1,
+        CREATOR_COL=USD_COL+1, DEPT_COL=CREATOR_COL+1, MADE_COL=DEPT_COL+1, STT_COL=MADE_COL+1;
+  const LASTCOL=STT_COL;
+
+  const buildRow=e=>{
+    const row=[e.src, e.date, e.vendor, e.desc, e.inv];
+    row[THU_COL]=e.isIn?e.thu:'';
+    for(let i=0;i<CHI_N;i++) row[CHI_COL0+i]=(!e.isIn && e.ccy===chiCcys[i])?e.thu:'';
+    row[FEE_COL]=e.fee; row[CCY_COL]=e.ccy; row[USD_COL]=e.usd;
+    row[CREATOR_COL]=e.creator; row[DEPT_COL]=e.dept; row[MADE_COL]=e.made; row[STT_COL]=e.stt;
+    return row;
+  };
+  const rowsX=entries.map(buildRow);
+  const budgetExcelRows=budgetEntries.map(buildRow);
+  rows.push(...rowsX);
+
+  // v3.10.08: sắp theo TÊN NV rồi NGÀY giao dịch — chỉ số cột giờ tính động theo CREATOR_COL.
+  const _sortByNv=(a,b)=>((a[CREATOR_COL]||'').localeCompare(b[CREATOR_COL]||'')) || ((a[1]||'').localeCompare(b[1]||''));
   rows.sort(_sortByNv);
   budgetExcelRows.sort(_sortByNv);
 
@@ -76940,8 +76956,8 @@ function opExportExcel(){
   const sub=[`Phạm vi: ${fV?((VesselService.opVessels().find(v=>v.id===fV)||{}).name||''):'Tất cả tàu QL hộ'}`
     +` · Tháng: ${fM||'Tất cả'} · Người nhập: ${_seeAll?(fC||'Tất cả'):me}`
     +` · Xuất: ${todayISO()} bởi ${me}`];
-  const header=['Nguồn','Ngày','Nhà cung cấp','Diễn giải','Số HĐ/Hóa đơn','Thu','Chi','Phí NH','Tiền tệ','Quy đổi USD','NV nhập','Bộ phận','Ngày lập','Tình trạng hồ sơ'];
-  const _LASTCOL=13;   // 14 cột (0-based cột cuối = 13) — v3.65.47: +1 cột do tách Thu/Chi
+  const header=['Nguồn','Ngày','Nhà cung cấp','Diễn giải','Số HĐ/Hóa đơn','Thu',...chiCcys.map(c=>'Chi '+c),'Phí NH','Tiền tệ','Quy đổi USD','NV nhập','Bộ phận','Ngày lập','Tình trạng hồ sơ'];
+  const _LASTCOL=LASTCOL;   // v3.65.49: động theo số loại tiền Chi hộ thật có (mỗi loại +1 cột)
   // Bảng 1: ĐÃ PHÁT SINH (thu hộ + chi hộ thực). Bảng 2: DỰ KIẾN CHI (chưa phát sinh) — khớp dòng tổng Trang 1 Statement.
   let aoa=[title,sub,[],['I. CÁC KHOẢN ĐÃ PHÁT SINH (đã chi thực tế / thu thực)'],header,...rows];
   let _budgetHeaderRowIdx=-1;
@@ -76956,7 +76972,8 @@ function opExportExcel(){
   // ===== v3.10.09 Phase A: nếu style sẵn sàng → build sheet ĐẸP qua ExcelExporter rồi return =====
   if(ExcelExporter.ready()){
     try{
-      _opExportExcelStyled({title:title[0], sub:sub[0], header, rows, budgetRows:budgetExcelRows, fM, fname:_opExcelFileName()});
+      _opExportExcelStyled({title:title[0], sub:sub[0], header, rows, budgetRows:budgetExcelRows, fM, fname:_opExcelFileName(),
+        colIdx:{thu:THU_COL, chiCols:chiCcys.map((_,i)=>CHI_COL0+i), fee:FEE_COL, ccy:CCY_COL, usd:USD_COL, made:MADE_COL}});
       toast(`Đã xuất ${rows.length} đã chi thực + ${budgetExcelRows.length} dự kiến chi ra Excel ✓`,'good');
       return;
     }catch(e){
@@ -76965,7 +76982,10 @@ function opExportExcel(){
   }
 
   const ws=XLSX.utils.aoa_to_sheet(aoa);
-  ws['!cols']=[{wch:9},{wch:11},{wch:24},{wch:42},{wch:16},{wch:15},{wch:15},{wch:12},{wch:7},{wch:15},{wch:16},{wch:18},{wch:11},{wch:18}];
+  // v3.65.49: độ rộng cột — cố định 5 cột đầu + Thu, rồi N cột Chi theo tiền, rồi 6 cột cuối cố định.
+  ws['!cols']=[{wch:9},{wch:11},{wch:24},{wch:42},{wch:16},{wch:15}]
+    .concat(chiCcys.map(()=>({wch:15})))
+    .concat([{wch:12},{wch:7},{wch:15},{wch:16},{wch:18},{wch:11},{wch:18}]);
   ws['!merges']=[
     {s:{r:0,c:0},e:{r:0,c:_LASTCOL}},
     {s:{r:1,c:0},e:{r:1,c:_LASTCOL}},
@@ -76974,16 +76994,20 @@ function opExportExcel(){
   // merge tiêu đề "II. DỰ KIẾN CHI" nếu có (hàng = _budgetHeaderRowIdx-1, 0-based)
   if(_budgetHeaderRowIdx>=0){ ws['!merges'].push({s:{r:_budgetHeaderRowIdx-1,c:0},e:{r:_budgetHeaderRowIdx-1,c:_LASTCOL}}); }
   ws['!freeze']={xSplit:0,ySplit:5};
-  // auto-filter trên hàng header bảng 1 (hàng index 4 → A5:N5, 14 cột — v3.65.47: M→N do +1 cột)
+  // auto-filter trên hàng header bảng 1 (hàng index 4) — cột cuối tính động theo số cột Chi thật có.
   const lastRow1=5+rows.length;
-  ws['!autofilter']={ref:`A5:N${lastRow1}`};
-  // v3.10.08/v3.65.47: format số có phân cách cho cột Thu(F)/Chi(G)/Phí NH(H)/Quy đổi USD(J).
-  const _numCols=['F','G','H','J'];
+  const _encodeCol=(typeof XLSX!=='undefined'&&XLSX.utils&&XLSX.utils.encode_col)?XLSX.utils.encode_col:(i=>{ let s=''; i++; while(i>0){ const m=(i-1)%26; s=String.fromCharCode(65+m)+s; i=Math.floor((i-1)/26); } return s; });
+  ws['!autofilter']={ref:`A5:${_encodeCol(_LASTCOL)}${lastRow1}`};
+  // v3.10.08/v3.65.49: format số có phân cách cho Thu/từng cột Chi/Phí NH ('#,##0') và Quy đổi USD ('#,##0.00').
+  const _numColsPct=[THU_COL].concat(chiCcys.map((_,i)=>CHI_COL0+i)).concat([FEE_COL]).map(_encodeCol);
+  const _numColUsd=_encodeCol(USD_COL);
   for(let r=0;r<aoa.length;r++){
-    _numCols.forEach(col=>{
+    _numColsPct.forEach(col=>{
       const cell=ws[col+(r+1)];
-      if(cell && typeof cell.v==='number'){ cell.t='n'; cell.z = (col==='J')?'#,##0.00':'#,##0'; }
+      if(cell && typeof cell.v==='number'){ cell.t='n'; cell.z='#,##0'; }
     });
+    const cellU=ws[_numColUsd+(r+1)];
+    if(cellU && typeof cellU.v==='number'){ cellU.t='n'; cellU.z='#,##0.00'; }
   }
   const wb=XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb,ws,'Thu-Chi hộ tàu QL');
@@ -76998,8 +77022,13 @@ function _opExportExcelStyled(P){
   const NCOL=P.header.length, LAST=NCOL-1;
   const colL=(i)=>XS.utils.encode_col(i);
   const aoa=[]; const meta={merges:[], headerRows:[]};
-  const NUM_COLS={5:'#,##0;(#,##0);"–"', 6:'#,##0;(#,##0);"–"', 7:'#,##0;(#,##0);"–"', 9:'#,##0.00;(#,##0.00);"–"'};   // v3.65.47: Thu(5)/Chi(6)/PhíNH(7)/QuyĐổiUSD(9) — dời sau khi tách cột Thu/Chi
-  const ALIGN=(c)=>{ if(c===5||c===6||c===7||c===9) return 'right'; if(c===0||c===1||c===4||c===8||c===12) return 'center'; return 'left'; };
+  // v3.65.49 (Sếp: "tách chi hộ ra theo các loại tiền gốc: mỗi loại 1 cột"): số cột Chi giờ ĐỘNG theo
+  // số loại tiền thật có (colIdx.chiCols truyền từ opExportExcel) — không còn 1 cột Chi cố định.
+  const CI=P.colIdx||{thu:5, chiCols:[6], fee:7, ccy:8, usd:9, made:11};
+  const PCT_COLS=new Set([CI.thu, ...CI.chiCols, CI.fee]);
+  const CENTER_COLS=new Set([0,1,4,CI.ccy,CI.made]);
+  const NUM_COLS={}; PCT_COLS.forEach(c=>{ NUM_COLS[c]='#,##0;(#,##0);"–"'; }); NUM_COLS[CI.usd]='#,##0.00;(#,##0.00);"–"';
+  const ALIGN=(c)=>{ if(PCT_COLS.has(c)||c===CI.usd) return 'right'; if(CENTER_COLS.has(c)) return 'center'; return 'left'; };
   function pushTitle(t){ const r=aoa.length; aoa.push([EE.title(t)]); meta.merges.push({s:{r,c:0},e:{r,c:LAST}}); }
   function pushSub(t){ const r=aoa.length; aoa.push([EE.sub(t)]); meta.merges.push({s:{r,c:0},e:{r,c:LAST}}); }
   function pushSection(t,which){ const r=aoa.length; aoa.push([EE.sectionBar(t,which)]); meta.merges.push({s:{r,c:0},e:{r,c:LAST}}); }
@@ -77013,7 +77042,7 @@ function _opExportExcelStyled(P){
         const o={bg:zebra, align:ALIGN(c), wrap:(c===2||c===3)};
         if(NUM_COLS[c]) o.num=NUM_COLS[c];
         if(c===0){ o.bold=true; o.color=srcColor; }
-        if(c===9 && src==='Thu hộ') o.color=EE.colors.green;   // v3.65.47: cột Quy đổi USD dời từ 8→9
+        if(c===CI.usd && src==='Thu hộ') o.color=EE.colors.green;
         return EE.dataCell(v,o);
       });
       aoa.push(cells);
@@ -77022,29 +77051,41 @@ function _opExportExcelStyled(P){
   // v3.65.46 (Sếp: "Lỗi xuất file Excel: thu chi hộ chủ tàu: tổng cộng bao gồm cả thu+chi"): TÌM RA
   // GỐC — dòng TỔNG CỘNG trước đây SUM() nguyên khối cột Giá trị/Phí/USD bất kể dòng là "Thu hộ" hay
   // "Chi hộ"/"Dự kiến chi" (2 khoản này ngược chiều, không được cộng chung) → ra 1 con số vô nghĩa.
-  // v3.65.47 (Sếp: "nên tách cột thu riêng ra"): Thu/Chi (VND gốc) giờ đã tách 2 CỘT riêng (5/6) nên
-  // tự nhiên không còn lẫn nữa dù SUM cả cột — NHƯNG Phí NH (7) và Quy đổi USD (9) vẫn CHUNG 1 cột
-  // cho cả Thu lẫn Chi, nên VẪN cần tách 2 dòng tổng riêng (Tổng Thu hộ/Tổng Chi hộ) như bản trước,
-  // chỉ đổi lại đúng số cột mới.
+  // v3.65.47 (Sếp: "nên tách cột thu riêng ra"): Thu/Chi (VND gốc) giờ đã tách 2 CỘT riêng nên tự
+  // nhiên không còn lẫn nữa dù SUM cả cột — NHƯNG Phí NH và Quy đổi USD vẫn CHUNG 1 cột cho cả Thu
+  // lẫn Chi, nên VẪN cần tách 2 dòng tổng riêng (Tổng Thu hộ/Tổng Chi hộ) như bản trước.
+  // v3.65.48 (Sếp: "Tổng cộng đang cộng cả VNĐ và USD vào 1"): mỗi nhóm Thu/Chi tách tiếp theo TỪNG
+  // LOẠI TIỀN (cột Tiền tệ) — chỉ cộng đúng cùng loại tiền, ra 1 dòng tổng riêng cho mỗi loại tiền.
+  // v3.65.49 (Sếp: "tách chi hộ ra theo các loại tiền gốc: mỗi loại 1 cột"): Chi giờ đã tách hẳn
+  // thành N CỘT riêng theo tiền (colIdx.chiCols) — mỗi cột tự nhiên chỉ chứa đúng 1 loại tiền, nên
+  // pushTotal chỉ cần SUM thẳng từng cột Chi, KHÔNG cần tách dòng theo tiền cho riêng Chi nữa. Vẫn
+  // giữ tách theo tiền cho Phí NH/Quy đổi USD (còn dùng chung 1 cột, còn lẫn tiền) qua dòng tổng
+  // split theo Tiền tệ như v3.65.48 — 2 cơ chế không xung đột: dòng tổng "· USD" chỉ có giá trị ở
+  // đúng cột Chi-USD, cột Chi-VND của dòng đó tự nhiên =0, không sai.
   function pushTotal(startRow, endRow, dataRows){
     const sumCol=(rs,idx)=>rs.reduce((a,r)=>a+(+r[idx]||0),0);
     const mkRow=(label, rs, color)=>{
       const cells=[]; for(let c=0;c<NCOL;c++){
         if(c===0) cells.push(EE.totalCell(label,{align:'left', color}));
-        else if(c===5||c===6||c===7) cells.push(EE.totalCell(sumCol(rs,c),{align:'right',num:'#,##0', color}));
-        else if(c===9) cells.push(EE.totalCell(sumCol(rs,c),{align:'right',num:'#,##0.00', color}));
+        else if(PCT_COLS.has(c)) cells.push(EE.totalCell(sumCol(rs,c),{align:'right',num:'#,##0', color}));
+        else if(c===CI.usd) cells.push(EE.totalCell(sumCol(rs,c),{align:'right',num:'#,##0.00', color}));
         else cells.push(EE.totalCell(null,{}));
       }
       aoa.push(cells);
+    };
+    const mkRowsByCcy=(baseLabel, rs, color)=>{
+      const ccys=Array.from(new Set(rs.map(r=>r[CI.ccy]||'')));
+      if(ccys.length<=1){ mkRow(baseLabel, rs, color); return; }
+      ccys.sort().forEach(ccy=>{ mkRow(baseLabel+' · '+(ccy||'?'), rs.filter(r=>(r[CI.ccy]||'')===ccy), color); });
     };
     const rows2=dataRows||[];
     const inRows=rows2.filter(r=>r[0]==='Thu hộ');
     const outRows=rows2.filter(r=>r[0]!=='Thu hộ');
     if(inRows.length && outRows.length){
-      mkRow('TỔNG THU HỘ', inRows, EE.colors.green);
-      mkRow('TỔNG CHI HỘ', outRows, EE.colors.red);
+      mkRowsByCcy('TỔNG THU HỘ', inRows, EE.colors.green);
+      mkRowsByCcy('TỔNG CHI HỘ', outRows, EE.colors.red);
     } else {
-      mkRow('TỔNG CỘNG', rows2, null);
+      mkRowsByCcy('TỔNG CỘNG', rows2, null);
     }
   }
   pushTitle(P.title); pushSub(P.sub); aoa.push([]);
