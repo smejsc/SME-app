@@ -4679,7 +4679,7 @@ const WH_TYPES = {
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.66.00';
+const APP_VERSION='3.66.06';
 /* HOTFIX 3.12.17-email: CHẶN TRIỆT ĐỂ gửi email TỰ ĐỘNG (mất kiểm soát — spam quota Google).
    Email phải do NV được phân quyền CHỦ ĐỘNG chọn gửi. Cờ này:
    (1) chặn auto-SCAN tạo email (hrmScanExpiries/vesselCertScanExpiries);
@@ -100298,7 +100298,7 @@ function vmOpenChiHoLedger(){
   const vByid={}; VesselService.opVessels().forEach(v=>vByid[v.id]=v);
   const list=(S.opTransactions||[]).filter(t=>t&&!t._deleted&&t.type==='OUT'&&allowed.includes(t.vesselId))
     .sort((a,b)=>String(b.date||'').localeCompare(String(a.date||'')));
-  _chiHoLedgerState={vByid, list, byUser:'', byStatus:'', byVessel:''};
+  _chiHoLedgerState={vByid, list, byUser:'', byStatus:'', byVessel:'', byMonth:''};
   _renderChiHoLedgerModal();
 }
 function _chiHoStatusOf(t){ return t._locked?'Đã khóa':(t.paid?'Đã TT':(t._isBudget?'Dự kiến':'Chờ TT')); }
@@ -100323,6 +100323,58 @@ function viewOpTxReadOnly(id){
     <div style="font-size:11px;color:var(--muted)">🔒 Phiếu thuộc kỳ đã khóa sổ (đã gửi chủ tàu) — chỉ xem, không sửa/xóa được.</div>`;
   openModal('👁 Xem bút toán (đã khóa)', body, `<button class="btn-sec" onclick="closeModal()">Đóng</button>`);
 }
+function _chiHoLedgerExportExcel(){
+  const s=_chiHoLedgerState; if(!s) return;
+  const filtered=s.list.filter(t=>(!s.byUser||t.createdBy===s.byUser)&&(!s.byStatus||_chiHoStatusOf(t)===s.byStatus)&&(!s.byVessel||t.vesselId===s.byVessel)&&(!s.byMonth||String(t.date||'').slice(0,7)===s.byMonth));
+  if(!filtered.length){ toast('Không có phiếu nào khớp bộ lọc để xuất','warn'); return; }
+  (async()=>{
+    if(typeof XLSX==='undefined'){ await _loadScriptOnce('https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js','XLSX'); }
+    if(typeof XLSX==='undefined'){ toast('Không tải được thư viện Excel','bad'); return; }
+    // v3.66.02 (Sếp: "Kiểm mẫu excel có đúng quy định?"): TÌM RA — bản v3.66.01 xuất thô (aoa_to_sheet
+    // trần), KHÔNG theo chuẩn Excel chung đã chốt (ExcelExporter/EE — logo/màu thương hiệu/viền/zebra,
+    // áp cho ~68 điểm xuất Excel toàn app). Sửa lại đúng khuôn _ovExportExcel() (Tồn kho tổng hợp) —
+    // file mẫu Sếp đã duyệt làm chuẩn tham chiếu.
+    const EE=(typeof ExcelExporter!=='undefined')?ExcelExporter:null, XS=window.XLSXStyle;
+    const styled=!!(EE&&XS&&(!EE.ready||EE.ready()));
+    const header=['Ngày','Tàu QL','Diễn giải','Số tiền','Loại tiền','Trạng thái','Đối chiếu','Người tạo'];
+    const total=filtered.reduce((sum,t)=>sum+(+t.amount||0),0);
+    const titleTxt='SỔ CHI HỘ — QUẢN LÝ TÀU'+(s.byMonth?(' — Tháng '+s.byMonth):'');
+    const merges=[]; let aoa;
+    if(styled){
+      aoa=[[EE.title(titleTxt)].concat(header.slice(1).map(()=>'')),
+           [EE.sub('Xuất lúc: '+new Date().toLocaleString('vi-VN')+' · '+filtered.length+'/'+s.list.length+' phiếu (theo đúng bộ lọc đang chọn)')].concat(header.slice(1).map(()=>''))];
+      merges.push({s:{r:0,c:0},e:{r:0,c:header.length-1}});
+      merges.push({s:{r:1,c:0},e:{r:1,c:header.length-1}});
+      aoa.push(header.map((h,c)=>EE.headerCell(h, c===3?'right':(c===0||c===5||c===6?'center':'left'))));
+      filtered.forEach((t,i)=>{
+        const v=s.vByid[t.vesselId]; const bg=(i%2)?EE.C.zebra:null;
+        aoa.push([
+          EE.dataCell(t.date||'',{bg,align:'center'}),
+          EE.dataCell(v?v.name:'',{bg}),
+          EE.dataCell(t.desc||'',{bg,wrap:true}),
+          EE.dataCell(+t.amount||0,{bg,align:'right',num:'#,##0.##'}),
+          EE.dataCell(t.ccy||'',{bg,align:'center'}),
+          EE.dataCell(_chiHoStatusOf(t),{bg,align:'center'}),
+          EE.dataCell(t.reconciled?'Đã đối chiếu':'',{bg,align:'center',color:t.reconciled?EE.C.green:undefined}),
+          EE.dataCell(t.createdBy||'',{bg})
+        ]);
+      });
+      aoa.push([EE.totalCell('TỔNG'),EE.totalCell(''),EE.totalCell(''),EE.totalCell(total,{align:'right',num:'#,##0.##'}),EE.totalCell(''),EE.totalCell(''),EE.totalCell(''),EE.totalCell('')]);
+    } else {
+      aoa=[[titleTxt],[],header];
+      filtered.forEach(t=>{ const v=s.vByid[t.vesselId]; aoa.push([t.date||'', v?v.name:'', t.desc||'', +t.amount||0, t.ccy||'', _chiHoStatusOf(t), t.reconciled?'Đã đối chiếu':'', t.createdBy||'']); });
+      aoa.push(['','','TỔNG', total,'','','','']);
+    }
+    const U=styled?XS.utils:XLSX.utils;
+    const ws=U.aoa_to_sheet(aoa); const wb=U.book_new();
+    if(merges.length) ws['!merges']=merges;
+    ws['!cols']=[{wch:11},{wch:16},{wch:36},{wch:14},{wch:8},{wch:12},{wch:12},{wch:14}];
+    U.book_append_sheet(wb, ws, 'Sổ CHI HỘ');
+    (styled?XS:XLSX).writeFile(wb, 'So_CHI_HO_QuanLyTau'+(s.byMonth?('_'+s.byMonth):'')+'.xlsx');
+    try{ logAuditEvent('chiho_ledger_export_xlsx',{count:filtered.length, month:s.byMonth||'(tất cả)'}); }catch(e){}
+    toast('Đã xuất Excel — '+filtered.length+' phiếu','good');
+  })();
+}
 function _renderChiHoLedgerModal(){
   const s=_chiHoLedgerState; if(!s) return;
   const users=Array.from(new Set(s.list.map(t=>t.createdBy).filter(Boolean))).sort();
@@ -100331,7 +100383,11 @@ function _renderChiHoLedgerModal(){
   // mọi tàu QL hộ đang cấu hình, tránh dropdown có tàu 0 phiếu gây rối).
   const vesselIds=Array.from(new Set(s.list.map(t=>t.vesselId).filter(Boolean)))
     .sort((a,b)=>String((s.vByid[a]&&s.vByid[a].name)||'').localeCompare(String((s.vByid[b]&&s.vByid[b].name)||''),'vi'));
-  const filtered=s.list.filter(t=>(!s.byUser||t.createdBy===s.byUser)&&(!s.byStatus||_chiHoStatusOf(t)===s.byStatus)&&(!s.byVessel||t.vesselId===s.byVessel));
+  const filtered=s.list.filter(t=>(!s.byUser||t.createdBy===s.byUser)&&(!s.byStatus||_chiHoStatusOf(t)===s.byStatus)&&(!s.byVessel||t.vesselId===s.byVessel)&&(!s.byMonth||String(t.date||'').slice(0,7)===s.byMonth));
+  // v3.66.01 (Sếp: "Tạo nút xuất file excel tại các tab Sổ chi hộ chủ Tàu trong các module Nhân sự/
+  // Quản lý tàu — lọc theo tháng"): danh sách tháng THẬT SỰ có phiếu trong sổ này (đúng khuôn lọc Tàu
+  // ở trên — không liệt mọi tháng có thể có, tránh dropdown rối).
+  const months=Array.from(new Set(s.list.map(t=>String(t.date||'').slice(0,7)).filter(Boolean))).sort().reverse();
   const statusIcon={'Đã khóa':'🔒 ','Đã TT':'✓ ','Dự kiến':'📋 ','Chờ TT':''};
   const rows=filtered.map(t=>{
     const v=s.vByid[t.vesselId];
@@ -100367,6 +100423,11 @@ function _renderChiHoLedgerModal(){
         <option value="">— Tất cả trạng thái —</option>
         ${statuses.map(x=>`<option value="${esc(x)}" ${s.byStatus===x?'selected':''}>${esc(x)}</option>`).join('')}
       </select>
+      <select onchange="_chiHoLedgerState.byMonth=this.value;_renderChiHoLedgerModal()" style="font-size:11px;padding:4px 8px;border:1px solid var(--rule);border-radius:6px">
+        <option value="">— Tất cả tháng —</option>
+        ${months.map(m=>`<option value="${esc(m)}" ${s.byMonth===m?'selected':''}>${esc(m)}</option>`).join('')}
+      </select>
+      <button class="btn-sec" style="font-size:11px" onclick="_chiHoLedgerExportExcel()" title="Xuất đúng danh sách đang lọc trên màn này ra Excel">📊 Xuất Excel</button>
     </div>
     <div style="font-size:10px;color:var(--muted);margin-bottom:8px">${filtered.length}/${s.list.length} phiếu — chỉ hiện tàu quản lý hộ trong phạm vi của bạn</div>
     <div class="tbl-scroll"><table class="tbl">
@@ -107346,9 +107407,13 @@ function _hrmFindMatch(r, emps){
   if(sid){
     const bySid = list.find(e=>String(e.smartId||'').trim().toUpperCase()===sid);
     if(bySid) return {emp:bySid, how:'smartId'};
-    return {emp:null, how:null}; // có mã nhưng chưa tồn tại → tạo mới (như cũ)
+    // v3.66.06 (Sếp — vụ Ernst Gritsenko/Mohammed Duffy trùng hồ sơ từ đợt import 25/6/2026): TÌM RA
+    // LỖI THẬT — trước đây, có mã nhưng KHÔNG khớp ai → dừng NGAY, không thử tiếp tên+ngày sinh (dòng
+    // return cũ ngay dưới) — dù file lần này ghi SAI/THIẾU mã cho 1 người ĐÃ CÓ hồ sơ thật (mã cũ khác,
+    // hoặc gõ nhầm), tên+DOB vẫn khớp hệt — bị bỏ lỡ, tạo hồ sơ trùng thay vì cảnh báo "Nghi trùng".
+    // Sửa: KHÔNG return ngay — rơi tiếp xuống thử tên+DOB (vẫn tôn trọng cờ FLAG_HRM_DEDUP_IMPORT).
   }
-  // smartId rỗng — chỉ dùng lưới dự phòng khi flag bật
+  // smartId rỗng (hoặc có nhưng không khớp mã nào) — chỉ dùng lưới dự phòng khi flag bật
   if(typeof FLAG_HRM_DEDUP_IMPORT==='undefined' || !FLAG_HRM_DEDUP_IMPORT) return {emp:null, how:null};
   // (2) CCCD/passport
   const nid = _hrmNormId(r.idNo);
@@ -107514,7 +107579,8 @@ function _hrmMatchVessel(name){
 function hrmImportApply(){
   const rows=_hrmImportRows; if(!rows||!rows.length){ closeModal(); return; }
   if(!Array.isArray(S.hrEmployees)) S.hrEmployees=[];
-  let nNew=0,nUpd=0,nLink=0,nAssign=0,nTerm=0,nSkip=0;   // v3.10.06: nSkip = dòng nghi trùng bị bỏ qua
+  let nNew=0,nUpd=0,nLink=0,nAssign=0,nTerm=0,nSkip=0,nErr=0;   // v3.10.06: nSkip = dòng nghi trùng bị bỏ qua; v3.66.06: nErr = dòng bị chặn trùng mã
+  const _hrmImportErrors=[];   // v3.66.06
   const _nowIso=new Date().toISOString();
   // v3.09.82: gán tàu (linkVesselId) + tạo QĐ điều động + xử lý nghỉ việc cho 1 hồ sơ sau import.
   const _hrmPostImport=(emp,r)=>{
@@ -107600,6 +107666,17 @@ function hrmImportApply(){
       }
       nUpd++;
     } else {
+      // v3.66.06 (cùng vụ trên): LỖI THẬT thứ 2 — nhánh "tạo mới" của Import KHÔNG kiểm tra trùng mã
+      // NV (khác hẳn màn "+Thêm nhân viên" bình thường, luôn chặn qua hrmSmartIdTaken()) — Excel ghi
+      // đúng 1 mã đã có ai dùng rồi (dù không khớp lúc _hrmFindMatch vì lý do khác) vẫn tạo được hồ sơ
+      // MỚI mang trùng smartId với hồ sơ cũ — 2 hồ sơ cùng mã tồn tại song song, gây rối mọi nơi tra
+      // theo mã (Thẻ lương, Kỳ lương, module chức năng...). Chặn cứng, KHÔNG tự đổi mã (im lặng đổi dễ
+      // gây khó hiểu hơn) — báo lỗi dòng, admin tự sửa mã trong Excel rồi import lại dòng đó.
+      if(r.smartId && (typeof hrmSmartIdTaken==='function') && hrmSmartIdTaken(r.smartId, null)){
+        nErr++;
+        _hrmImportErrors.push('Dòng '+(r.smartId||r.fullName||'?')+': Mã "'+r.smartId+'" đã có NV khác dùng — không tự tạo trùng. Sửa mã trong Excel rồi import lại dòng này.');
+        return;
+      }
       const newEmp=Object.assign({
         id:'emp_'+Date.now()+'_'+Math.random().toString(36).slice(2,7),
         smartId:r.smartId||hrmGenSmartId(), type:(r.empType||'office'), status:'active', projectIds:[],
@@ -107617,7 +107694,14 @@ function hrmImportApply(){
   saveState();
   closeModal();
   renderHRM();
-  toast(`Đã import: ${nNew} mới, ${nUpd} cập nhật ✓ · gán tàu ${nLink} · QĐ điều động ${nAssign}${nTerm?' · đã nghỉ '+nTerm:''}${nSkip?' · bỏ qua '+nSkip+' nghi trùng':''}`,'good');
+  toast(`Đã import: ${nNew} mới, ${nUpd} cập nhật ✓ · gán tàu ${nLink} · QĐ điều động ${nAssign}${nTerm?' · đã nghỉ '+nTerm:''}${nSkip?' · bỏ qua '+nSkip+' nghi trùng':''}${nErr?' · ⛔ '+nErr+' dòng bị chặn (trùng mã)':''}`, nErr?'warn':'good');
+  // v3.66.06: hiện rõ danh sách dòng bị chặn (không chỉ đếm số) — để biết đúng sửa mã nào rồi import lại.
+  if(_hrmImportErrors.length){
+    openModal('⛔ '+_hrmImportErrors.length+' dòng bị chặn khi import (trùng mã NV)',
+      '<div style="font-size:12px;color:var(--muted);margin-bottom:8px">Các dòng này CHƯA được tạo — sửa đúng mã trong file Excel rồi import lại riêng các dòng đó.</div>'
+      +'<ul style="font-size:12.5px;padding-left:18px;margin:0">'+_hrmImportErrors.map(x=>`<li style="margin-bottom:4px">${esc(x)}</li>`).join('')+'</ul>',
+      '<button class="btn-primary" onclick="closeModal()">Đã hiểu</button>');
+  }
 }
 
 let _hrmView='dash';
@@ -111831,6 +111915,36 @@ function hrmTerminateCommit(){
 }
 
 /* ---- XEM HỒ SƠ ---- */
+// v3.66.05 (Sếp: "không có nút xóa nhân sự?" — cần xóa đúng bản ghi TẠO NHẦM/TRÙNG, không phải NV
+// nghỉ việc thật): app vốn KHÔNG cho xóa cứng hồ sơ (chủ đích — giữ lịch sử lương/BHXH/hợp đồng),
+// NV nghỉ việc thật luôn đổi Trạng thái = "Đã nghỉ", không xóa. Nút này CHỈ dành cho dọn dữ liệu
+// nhập nhầm — chỉ Admin, chặn cứng nếu hồ sơ đã có dấu vết dữ liệu thật (Thẻ lương/Kỳ lương đã chạy/
+// Chấm công đã tạo/Kỳ lương đã dùng) để tránh xóa nhầm NV thật đã có lịch sử.
+function hrmDeleteEmployee(id){
+  if(!isAdmin()){ toast('Chỉ Admin xóa được hồ sơ','bad'); return; }
+  const e=hrmEmpById(id); if(!e){ toast('Không tìm thấy hồ sơ','bad'); return; }
+  const blocks=[];
+  const cards=(S.salaryProfiles||[]).filter(v=>v&&!v._deleted&&v.empId===id);
+  if(cards.length) blocks.push(cards.length+' Thẻ lương');
+  const usedInPeriod=(PayrollService.periods()||[]).some(p=>(p.rows||[]).some(r=>r.empId===id));
+  if(usedInPeriod) blocks.push('đã có trong ít nhất 1 Kỳ lương');
+  const bcc=(S.bccSheets||[]).some(sh=>(sh.rows||[]).some(r=>r.empId===id));
+  if(bcc) blocks.push('đã có Bảng chấm công');
+  if(blocks.length){
+    toast('⛔ Không xóa được — hồ sơ đã có dữ liệu thật: '+blocks.join(', ')+'. Nếu NV nghỉ việc, đổi Trạng thái = "Đã nghỉ" thay vì xóa.','bad');
+    return;
+  }
+  confirmDelete('hồ sơ Nhân sự "'+esc(e.fullName||'')+'" ('+esc(e.smartId||'')+')',
+    'Chỉ nên dùng khi hồ sơ TẠO NHẦM/TRÙNG — hành động này KHÔNG hoàn tác được. Nếu là NV nghỉ việc thật, hủy và đổi Trạng thái = "Đã nghỉ" thay vào đó.',
+    ()=>{
+      S.hrEmployees=(S.hrEmployees||[]).filter(x=>x.id!==id);
+      try{ markDeleted([id]); }catch(err){}
+      try{ hrmLogHistory(id,'edit','Hồ sơ','','','Đã xóa hồ sơ (tạo nhầm/trùng) — Admin'); }catch(err){}
+      try{ logAuditEvent('hrm_employee_delete',{empId:id, smartId:e.smartId, fullName:e.fullName, by:(CURRENT_USER&&CURRENT_USER.name)||'admin'}); }catch(err){}
+      saveState(); closeModal(); renderHRM();
+      toast('Đã xóa hồ sơ '+(e.smartId||'')+' ✓','good');
+    });
+}
 function hrmViewEmployee(id){
   const e=hrmEmpById(id); if(!e){ toast('Không tìm thấy hồ sơ','bad'); return; }
   // v3.07.02: NV thường chỉ xem hồ sơ của chính mình
@@ -111898,7 +112012,7 @@ function hrmViewEmployee(id){
 
   openModal(`Hồ sơ — ${e.fullName} · ${e.smartId}`,
     basic+work+bank+docsSec+histSec+future,
-    `<button class="btn-ghost" onclick="closeModal()">Đóng</button>${((S.companies||[]).length>1)?`<button class="btn-sec" onclick="empEntityOpen('${e.id}')" title="Quan hệ NV–pháp nhân + nơi đóng BHXH (đa pháp nhân GĐ1)">🏛 Pháp nhân</button>`:''}<button class="btn-primary" onclick="closeModal();hrmEditEmployee('${e.id}')">✏️ Sửa</button>`);
+    `<button class="btn-ghost" onclick="closeModal()">Đóng</button>${((S.companies||[]).length>1)?`<button class="btn-sec" onclick="empEntityOpen('${e.id}')" title="Quan hệ NV–pháp nhân + nơi đóng BHXH (đa pháp nhân GĐ1)">🏛 Pháp nhân</button>`:''}${isAdmin()?`<button class="btn-ghost" style="color:var(--bad)" onclick="hrmDeleteEmployee('${e.id}')" title="Chỉ dùng để xóa hồ sơ TẠO NHẦM/TRÙNG — NV nghỉ việc thật thì đổi Trạng thái = Đã nghỉ, không xóa. Chỉ Admin bấm được.">🗑 Xóa hồ sơ</button>`:''}<button class="btn-primary" onclick="closeModal();hrmEditEmployee('${e.id}')">✏️ Sửa</button>`);
     /* v3.20.202 (Sếp — ảnh Employees: "chuyển Thẻ lương nhân viên về Payroll Cost Report - không để
        trong hồ sơ nhân viên. Mục đích: Hồ sơ nhân viên mọi NV thuộc bộ phận NHÂN SỰ đều thấy nên cần
        cất riêng"): bỏ hẳn 2 nút "💳 Thẻ lương" từng có ở đây (1 gate bằng hrmCanSeeAll/
