@@ -4655,7 +4655,7 @@ const WH_TYPES = {
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.65.71';
+const APP_VERSION='3.65.76';
 /* HOTFIX 3.12.17-email: CHẶN TRIỆT ĐỂ gửi email TỰ ĐỘNG (mất kiểm soát — spam quota Google).
    Email phải do NV được phân quyền CHỦ ĐỘNG chọn gửi. Cờ này:
    (1) chặn auto-SCAN tạo email (hrmScanExpiries/vesselCertScanExpiries);
@@ -20824,16 +20824,12 @@ function _expTreeSyntheticTypes(){
 function activeExpenseTypes(){
   const list = (S && S.expenseTypes && S.expenseTypes.length) ? S.expenseTypes : DEFAULT_EXPENSE_TYPES;
   const adm=(typeof isAdmin==='function')?isAdmin():false;
-  /* v3.20.147 (Sếp — nhóm A/Tài chính liên quan NSNN, chỉ KT thấy): thuộc KT = admin, hoặc có quyền
-     KT viên (canCheckAcc) hoặc KTT (canManageUsers) — cùng công thức "thuộc KT" đã dùng ở chỗ khác
-     trong app (vd tab fin_accounting). NV thường (kể cả NV kế toán nhưng chưa được tick 1 trong 2 cờ
-     trên) sẽ không thấy nhóm A ở bất kỳ dropdown/chip/danh mục chi phí nào. */
-  const isKT = adm || (typeof canCheckAcc==='function' && canCheckAcc()) || !!(CURRENT_USER && canManageUsers());
-  const real=list.filter(t=>!t.archived && (adm || !isExpenseTypeBOD(t)) && (isKT || !isExpenseTypeFinOnly(t)));
+  // v3.65.75 (Sếp: "Mở phân quyền cho NV ví dụ: A - chi phí tài chính... mở toàn bộ cho NV, chỉ giữ
+  // mục chỉ riêng admin/BOD"): ĐẢO NGƯỢC v3.20.147 — bỏ hẳn điều kiện "chỉ KT thấy" cho nhóm A (Tài
+  // chính). Mọi NV giờ thấy đầy đủ nhóm A như các nhóm chi phí khác. CHỈ còn giữ khóa đúng 1 mục thật
+  // sự admin/BOD-only (isExpenseTypeBOD — nhóm BOD_ONLY), không đổi.
+  const real=list.filter(t=>!t.archived && (adm || !isExpenseTypeBOD(t)));
   let synth=[]; try{ synth=_expTreeSyntheticTypes(); }catch(e){}
-  /* v3.20.147: nhánh lá CHƯA có loại chi phí thật gắn vào (sinh ảo ở trên) không đi qua bộ lọc real
-     ở trên — nếu là nhánh lá nhóm A thì vẫn phải ẩn với NV, lọc riêng 1 lượt ở đây. */
-  synth=synth.filter(t=>isKT || !isExpenseTypeFinOnly(t));
   return real.concat(synth);
 }
 
@@ -21561,11 +21557,10 @@ function expGroupsActive(opts){
     Object.keys(EXPENSE_GROUPS).forEach(k=>{ if(!out.includes(k) && used.has(k)) out.push(k); });
   }
   const adm=(typeof isAdmin==='function')?isAdmin():false;   /* v3.18.95: nhóm BOD chỉ admin */
-  /* v3.20.147 (Sếp — nhóm A/Tài chính liên quan NSNN, chỉ KT thấy): cùng công thức "thuộc KT" ở
-     activeExpenseTypes() — ẩn luôn TIÊU ĐỀ nhóm A khỏi NV, không chỉ ẩn từng loại con bên trong. */
-  const isKT = adm || (typeof canCheckAcc==='function' && canCheckAcc()) || !!(CURRENT_USER && canManageUsers());
+  // v3.65.75 (Sếp: "Mở phân quyền cho NV... mở toàn bộ cho NV, chỉ giữ mục chỉ riêng admin/BOD"):
+  // ĐẢO NGƯỢC v3.20.147 — bỏ ẩn tiêu đề nhóm A (Tài chính) với NV thường. Chỉ còn ẩn đúng nhóm BOD
+  // với người không phải admin, khớp nguyên tắc mới ở activeExpenseTypes().
   let out2 = adm ? out : out.filter(k=>k!=='BOD');
-  if(!isKT) out2 = out2.filter(k=>k!=='A');
   return out2;
 }
 /* Chữ cái → key nhóm: bảng cố định (chữ HIỆN HÀNH) thắng; chữ cái động → chính nó (nếu đã sync thành nhóm); lạ → rỗng. */
@@ -76977,8 +76972,12 @@ function opExportExcel(){
     const dept=t.createdByDept || (typeof lookupUserDeptName==='function'?lookupUserDeptName(t.createdBy):'') || '—';
     const madeDate=(t.createdAt||'').slice(0,10);
     const isIn=t.type==='IN';
+    // v3.65.73 (Sếp: "tách: tổng chi thực + Phí quản lý + Phí ngân hàng + Dự kiến (Chưa có hồ sơ).
+    // Thống nhất trên tất cả các bảng tính/bảng in excel/pdf/Commercial Inv."): tách nhãn "Phí quản
+    // lý" riêng khỏi "Chi hộ" cho các bút toán "Cấn trừ phí quản lý" (t._mgmtFeeId) — lọc/tổng riêng
+    // được ngay qua cột Nguồn + AutoFilter có sẵn, không cần dựng lại toàn bộ kiến trúc bảng động.
     const e={
-      src: isIn?'Thu hộ':(t._isBudget?'Dự kiến chi':'Chi hộ'),
+      src: isIn?'Thu hộ':(t._isBudget?'Dự kiến chi':(t._mgmtFeeId?'Phí quản lý':'Chi hộ')),
       date: t.date||'', vendor: t.vendor||'', desc: t.desc||'', inv: (t.invoiceNo||t.contractNo||''),
       isIn, thu: gross, ccy: t.ccy||'', fee: feeRaw, usd: usdTotal,
       creator: t.createdBy||'', dept, made: madeDate, stt: opStt(t),
@@ -77165,10 +77164,14 @@ function _opExportExcelStyled(P){
     };
     const rows2=dataRows||[];
     const inRows=rows2.filter(r=>r[0]==='Thu hộ');
-    const outRows=rows2.filter(r=>r[0]!=='Thu hộ');
-    if(inRows.length && outRows.length){
-      mkRow('TỔNG THU HỘ', inRows, EE.colors.green);
-      mkRow('TỔNG CHI HỘ', outRows, EE.colors.red);
+    const chiRows=rows2.filter(r=>r[0]==='Chi hộ');
+    const mgmtRows=rows2.filter(r=>r[0]==='Phí quản lý');
+    if((inRows.length && (chiRows.length||mgmtRows.length)) || (chiRows.length && mgmtRows.length)){
+      if(inRows.length) mkRow('TỔNG THU HỘ', inRows, EE.colors.green);
+      if(chiRows.length) mkRow('TỔNG CHI HỘ THỰC', chiRows, EE.colors.red);
+      // v3.65.73 (Sếp: "tách: tổng chi thực + Phí quản lý + Phí ngân hàng + Dự kiến (Chưa có hồ sơ)"):
+      // dòng tổng RIÊNG cho Phí quản lý — cùng nguyên tắc tách bạch áp dụng cho toàn bộ các bảng.
+      if(mgmtRows.length) mkRow('TỔNG PHÍ QUẢN LÝ', mgmtRows, EE.colors.red);
     } else {
       mkRow('TỔNG CỘNG', rows2, null);
     }
@@ -78141,6 +78144,58 @@ function _opIsCrewSalaryRow(x){
   const d=(x.desc||'').toLowerCase();
   return ['lương','luong','thuyền viên','thuyen vien','crew'].some(k=>d.includes(k));
 }
+// v3.65.74 (Sếp: "Yêu cầu: số liệu tổng tại các bảng cho mảng quản lý hộ chủ tàu: cùng cách tính"):
+// HÀM TÍNH CHUNG DUY NHẤT cho 1 tàu + 1 kỳ [from,to] — PDF (generateOpReport) và Excel
+// (generateOpReportExcel) đều gọi ĐÚNG hàm này thay vì mỗi nơi tự viết lại công thức riêng (nguồn
+// gốc của rất nhiều lần lệch số phải sửa suốt phiên làm việc trước). Trả về đủ dữ liệu 2 nơi cần:
+// danh sách dòng theo từng mục (Thu/Chi thực/Phí QL/Dự kiến) + các tổng + Tồn đầu/cuối kỳ.
+function _opPeriodTotals(v, from, to){
+  const vid=v.id;
+  const _apV=(typeof _opApVirtualTx==='function'?_opApVirtualTx():[]).filter(x=>x.vesselId===vid);
+  const all=VesselService.opTransactions().filter(x=>x.vesselId===vid).concat(_apV).sort((a,b)=>(a.date||'').localeCompare(b.date||''));
+  const _effPeriodDate=(x)=>{ if(x&&x.settleMonth){const m=String(x.settleMonth),d=String(x.date||'');return (d.slice(0,7)===m)?d:(m+'-15');} return x?(x.date||''):''; };
+  const _isKhoanChi=(x)=>x.khoanRole==='chi';
+  let openBal=0;
+  all.forEach(x=>{
+    const _d=_effPeriodDate(x);
+    if(_d<from){ if(x.khoanRole==='chi') return; const usd=opReportUsd(x); openBal += (x.type==='IN'?usd:-usd) - opTxFeesUsd(x); }
+  });
+  const period=all.filter(x=>{ const d=_effPeriodDate(x); return d>=from && d<=to && x.reportToOwner!==false && !x.seahorseOwn; });
+  const inRows=period.filter(x=>x.type==='IN');
+  const outAll=period.filter(x=>x.type==='OUT' && !x._isBudget && !_isKhoanChi(x));
+  const outRows=outAll.filter(x=>!x._mgmtFeeId);
+  const mgmtRows=outAll.filter(x=>!!x._mgmtFeeId);
+  const budgetRows=period.filter(x=>x.type==='OUT' && x._isBudget && !_isKhoanChi(x));
+  let sumIn=0,sumOut=0,sumMgmt=0,sumBudget=0,sumCrew=0;
+  period.forEach(x=>{
+    if(_isKhoanChi(x)) return;
+    if(x.type==='IN'){ sumIn+=opReportUsd(x); return; }
+    if(x._isBudget){ sumBudget+=opReportUsd(x); return; }
+    const u=opReportUsd(x);
+    if(x._mgmtFeeId){ sumMgmt+=u; } else { sumOut+=u; if(typeof _opIsCrewSalaryRow==='function'&&_opIsCrewSalaryRow(x)) sumCrew+=u; }
+  });
+  // v3.09.88: PHÍ tính theo NGÀY PHÁT SINH PHÍ (paidDate/payment.date), KHÔNG theo ngày phiếu gốc.
+  let sumFee=0; const extraFeeRows=[];
+  all.forEach(x=>{
+    if(x.type!=='OUT' || x._isBudget || _isKhoanChi(x)) return;
+    if(x.reportToOwner===false || x.seahorseOwn) return;
+    const entries=(typeof opTxFeeEntries==='function')?opTxFeeEntries(x):[];
+    entries.forEach(fe=>{
+      const fd=fe.date||x.date||'';
+      if(!(fd>=from && fd<=to)) return;
+      sumFee+=fe.feeUsd;
+      const srcInPeriod=(x.date>=from && x.date<=to);
+      if(!srcInPeriod){
+        extraFeeRows.push({ date:fd, feeUsd:fe.feeUsd,
+          desc:(fe.feeNote||'Phí giao dịch')+' ('+(fe.srcDesc||x.desc||'khoản chi hộ '+String(x.date||'').slice(0,7))+')',
+          srcMonth:String(x.date||'').slice(0,7) });
+      }
+    });
+  });
+  const closeBal=openBal+sumIn-sumOut-sumMgmt-sumBudget-sumFee;
+  return {all, period, inRows, outRows, mgmtRows, budgetRows, extraFeeRows,
+    sumIn, sumOut, sumMgmt, sumBudget, sumFee, sumCrew, openBal, closeBal};
+}
 function generateOpReportExcel(){
   const from=document.getElementById('rep-from').value;
   const to=document.getElementById('rep-to').value;
@@ -78205,20 +78260,21 @@ function generateOpReportExcel(){
     pushSummaryLine('Số dư đầu kỳ / Balance b/f (USD)', money(data.openBal), true, null);
     aoa.push([]);
     pushSection('THU HỘ / COLLECTIONS','I'); pushHead(); pushRows(data.inRows); pushSecTotal('Tổng thu hộ (USD)', money(data.sumIn)); aoa.push([]);
-    pushSection('CHI HỘ / DISBURSEMENTS','II'); pushHead(); pushRows(data.outRows); pushSecTotal('Tổng chi hộ (USD)', money(data.sumOut)); aoa.push([]);
-    if(data.crewRows.length){ pushSection('LƯƠNG THUYỀN VIÊN / CREW WAGES','I'); pushHead(); pushRows(data.crewRows); pushSecTotal('Tổng lương TV (USD)', money(data.sumCrew)); aoa.push([]); }
-    if(data.budgetRows.length){ pushSection('DỰ KIẾN CHI / COMMITTED COSTS','II'); pushHead(); pushRows(data.budgetRows); pushSecTotal('Tổng dự kiến (USD)', money(data.sumBudget)); aoa.push([]); }
+    pushSection('CHI HỘ / DISBURSEMENTS','II'); pushHead(); pushRows(data.outRows); pushSecTotal('Tổng chi hộ thực (USD)', money(data.sumOut)); aoa.push([]);
+    // v3.65.73 (Sếp: "tách: tổng chi thực + Phí quản lý + Phí ngân hàng + Dự kiến (Chưa có hồ sơ)"):
+    // mục RIÊNG cho Phí quản lý — trước gộp trong Chi hộ (v3.65.70), giờ tách hẳn theo đúng yêu cầu.
+    if(data.mgmtRows.length){ pushSection('PHÍ QUẢN LÝ / MANAGEMENT FEE','II'); pushHead(); pushRows(data.mgmtRows); pushSecTotal('Tổng phí quản lý (USD)', money(data.sumMgmt)); aoa.push([]); }
+    if(data.budgetRows.length){ pushSection('DỰ KIẾN CHI — CHƯA CÓ HỒ SƠ / COMMITTED, NOT YET DOCUMENTED','II'); pushHead(); pushRows(data.budgetRows); pushSecTotal('Tổng dự kiến (USD)', money(data.sumBudget)); aoa.push([]); }
     pushSection('TỔNG KẾT / SUMMARY (USD)','I');
     pushSummaryLine('Số dư đầu kỳ', money(data.openBal), false, null);
     pushSummaryLine('(+) Thu hộ', money(data.sumIn), false, EE.colors.green);
     pushSummaryLine('(−) Chi hộ thực', money(data.sumOut), false, EE.colors.red);
-    pushSummaryLine('(−) Dự kiến chi', money(data.sumBudget), false, EE.colors.red);
+    pushSummaryLine('(−) Phí quản lý', money(data.sumMgmt), false, EE.colors.red);
+    pushSummaryLine('(−) Dự kiến chi (chưa có hồ sơ)', money(data.sumBudget), false, EE.colors.red);
     pushSummaryLine('(−) Phí NH & khác', money(data.sumFee), false, EE.colors.red);
     pushSummaryLine('Số dư cuối kỳ / Balance c/f', money(data.closeBal), true, null);
-    // v3.65.58 (Sếp: "Ẩn dòng Phí quản lý trên báo cáo: đây là báo cáo chủ tàu: không liên quan"):
-    // dòng "Phí quản lý" chỉ để tham khảo/nhắc kế toán nội bộ — KHÔNG liên quan đến chủ tàu, không
-    // nên xuất hiện trên báo cáo gửi chủ tàu. Bỏ hẳn khỏi Excel (giữ nguyên phần tính mgmtUsd ở trên
-    // để chỗ khác trong file còn dùng được nếu cần, chỉ không in dòng này ra báo cáo nữa).
+    // v3.65.73: 4 mục tách bạch cộng dồn đúng 1 lần — không còn dòng "tham khảo, không ảnh hưởng số
+    // dư" gây hiểu lầm như bản trước (v3.65.56-58); Phí quản lý giờ TRỪ THẲNG vào Số dư cuối kỳ.
     const ws=XS.utils.aoa_to_sheet(aoa);
     ws['!cols']=[{wch:12},{wch:34},{wch:20},{wch:12},{wch:14},{wch:8},{wch:16}];
     ws['!merges']=merges;
@@ -78229,73 +78285,18 @@ function generateOpReportExcel(){
   let nSheet=0;
   checked.forEach(vid=>{
     const v=VesselService.opVessels().find(x=>x.id===vid); if(!v) return;
-    const _apV=(typeof _opApVirtualTx==='function'?_opApVirtualTx():[]).filter(x=>x.vesselId===vid);
-    const all=VesselService.opTransactions().filter(x=>x.vesselId===vid).concat(_apV).sort((a,b)=>(a.date||'').localeCompare(b.date||''));
-    // số dư đầu kỳ (USD) — cùng quy tắc PDF
-    let openBal=0;
-    all.forEach(x=>{
-      const _d=(x&&x.settleMonth)?((String(x.date||'').slice(0,7)===String(x.settleMonth))?String(x.date||''):(String(x.settleMonth)+'-15')):String(x&&x.date||'');
-      if(_d<from){ if(x.khoanRole==='chi') return; const usd=opReportUsd(x); openBal += (x.type==='IN'?usd:-usd) - opTxFeesUsd(x); }
-    });
-    const period=all.filter(x=>{ const d=_effPeriodDate(x); return d>=from && d<=to && x.reportToOwner!==false && !x.seahorseOwn; });
-    const _isKhoanChi=(x)=> x.khoanRole==='chi';
-    const inRows=period.filter(x=>x.type==='IN');
-    const outAll=period.filter(x=>x.type==='OUT' && !x._isBudget && !_isKhoanChi(x));
-    // v3.65.70 (Sếp: "App đang lọc sai yêu cầu: không tách riêng phần chi lương thuyền viên như vậy,
-    // chỉ tách riêng phần phí ngân hàng - chi dự kiến (đã tách rồi). Mục đích: đối chiếu ngay với các
-    // dòng lớn trong báo cáo chủ tàu"): BỎ tách "LƯƠNG THUYỀN VIÊN" thành mục riêng — gộp lại chung 1
-    // bảng "Chi hộ" duy nhất (tách ra làm khó đối chiếu tuần tự với báo cáo chủ tàu/chứng từ gốc).
-    // CHỈ giữ đúng 2 mục tách riêng đã có: Phí ngân hàng + Dự kiến chi.
-    const outRows=outAll;
-    // v3.65.60 (Sếp: "Lọc phí quản lý để xuống cuối bảng chi hộ, không cần tách riêng chỉ tập hợp
-    // xuống cuối"): KHÔNG tách thành mục riêng (khác Lương thuyền viên) — chỉ SẮP XẾP để các dòng
-    // "Cấn trừ phí quản lý" (t._mgmtFeeId) dồn xuống cuối bảng Chi hộ, vẫn nằm trong cùng 1 bảng.
-    // sort() ổn định (stable) — không xáo trộn thứ tự các dòng còn lại trong từng nhóm.
-    outRows.sort((a,b)=>(a._mgmtFeeId?1:0)-(b._mgmtFeeId?1:0));
-    const crewRows=[];   // v3.65.70: không còn tách mục riêng — giữ biến rỗng để phần code dưới (if(crewRows.length)) tự bỏ qua, không cần sửa thêm chỗ khác.
-    const budgetRows=period.filter(x=>x.type==='OUT' && x._isBudget && !_isKhoanChi(x));
-    let sumIn=0,sumOut=0,sumBudget=0,sumFee=0,sumCrew=0;
-    period.forEach(x=>{ if(_isKhoanChi(x)) return; if(x.type==='IN') sumIn+=opReportUsd(x); else if(x._isBudget) sumBudget+=opReportUsd(x); else { const u=opReportUsd(x); sumOut+=u; if(_opIsCrewSalaryRow(x)) sumCrew+=u; } });
-    // v3.65.54 (Sếp: "Kiểm tra các dòng tính. Đối chiếu đúng với file pdf tương ứng?"): TÌM RA 3 CHỖ
-    // TÍNH SAI/LỆCH so với generateOpReport() (PDF) — cùng 1 màn, cùng 1 bộ lọc, PHẢI khớp tuyệt đối:
-    // (1) sumFee — bản cũ chỉ cộng opTxFeesUsd(x) theo NGÀY PHIẾU GỐC trong period; PDF (v3.09.88)
-    //     tính theo NGÀY PHÁT SINH PHÍ THẬT (opTxFeeEntries, duyệt TOÀN BỘ `all` chứ không chỉ
-    //     `period`) — phí trả sau/khác tháng phiếu gốc sẽ lệch nếu không theo đúng cách PDF.
-    // (2) mgmtUsd — đọc mfP.amountUsd, TRƯỜNG NÀY KHÔNG TỒN TẠI trên object trả về của
-    //     opMgmtFeeForPeriod() (chỉ có amount+ccy) → mgmtUsd LUÔN = 0, dòng "Phí quản lý" trong Excel
-    //     không bao giờ hiện số dù PDF có. Sửa: tự quy đổi mfP.amount theo mfP.ccy giống PDF.
-    all.forEach(x=>{
-      if(x.type!=='OUT' || x._isBudget || _isKhoanChi(x)) return;
-      if(x.reportToOwner===false || x.seahorseOwn) return;
-      const entries=(typeof opTxFeeEntries==='function')?opTxFeeEntries(x):[];
-      entries.forEach(fe=>{
-        const fd=fe.date||x.date||'';
-        if(!(fd>=from && fd<=to)) return;   // chỉ phí có NGÀY PHÍ trong kỳ báo cáo này — đúng khuôn PDF
-        sumFee+=fe.feeUsd;
-      });
-    });
-    const mfP=(typeof opMgmtFeeForPeriod==='function')?opMgmtFeeForPeriod(v,from,to):{amount:0,ccy:v.ccy||'USD',billedMonths:0,pendingMonths:0,anyDeducted:false};
-    const mfCcy=(mfP.ccy||v.ccy||'USD');
-    let mgmtUsd=0;
-    if(mfCcy==='USD') mgmtUsd=+mfP.amount||0;
-    else if(mfCcy==='VND') mgmtUsd=(+S.fxRate||0)>0 ? (+mfP.amount||0)/(+S.fxRate) : (+mfP.amount||0);
-    else { const _avg=(typeof fxAvgSuggest==='function')?fxAvgSuggest(mfCcy):0; mgmtUsd=(_avg>0 && typeof _opConvert==='function') ? (_opConvert(+mfP.amount||0, mfCcy, _avg).usd||0) : (+mfP.amount||0); }
-    // v3.65.56 (Sếp: "Tất cả phí quản lý đều ghi vào chi hộ. Bỏ dòng phí quản lý chưa xuất hoá đơn —
-    // đây chỉ note cho kế toán biết việc cần làm - phí đã được ghi rồi"): TOÀN BỘ phí QL — kể cả tháng
-    // CHƯA xuất hóa đơn chính thức — ĐÃ được ghi thành bút toán Chi hộ thật (cấn trừ quỹ) rồi, không
-    // chờ tới lúc xuất HĐ mới trừ. "Chưa xuất HĐ" chỉ là việc hành chính còn thiếu (nhắc kế toán làm
-    // nốt thủ tục hóa đơn), KHÔNG phải tiền chưa trừ. Trước đây closeBal trừ thêm `mgmtFeeDeducted`
-    // (phần tháng pending) — TRỪ ĐÚP vì khoản đó đã nằm trong sumOut qua bút toán Chi hộ "Cấn trừ phí
-    // quản lý" rồi. BỎ HẲN việc trừ thêm — mgmtUsd giờ chỉ còn là dòng THAM KHẢO/NHẮC VIỆC, không ảnh
-    // hưởng closeBal.
-    const closeBal=openBal+sumIn-sumOut-sumBudget-sumFee;
+    // v3.65.74 (Sếp: "số liệu tổng tại các bảng cho mảng quản lý hộ chủ tàu: cùng cách tính"): gọi
+    // ĐÚNG hàm tính chung _opPeriodTotals() — không tự viết lại công thức riêng ở đây nữa.
+    const PT=_opPeriodTotals(v, from, to);
+    const {inRows, outRows, mgmtRows, budgetRows, sumIn, sumOut, sumMgmt, sumBudget, sumFee, sumCrew, openBal, closeBal}=PT;
+    const crewRows=[];   // v3.65.70: Lương thuyền viên vẫn gộp trong Chi hộ thực, không tách riêng.
     const _lk=(typeof ownerReportLockFor==='function')?ownerReportLockFor(vid,String(from).slice(0,7)):null;
     const lockLabel=_lk?('Đã khóa · '+(_lk.signedBy||'')):'Chưa khóa';
     const safe=String(v.name||('Tau'+(nSheet+1))).replace(/[\\\/\?\*\[\]:]/g,'').slice(0,28)||('Tau'+(nSheet+1));
     let ws;
     if(_styled){
       try{
-        ws=_buildSheetStyled(v,{from,to,lockLabel,openBal,inRows,outRows,crewRows,budgetRows,sumIn,sumOut,sumCrew,sumBudget,sumFee,closeBal,mgmtUsd});
+        ws=_buildSheetStyled(v,{from,to,lockLabel,openBal,inRows,outRows,mgmtRows,crewRows,budgetRows,sumIn,sumOut,sumMgmt,sumCrew,sumBudget,sumFee,closeBal});
       }catch(e){ console.warn('[generateOpReportExcel] style fail → fallback trơn:', e&&e.message); }
     }
     if(!ws){
@@ -78309,18 +78310,17 @@ function generateOpReportExcel(){
       aoa.push([]);
       const secH=(title)=>{ aoa.push([title]); aoa.push(['Ngày/Date','Diễn giải/Particulars','NCC/Vendor','Số HĐ/Inv','Nguyên tệ','CCY','Quy USD']); };
       secH('THU HỘ / COLLECTIONS'); inRows.forEach(x=>aoa.push(rowOf(x))); aoa.push(['','','','','','Tổng thu hộ (USD)',money(sumIn)]); aoa.push([]);
-      secH('CHI HỘ / DISBURSEMENTS'); outRows.forEach(x=>aoa.push(rowOf(x))); aoa.push(['','','','','','Tổng chi hộ (USD)',money(sumOut)]); aoa.push([]);
-      if(crewRows.length){ secH('LƯƠNG THUYỀN VIÊN / CREW WAGES'); crewRows.forEach(x=>aoa.push(rowOf(x))); aoa.push(['','','','','','Tổng lương TV (USD)',money(sumCrew)]); aoa.push([]); }
-      if(budgetRows.length){ secH('DỰ KIẾN CHI / COMMITTED COSTS'); budgetRows.forEach(x=>aoa.push(rowOf(x))); aoa.push(['','','','','','Tổng dự kiến (USD)',money(sumBudget)]); aoa.push([]); }
+      secH('CHI HỘ / DISBURSEMENTS'); outRows.forEach(x=>aoa.push(rowOf(x))); aoa.push(['','','','','','Tổng chi hộ thực (USD)',money(sumOut)]); aoa.push([]);
+      if(mgmtRows.length){ secH('PHÍ QUẢN LÝ / MANAGEMENT FEE'); mgmtRows.forEach(x=>aoa.push(rowOf(x))); aoa.push(['','','','','','Tổng phí quản lý (USD)',money(sumMgmt)]); aoa.push([]); }
+      if(budgetRows.length){ secH('DỰ KIẾN CHI — CHƯA CÓ HỒ SƠ / COMMITTED, NOT YET DOCUMENTED'); budgetRows.forEach(x=>aoa.push(rowOf(x))); aoa.push(['','','','','','Tổng dự kiến (USD)',money(sumBudget)]); aoa.push([]); }
       aoa.push(['TỔNG KẾT / SUMMARY (USD)']);
       aoa.push(['Số dư đầu kỳ', money(openBal)]);
       aoa.push(['(+) Thu hộ', money(sumIn)]);
       aoa.push(['(−) Chi hộ thực', money(sumOut)]);
-      aoa.push(['(−) Dự kiến chi', money(sumBudget)]);
+      aoa.push(['(−) Phí quản lý', money(sumMgmt)]);
+      aoa.push(['(−) Dự kiến chi (chưa có hồ sơ)', money(sumBudget)]);
       aoa.push(['(−) Phí NH & khác', money(sumFee)]);
       aoa.push(['Số dư cuối kỳ / Balance c/f', money(closeBal)]);
-      // v3.65.58 (Sếp: "Ẩn dòng Phí quản lý trên báo cáo — báo cáo chủ tàu, không liên quan, bỏ cả
-      // bản Excel"): bỏ hẳn dòng này khỏi Excel gửi chủ tàu.
       ws=XLSX.utils.aoa_to_sheet(aoa);
       ws['!cols']=[{wch:12},{wch:34},{wch:20},{wch:12},{wch:14},{wch:6},{wch:14}];
     }
@@ -78356,8 +78356,8 @@ function generateOpReport(){
     openBal:'Balance brought forward',
     closeBal:'Balance carried forward',
     sumIn:'Total funds received / advances',
-    sumOut:'Total disbursements',
-    sumBudget:'Committed costs (not yet incurred)',
+    sumOut:'Total actual disbursements',
+    sumBudget:'Committed costs (not yet documented)',
     expenseBudget:'COMMITTED COSTS',
     budgetNote:'Committed costs for the period, advanced on the Owners’ account with the Owners’ agreement. Included in the commercial invoice and reconciled against the actual figures when incurred.',
     sumFee:'Bank & remittance charges',
@@ -78380,8 +78380,8 @@ function generateOpReport(){
     openBal:'Tồn đầu kỳ · Opening balance',
     closeBal:'Tồn cuối kỳ · Closing balance',
     sumIn:'Tổng thu hộ · Total collections',
-    sumOut:'Tổng chi hộ · Total disbursements',
-    sumBudget:'Dự kiến chi (chưa phát sinh) · Estimated costs (not yet incurred)',
+    sumOut:'Tổng chi hộ thực · Total actual disbursements',
+    sumBudget:'Dự kiến chi (chưa có hồ sơ) · Estimated costs (not yet documented)',
     expenseBudget:'BẢNG DỰ KIẾN CHI · ESTIMATED COSTS',
     budgetNote:'Khoản dự kiến chi trong kỳ — chủ tàu đồng ý ứng trước, đã tính vào Commercial Invoice; sẽ đối chiếu theo thực tế khi phát sinh · Committed costs for the period, advanced with the Owners’ agreement — included in the commercial invoice and reconciled against the actual figures when incurred.',
     sumFee:'Tổng phí · Total fees',
@@ -78403,8 +78403,8 @@ function generateOpReport(){
     paid:'Đã thanh toán', unpaid:'Chưa thanh toán',
     openBal:'Tồn đầu kỳ',
     closeBal:'Tồn cuối kỳ',
-    sumIn:'Tổng thu hộ', sumOut:'Tổng chi hộ', sumFee:'Tổng phí',
-    sumBudget:'Dự kiến chi (chưa phát sinh)',
+    sumIn:'Tổng thu hộ', sumOut:'Tổng chi hộ thực', sumFee:'Tổng phí',
+    sumBudget:'Dự kiến chi (chưa có hồ sơ)',
     expenseBudget:'BẢNG DỰ KIẾN CHI',
     budgetNote:'Khoản dự kiến chi trong kỳ — chủ tàu đồng ý ứng trước, đã tính vào Commercial Invoice; sẽ đối chiếu theo thực tế khi phát sinh.',
     mgmtFee:'Phí quản lý',
@@ -78455,150 +78455,22 @@ function generateOpReport(){
     const _sigCoSub = _lk ? (t.signDate+' '+_sigCoDate) : (t.signDate+' ...........');
     // v1.89.0: báo cáo backcharge — tổng hợp theo USD (đồng chuẩn QL vận hành)
     // Opening balance: sum of all tx before `from` for this vessel (USD)
-    // v3.01.62: GỘP cả AP gắn tàu QL (chi hộ ảo) để báo cáo khớp opBalance / số dư thật.
-    const _apV=_opApVirtualTx().filter(x=>x.vesselId===vid);
-    const all=VesselService.opTransactions().filter(x=>x.vesselId===vid).concat(_apV).sort((a,b)=>(a.date||'').localeCompare(b.date||''));
-    let openBal=0;
-    all.forEach(x=>{
-      /* v3.12.45: dùng NGÀY HIỆU LỰC (settleMonth thắng date) để số dư đầu kỳ không đếm
-         nhầm khoản đã chuyển sang kỳ quyết toán sau. */
-      const _d = (x && x.settleMonth)
-        ? ((String(x.date||'').slice(0,7)===String(x.settleMonth)) ? String(x.date||'') : (String(x.settleMonth)+'-15'))
-        : String(x&&x.date||'');
-      if(_d<from){
-        if(x.khoanRole==='chi') return;  // v3.03.52: thực chi khoán không trừ số dư chủ tàu
-        const usd=opReportUsd(x);
-        const delta=x.type==='IN'?usd:-usd;
-        openBal += delta - opTxFeesUsd(x);
-      }
-    });
-    // Filter period
-    // v3.01.77: số liệu kỳ = MỌI bút toán theo NGÀY trong kỳ, không phân biệt đã/chưa TT.
-    /* v3.12.45 (lệnh Sếp 22/7): KHOẢN QUYẾT TOÁN SAU KỲ KHÓA.
-       Khi quyết toán chi hộ dự kiến mà KỲ GỐC đã khóa (đã đối chiếu/ký với chủ tàu),
-       ta KHÔNG sửa số kỳ cũ. Khoản đó mang settleMonth = kỳ ghi nhận quyết toán →
-       phải tính vào kỳ ĐÓ, không phải kỳ gốc. Cùng nguyên tắc "phí phát sinh sau kỳ khóa" (v3.09.88).
-       _effPeriodDate(x): ngày hiệu lực để xếp kỳ — settleMonth (nếu có) thắng x.date. */
-    const _effPeriodDate=(x)=>{
-      if(x && x.settleMonth){
-        const m=String(x.settleMonth);
-        const d=String(x.date||'');
-        // giữ ngày trong tháng nếu cùng tháng-năm; ngược lại dùng ngày 15 cho ổn định
-        return (d.slice(0,7)===m) ? d : (m+'-15');
-      }
-      return x?(x.date||''):'';
-    };
-    const period=all.filter(x=>{ const d=_effPeriodDate(x); return d>=from && d<=to && x.reportToOwner!==false && !x.seahorseOwn; });  // v3.04.73: bỏ dòng chi hộ KHÔNG đưa vào báo cáo chủ tàu; v3.07.17: bỏ CP Seahorse tự chịu; v3.12.45: xếp kỳ theo settleMonth nếu có
-    const inRows=period.filter(x=>x.type==='IN');
-    // v3.03.52: KHOÁN — báo cáo CHỦ TÀU chỉ hiện SỐ ĐÒI (khoanRole='doi'); GIẤU dòng thực chi
-    //   (khoanRole='chi') và phần chênh (bí mật KD). Dòng 'chi' không trừ số dư chủ tàu (opBalance đã skip),
-    //   nên loại khỏi mọi bảng/tổng để báo cáo khớp số dư.
-    const _isKhoanChi=(x)=> x.khoanRole==='chi';
-    // v2.99.31: tách Chi hộ THỰC (đã/đang chi) vs DỰ KIẾN CHI (_isBudget — chưa phát sinh).
-    // v3.65.70 (Sếp: "không tách riêng phần chi lương thuyền viên như vậy, chỉ tách riêng phần phí
-    // ngân hàng - chi dự kiến (đã tách rồi). Mục đích: đối chiếu ngay với các dòng lớn trong báo cáo
-    // chủ tàu"): BỎ tách LƯƠNG THUYỀN VIÊN (trước v3.02.61) — gộp lại chung 1 bảng Chi hộ duy nhất.
-    const outAll=period.filter(x=>x.type==='OUT' && !x._isBudget && !_isKhoanChi(x));
-    const outRows=outAll;
-    // v3.65.60 (Sếp: "Lọc phí quản lý để xuống cuối bảng chi hộ, không cần tách riêng chỉ tập hợp
-    // xuống cuối"): KHÔNG tách thành mục riêng (khác Lương thuyền viên) — chỉ SẮP XẾP để các dòng
-    // "Cấn trừ phí quản lý" (t._mgmtFeeId) dồn xuống cuối bảng Chi hộ, vẫn nằm trong cùng 1 bảng.
-    // sort() ổn định (stable) — không xáo trộn thứ tự các dòng còn lại trong từng nhóm.
-    outRows.sort((a,b)=>(a._mgmtFeeId?1:0)-(b._mgmtFeeId?1:0));
-    const crewRows=[];   // v3.65.70: không còn tách mục riêng — mảng rỗng để phần render dưới tự bỏ qua.
-    const budgetRows=period.filter(x=>x.type==='OUT' && x._isBudget && !_isKhoanChi(x));
+    // v3.65.74 (Sếp: "số liệu tổng tại các bảng cho mảng quản lý hộ chủ tàu: cùng cách tính"): gọi
+    // ĐÚNG hàm tính chung _opPeriodTotals() — cùng 1 công thức PDF và Excel đều dùng, không tự viết
+    // lại ở đây nữa (loại bỏ khả năng 2 nơi lệch nhau về sau).
+    const PT=_opPeriodTotals(v, from, to);
+    const {all, period, inRows, outRows, mgmtRows, budgetRows, extraFeeRows,
+      sumIn, sumOut, sumMgmt, sumBudget, sumFee, sumCrew, openBal}=PT;
+    let closeBal=PT.closeBal;
+    const crewRows=[];   // v3.65.70: Lương thuyền viên vẫn gộp trong Chi hộ thực, không tách riêng.
     // v3.04.55/61: gom chứng từ (ảnh/PDF) của các khoản chi hộ trong kỳ → phụ lục
     //   gồm cả dòng dự kiến (_isBudget) để chứng từ không bị bỏ sót.
-    [...inRows, ...outRows, ...crewRows, ...budgetRows].forEach(x=>{
+    [...inRows, ...outRows, ...mgmtRows, ...crewRows, ...budgetRows].forEach(x=>{
       (Array.isArray(x.attachments)?x.attachments:[]).forEach(a=>{
         if(a && a.id) _annexItems.push({ vessel:v.name, date:x.date, vendor:x.vendor||'', invoiceNo:x.invoiceNo||'', desc:x.desc||'', amount:x.amount, ccy:x.ccy||'USD', fileId:a.id, fileName:a.name||'', mimeType:a.mimeType||'', url:a.url||'', docType:a.docType||'' });
       });
     });
-    let sumIn=0, sumOut=0, sumBudget=0, sumFee=0, sumCrew=0;
-    const extraFeeRows=[];  // v3.09.88: dòng phí phát sinh trong kỳ nhưng phiếu gốc thuộc kỳ KHÁC (đã khóa)
-    period.forEach(x=>{
-      if(_isKhoanChi(x)) return;  // v3.03.52: bỏ qua dòng thực chi của khoán (không lên báo cáo chủ tàu)
-      if(x.type==='IN') sumIn+=opReportUsd(x);
-      else if(x._isBudget) sumBudget+=opReportUsd(x);
-      else { const u=opReportUsd(x); sumOut+=u; if(_opIsCrewSalaryRow(x)) sumCrew+=u; }
-    });
-    // v3.09.88: PHÍ tính theo NGÀY PHÁT SINH PHÍ (paidDate/payment.date), KHÔNG theo ngày phiếu gốc.
-    //   Duyệt MỌI phiếu chi hộ của tàu (kể cả phiếu gốc ngoài kỳ). Phí có ngày trong [from,to] → tính kỳ này.
-    //   Nếu phiếu gốc THUỘC kỳ này → gộp sumFee như thường. Nếu phiếu gốc NGOÀI kỳ (đã khóa) → DÒNG RIÊNG.
-    all.forEach(x=>{
-      if(x.type!=='OUT' || x._isBudget || _isKhoanChi(x)) return;
-      if(x.reportToOwner===false || x.seahorseOwn) return;
-      const entries=(typeof opTxFeeEntries==='function')?opTxFeeEntries(x):[];
-      entries.forEach(fe=>{
-        const fd=fe.date||x.date||'';
-        if(!(fd>=from && fd<=to)) return;   // chỉ phí có NGÀY PHÍ trong kỳ báo cáo này
-        const srcInPeriod=(x.date>=from && x.date<=to);
-        if(srcInPeriod){
-          sumFee+=fe.feeUsd;   // phí cùng kỳ phiếu gốc → gộp như cũ
-        } else {
-          // phí phát sinh trong kỳ này, phiếu gốc thuộc kỳ khác (đã khóa) → dòng riêng + vẫn trừ số dư kỳ này
-          sumFee+=fe.feeUsd;
-          extraFeeRows.push({
-            date:fd,
-            feeUsd:fe.feeUsd,
-            desc:(fe.feeNote||'Phí giao dịch')+' ('+(fe.srcDesc||x.desc||'khoản chi hộ '+String(x.date||'').slice(0,7))+')',
-            srcMonth:String(x.date||'').slice(0,7)
-          });
-        }
-      });
-    });
-    // v3.65.70: không còn tách Lương thuyền viên khỏi Chi hộ — sumOutNormal = sumOut đầy đủ (giữ tên
-    // biến cũ để khỏi phải sửa chỗ dùng nó, chỉ đổi công thức).
-    const sumOutNormal=sumOut;
-    let closeBal=openBal+sumIn-sumOut-sumBudget-sumFee;
-
-    // v2.71.5: Dòng PHÍ QUẢN LÝ trong báo cáo tháng.
-    // - Nếu trong kỳ ĐÃ phát hành hóa đơn phí QL → ghi đủ (số HĐ + số tiền thật, gross).
-    // - Nếu CHƯA → lấy giá trị QUY ĐỊNH (phí/tháng × số tháng trong kỳ báo cáo) làm tham chiếu dự kiến.
-    // Dòng này là THÔNG TIN cho chủ tàu; KHÔNG cộng/trừ lại vào số dư (nếu đã cấn trừ thì
-    // khoản đó đã nằm trong "Tổng chi hộ" rồi — tránh trừ trùng).
-    // v3.06.00: ĐỒNG BỘ với form/tab 6 — phí QL theo TỪNG THÁNG (opMgmtFeeMonthly), "1 tháng 1 số".
-    //   Mỗi tháng trong kỳ báo cáo: đã lập→số NV chốt; chưa lập→số chuẩn. Khớp tuyệt đối với
-    //   bảng "Phí QL theo từng tháng" ở tab 6 và form Thu phí QL (hết tình trạng lệch date vs periodMonth).
-    const mfP=opMgmtFeeForPeriod(v, from, to);
-    const mfCcy=(mfP.ccy||v.ccy||'USD');
-    let mfUsd;
-    if(mfCcy==='USD') mfUsd = mfP.amount;
-    else if(mfCcy==='VND') mfUsd = (+S.fxRate||0)>0 ? mfP.amount/(+S.fxRate) : mfP.amount;
-    else { // ngoại tệ khác: quy "1 CCY = ? VND" qua tỷ giá bình quân (phí QL hiếm khi ≠ USD/VND)
-      const _avg=(typeof fxAvgSuggest==='function')?fxAvgSuggest(mfCcy):0;
-      mfUsd = (_avg>0 && typeof _opConvert==='function') ? (_opConvert(mfP.amount, mfCcy, _avg).usd||0) : mfP.amount;
-    }
-    let mgmtFeeInfo;
-    if(mfP.billedMonths>0 && mfP.pendingMonths===0){
-      // toàn bộ tháng trong kỳ đã lập
-      const invList=mfP.invoiceNos.join(', ');
-      mgmtFeeInfo={ has:true, amountUsd:mfUsd,
-        note:(invList?('HĐ: '+invList):'(đã phát hành)'), deducted:mfP.anyDeducted };
-    } else if(mfP.billedMonths>0){
-      // kỳ hỗn hợp: có tháng đã lập + có tháng chưa → coi là chưa hoàn tất phát hành (dự kiến),
-      // số tiền vẫn là tổng theo từng tháng (đã lập dùng số NV, chưa lập dùng chuẩn).
-      const invList=mfP.invoiceNos.join(', ');
-      mgmtFeeInfo={ has:false, amountUsd:mfUsd,
-        note:(lang==='bi'?'Một phần đã xuất HĐ · Partially invoiced':'Một phần đã xuất HĐ')+(invList?(' (HĐ: '+invList+')'):''), deducted:false };
-    } else {
-      // chưa lập tháng nào trong kỳ → toàn bộ dùng số chuẩn theo tháng
-      mgmtFeeInfo={ has:false, amountUsd:mfUsd,
-        note:lang==='bi'?'Dự kiến — chưa xuất hóa đơn · Estimated — not yet invoiced':'Dự kiến — chưa xuất hóa đơn', deducted:false };
-    }
-    // v3.02.72 / v3.06.00: TRỪ PHÍ QL vào số dư cuối kỳ (nguyên tắc: phí quản lý phải trừ).
-    //   - Tháng ĐÃ lập (billed): đã có bút toán giảm quỹ trong opTx/AP → KHÔNG trừ lại (tránh trùng).
-    //   - Tháng CHƯA lập (pending): trừ THÊM phần dự kiến vào closeBal để khớp số dư app (opBalance).
-    //   Kỳ hỗn hợp chỉ trừ ĐÚNG phần pending (số chuẩn × số tháng chưa lập), không trừ phần đã lập.
-    // v3.65.56 (Sếp: "Tất cả phí quản lý đều ghi vào chi hộ. Bỏ dòng phí quản lý chưa xuất hoá đơn —
-    // đây chỉ note cho kế toán biết việc cần làm - phí đã được ghi rồi"): SAI GIẢ ĐỊNH ở trên — tháng
-    // CHƯA lập hóa đơn KHÔNG có nghĩa là tiền chưa trừ; toàn bộ phí QL (mọi tháng) ĐÃ được ghi thành
-    // bút toán Chi hộ "Cấn trừ phí quản lý" ngay khi phát sinh, không chờ xuất HĐ mới trừ quỹ. "Chưa
-    // xuất HĐ" chỉ là việc hành chính còn thiếu (nhắc kế toán hoàn tất thủ tục hóa đơn), không phải
-    // khoản tiền còn nợ. BỎ HẲN việc trừ thêm mgmtFeeDeducted vào closeBal — tránh trừ đúp (khoản đó
-    // đã nằm trong sumOut qua bút toán Chi hộ rồi). Dòng "Phí quản lý" bên dưới giữ lại CHỈ để tham
-    // khảo/nhắc việc kế toán, không còn ảnh hưởng Số dư cuối kỳ.
-    let mgmtFeeDeducted=0;
+    const sumOutNormal=sumOut;   // v3.65.70: giữ tên biến cũ để khỏi sửa chỗ dùng nó (Chi hộ thực, không gồm phí QL nữa)
 
     const tableRowsIN=(rows)=>{
       if(!rows.length) return `<tr><td colspan="5" style="text-align:center;font-style:normal;color:#888">— Không có giao dịch —</td></tr>`;
@@ -78675,11 +78547,13 @@ function generateOpReport(){
           <tr><td class="lbl" style="padding:8pt 12pt">${t.openBal}</td><td class="r" style="padding:8pt 12pt;font-size:13pt">${fmtMoney(openBal,'USD')}</td></tr>
           <tr style="background:rgba(45,106,106,.04)"><td class="lbl" style="padding:8pt 12pt"><b>(+) ${t.sumIn}</b><br><span style="font-size:9pt;color:#666">${inRows.length} ${en?"entries":"bút toán"}</span></td><td class="r" style="padding:8pt 12pt;font-size:13pt;color:#2d6a6a"><b>${fmtMoney(sumIn,'USD')}</b></td></tr>
           <tr style="background:rgba(var(--accent-rgb,65,65,65),.04)"><td class="lbl" style="padding:8pt 12pt"><b>(−) ${t.sumOut}</b><br><span style="font-size:9pt;color:#666">${outRows.length} ${en?"entries":"bút toán"}</span></td><td class="r" style="padding:8pt 12pt;font-size:13pt;color:#a8362b"><b>${fmtMoney(sumOut,'USD')}</b></td></tr>
+          ${mgmtRows.length?`<tr style="background:rgba(196,138,57,.04)"><td class="lbl" style="padding:8pt 12pt"><b>(−) ${t.mgmtFee}</b><br><span style="font-size:9pt;color:#666">${mgmtRows.length} ${en?'item(s)':'khoản'}</span></td><td class="r" style="padding:8pt 12pt;font-size:12pt;color:#a8362b"><b>${fmtMoney(sumMgmt,'USD')}</b></td></tr>`:''}
           ${budgetRows.length?`<tr style="background:rgba(196,138,57,.05)"><td class="lbl" style="padding:8pt 12pt"><b>(−) ${t.sumBudget}</b><br><span style="font-size:9pt;color:#666">${budgetRows.length} ${en?'item(s)':'khoản'} · ${en?'advanced by Owners’ agreement — included in invoice, reconciled on actual':enOrBi?'chủ tàu đồng ý ứng trước · đã vào invoice, đối chiếu theo thực tế':'chủ tàu đồng ý ứng trước · đã tính vào invoice, đối chiếu theo thực tế'}</span></td><td class="r" style="padding:8pt 12pt;font-size:12pt;color:#8a5a1e"><span style="font-size:9pt;font-style:normal">~ </span>${fmtMoney(sumBudget,'USD')}</td></tr>`:''}
           <tr><td class="lbl" style="padding:8pt 12pt">(−) ${t.sumFee}<br><span style="font-size:9pt;color:#666">${en?"Bank &amp; other fees":"Phí NH + phí khác"}</span></td><td class="r" style="padding:8pt 12pt">${fmtMoney(sumFee,'USD')}</td></tr>
-          <!-- v3.65.58 (Sếp: "Ẩn dòng Phí quản lý trên báo cáo: đây là báo cáo chủ tàu: không liên
-               quan, bỏ cả trên bản excel xuất kèm") — bỏ hẳn dòng "Phí quản lý" khỏi báo cáo chủ tàu,
-               đã ghi trong Chi hộ ở trên rồi, không cần nhắc lại ở đây. -->
+          <!-- v3.65.73 (Sếp: "Làm ngược lại: ... tách: tổng chi thực + Phí quản lý + Phí ngân hàng +
+               Dự kiến (Chưa có hồ sơ). Thống nhất trên tất cả các bảng tính/bảng in excel/pdf/
+               Commercial Inv."): ĐẢO NGƯỢC v3.65.58 (từng ẩn dòng Phí quản lý) — hiện lại dòng này,
+               giờ TRỪ THẬT vào Tồn cuối kỳ (không còn là dòng tham khảo/không ảnh hưởng như trước). -->
           <tr class="grand" style="background:rgba(28,58,92,.08);border-top:2pt solid #1c3a5c"><td class="lbl" style="padding:12pt;font-size:14pt"><b>${t.closeBal}</b></td><td class="r" style="padding:12pt;font-size:16pt;color:${closeBal<0?'#a8362b':'#2d6a6a'}"><b>${fmtMoney(closeBal,'USD')}</b></td></tr>
         </table>
       </div>
@@ -78784,6 +78658,32 @@ function generateOpReport(){
         </tbody>
       </table>
       `:''}
+      ${mgmtRows.length?`
+      <!-- v3.65.73 (Sếp: "tách: tổng chi thực + Phí quản lý + Phí ngân hàng + Dự kiến (Chưa có hồ
+           sơ). Thống nhất trên tất cả các bảng tính/bảng in excel/pdf/Commercial Inv."): mục CHI TIẾT
+           riêng cho Phí quản lý ở Trang 2 — khớp với mục riêng đã tách ở Excel/Trang 1/Commercial Inv. -->
+      <div class="pr-section-title" style="color:#8a5a1e">${t.mgmtFee}</div>
+      <table>
+        <thead><tr>
+          <th style="width:9%">${t.date}</th>
+          <th style="width:24%">${esc(t.desc)}</th>
+          <th style="width:17%">${en?'Vendor':bi?'NCC · Vendor':'Tên NCC'}</th>
+          <th style="width:11%">${en?'Contract':bi?'HĐ · Contract':'Số HĐ'}</th>
+          <th style="width:11%">${en?'Invoice':bi?'HD · Invoice':'Số HD'}</th>
+          <th class="c" style="width:8%">${enOrBi?'CCY':'Tiền tệ'}</th>
+          <th class="r" style="width:13%">${enOrBi?'Original':'Số tiền gốc'}</th>
+          <th class="r" style="width:10%">${en?'Fee':bi?'Phí · Fee':'Phí'}</th>
+          <th class="r" style="width:13%">USD</th>
+        </tr></thead>
+        <tbody>
+          ${tableRowsOUT(mgmtRows)}
+          <tr class="total" style="background:rgba(196,138,57,.08)">
+            <td colspan="8">${t.total} ${t.mgmtFee.split('·')[0].trim()} <span style="font-weight:400;color:#888;font-size:8pt">(USD)</span></td>
+            <td class="r" style="color:#8a5a1e">${fmtMoney(sumMgmt,'USD')}</td>
+          </tr>
+        </tbody>
+      </table>
+      `:''}
       ${budgetRows.length?`
       <div class="pr-section-title" style="color:#8a5a1e">${t.expenseBudget}</div>
       <table>
@@ -78825,8 +78725,14 @@ function generateOpReport(){
 
     // PAGE 3: COMMERCIAL INVOICE (English only) — v3.01.69
     // Mục đích: gửi kèm chủ tàu xác nhận; nội dung = Total disbursements + Management fee.
-    const invDisb = sumOut + sumFee;                 // tổng chi hộ THỰC trong kỳ (USD) + phí giao dịch
-    const invMgmt = mgmtFeeInfo.amountUsd || 0;      // phí quản lý (USD)
+    // v3.65.73 (Sếp: "Làm ngược lại: ... tách: tổng chi thực + Phí quản lý + Phí ngân hàng + Dự kiến
+    // (Chưa có hồ sơ). Thống nhất trên tất cả các bảng tính/bảng in excel/pdf/Commercial Inv."): ĐẢO
+    // NGƯỢC v3.65.72 — invDisb giờ KHÔNG còn gồm phí QL (sumOut đã tách phí QL ra riêng từ nguồn),
+    // nên đưa lại dòng "Vessel management fee" làm dòng RIÊNG dùng invMgmt = sumMgmt (số THẬT đã ghi
+    // Chi hộ trong kỳ, không phải số tham khảo cả kỳ như bản trước v3.65.72 nữa) — không còn tính
+    // trùng vì invDisb + invMgmt cộng đúng 1 lần duy nhất.
+    const invDisb = sumOut + sumFee;                 // tổng chi hộ THỰC trong kỳ (USD, không gồm phí QL) + phí giao dịch
+    const invMgmt = sumMgmt;                         // phí quản lý THẬT đã ghi Chi hộ trong kỳ (USD)
     const invBudget = sumBudget;                     // v3.07.12: chi DỰ KIẾN — chủ tàu đồng ý ứng trước → tính vào invoice (dòng riêng)
     const invTotal = invDisb + invMgmt + invBudget;
     const invNo = 'CI-' + (v.name||'VESSEL').replace(/[^A-Za-z0-9]/g,'').toUpperCase().slice(0,8) + '-' + (to||'').replace(/-/g,'');
@@ -78872,13 +78778,13 @@ function generateOpReport(){
             <td style="padding:9pt 10pt">Reimbursement of disbursements incurred on the Owners’ account during the statement period<div style="font-size:8.5pt;color:#888;margin-top:2pt">Stores, services, port and crew-related expenses — itemised in the attached statement of account.</div></td>
             <td style="padding:9pt 10pt;text-align:right;font-weight:600">${usd(invDisb)}</td>
           </tr>
-          <tr style="border-bottom:1pt solid #ddd">
+          ${invMgmt>0?`<tr style="border-bottom:1pt solid #ddd">
             <td style="padding:9pt 10pt;vertical-align:top">2</td>
-            <td style="padding:9pt 10pt">Vessel management fee for the period<div style="font-size:8.5pt;color:#888;margin-top:2pt">${mgmtFeeInfo.has?'As per management agreement (invoiced)':'As per management agreement'}</div></td>
+            <td style="padding:9pt 10pt">Vessel management fee for the period<div style="font-size:8.5pt;color:#888;margin-top:2pt">As per management agreement — recorded as disbursements for the period.</div></td>
             <td style="padding:9pt 10pt;text-align:right;font-weight:600">${usd(invMgmt)}</td>
-          </tr>
+          </tr>`:''}
           ${invBudget>0?`<tr style="border-bottom:1pt solid #ddd;background:rgba(196,138,57,.05)">
-            <td style="padding:9pt 10pt;vertical-align:top">3</td>
+            <td style="padding:9pt 10pt;vertical-align:top">${invMgmt>0?3:2}</td>
             <td style="padding:9pt 10pt">Estimated / committed costs for the period, advanced on the Owners’ account<div style="font-size:8.5pt;color:#888;margin-top:2pt">Costs committed for the period and advanced by the Managers with the Owners’ agreement — reconciled against actual figures when incurred.</div></td>
             <td style="padding:9pt 10pt;text-align:right;font-weight:600">${usd(invBudget)}</td>
           </tr>`:''}
@@ -97595,6 +97501,11 @@ function saveUserRow(idx, btnEl){
   const u=cfg.users[idx];
   const roleSel=tr.querySelector('[data-role-sel]');
   const coSel=tr.querySelector('[data-co-sel]');
+  const fgDetails=tr.querySelector('details');
+  // v3.65.76 (Sếp: "đã phân quyền rồi lại bị mất trắng"): CHỈ ghi đè funcGroups nếu admin đã từng MỞ
+  // khối Module ra xem/sửa (dataset.opened, gắn qua ontoggle ở fgCell) — chưa mở thì giữ nguyên
+  // funcGroups cũ, tránh Lưu nhầm (đổi Vai trò/Công ty) làm mất trắng Module đã gán trước đó.
+  const fgOpened = !!(fgDetails && fgDetails.dataset && fgDetails.dataset.opened==='1');
   const fgVals=Array.from(tr.querySelectorAll('[data-fg]')).filter(b=>b.checked).map(b=>b.value);
   const role=roleSel?roleSel.value:(u.roleTier||'');
   u.roleTier=role;
@@ -97604,12 +97515,12 @@ function saveUserRow(idx, btnEl){
   if(role==='ceo') u.isCEO=true;
   // v3.65.38: "11. Thủ kho theo module" — bundling giống CEO/Trưởng bộ phận, KHÔNG cần form tick riêng.
   u.isDeptWarehouse=(role==='thu_kho_module');
-  u.funcGroups=fgVals;
+  if(fgOpened) u.funcGroups=fgVals;   // v3.65.76: chưa mở khối Module → giữ nguyên u.funcGroups cũ
   u.companyId=coSel?coSel.value:(u.companyId||'');
   setAuthConfig(cfg);
   // cập nhật tại chỗ tên Module hiện trên ô (không gọi renderStaff() — sẽ đóng mọi <details> đang mở)
   const det=tr.querySelector('details'); const sum=det&&det.querySelector('summary');
-  if(sum) sum.textContent=_fgLabel(fgVals)+' ▾';
+  if(sum) sum.textContent=_fgLabel(Array.isArray(u.funcGroups)?u.funcGroups:[])+' ▾';
   // v3.64.40: "Quản lý công ty con" chỉ thật sự bị giới hạn 1 công ty nếu có companyId HOẶC đã tick
   // đúng 1 công ty con làm Module (xem getActorCompanyId()) — thiếu cả 2 thì canCheckAcc/canApproveL1
   // áp dụng cho TOÀN CÔNG TY, rộng hơn ý định.
@@ -97789,8 +97700,13 @@ function renderStaff(){
     // v3.64.43 (Sếp: "1 nút Lưu ở dòng, không phải từng ô; Module hiện tên thay vì đếm"): 3 ô Vai
     // trò/Module/Công ty giờ chỉ SỬA TRÊN MÀN HÌNH (data-role-sel/data-fg/data-co-sel, không onchange
     // riêng) — ghi thật vào cfg khi bấm nút Lưu ở cuối dòng (saveUserRow đọc cả 3 trong cùng <tr>).
+    // v3.65.76 (Sếp: "vấn đề: đã phân quyền rồi lại bị mất trắng" — TÌM RA: saveUserRow() LUÔN ghi
+    // đè funcGroups bằng đúng các ô tích đang hiện, kể cả khi admin CHƯA HỀ mở khối Module ra xem —
+    // ô này nằm trong <details> đóng sẵn, dễ bị "Lưu nhầm" khi admin chỉ định đổi Vai trò/Công ty,
+    // âm thầm xóa mất Module đã gán trước đó không cảnh báo. Đánh dấu "đã mở" qua ontoggle — saveUserRow
+    // đọc cờ này, CHƯA mở thì giữ nguyên funcGroups cũ, không ghi đè.
     const fgCell = !isAdmin() ? esc(_fgLabel(curFg))
-      : `<details style="font-size:11px"><summary style="cursor:pointer;color:var(--muted);list-style:none">${esc(_fgLabel(curFg))} ▾</summary>
+      : `<details style="font-size:11px" ontoggle="this.dataset.opened='1'"><summary style="cursor:pointer;color:var(--muted);list-style:none">${esc(_fgLabel(curFg))} ▾</summary>
           <div style="display:flex;flex-direction:column;gap:2px;padding:6px 0 2px;max-height:160px;overflow-y:auto">
             ${FG_QUICK_PICK.map(f=>`<label style="display:flex;align-items:center;gap:5px;white-space:nowrap;cursor:pointer"><input type="checkbox" data-fg value="${f.k}" ${curFg.includes(f.k)?'checked':''}>${esc(f.label)}</label>`).join('')}
           </div></details>`;
