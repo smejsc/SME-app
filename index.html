@@ -3254,7 +3254,10 @@ span.chip.chip-fixed{display:inline-flex;align-items:center;gap:4px}
   <div class="section collapsible collapsed" id="op-vessel-status-section">
     <div class="section-head" style="display:flex;justify-content:space-between;align-items:center">
       <div class="section-title"><span class="tag">∑</span>Trạng thái số dư <span id="op-netbal-hdr" style="font-family:var(--font-mono);font-weight:700;font-size:13px;margin-left:10px"></span></div>
-      <button class="btn-sec" onclick="internalSummaryReport()" title="Báo cáo PDF tóm tắt nội bộ — tổng hợp các tàu QL hộ" style="font-size:13px">📑 Báo cáo tóm tắt (PDF)</button>
+      <div style="display:flex;gap:8px;align-items:center">
+        <button class="btn-sec" onclick="openOrphanMgmtFeeScan()" title="Rà soát TOÀN BỘ tàu — tìm bút toán Chi hộ gắn cờ phí QL nhưng thiếu hồ sơ Kỳ phí QL đi kèm" style="font-size:13px">⚠ Rà bút toán mồ côi</button>
+        <button class="btn-sec" onclick="internalSummaryReport()" title="Báo cáo PDF tóm tắt nội bộ — tổng hợp các tàu QL hộ" style="font-size:13px">📑 Báo cáo tóm tắt (PDF)</button>
+      </div>
     </div>
     <div class="section-body"><table class="tbl" id="op-vessel-table"></table></div>
   </div>
@@ -4658,7 +4661,7 @@ const WH_TYPES = {
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.65.87';
+const APP_VERSION='3.65.92';
 /* HOTFIX 3.12.17-email: CHẶN TRIỆT ĐỂ gửi email TỰ ĐỘNG (mất kiểm soát — spam quota Google).
    Email phải do NV được phân quyền CHỦ ĐỘNG chọn gửi. Cờ này:
    (1) chặn auto-SCAN tạo email (hrmScanExpiries/vesselCertScanExpiries);
@@ -47873,6 +47876,14 @@ function vmModSwitchView(v){
 }
 // v3.63.31: cờ isVesselManager gắn ở TÀI KHOẢN đăng nhập (S.authConfig hoặc getAuthConfig().users),
 // không phải hồ sơ HR trực tiếp — map qua linkUserId để ra đúng hồ sơ NV tương ứng, không suy diễn.
+// v3.65.91 (Sếp: "các module đều có danh sách phòng ban trực thuộc"): dòng hiển thị CHUNG — liệt kê
+// đúng tên các Phòng/ban đang gắn 1 Module dashboard cụ thể (qua Danh mục Phòng ban), để xem ngay
+// trong module, khỏi phải mở riêng màn Phòng ban mới biết đang lấy NV từ đâu.
+function _deptListForModuleHtml(moduleKey){
+  const depts=(HRService.departments()||[]).filter(d=>d&&d.dashboardModule===moduleKey);
+  if(!depts.length) return `<span style="color:var(--warn)">⚠ chưa gắn phòng/ban nào</span>`;
+  return depts.map(d=>esc(d.name||d.code)).join(', ');
+}
 function renderVmStaff(){
   const box=document.getElementById('vm-staff-body'); if(!box) return;
   // v3.65.10: NV không đủ quyền chỉ thấy đích danh chính mình.
@@ -47880,25 +47891,28 @@ function renderVmStaff(){
     box.innerHTML=`<div style="font-family:var(--font-display);font-size:16px;font-weight:700;margin-bottom:14px">👤 Thông tin của tôi</div>`+_modMyStaffHtml();
     return;
   }
-  // v3.64.80 (Sếp: "Cờ này không sử dụng cho NV nào, có thể gỡ"): đổi nguồn lọc từ cờ isVesselManager
-  // cũ sang đúng Module "Quản lý tàu" (funcGroups chứa 'TAU') — khớp chuẩn isVesselManager() đã đổi.
-  const vmUsers=((getAuthConfig()||{}).users||[]).filter(u=>u&&Array.isArray(u.funcGroups)&&u.funcGroups.includes('TAU'));
-  // v3.64.79 (Sếp — ảnh: "MSNV SME0017 là của NV YEN nhưng hiện tên Cao Quang Tuấn"): TÌM RA BUG THẬT
-  // — điều kiện `e.linkUserId===u.id` LUÔN đúng một cách SAI với MỌI NV chưa được gán linkUserId
-  // (tài khoản không có field `id`, u.id luôn undefined → so undefined===undefined khớp NHẦM với
-  // BẤT KỲ hồ sơ NV nào có linkUserId trống, không phải đúng người đang lặp) — .find() dừng ở hồ sơ
-  // TRỐNG linkUserId ĐẦU TIÊN trong mảng (Cao Quang Tuấn), gán nhầm cho MỌI Vessel Manager khác dù
-  // họ có hồ sơ NV liên kết đúng thật (Yến, MSNV SME0017). Đúng lỗi đã vá ở nơi khác từ v3.10.21
-  // ("users KHÔNG có field id — định danh bằng name") nhưng hàm này bị sót. Bỏ hẳn vế `e.linkUserId===u.id`.
-  const emps=vmUsers.map(u=>(HRService.employees()||[]).find(e=>e&&!e._deleted&&!e.deleted&&e.linkUserId&&e.linkUserId===u.name)).filter(Boolean)
-    .sort((a,b)=>String(a.fullName||'').localeCompare(String(b.fullName||''),'vi'));
+  // v3.65.92 (Sếp: "gắn nhân viên thuộc phòng QLT (theo hồ sơ nhân viên) vào module chức năng: Quản lý
+  // tàu"): thêm mặc định (fallback) "QLT" — đúng khuôn KT_DEPTS của Kỹ thuật (['BDA','DRILL','LABTECH']
+  // khi chưa ai gán qua Danh mục Phòng ban) — để NV phòng QLT hiện NGAY, không phải chờ anh vào Danh
+  // mục Phòng ban gán tay Module cho phòng đó trước. Nếu sau này anh gán qua UI, danh sách đã gán qua
+  // UI (_vmAssigned) LUÔN ưu tiên hơn, fallback chỉ dùng khi UI CHƯA có ai được gán.
+  const _vmAssignedRaw=(HRService.departments()||[]).filter(d=>d&&d.dashboardModule==='TAU').map(d=>d.code);
+  const _vmAssigned=_vmAssignedRaw.length?_vmAssignedRaw:['QLT'];
+  let emps, _noDeptAssigned=false;
+  if(_vmAssigned.length){
+    emps=(HRService.employees()||[]).filter(e=>e&&!e._deleted&&!e.deleted
+      && _vmAssigned.includes(typeof hrDeptCanon==='function'?hrDeptCanon(e.dept):e.dept))
+      .sort((a,b)=>String(a.fullName||'').localeCompare(String(b.fullName||''),'vi'));
+  } else {
+    emps=[]; _noDeptAssigned=true;
+  }
   box.innerHTML=`
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
       <div style="font-family:var(--font-display);font-size:16px;font-weight:700">👤 Nhân viên Quản lý tàu</div>
       <div style="font-size:10px;color:var(--muted)">${emps.length} người</div>
     </div>
-    ${_modStaffTable(emps)}
-    <div style="margin-top:8px;font-size:10.5px;color:var(--muted)">Danh sách theo tài khoản có Module "Quản lý tàu" — không phải theo phòng ban HR.</div>`;
+    ${_noDeptAssigned?`<div style="padding:14px;text-align:center;color:var(--warn);font-size:12.5px">⚠ Chưa có Phòng/ban nào được gắn Module "Quản lý tàu" — vào <b>Danh mục Phòng ban</b>, chọn đúng phòng phụ trách tàu, gắn Module "Quản lý tàu" để NV thuộc phòng đó hiện ở đây.</div>`:_modStaffTable(emps)}
+    <div style="margin-top:8px;font-size:10.5px;color:var(--muted)">Phòng/ban trực thuộc module này: ${_vmAssignedRaw.length?_deptListForModuleHtml('TAU'):'QLT (mặc định — chưa gán qua Danh mục Phòng ban)'}.</div>`;
 }
 // v3.63.33: Timesheet Quản lý tàu — không ép 1 tàu cụ thể (module quản lý NHIỀU tàu), liệt kê MỌI
 // phiếu BCC phạm vi 'vessel' (Thuyền viên) — nút Tạo mở modal picker thường (không ép sẵn), để chọn
@@ -73092,6 +73106,7 @@ function openMgmtFeeFromOpTab(){
 }
 /* v3.06.00: XEM CHI TIẾT PHÍ QL (chỉ xem, không lập) — mở từ tab 6 */
 function openMgmtFeeDetail(vid){
+  window._orphanScanOpen=false;   // v3.65.88: mở đúng theo tàu (không phải rà toàn công ty) — reset cờ
   const v=VesselService.opVessels().find(x=>x.id===vid); if(!v){ toast('Không tìm thấy tàu','bad'); return; }
   const m=opMgmtFeeMonthly(v);
   const ccy=v.ccy||'VND';
@@ -73161,8 +73176,44 @@ function deleteOrphanMgmtFeeTx(txId, vid){
       try{ logAuditEvent('mgmt_fee_orphan_delete',{txId, arId:ar?ar.id:null, vesselId:vid}); }catch(e){}
       toast('Đã xóa bút toán mồ côi','good');
       renderAll();
-      try{ openMgmtFeeDetail(vid); }catch(e){}
+      // v3.65.88 (Sếp: "còn 1 số bút toán mồ côi như vậy"): mở lại đúng màn đang đứng — màn rà soát
+      // TOÀN CÔNG TY (openOrphanMgmtFeeScan) hoặc màn chi tiết 1 tàu (openMgmtFeeDetail), tùy đang gọi
+      // xóa từ đâu, không đoán cố định 1 nơi như trước.
+      if(window._orphanScanOpen){ try{ openOrphanMgmtFeeScan(); }catch(e){} }
+      else { try{ openMgmtFeeDetail(vid); }catch(e){} }
     });
+}
+// v3.65.88 (Sếp: "còn 1 số bút toán mồ côi như vậy" — sau khi dọn xong AFALINA, nghi còn tàu khác):
+// RÀ TOÀN CÔNG TY 1 lần — quét mọi tàu QL hộ, gom hết bút toán Chi hộ gắn cờ _mgmtFeeId nhưng KHÔNG
+// khớp bất kỳ bản ghi opMgmtFees nào (đúng lỗi mồ côi đã tìm ra ở AFALINA), không phải mở từng tàu
+// một để dò tay.
+function _findAllOrphanMgmtFeeTx(){
+  const issuedIds=new Set((VesselService.opMgmtFees()||[]).map(f=>f.id));
+  return (VesselService.opTransactions()||[]).filter(t=>t && !t._deleted && t._mgmtFeeId && !issuedIds.has(t._mgmtFeeId));
+}
+function openOrphanMgmtFeeScan(){
+  window._orphanScanOpen=true;
+  const orphans=_findAllOrphanMgmtFeeTx();
+  const vById={}; VesselService.opVessels().forEach(v=>vById[v.id]=v);
+  const total=orphans.reduce((s,t)=>s+opTxUsd(t),0);
+  const rows=orphans.sort((a,b)=>String(a.date||'').localeCompare(String(b.date||'')))
+    .map(t=>`<tr>
+      <td style="font-size:11px">${esc((vById[t.vesselId]&&vById[t.vesselId].name)||t.vesselId||'—')}</td>
+      <td class="mono" style="font-size:11px">${esc(t.date||'')}</td>
+      <td>${esc(t.desc||'')}</td>
+      <td class="r num">${fmtCcy(opTxUsd(t),'USD')}</td>
+      <td style="font-size:11px;color:var(--muted)">${esc(t.createdBy||'')}</td>
+      <td>${(isAdmin()||canApproveL2())?`<button class="icon-btn danger" title="Xóa bút toán mồ côi này" onclick="deleteOrphanMgmtFeeTx('${t.id}','${t.vesselId}')">✕</button>`:'<span style="font-size:10px;color:var(--muted)">Chỉ Admin/KTT</span>'}</td>
+    </tr>`).join('');
+  const body = orphans.length
+    ? `<div style="font-size:11px;color:var(--muted);margin-bottom:10px">Quét toàn bộ tàu QL hộ — tìm bút toán Chi hộ gắn cờ phí QL (<code>_mgmtFeeId</code>) nhưng KHÔNG có bản ghi "Kỳ phí QL" tương ứng (thường do lỗi giữa chừng lúc lập phí QL — xem giải thích đã trao đổi). Rà từng dòng: sai/trùng → xóa; đúng thật → báo lại để bổ sung hồ sơ thay vì xóa.</div>
+      <div style="font-size:13px;font-weight:700;margin-bottom:8px">Tổng ${orphans.length} bút toán · ${fmtCcy(total,'USD')}</div>
+      <div class="tbl-scroll"><table class="tbl" style="font-size:13px">
+        <thead><tr><th>Tàu</th><th>Ngày</th><th>Diễn giải</th><th class="r">Số tiền (USD)</th><th>Người tạo</th><th></th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table></div>`
+    : `<div class="empty" style="padding:20px;text-align:center;color:var(--good)">✓ Không còn bút toán mồ côi nào — sạch toàn bộ công ty.</div>`;
+  openModal('⚠ Rà soát bút toán phí QL mồ côi — toàn công ty', body, `<button class="btn-sec" onclick="window._orphanScanOpen=false;closeModal()">Đóng</button>`);
 }
 /* v3.06.00: Sửa KỲ THÁNG (periodMonth) của 1 bản ghi phí QL — dùng khi một phiếu thuộc
    về tháng khác với ngày phát hành (vd T4 phát sinh thêm việc, lập gộp/lập trễ).
@@ -76998,6 +77049,11 @@ function opExportExcel(){
   };
   const _apVirtual=_opApVirtualTx().filter(t=>allowedIds.includes(t.vesselId));
   const opAll=VesselService.opTransactions().filter(t=>allowedIds.includes(t.vesselId) && !t._deleted).concat(_apVirtual);
+  // v3.65.89 (Sếp: "Phí quản lý trong báo cáo cần lấy từ nguồn chuẩn — nguồn tạo phí quản lý — xóa/
+  // sửa phải tự cập nhật"): đồng bộ với _opPeriodTotals() — chỉ coi là "Phí quản lý" khi cờ
+  // `_mgmtFeeId` khớp đúng 1 bản ghi CÒN THẬT trong opMgmtFees (nguồn chuẩn), không dựa mỗi cờ trên
+  // bút toán thô (dễ "mồ côi" khi tạo phí QL bị lỗi giữa chừng).
+  const _mgmtFeeIdsCanonical=new Set((VesselService.opMgmtFees()||[]).map(f=>f.id));
   // v3.65.49 (Sếp: "tách chi hộ ra theo các loại tiền gốc: mỗi loại 1 cột"): 2 bước — (1) gom ENTRY
   // thô trước (chưa dựng thành dòng Excel), để biết hết các loại tiền Chi hộ đang dùng trong đợt xuất
   // này; (2) mới dựng cột "Chi <tiền>" ĐỘNG theo đúng số loại tiền thực tế có — không cố định số cột,
@@ -77032,7 +77088,7 @@ function opExportExcel(){
     // lý" riêng khỏi "Chi hộ" cho các bút toán "Cấn trừ phí quản lý" (t._mgmtFeeId) — lọc/tổng riêng
     // được ngay qua cột Nguồn + AutoFilter có sẵn, không cần dựng lại toàn bộ kiến trúc bảng động.
     const e={
-      src: isIn?'Thu hộ':(t._isBudget?'Dự kiến chi':(t._mgmtFeeId?'Phí quản lý':'Chi hộ')),
+      src: isIn?'Thu hộ':(t._isBudget?'Dự kiến chi':((t._mgmtFeeId && _mgmtFeeIdsCanonical.has(t._mgmtFeeId))?'Phí quản lý':'Chi hộ')),
       date: t.date||'', vendor: t.vendor||'', desc: t.desc||'', inv: (t.invoiceNo||t.contractNo||''),
       isIn, thu: gross, ccy: t.ccy||'', fee: feeRaw, usd: usdTotal,
       creator: t.createdBy||'', dept, made: madeDate, stt: opStt(t),
@@ -78225,8 +78281,18 @@ function _opPeriodTotals(v, from, to){
   const period=all.filter(x=>{ const d=_effPeriodDate(x); return d>=from && d<=to && x.reportToOwner!==false && !x.seahorseOwn; });
   const inRows=period.filter(x=>x.type==='IN');
   const outAll=period.filter(x=>x.type==='OUT' && !x._isBudget && !_isKhoanChi(x));
-  const outRows=outAll.filter(x=>!x._mgmtFeeId);
-  const mgmtRows=outAll.filter(x=>!!x._mgmtFeeId);
+  // v3.65.89 (Sếp: "Phần phí quản lý trong báo cáo chủ tàu: cần phải lấy từ nguồn chuẩn — là nguồn
+  // tạo phí quản lý — để khi xóa hoặc điều chỉnh phải được cập nhật trong báo cáo/các file excel"):
+  // ĐẢO NGƯỢC nguồn xác định "đây là Phí quản lý" — trước đây chỉ cần bút toán Chi hộ có cờ
+  // `_mgmtFeeId` là đủ (kể cả bút toán "mồ côi", không còn bản ghi thật đi kèm — đúng lỗi vụ
+  // Predelivery). Giờ CHỈ tính là "Phí quản lý" nếu cờ đó khớp ĐÚNG 1 bản ghi CÒN THẬT trong
+  // VesselService.opMgmtFees() (nguồn chuẩn — đúng nguồn issueMgmtFee()/deleteMgmtFee() thao tác) —
+  // xóa/sửa ở đúng nguồn đó sẽ tự động phản ánh đúng vào báo cáo ngay lần xuất sau, không cần sửa gì
+  // thêm. Bút toán "mồ côi" (cờ còn nhưng hồ sơ đã mất/chưa từng có) tự rơi về "Chi hộ" thường —
+  // không còn bị tính nhầm vào Phí quản lý nữa.
+  const _mgmtFeeIdsCanonical=new Set((VesselService.opMgmtFees()||[]).filter(f=>f.vesselId===vid).map(f=>f.id));
+  const outRows=outAll.filter(x=>!(x._mgmtFeeId && _mgmtFeeIdsCanonical.has(x._mgmtFeeId)));
+  const mgmtRows=outAll.filter(x=>x._mgmtFeeId && _mgmtFeeIdsCanonical.has(x._mgmtFeeId));
   const budgetRows=period.filter(x=>x.type==='OUT' && x._isBudget && !_isKhoanChi(x));
   let sumIn=0,sumOut=0,sumMgmt=0,sumBudget=0,sumCrew=0;
   period.forEach(x=>{
@@ -78234,7 +78300,8 @@ function _opPeriodTotals(v, from, to){
     if(x.type==='IN'){ sumIn+=opReportUsd(x); return; }
     if(x._isBudget){ sumBudget+=opReportUsd(x); return; }
     const u=opReportUsd(x);
-    if(x._mgmtFeeId){ sumMgmt+=u; } else { sumOut+=u; if(typeof _opIsCrewSalaryRow==='function'&&_opIsCrewSalaryRow(x)) sumCrew+=u; }
+    const isCanonicalMgmt=(x._mgmtFeeId && _mgmtFeeIdsCanonical.has(x._mgmtFeeId));
+    if(isCanonicalMgmt){ sumMgmt+=u; } else { sumOut+=u; if(typeof _opIsCrewSalaryRow==='function'&&_opIsCrewSalaryRow(x)) sumCrew+=u; }
   });
   // v3.09.88: PHÍ tính theo NGÀY PHÁT SINH PHÍ (paidDate/payment.date), KHÔNG theo ngày phiếu gốc.
   let sumFee=0; const extraFeeRows=[];
@@ -100853,7 +100920,8 @@ function renderKyThuatModule(){
         <div style="font-family:var(--font-display);font-size:16px;font-weight:700">👤 Nhân viên Kỹ thuật</div>
         <div style="font-size:10px;color:var(--muted)">${emps.length+expats.length+ntps.length} người đang làm việc</div>
       </div>
-      ${groupsHtml}${expatsHtml}${ntpsHtml}`;
+      ${groupsHtml}${expatsHtml}${ntpsHtml}
+      <div style="margin-top:8px;font-size:10.5px;color:var(--muted)">Phòng/ban trực thuộc module này: ${_deptListForModuleHtml('TECH')}.</div>`;
     return;
   }
   // v3.64.03 (Đợt 1 module Kỹ thuật): Project Register — lọc ĐÚNG Mảng VESSEL_TECH (Sếp: "Để cả 2
@@ -107823,7 +107891,8 @@ function renderTmStaff(){
     ${experts.length?`<div style="margin-top:18px">
       <div style="font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);font-weight:700;margin-bottom:6px">🎓 Chuyên gia VP (Expat) <span style="font-weight:400">(${experts.length})</span></div>
       ${_modStaffTable(experts)}
-    </div>`:''}`;
+    </div>`:''}
+    <div style="margin-top:8px;font-size:10.5px;color:var(--muted)">Phòng/ban trực thuộc module này: ${_deptListForModuleHtml('TM')}.</div>`;
 }
 function renderTmTimesheet(){
   const box=document.getElementById('tm-timesheet-body'); if(!box) return;
