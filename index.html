@@ -4678,7 +4678,7 @@ const WH_TYPES = {
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.65.96';
+const APP_VERSION='3.65.98';
 /* HOTFIX 3.12.17-email: CHẶN TRIỆT ĐỂ gửi email TỰ ĐỘNG (mất kiểm soát — spam quota Google).
    Email phải do NV được phân quyền CHỦ ĐỘNG chọn gửi. Cờ này:
    (1) chặn auto-SCAN tạo email (hrmScanExpiries/vesselCertScanExpiries);
@@ -7662,6 +7662,9 @@ async function authAction(){
       // v3.65.96 (Sếp: "đổi mã loại này thành GEO"): dọn nốt dữ liệu THẬT đã lỡ lưu với mã cũ 'ntp'
       // (Loại nhân sự/Thẻ lương/BCC/Kỳ lương) sang 'geo' — idempotent, chạy lại an toàn.
       try{ const _rg=_migrateNtpCodeToGeo(); if(_rg>0){ saveState(); dlog('[migrate v3.65.96] đổi '+_rg+' bản ghi từ mã "ntp" sang "geo"'); } }catch(e){console.warn('[migrate v3.65.96 ntp-to-geo] failed:',e);}
+      // v3.65.98: nhập 1 lần 20 NV đội khoan GEOMARINE (hồ sơ Nhân sự + Thẻ lương) — chưa từng có
+      // trong Nhân sự, đúng số liệu đối chiếu khớp 100% "Thang bảng lương đội khoan 09/2026".
+      try{ const _rgt=_geoTeamImportSeed(); if(_rgt>0){ saveState(); dlog('[seed v3.65.98] nhập '+_rgt+' NV đội khoan GEOMARINE + Thẻ lương'); } }catch(e){console.warn('[seed v3.65.98 geo-team] failed:',e);}
       // v3.65.65: nhập 1 lần dữ liệu khởi tạo Equipment Register (module Kỹ thuật) từ file kiểm định Geo Mariner.
       try{ const _re=_ktEquipImportSeed(); if(_re>0){ saveState(); dlog('[seed v3.65.65] nhập '+_re+' thiết bị Equipment Register'); } }catch(e){console.warn('[seed v3.65.65 equip] failed:',e);}
       // v3.65.66: nhập 1 lần PM checklist (KHBD 2026) + Running Hour (T12/2025→T09/2026).
@@ -23639,7 +23642,7 @@ function defaultPayProfiles(){
     // KHÔNG BHXH, KHÔNG biểu thuế TNCN (khớp đúng cách expat/project đã làm từ trước, không phải
     // trường hợp đặc biệt). Công thức RIÊNG (khác hẳn office/crew/expat) — xem ntpComputeSalaryRow()
     // đã đối chiếu khớp 100% với file thật GEOMARINE PTE.LTD.
-    ntp: {
+    geo: {
       label:'Lương Nhà thầu phụ — Drill-Geo (USD)',
       ccy:'USD',
       basicDay: 20,              // "Số công chuẩn theo tháng" — đúng file GEOMARINE (khác 21 của expat)
@@ -24200,6 +24203,7 @@ function openPayrollEngine(){
       <button class="pe-tab-btn" id="pe-tab-tech" onclick="payEngineTab('tech')" style="padding:7px 14px;border:none;background:none;cursor:pointer;font-size:13px;color:var(--muted)">Lương Kỹ thuật</button>
       <button class="pe-tab-btn" id="pe-tab-expert" onclick="payEngineTab('expert')" style="padding:7px 14px;border:none;background:none;cursor:pointer;font-size:13px;color:var(--muted)">Lương Chuyên gia</button>
       <button class="pe-tab-btn" id="pe-tab-expat" onclick="payEngineTab('expat')" style="padding:7px 14px;border:none;background:none;cursor:pointer;font-size:13px;color:var(--muted)">Lương Expat VP</button>
+      <button class="pe-tab-btn" id="pe-tab-geo" onclick="payEngineTab('geo')" style="padding:7px 14px;border:none;background:none;cursor:pointer;font-size:13px;color:var(--muted)">Lương GEO</button>
       <button class="pe-tab-btn" id="pe-tab-tpl" onclick="payEngineTab('tpl')" style="padding:7px 14px;border:none;background:none;cursor:pointer;font-size:13px;color:var(--muted)">Mẫu BCC Excel</button>
     </div>
     <div id="pe-body" style="max-height:420px;overflow:auto"></div>`;
@@ -24207,7 +24211,7 @@ function openPayrollEngine(){
   payEngineTab('office');
 }
 function payEngineTab(tab){
-  ['office','crew','tech','expert','expat','tpl'].forEach(t=>{ const b=document.getElementById('pe-tab-'+t); if(b){ b.style.borderBottom=t===tab?'2px solid var(--accent)':'none'; b.style.color=t===tab?'':'var(--muted)'; b.style.fontWeight=t===tab?'600':'400'; } });
+  ['office','crew','tech','expert','expat','geo','tpl'].forEach(t=>{ const b=document.getElementById('pe-tab-'+t); if(b){ b.style.borderBottom=t===tab?'2px solid var(--accent)':'none'; b.style.color=t===tab?'':'var(--muted)'; b.style.fontWeight=t===tab?'600':'400'; } });
   const host=document.getElementById('pe-body'); if(!host) return;
   const ver=payActiveVersion();
   if(tab==='office'){
@@ -24241,6 +24245,32 @@ function payEngineTab(tab){
         'Lương OT = (Mức/ngày ÷ 8) × giờ OT × hệ số (×1.5 hoặc ×2)',
         'Tổng thu nhập = Mức/ngày × (Công thường + Công phép) + Lương OT + Thưởng + PC đi lại + PC ăn trưa + Hoàn trả',
         'Hợp đồng NET — công ty nộp thuế TNCN thay (gross-up theo diện cư trú), thực lĩnh KHÔNG đổi'
+      ])}`;
+  } else if(tab==='geo'){
+    // v3.65.97 (Sếp, ảnh "Payroll Engine — cấu hình tính lương": "Tại sao lại là thẻ lương? Tham số
+    // cách tính lương Geo ở đâu?"): TÌM RA 2 lỗ hổng chồng nhau — (1) defaultPayProfiles() có sẵn
+    // profile chung cho nhóm này nhưng khóa còn là 'ntp' (sót lại từ trước khi đổi mã hôm nay, không
+    // bị bắt bởi các lượt đổi tên trước vì viết dạng "ntp: {" — khóa object, không phải chuỗi 'ntp');
+    // (2) CHƯA TỪNG có tab UI nào cho nhóm này trong màn cấu hình chung (khác hẳn Expat/Chuyên gia/
+    // Kỹ thuật đều có) — nên "Thẻ lương" (dữ liệu riêng từng người) là nơi DUY NHẤT thấy được liên
+    // quan tới GEO, tạo cảm giác thiếu hẳn tầng "cấu hình dùng chung". Thêm tab đúng khuôn 'expat'
+    // ngay trên — GEO chỉ có đúng 1 tham số dùng chung (Công chuẩn/tháng mặc định, dùng để tính đơn
+    // giá giờ OT khi thẻ không khai riêng) — công thức còn lại (payComputeGeo) không có tham số
+    // dùng-chung nào khác, mọi thứ khác đều lấy từ Thẻ lương RIÊNG từng người (đúng bản chất file
+    // GEOMARINE — mỗi người 1 mức lương/PC biển khác nhau, không có mức chung để cấu hình).
+    const prof=payEngine().profiles.geo||defaultPayProfiles().geo;
+    host.innerHTML=`<div style="font-size:11px;color:var(--muted);margin-bottom:8px">Profile <b>Lương Nhà thầu phụ — Drill-Geo (GEO)</b> (USD) — đối chiếu khớp 100% bảng lương thật GEOMARINE PTE.LTD. Lương cơ bản/PC biển/ngày là dữ liệu RIÊNG từng người (xem Thẻ lương) — ở đây chỉ có tham số DÙNG CHUNG.</div>
+      <table style="width:100%;border-collapse:collapse;font-size:13px;margin-bottom:12px"><tbody>
+        <tr><td style="padding:5px 8px;color:var(--muted)">Công chuẩn/tháng mặc định</td><td style="padding:5px 8px"><input id="pge-bd" value="${prof.basicDay}" style="width:80px;padding:3px 6px;border:1px solid var(--rule);border-radius:4px"></td></tr>
+      </tbody></table>
+      <button class="btn-sec" style="font-size:11px" onclick="payGeoSaveParams()">💾 Lưu tham số</button>
+      ${_peSectionCongThuc([
+        'Lương cơ bản trả = nguyên đơn giá trên Thẻ lương (KHÔNG chia theo công thực làm)',
+        'Phụ cấp biển = Đơn giá PC biển/ngày (Thẻ lương) × Công biển (B1, chấm công)',
+        'Đơn giá giờ = Lương cơ bản ÷ Công chuẩn/tháng (Thẻ lương, mặc định ở trên nếu thẻ để trống) ÷ 8',
+        'OT×1.5 = Đơn giá giờ × 1.5 × Số giờ OT1 · OT×2 = Đơn giá giờ × 2 × Số giờ OT2',
+        'Tổng lương = Lương cơ bản + Phụ cấp biển + OT×1.5 + OT×2 + Khác',
+        'Không GTGC, không BHXH, không thuế TNCN — phiếu chi dừng ở NHÁP, không qua KT/L1/L2 (đã chốt)'
       ])}`;
   } else if(tab==='expert'){
     const prof=payEngine().profiles.project;
@@ -24342,6 +24372,11 @@ function payExpatSaveParams(){ _payConfirmSaveChange('Tham số lương Chuyên 
 function _payExpatApply(){
   const g=id=>(document.getElementById(id)||{}).value;
   _paySubmitConfigChange('expat','Tham số lương Chuyên gia VP/Expat',{ standardDays:+g('pxe-sd')||21, otCoef15:+g('pxe-ot15')||1.5, otCoef20:+g('pxe-ot20')||2 });
+}
+function payGeoSaveParams(){ _payConfirmSaveChange('Tham số lương GEO (Drill-Geo)', _payGeoApply); }
+function _payGeoApply(){
+  const g=id=>(document.getElementById(id)||{}).value;
+  _paySubmitConfigChange('geo','Tham số lương GEO (Drill-Geo)',{ basicDay:+g('pge-bd')||20 });
 }
 function payTplSave(){
   const tpls=payEngine().importTemplates;
@@ -31244,9 +31279,54 @@ function ntpComputeSalaryRow(card, bcc){
 }
 // Màn quản lý thẻ lương NTP — 1 bảng, sửa trực tiếp từng ô (đúng khuôn thẻ lương nhập nhanh, không
 // cần modal riêng cho từng người — 19-20 NV, sửa từng dòng modal sẽ chậm hơn hẳn).
-// v3.65.96 (Sếp: "Payroll engine Vừa tạo 1 loại mới là NTP. Tôi muốn đổi mã loại này thành GEO" —
-// đổi ĐỒNG BỘ cả 3: Loại nhân sự + Payroll Engine + BCC): dọn dữ liệu THẬT đã lỡ lưu với mã cũ 'ntp'
-// (nếu có, từ trước khi đổi mã) — sang đúng mã mới 'geo', đủ cả 3 chỗ. Idempotent — chạy lại an toàn.
+// v3.65.98 (Sếp: "Thẻ lương gắn vào đâu? Trong app chưa import nhóm này?" — xác nhận: 20 NV GEOMARINE
+// CHƯA có hồ sơ Nhân sự): nhập 1 lần — tạo cả hồ sơ Nhân sự LẪN Thẻ lương (engine='geo') cùng lúc,
+// đúng dữ liệu thật đối chiếu khớp 100% từ "Thang bảng lương đội khoan 09/2026" (GEOMARINE PTE.LTD).
+// Idempotent theo smartId — chạy lại không tạo trùng, không đụng hồ sơ nếu ai đó đã tự nhập tay rồi.
+function _geoTeamImportSeed(){
+  if(S._geoTeamSeeded) return 0;
+  const rows=[
+    ['GEO001','ISMAIL BIN MOHAMAD YUSOF','Driling Director',3000,200],
+    ['GEO002','ZULKEFLE BIN YUSOF','Drilling Supervisor',3000,120],
+    ['GEO003','HENDIKA YUSNOOR BIN ZULKEFLE','CPT Operator',2575,100],
+    ['GEO004','MOHD SUHAIMI BIN MAT RASAT','CPT Operator',2575,100],
+    ['GEO005','MUKHTZADHOR SHALIM','Driller',1800,80],
+    ['GEO006','FRANKIE ANAK JIKA','Assistant Driller',1800,80],
+    ['GEO007','MUHAMMAD KANA ABDULLAH','Rig Mechanic',1545,80],
+    ['GEO008','WILLIAM ANAK GUYAM','Roughneck',1236,60],
+    ['GEO009','ALEXSON ANAK EGOH','Roughneck/Welder',1236,60],
+    ['GEO010','ROSADI FAISAL RIZA','Roughneck',1236,60],
+    ['GEO011','MOCHAMAD JAINI','Roughneck',1236,60],
+    ['GEO012','FAHRI SEPTIANTO','Geotech Engineer',2060,100],
+    ['GEO013','MUHAMMAD ASHRAAF BIN RAMLI','Lab Tech',1545,80],
+    ['GEO014','IBNATUN ABDULLA SUNISAR MADANIYAH','Chef/Training CPT',1250,75],
+    ['GEO015','CHERDPONG SAMPHAOTHONG','Chef',1030,50],
+    ['GEO016','AMIR RAHMAD GAFAR','Chef',1030,50],
+    ['GEO017','GALANG VIRGIAWAN','Geotechnical Engineer',2000,100],
+    ['GEO018','SUTAN AGUNG HUMISAR MUDA MANURUNG','Geotechnical Engineer',2000,100],
+    ['SME0042','MOHAMMED DUFFY AHMAD SUHAIMI','Geotechnical Manager',8000,150],
+    ['GEO019','MOHAMAD FIRDAUS BIN SHAHIDAN','Party Chief',2200,150]
+  ];
+  let n=0;
+  rows.forEach(([smartId, fullName, title, basicSalary, offshoreAllowance])=>{
+    if((HRService.employees()||[]).some(e=>e&&e.smartId===smartId)) return;   // đã có → bỏ qua, không tạo trùng
+    const empId=uid();
+    HRService.addEmployee({
+      id:empId, smartId, fullName, title, dept:'DRILL', type:'geo', status:'active',
+      startDate:'2026-04-15', note:'Nhập tự động từ Thang bảng lương đội khoan GEOMARINE 09/2026 (v3.65.98)'
+    });
+    try{
+      salaryProfileAddVersion(empId, {
+        effectiveFrom:'2026-04', engine:'geo',
+        data:{ ccy:'USD', salaryType:'NET', geo_basicSalary:basicSalary, geo_offshoreAllowance:offshoreAllowance, geo_basicDay:20 },
+        reason:'Nhập tự động từ Thang bảng lương đội khoan GEOMARINE 09/2026 (v3.65.98)', source:'seed_geo_team'
+      });
+    }catch(e){ console.warn('[seed v3.65.98] lỗi tạo thẻ lương cho', smartId, e); }
+    n++;
+  });
+  S._geoTeamSeeded=true;
+  return n;
+}
 function _migrateNtpCodeToGeo(){
   let n=0;
   (HRService.employees()||[]).forEach(e=>{ if(e && e.type==='ntp'){ e.type='geo'; n++; } });
