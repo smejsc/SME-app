@@ -3034,6 +3034,7 @@ span.chip.chip-fixed{display:inline-flex;align-items:center;gap:4px}
            không gộp 1 danh sách chung — đúng mô tả 2 nhóm nhân sự khác bản chất tại chi nhánh này. -->
       <div class="hrm-side-item" id="vpqn-si-staff" onclick="vpqnSwitchView('staff')">👤 NV Quảng Ngãi</div>
       <div class="hrm-side-item" id="vpqn-si-om" onclick="vpqnSwitchView('om')">🎓 Chuyên gia O&amp;M</div>
+      <div class="hrm-side-item" id="vpqn-si-salary" onclick="vpqnSwitchView('salary')" style="display:none">🪪 Thẻ lương chuyên gia</div>
       <div class="hrm-side-item" id="vpqn-si-timesheet" onclick="vpqnSwitchView('timesheet')">🗓️ Timesheet</div>
       <!-- Đợt 3: 🗓️ Timesheet -->
       <!-- v3.63.86 (Sếp — ảnh "VPCT-QN · Quỹ Văn phòng · TUYEN": "Chuyển Quỹ VPCT-QN vào module CN
@@ -4678,7 +4679,7 @@ const WH_TYPES = {
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.65.98';
+const APP_VERSION='3.66.00';
 /* HOTFIX 3.12.17-email: CHẶN TRIỆT ĐỂ gửi email TỰ ĐỘNG (mất kiểm soát — spam quota Google).
    Email phải do NV được phân quyền CHỦ ĐỘNG chọn gửi. Cờ này:
    (1) chặn auto-SCAN tạo email (hrmScanExpiries/vesselCertScanExpiries);
@@ -25310,7 +25311,9 @@ const SP_TEMPLATE_COLS={
   expat:{label:'Chuyên gia VP (Expat)', cols:['MSNV','Họ tên','Hiệu lực (YYYY-MM)','Lương/tháng USD','Hệ số ngày công','PC di chuyển','PC ăn trưa','Lương BHXH','NPT'],
     sample:['NV006','Mike Chen','2026-01',3000,22,200,10,0]},
   office_gross:{label:'Lương GROSS — công ty con (STER)', cols:['MSNV','Họ tên','Hiệu lực (YYYY-MM)','Lương cơ bản','Tiền thuê nhà','Khấu trừ 10% (Có/Không)','Lương BHXH','NPT'],
-    sample:['NV007','Vũ Thị E','2026-01',20000000,5000000,'Không',20000000,0]}
+    sample:['NV007','Vũ Thị E','2026-01',20000000,5000000,'Không',20000000,0]},
+  geo:{label:'GEO — Drill/Geo (USD)', cols:['MSNV','Họ tên','Hiệu lực (YYYY-MM)','Lương cơ bản USD','PC biển','Công chuẩn'],
+    sample:['GEO001','Ismail Bin Mohamad Yusof','2026-01',3000,200,20]}
 };
 async function spDownloadTemplate(){
   const eng=(document.getElementById('sp-tpl-engine')||{}).value||'office';
@@ -101550,8 +101553,11 @@ function myAssignedFundsOpen(){
 function vpqnSwitchView(v){
   // v3.64.78: cùng khuôn Kỹ thuật/Thương mại — Overview chỉ Trưởng bộ phận/Admin/BOD/CEO.
   if(v==='dash' && !_modCanSeeOverview('VPQN')) v='staff';
+  // v3.66.00 (Sếp: "tạo tab Thẻ lương chuyên gia - giới hạn chỉ Trưởng bộ phận thấy"): NV không đủ
+  // quyền lỡ có URL/lịch sử cũ trỏ vào 'salary' → tự rơi về 'om' (không thấy được).
+  if(v==='salary' && !_modCanManageStaff('VPQN')) v='om';
   _vpqnView=v;
-  ['dash','staff','om','timesheet'].forEach(k=>{ const el=document.getElementById('vpqn-si-'+k); if(el) el.classList.toggle('active', k===v); });
+  ['dash','staff','om','salary','timesheet'].forEach(k=>{ const el=document.getElementById('vpqn-si-'+k); if(el) el.classList.toggle('active', k===v); });
   renderVpqnModule();
 }
 // v3.63.30 (Sếp: "Làm tiếp" — Đợt 2 mở rộng cho TCKT/Kỹ thuật/Thương mại/Quản lý tàu): đổi tên 3 hàm
@@ -101630,6 +101636,35 @@ function renderVpqnModule(){
   const box=document.getElementById('vpqn-mod-body'); if(!box) return;
   // v3.64.78: lớp an toàn thứ 2 — cùng khuôn Kỹ thuật.
   if(_vpqnView==='dash' && !_modCanSeeOverview('VPQN')) _vpqnView='staff';
+  // v3.66.00 (Sếp: "Lương chuyên gia O&M đang thuộc Module Chi Nhánh Quảng ngãi: tạo tab Thẻ lương
+  // chuyên gia - giới hạn chỉ Trưởng bộ phận thấy"): ẩn hẳn nút sidebar với NV không đủ quyền — đúng
+  // nguyên tắc "ẩn tab NV không được phân quyền" đã áp cho các module khác (v3.65.80).
+  try{ const _si=document.getElementById('vpqn-si-salary'); if(_si) _si.style.display=_modCanManageStaff('VPQN')?'':'none'; }catch(e){}
+  if(_vpqnView==='salary'){
+    if(!_modCanManageStaff('VPQN')){ box.innerHTML=`<div style="padding:20px;text-align:center;color:var(--muted)">Không có quyền xem mục này.</div>`; return; }
+    const emps=_modEmpsByDept('OM');
+    const rows=emps.map(e=>{
+      const v=salaryProfileAt(e.id, new Date().toISOString().slice(0,7));
+      const d=(v&&v.data)||{};
+      const cell = v ? `${fmtCcy(+d.expert_usdPerDay||0,'USD')}/ngày · ${+d.expert_allowDays||0} ngày PC · sinh hoạt ${fmtCcy(+d.expert_livingAllowance||0,'USD')}`
+                     : `<span style="color:var(--warn)">⚠ Chưa có Thẻ lương</span>`;
+      return `<tr style="cursor:pointer" onclick="openSalaryProfileCard('${esc(e.id)}')">
+        <td style="padding:6px 8px;font-size:11px">${esc(e.smartId||'')}</td>
+        <td style="padding:6px 8px">${esc(e.fullName||'')}</td>
+        <td style="padding:6px 8px;color:var(--muted)">${esc(e.title||'')}</td>
+        <td style="padding:6px 8px;font-size:12px">${cell}</td>
+      </tr>`;
+    }).join('');
+    box.innerHTML=`
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
+        <div style="font-family:var(--font-display);font-size:16px;font-weight:700">🪪 Thẻ lương chuyên gia (O&amp;M)</div>
+        <div style="font-size:10px;color:var(--muted)">${emps.length} người</div>
+      </div>
+      <div style="font-size:11px;color:var(--muted);margin-bottom:8px">Bấm 1 dòng để mở/sửa Thẻ lương đúng người đó. Chỉ Trưởng bộ phận/Admin/BOD/CEO xem được mục này.</div>
+      <table class="tbl"><thead><tr><th>MSNV</th><th>Họ tên</th><th>Chức danh</th><th>Thẻ lương hiện tại</th></tr></thead>
+      <tbody>${rows||'<tr><td colspan="4" style="padding:14px;text-align:center;color:var(--muted)">Chưa có Chuyên gia O&M</td></tr>'}</tbody></table>`;
+    return;
+  }
   if(_vpqnView==='timesheet'){
     // v3.65.10: NV không đủ quyền chỉ thấy/tạo BCC đích danh chính mình.
     if(!_modCanManageStaff('VPQN')){
@@ -108924,6 +108959,8 @@ function spImportParse_(aoa, empBySmart, empByName){
     expAllow:col(['phụ cấp sinh hoạt','phu cap sinh hoat','expert_livingallowance']),
     expatSal:col(['lương/tháng usd','luong/thang usd','expat_monthlysalary']), expatDays:col(['hệ số ngày công','he so ngay cong','expat_stddayscoef']),
     expatTr:col(['pc di chuyển','pc di chuyen','expat_transport']), expatLu:col(['pc ăn trưa','pc an trua','expat_lunchperday']),
+    geoSal:col(['lương cơ bản usd','luong co ban usd','geo_basicsalary']), geoOff:col(['pc biển','pc bien','geo_offshoreallowance']),
+    geoDay:col(['công chuẩn','cong chuan','geo_basicday']),   /* v3.65.99: cột riêng GEO — Drill/Geo */
     grHouse:col(['tiền thuê nhà','tien thue nha','grosshousing']), grT10:col(['khấu trừ 10','khau tru 10','taxwithhold10']),   /* v3.13.85 GĐ2 */
     dp:col(['mức dp','muc dp','dp /ngày','dp/ngày','crewdprate']),   /* v3.13.90: khoán NGÀY (SDPO) — cột Mức DP /ngày */
     duAnDay:col(['pc dự án /ngày','pc du an /ngay','dự án /ngày','du an /ngay','allow_duanperday']),
@@ -108958,8 +108995,8 @@ function spImportParse_(aoa, empBySmart, empByName){
     /* v3.13.81 (Sếp yêu cầu 30/7): KHÔNG tự mở thẻ engine lạ khi import. Ô Engine CÓ GIÁ TRỊ nhưng
        không thuộc danh sách hợp lệ -> LỖI dòng (trước đây bị âm thầm ép về tech/office — nguy hiểm:
        gõ nhầm 'офиc'/'office_gross' vẫn tạo thẻ với engine đoán). Chỉ đoán khi ô TRỐNG/không có cột. */
-    if(eng && eng!=='office'&&eng!=='tech'&&eng!=='crew_khoan'&&eng!=='crew'&&eng!=='expert_om'&&eng!=='expat'&&eng!=='office_gross'){
-      out.err.push(line+': Engine "'+eng+'" không hợp lệ (chỉ nhận: office/tech/crew/crew_khoan/expert_om/expat/office_gross) — không tự đoán, sửa file rồi import lại'); continue; }
+    if(eng && eng!=='office'&&eng!=='tech'&&eng!=='crew_khoan'&&eng!=='crew'&&eng!=='expert_om'&&eng!=='expat'&&eng!=='office_gross'&&eng!=='geo'){
+      out.err.push(line+': Engine "'+eng+'" không hợp lệ (chỉ nhận: office/tech/crew/crew_khoan/expert_om/expat/office_gross/geo) — không tự đoán, sửa file rồi import lại'); continue; }
     if(!eng) eng=(d.techSeaRate>0||d.techOfficeRate>0)?'tech':'office';
     if(eng==='office'){ delete d.techSeaRate; delete d.techOfficeRate; delete d.techDockRate;
       if(!(d.netBase>0)){ out.err.push(line+': Thẻ office cần Lương cơ bản > 0'); continue; } }
@@ -108984,6 +109021,10 @@ function spImportParse_(aoa, empBySmart, empByName){
       d={ salaryType:'NET', ccy:'USD', bhxhBase:num(ix.bh), dependents:num(ix.npt), isUnionMember:false,
         expat_monthlySalary:num(ix.expatSal), expat_stdDaysCoef:num(ix.expatDays)||22, expat_transport:num(ix.expatTr), expat_lunchPerDay:num(ix.expatLu) };
       if(!(d.expat_monthlySalary>0)){ out.err.push(line+': Thẻ Expat cần Lương/tháng USD > 0'); continue; } }
+    else if(eng==='geo'){ /* v3.65.99: GEO — Drill/Geo — khớp đúng salaryProfileBuildInp (geo_basicSalary/geo_offshoreAllowance/geo_basicDay) */
+      d={ salaryType:'NET', ccy:'USD',
+        geo_basicSalary:num(ix.geoSal), geo_offshoreAllowance:num(ix.geoOff), geo_basicDay:num(ix.geoDay)||20 };
+      if(!(d.geo_basicSalary>0)){ out.err.push(line+': Thẻ GEO cần Lương cơ bản USD > 0'); continue; } }
     else { delete d.netBase; delete d.allow_trachNhiem; delete d.allow_kpi; delete d.allow_duAn; delete d.allow_thamNien; delete d.allow_khac;
       if(!(d.techSeaRate>0||d.techOfficeRate>0)){ out.err.push(line+': Thẻ tech cần đơn giá Biển hoặc VP > 0'); continue; } }
     var dup=(S.salaryProfiles||[]).some(function(x){return x&&!x._deleted&&x.empId===e.id&&x.effectiveFrom===eff;});
@@ -112070,9 +112111,26 @@ function hrmEditEmployee(id){
     <div style="font-size:10.5px;color:var(--muted);margin-bottom:10px">${hint} = nên điền để hồ sơ đầy đủ (phục vụ lương/BHXH/thuế) — <b>không bắt buộc</b>, không chặn lưu. Chỉ Họ tên và Mã NV là bắt buộc thật.</div>
     <h4 style="font-size:13px;margin:0 0 6px">Phân loại</h4>
     ${rowWrap(
-      sel('Nhóm nhân sự','hrm-f-type', `<option value="office"${e.type==='office'?' selected':''}>Văn phòng</option><option value="crew"${e.type==='crew'?' selected':''}>Thuyền viên</option><option value="expert"${e.type==='expert'?' selected':''}>Chuyên gia</option><option value="expert_om"${e.type==='expert_om'?' selected':''}>Chuyên gia O&M</option><option value="expat"${e.type==='expat'?' selected':''}>Expat</option><option value="geo"${e.type==='geo'?' selected':''}>Nhà thầu phụ (GEO)</option>`)+
+      sel('Nhóm nhân sự','hrm-f-type', `<option value="office"${e.type==='office'?' selected':''}>Văn phòng</option><option value="crew"${e.type==='crew'?' selected':''}>Thuyền viên</option><option value="expert"${e.type==='expert'?' selected':''}>Chuyên gia</option><option value="expert_om"${e.type==='expert_om'?' selected':''}>Chuyên gia O&M</option><option value="expat"${e.type==='expat'?' selected':''}>Expat</option><option value="geo"${e.type==='geo'?' selected':''}>Nhà thầu phụ (GEO)</option>`).replace('<select id="hrm-f-type"','<select id="hrm-f-type" onchange="_hrmToggleGeoCard()"')+
       sel('Trạng thái','hrm-f-status', `<option value="active"${e.status!=='inactive'?' selected':''}>Đang làm việc</option><option value="inactive"${e.status==='inactive'?' selected':''}>Đã nghỉ</option>`)
     )}
+    ${(!isEdit)?`
+    <!-- v3.66.00 (Sếp: "nên làm đơn giản thao tác" — thêm NV rồi phải mở lại tạo Thẻ lương là 2 bước
+         rời, kiểm tra thấy Chuyên gia O&M cũng chưa có, không riêng GEO): CHỈ khi TẠO MỚI (chưa có thẻ
+         nào để tránh đụng bản cũ) VÀ đang chọn "Nhà thầu phụ (GEO)" — hiện ngay 3 ô Thẻ lương, điền 1
+         lần cùng hồ sơ. Để trống vẫn Lưu bình thường (không bắt buộc — vẫn tạo thẻ sau qua "+ Phiên
+         bản Thẻ lương" như cũ nếu muốn). onchange gắn ngay trên thẻ <select> (attribute, không dùng
+         <script> rời — innerHTML không tự chạy <script> chèn vào).
+    -->
+    <div id="hrm-f-geo-card" style="display:none;background:#fff7ec;border:1px solid #f0d9b5;border-radius:8px;padding:10px 12px;margin-bottom:10px">
+      <div style="font-weight:600;font-size:13px;margin-bottom:6px">🪪 Thẻ lương GEO — điền luôn (không bắt buộc, để trống thì tạo sau)</div>
+      ${rowWrap(
+        fld('Lương cơ bản/tháng USD','hrm-f-geo-basic','', 'number')+
+        fld('PC biển/ngày USD','hrm-f-geo-offshore','', 'number')+
+        fld('Công chuẩn/tháng','hrm-f-geo-basicday','20','number')
+      )}
+    </div>
+    `:''}
     <h4 style="font-size:13px;margin:10px 0 6px">Thông tin cơ bản</h4>
     ${rowWrap(fld('Họ tên *','hrm-f-fullName',e.fullName)+sel('Giới tính','hrm-f-gender',opt(['','Nam','Nữ','Khác'],e.gender)))}
     ${rowWrap(fld('Ngày sinh','hrm-f-dob',e.dob,'date',true)+fld('Nơi sinh','hrm-f-pob',e.pob)+sel('Hôn nhân','hrm-f-maritalStatus',opt(['','Độc thân','Đã kết hôn','Khác'],e.maritalStatus)))}
@@ -112139,6 +112197,10 @@ function hrmEditEmployee(id){
 }
 
 /* ---- LƯU HỒ SƠ + ghi lịch sử thay đổi ---- */
+function _hrmToggleGeoCard(){
+  const t=document.getElementById('hrm-f-type'); const b=document.getElementById('hrm-f-geo-card');
+  if(t&&b) b.style.display=(t.value==='geo')?'':'none';
+}
 function hrmSaveEmployee(id, opts){
   opts = opts || {};
   const g=fid=>{ const el=document.getElementById(fid); return el?el.value.trim():''; };
@@ -112233,6 +112295,22 @@ function hrmSaveEmployee(id, opts){
     hrmLogHistory(newEmp.id, 'create', '', '', smartId, 'Tạo hồ sơ nhân sự');
     toast('Đã tạo hồ sơ '+smartId+' ✓','good');
     opts._savedId = newEmp.id;
+    // v3.66.00 (Sếp: "nên làm đơn giản thao tác"): TẠO MỚI + Loại nhân sự = GEO + có điền Lương cơ
+    // bản (>0, không bắt buộc) → tạo luôn Thẻ lương (engine='geo') cùng lúc, đỡ phải mở lại hồ sơ
+    // làm bước "+ Phiên bản Thẻ lương" riêng. Hiệu lực = tháng hiện tại (chỉnh lại sau nếu cần).
+    if(newEmp.type==='geo'){
+      const _gBasic=+g('hrm-f-geo-basic')||0;
+      if(_gBasic>0){
+        try{
+          salaryProfileAddVersion(newEmp.id, {
+            effectiveFrom:new Date().toISOString().slice(0,7), engine:'geo',
+            data:{ ccy:'USD', salaryType:'NET', geo_basicSalary:_gBasic, geo_offshoreAllowance:+g('hrm-f-geo-offshore')||0, geo_basicDay:+g('hrm-f-geo-basicday')||20 },
+            reason:'Tạo cùng lúc khi thêm hồ sơ nhân sự', source:'manual'
+          });
+          toast('Đã tạo hồ sơ '+smartId+' kèm Thẻ lương GEO ✓','good');
+        }catch(_e){ console.warn('[hrm geo card] lỗi tạo thẻ lương kèm:', _e); }
+      }
+    }
   }
   // v3.65.09 (Sếp: "Không đúng... đang có nút Pháp Nhân: cập nhật nhanh và đủ hơn"): RÚT LẠI — nút
   // "🏛 Pháp nhân" (empEntityOpen(), màn Xem hồ sơ) đã có sẵn ĐẦY ĐỦ hơn hẳn bản em vừa thêm (ngày
