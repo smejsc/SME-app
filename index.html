@@ -4730,7 +4730,7 @@ const WH_TYPES = {
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.66.47';
+const APP_VERSION='3.66.48';
 /* HOTFIX 3.12.17-email: CHẶN TRIỆT ĐỂ gửi email TỰ ĐỘNG (mất kiểm soát — spam quota Google).
    Email phải do NV được phân quyền CHỦ ĐỘNG chọn gửi. Cờ này:
    (1) chặn auto-SCAN tạo email (hrmScanExpiries/vesselCertScanExpiries);
@@ -5668,9 +5668,10 @@ async function _srvLoginBg(name, pw){
     if(!(typeof isAdmin==='function' && isAdmin())) return;
     const cfg=getAuthConfig(); if(!cfg || !cfg.scriptUrl || !name || !pw) return;
     const r=await fetchWithTimeout(cfg.scriptUrl,{method:'POST',headers:{'Content-Type':'text/plain;charset=utf-8'},
-      body:JSON.stringify({action:'login', username:name, password:pw, token:_srvToken()})}, 20000);
+      body:JSON.stringify({action:'login', username:name, password:pw, token:_srvToken()})}, 45000);   // v3.66.48: 20s→45s
     const d=await safeJson(r);
     if(d && d.ok && d.session){
+      window._srvLastName=name;
       _SRV_SESS={token:d.session, user:d.username, exp:Date.now()+((+d.expiresInSec||21600)-120)*1000};
       try{ sessionStorage.setItem('shSrvSess', JSON.stringify(_SRV_SESS)); }catch(e){}
       console.log('[srv] phiên máy chủ OK —', d.username);
@@ -5692,6 +5693,42 @@ async function _srvSetPwBg(newPw){
     if(d && d.ok) console.log('[srv] đã cập nhật mật khẩu máy chủ'); else console.warn('[srv] set pw:', d && d.error);
   }catch(e){ console.warn('[srv] set pw lỗi:', e && e.message); }
 }
+/* v3.66.48: lấy phiên SAU KHI đồng bộ xong + thử lại — lần đầu (v3.66.47) gọi ngay lúc đăng nhập, trùng lượt
+   đồng bộ nặng → quá 20s. Đợi 20s, chờ tới khi không còn đồng bộ, tối đa 3 lần cách nhau 60s. Mật khẩu
+   chỉ giữ trong bộ nhớ của hàm này tới khi xong (không lưu đâu cả). */
+function _srvLoginSchedule(name, pw){
+  if(!(typeof isAdmin==='function' && isAdmin())) return;
+  window._srvLastName=name;
+  let tries=0;
+  const attempt=async()=>{
+    if(_srvSess()) return;
+    const busy=window._syncSignal && window._syncSignal.status==='busy';
+    if(busy){ setTimeout(attempt, 10000); return; }   // đang đồng bộ → đợi thêm (không tính lượt)
+    tries++;
+    await _srvLoginBg(name, pw);
+    if(!_srvSess() && tries<3) setTimeout(attempt, 60000);
+  };
+  setTimeout(attempt, 20000);
+}
+/* Phiên hết hạn/chưa có mà máy chủ chặn (ADMIN_ONLY) → hỏi lại mật khẩu, lấy phiên mới, thử lại 1 lần. */
+async function _srvReauth(){
+  if(!(typeof isAdmin==='function' && isAdmin())) return false;
+  const pw=prompt('Phiên máy chủ hết hạn — nhập mật khẩu đăng nhập của anh/chị để tiếp tục:');
+  if(!pw) return false;
+  const nm=window._srvLastName || (typeof CURRENT_ROLE!=='undefined' && CURRENT_ROLE==='admin' ? 'admin' : ((CURRENT_USER&&CURRENT_USER.name)||''));
+  await _srvLoginBg(nm, pw);
+  if(!_srvSess()){ toast('Không lấy được phiên máy chủ — kiểm tra mật khẩu','bad'); return false; }
+  return true;
+}
+/* Gửi lệnh snapshot/backup kèm phiên; bị chặn ADMIN_ONLY → hỏi mật khẩu → thử lại 1 lần. */
+async function _srvPost(obj, timeoutMs){
+  const cfg=getAuthConfig(); if(!cfg || !cfg.scriptUrl) throw new Error('Chưa cấu hình Apps Script URL');
+  const send=async()=>{ const r=await fetchWithTimeout(cfg.scriptUrl,{method:'POST',headers:{'Content-Type':'text/plain;charset=utf-8'},
+    body:JSON.stringify(Object.assign({}, obj, {token:_srvToken(), session:_srvSess()}))}, timeoutMs||60000); return safeJson(r); };
+  let d=await send();
+  if(d && !d.ok && String(d.error||'').indexOf('ADMIN_ONLY')===0){ if(await _srvReauth()) d=await send(); }
+  return d;
+}
 function _srvErrMsg(err){
   const s=String(err||'');
   if(s.indexOf('ADMIN_ONLY')===0) return 'Phiên máy chủ hết hạn hoặc chưa có — đăng xuất rồi đăng nhập lại (tài khoản admin)';
@@ -5701,12 +5738,7 @@ function _srvErrMsg(err){
 async function listCloudBackups(){
   const cfg = getAuthConfig();
   if(!cfg.scriptUrl) throw new Error('Chưa cấu hình Apps Script URL');
-  const res = await fetch(cfg.scriptUrl, {
-    method: 'POST',
-    headers: {'Content-Type': 'text/plain'},
-    body: JSON.stringify({action: 'backup_list', token:_srvToken(), session:_srvSess()})   // v3.66.47
-  });
-  const data = await res.json();
+  const data = await _srvPost({action:'backup_list'});   // v3.66.48
   if(!data.ok) throw new Error(_srvErrMsg(data.error) || 'List failed');
   return data.files || [];
 }
@@ -5715,12 +5747,7 @@ async function listCloudBackups(){
 async function fetchCloudBackup(fileId){
   const cfg = getAuthConfig();
   if(!cfg.scriptUrl) throw new Error('Chưa cấu hình Apps Script URL');
-  const res = await fetch(cfg.scriptUrl, {
-    method: 'POST',
-    headers: {'Content-Type': 'text/plain'},
-    body: JSON.stringify({action: 'backup_get', fileId, token:_srvToken(), session:_srvSess()})   // v3.66.47
-  });
-  const data = await res.json();
+  const data = await _srvPost({action:'backup_get', fileId}, 120000);   // v3.66.48
   if(!data.ok) throw new Error(_srvErrMsg(data.error) || 'Fetch failed');
   return JSON.parse(data.content);
 }
@@ -7477,7 +7504,7 @@ async function authAction(){
     // This silently creates/updates wrap for this user on cloud cfg, so they can pull from new device next time
     if(cfg.scriptUrl){
       selfWrapInCloudCfg(name, pw).catch(e=>console.warn('[self-wrap]', e.message));
-      _srvLoginBg(name, pw);   // v3.66.47: phiên máy chủ (chỉ admin, chạy ngầm)
+      _srvLoginSchedule(name, pw);   // v3.66.48: phiên máy chủ — đợi đồng bộ xong, thử lại tối đa 3 lần (chỉ admin)
     }
     // v3.64.11 (Phương án 2 — tải quyền mới NGẦM sau khi đã cho vào, không chặn đăng nhập): CHỈ áp
     // dụng cho NV thường (CURRENT_ROLE==='user') — admin không có luồng pull cfg này. Không await,
@@ -99654,12 +99681,7 @@ async function openSnapshotRestore(){
   toast('Đang tải danh sách snapshot...');
   let list=[];
   try{
-    const res=await fetchWithTimeout(cfg.scriptUrl, {
-      method:'POST',
-      headers:{'Content-Type':'text/plain;charset=utf-8'},
-      body:JSON.stringify({action:'snapshot_list', token:cfg.apiToken||API_TOKEN, session:_srvSess()})   // v3.66.47
-    }, 30000);
-    const data=await safeJson(res);
+    const data=await _srvPost({action:'snapshot_list'}, 30000);   // v3.66.48: phiên hết hạn → hỏi lại mật khẩu
     if(!data.ok){ toast('Lỗi lấy danh sách: '+_srvErrMsg(data.error||''),'bad'); return; }
     list=data.files||[];
   }catch(e){ toast('Không lấy được danh sách snapshot: '+e.message,'bad'); return; }
@@ -99697,13 +99719,8 @@ async function _snapshotPick(fileId, name){
   toast('Đang tải snapshot...');
   let content='';
   try{
-    const res=await fetchWithTimeout(cfg.scriptUrl, {
-      method:'POST',
-      headers:{'Content-Type':'text/plain;charset=utf-8'},
-      body:JSON.stringify({action:'snapshot_get', fileId, token:cfg.apiToken||API_TOKEN, session:_srvSess()})   // v3.66.47
-    }, 30000);
-    const data=await safeJson(res);
-    if(!data.ok){ toast('Lỗi tải snapshot: '+(data.error||''),'bad'); return; }
+    const data=await _srvPost({action:'snapshot_get', fileId}, 60000);   // v3.66.48
+    if(!data.ok){ toast('Lỗi tải snapshot: '+_srvErrMsg(data.error||''),'bad'); return; }
     content=data.content||'';
   }catch(e){ toast('Không tải được snapshot: '+e.message,'bad'); return; }
   let snapData;
