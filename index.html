@@ -4624,8 +4624,8 @@ span.chip.chip-fixed{display:inline-flex;align-items:center;gap:4px}
       <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:12px;background:#fffdf8;border:1px solid var(--rule);border-radius:10px;padding:12px">
         <label style="font-size:11px;color:var(--muted)">Kỳ:</label>
         <input type="month" id="hrm-att-period" onchange="hrmAttRender()" style="padding:6px 8px;border:1px solid var(--rule);border-radius:6px;font-size:13px">
-        <label style="font-size:11px;color:var(--muted);margin-left:6px">Loại bảng:</label>
-        <select id="hrm-att-profile" onchange="{const p=this.value==='BCC_CG_PDF';const a=document.getElementById('hrm-att-btn-xls'),b=document.getElementById('hrm-att-btn-pdf');if(a)a.style.display=p?'none':'';if(b)b.style.display=p?'':'none';}" style="padding:6px 8px;border:1px solid var(--rule);border-radius:6px;font-size:13px">
+        <label style="font-size:11px;color:var(--muted);margin-left:6px;display:none">Loại bảng:</label>
+        <select style="display:none" id="hrm-att-profile" onchange="{const p=this.value==='BCC_CG_PDF';const a=document.getElementById('hrm-att-btn-xls'),b=document.getElementById('hrm-att-btn-pdf');if(a)a.style.display=p?'none':'';if(b)b.style.display=p?'':'none';}" style="padding:6px 8px;border:1px solid var(--rule);border-radius:6px;font-size:13px">
           <option value="BCC_VP">BCC Văn phòng</option>
           <option value="BCC_VP_BP">BCC VP — mẫu theo bộ phận (SME-HR-PR02-FM01)</option>
           <option value="BCC_DOITAU">BCC Đội tàu</option>
@@ -4635,7 +4635,7 @@ span.chip.chip-fixed{display:inline-flex;align-items:center;gap:4px}
           <option value="BCC_KYTHUAT">BCC Bộ phận Kỹ thuật (Excel lương)</option>
         </select>
         <input type="file" id="hrm-att-file" accept=".xlsx,.xls" style="display:none" onchange="hrmAttImportExcel(this)">
-        <button class="btn-ghost" id="hrm-att-btn-xls" style="padding:6px 14px;font-size:13px" onclick="hrmAttPickFile()">📥 Import BCC (Excel đã ký)</button>
+        <button class="btn-ghost" id="hrm-att-btn-xls" style="padding:6px 14px;font-size:13px;display:none" onclick="hrmAttPickFile()">📥 Import BCC (Excel đã ký)</button>
         <!-- v3.20.357 (Sếp: "gộp H1 vào H2"): nút tạo BCC web ĐÚNG vị trí cuối cùng — ngay tại đây. -->
         <button class="btn-primary" style="padding:6px 14px;font-size:13px" onclick="bccOpenCreateModal()" title="Mở luồng tạo BCC web theo phòng ban/tàu được cấp — nạp sẵn danh sách NV, không cần Excel">➕ Tạo bảng chấm công</button>
         <input type="file" id="hrm-att-pdf" accept="application/pdf" multiple style="display:none" onchange="hrmAttImportBsrPdf(this)">
@@ -4730,7 +4730,7 @@ const WH_TYPES = {
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.66.37';
+const APP_VERSION='3.66.47';
 /* HOTFIX 3.12.17-email: CHẶN TRIỆT ĐỂ gửi email TỰ ĐỘNG (mất kiểm soát — spam quota Google).
    Email phải do NV được phân quyền CHỦ ĐỘNG chọn gửi. Cờ này:
    (1) chặn auto-SCAN tạo email (hrmScanExpiries/vesselCertScanExpiries);
@@ -5652,6 +5652,51 @@ async function cloudBackupSilent(){
   }
 }
 
+/* ════ v3.66.47 (GĐ3 — G2, Sếp duyệt 24/9): PHIÊN MÁY CHỦ cho admin ════
+   Đăng nhập app thành công + là admin → chạy NGẦM lệnh login máy chủ (Code.gs v1.79.0-G2) lấy phiên 6 giờ.
+   Phiên gửi kèm các lệnh snapshot/backup (server chặn khi ENFORCE_ADMIN_ACTIONS=true). Lỗi → bỏ qua,
+   KHÔNG ảnh hưởng đăng nhập app. Phiên chỉ giữ trong bộ nhớ + sessionStorage (đóng tab là mất). */
+let _SRV_SESS=null;
+function _srvSess(){
+  if(_SRV_SESS && _SRV_SESS.exp>Date.now()) return _SRV_SESS.token;
+  try{ const o=JSON.parse(sessionStorage.getItem('shSrvSess')||'null'); if(o && o.exp>Date.now()){ _SRV_SESS=o; return o.token; } }catch(e){}
+  return '';
+}
+function _srvToken(){ const cfg=getAuthConfig()||{}; return cfg.apiToken||API_TOKEN; }
+async function _srvLoginBg(name, pw){
+  try{
+    if(!(typeof isAdmin==='function' && isAdmin())) return;
+    const cfg=getAuthConfig(); if(!cfg || !cfg.scriptUrl || !name || !pw) return;
+    const r=await fetchWithTimeout(cfg.scriptUrl,{method:'POST',headers:{'Content-Type':'text/plain;charset=utf-8'},
+      body:JSON.stringify({action:'login', username:name, password:pw, token:_srvToken()})}, 20000);
+    const d=await safeJson(r);
+    if(d && d.ok && d.session){
+      _SRV_SESS={token:d.session, user:d.username, exp:Date.now()+((+d.expiresInSec||21600)-120)*1000};
+      try{ sessionStorage.setItem('shSrvSess', JSON.stringify(_SRV_SESS)); }catch(e){}
+      console.log('[srv] phiên máy chủ OK —', d.username);
+    } else console.warn('[srv] không lấy được phiên máy chủ:', d && d.error);
+  }catch(e){ console.warn('[srv] login lỗi:', e && e.message); }
+}
+async function _srvLogoutBg(){
+  const t=_srvSess(); _SRV_SESS=null; try{ sessionStorage.removeItem('shSrvSess'); }catch(e){}
+  if(!t) return;
+  try{ const cfg=getAuthConfig(); if(cfg && cfg.scriptUrl) await fetch(cfg.scriptUrl,{method:'POST',headers:{'Content-Type':'text/plain'},body:JSON.stringify({action:'logout', session:t, token:_srvToken()})}); }catch(e){}
+}
+async function _srvSetPwBg(newPw){
+  const t=_srvSess(); if(!t || !newPw) return;
+  try{
+    const cfg=getAuthConfig(); if(!cfg || !cfg.scriptUrl) return;
+    const r=await fetchWithTimeout(cfg.scriptUrl,{method:'POST',headers:{'Content-Type':'text/plain;charset=utf-8'},
+      body:JSON.stringify({action:'set_server_pw', session:t, newPassword:newPw, token:_srvToken()})}, 20000);
+    const d=await safeJson(r);
+    if(d && d.ok) console.log('[srv] đã cập nhật mật khẩu máy chủ'); else console.warn('[srv] set pw:', d && d.error);
+  }catch(e){ console.warn('[srv] set pw lỗi:', e && e.message); }
+}
+function _srvErrMsg(err){
+  const s=String(err||'');
+  if(s.indexOf('ADMIN_ONLY')===0) return 'Phiên máy chủ hết hạn hoặc chưa có — đăng xuất rồi đăng nhập lại (tài khoản admin)';
+  return s;
+}
 /* List backups from Drive */
 async function listCloudBackups(){
   const cfg = getAuthConfig();
@@ -5659,10 +5704,10 @@ async function listCloudBackups(){
   const res = await fetch(cfg.scriptUrl, {
     method: 'POST',
     headers: {'Content-Type': 'text/plain'},
-    body: JSON.stringify({action: 'backup_list'})
+    body: JSON.stringify({action: 'backup_list', token:_srvToken(), session:_srvSess()})   // v3.66.47
   });
   const data = await res.json();
-  if(!data.ok) throw new Error(data.error || 'List failed');
+  if(!data.ok) throw new Error(_srvErrMsg(data.error) || 'List failed');
   return data.files || [];
 }
 
@@ -5673,10 +5718,10 @@ async function fetchCloudBackup(fileId){
   const res = await fetch(cfg.scriptUrl, {
     method: 'POST',
     headers: {'Content-Type': 'text/plain'},
-    body: JSON.stringify({action: 'backup_get', fileId})
+    body: JSON.stringify({action: 'backup_get', fileId, token:_srvToken(), session:_srvSess()})   // v3.66.47
   });
   const data = await res.json();
-  if(!data.ok) throw new Error(data.error || 'Fetch failed');
+  if(!data.ok) throw new Error(_srvErrMsg(data.error) || 'Fetch failed');
   return JSON.parse(data.content);
 }
 
@@ -7432,6 +7477,7 @@ async function authAction(){
     // This silently creates/updates wrap for this user on cloud cfg, so they can pull from new device next time
     if(cfg.scriptUrl){
       selfWrapInCloudCfg(name, pw).catch(e=>console.warn('[self-wrap]', e.message));
+      _srvLoginBg(name, pw);   // v3.66.47: phiên máy chủ (chỉ admin, chạy ngầm)
     }
     // v3.64.11 (Phương án 2 — tải quyền mới NGẦM sau khi đã cho vào, không chặn đăng nhập): CHỈ áp
     // dụng cho NV thường (CURRENT_ROLE==='user') — admin không có luồng pull cfg này. Không await,
@@ -12326,7 +12372,14 @@ function assertOwnerReportWritable(t){
   if(!r.ok){ try{ toast(r.reason,'bad'); }catch(_){}; return false; }
   return true;
 }
+/* v3.66.45 (Sếp: "Báo cáo chủ tàu CHỈ là bảng liệt kê chính xác của Sổ theo dõi Thu–Chi hộ — không có giá trị
+   cố định riêng"): mỗi bút toán MỘT giá trị. opReportUsd giữ tên (nhiều nơi gọi) nhưng trả ĐÚNG opTxUsd.
+   Cơ chế "giá trị đã chốt" (reportedValue) chỉ còn dùng cho công cụ sửa dữ liệu 1 lần (_opLegacyReportedUsd). */
 function opReportUsd(t){
+  if(!t) return 0;
+  return (typeof opTxUsd==='function') ? opTxUsd(t) : (+t.amount||0);
+}
+function _opLegacyReportedUsd(t){
   if(!t) return 0;
   var frozen = (typeof isOwnerPeriodLocked==='function' && t.vesselId && t.date && isOwnerPeriodLocked(t.vesselId, t.date));
   if(frozen && t.reportedValue!=null && t.reportedValue!==''){
@@ -14373,14 +14426,34 @@ function _vtsVesselId(){
   const a=(CURRENT_USER&&CURRENT_USER.assignedVesselIds)||[];
   return a[0]||(VesselService.vessels()[0]||{}).id||'';
 }
+/* ════ v3.66.43 (Sếp: "BCC tàu — không chấm theo thuyền viên. Tàu chỉ có 1 BCC cho cả tàu") ════
+   Màn Chấm công của TÀU nay đọc/ghi ĐÚNG 1 bảng BCC web phạm vi Tàu (bccSheets, scope vessel, kiểu Tổng
+   hợp — cột DB1/DB2/DOCK/BO/NGHICA/BO2/DP trùng khớp mã cũ). Không còn bảng riêng của tàu (HRService.
+   timesheets) và không chép sang hệ cũ (hrAttendance). Tàu Xác nhận = lưu nháp; Gửi HR = Chuyển HR;
+   HR kiểm → 🔒 Khóa hoặc ↩ Trả về (lý do hiện ngay trên màn tàu). Thuyền viên KHÔNG tự chấm.
+   Kỳ cũ đã gửi/khóa theo luồng cũ: chỉ xem (giữ lịch sử). */
+function _vtsSheetId(vid, period){ return ('BCC-VSL-'+period+'-'+vid).replace(/[^A-Za-z0-9_\-]/g,'_'); }
+function _vtsFindSheet(vid, period){
+  return (S.bccSheets||[]).find(s=>s&&!s._deleted&&s.period===period&&s.scope&&s.scope.type==='vessel'&&s.scope.value===vid)||null;
+}
+function _vtsStatusOfSheet(sh){
+  if(!sh) return {st:'none', reason:''};
+  if(sh.status==='confirmed') return {st:'locked', reason:''};
+  if(sh.status==='submitted') return {st:'submitted', reason:''};
+  const log=Array.isArray(sh.reopenLog)?sh.reopenLog:[]; const last=log[log.length-1];
+  if(last && (!sh.shipConfirmedAt || String(last.at)>String(sh.shipConfirmedAt))) return {st:'returned', reason:last.reason||''};
+  return {st: sh.shipConfirmedAt?'confirmed':'draft', reason:''};
+}
 /* v3.18.68 (Sếp 25/8: "máy admin — admin phải thấy toàn bộ"): trạng thái BCC của tàu theo kỳ,
    THUẦN (chỉ đọc HRService.timesheets) — dùng cho thẻ 🕐 Chấm công (BCC) trên Trung tâm QL tàu.
    waiting = số bảng tàu ĐÃ GỬI HR (submitted) còn chờ NS 📥 Lấy BCC (mọi kỳ). */
 function vtsHubStatus(vid, period){
   const all=HRService.timesheets().filter(t=>t && t.vesselId===vid);
   const ts=all.find(t=>t.period===period);
-  const waiting=all.filter(t=>t.status==='submitted').length;
-  const st=ts?(ts.status||'draft'):'none';
+  const _sh=_vtsFindSheet(vid, period);   // v3.66.43: 1 BCC web cho cả tàu là nguồn chính
+  const waiting=(S.bccSheets||[]).filter(s=>s&&!s._deleted&&s.scope&&s.scope.type==='vessel'&&s.scope.value===vid&&s.status==='submitted').length
+               + all.filter(t=>t.status==='submitted').length;
+  const st=_sh?_vtsStatusOfSheet(_sh).st:(ts?(ts.status||'draft'):'none');
   const map={
     none:      {label:'chưa chấm',                   color:'#b8730a'},
     draft:     {label:'nháp',                        color:''},
@@ -14394,20 +14467,50 @@ function vtsHubStatus(vid, period){
   return {key:st, label:m.label, color:m.color, waiting};
 }
 /* v3.18.68: vidArg — mở đúng tàu đang xem từ Hub (admin/VM); tài khoản tàu vẫn suy theo _vtsVesselId. */
-function openVesselTimesheet(vidArg){
+function openVesselTimesheet(vidArg, periodArg){
   const vid=vidArg||_vtsVesselId();
   if(!vid){ toast('Chưa xác định tàu','bad'); return; }
-  const period=(_vtsDraft&&_vtsDraft.vesselId===vid)?_vtsDraft.period:_vtsPeriodNow();
-  _vtsLoad(vid, period);
-  _vtsRender();
+  const period=periodArg||((_vtsDraft&&_vtsDraft.vesselId===vid)?_vtsDraft.period:_vtsPeriodNow());
+  // v3.66.44 (Sếp: "BCC tàu cũng làm bảng chi tiết theo ngày — in để thuyền viên ký xác nhận dòng của mình"):
+  // tàu chấm TRÊN ĐÚNG 1 BCC web của tàu, kiểu CHI TIẾT THEO NGÀY (mã DB1/DB2/DOCK/BO/NGHICA/BO2/DP từng ngày,
+  // tổng tự đếm). Bảng Tổng hợp đã lập ở v3.66.43 (nếu có) vẫn mở bằng màn Tổng hợp. Kỳ cũ theo luồng cũ: xem như cũ.
+  let sh=_vtsFindSheet(vid, period);
+  if(!sh){
+    const old=HRService.timesheets().find(t=>t.vesselId===vid && t.period===period);
+    if(old){ _vtsLoad(vid, period); _vtsRender(); return; }   // luồng cũ (lịch sử)
+    const [Y,M]=period.split('-').map(Number); const nd=bccDaysInMonth(Y,M); const nowIso=new Date().toISOString();
+    const crew=(typeof vesselCrewMerged==='function')?vesselCrewMerged(vid).filter(x=>x.status!=='off'):crewOnboard(vid, period+'-15').map(a=>({empId:a.empId}));
+    sh={ id:_vtsSheetId(vid, period), period, scope:{type:'vessel', value:vid}, month:M, year:Y, numDays:nd, workDays:nd,
+      status:'draft', mode:'daily', rows:crew.map(x=>({empId:x.empId, days:{}, ot:{}})), createdBy:actorName(),
+      createdByUserId:(CURRENT_USER&&CURRENT_USER.id)||null, createdAt:nowIso, updatedAt:nowIso, _fromVessel:true };
+    S.bccSheets=S.bccSheets||[]; S.bccSheets.push(sh); saveState();
+  } else if(sh.status==='draft' && sh.mode==='daily'){
+    // bổ sung thuyền viên mới lên tàu (không xóa ai)
+    try{
+      const crew=(typeof vesselCrewMerged==='function')?vesselCrewMerged(vid).filter(x=>x.status!=='off'):[];
+      let add=0; crew.forEach(x=>{ if(!(sh.rows||[]).some(r=>r.empId===x.empId)){ sh.rows.push({empId:x.empId, days:{}, ot:{}}); add++; } });
+      if(add){ _bccTouch(sh); saveState(); }
+    }catch(e){}
+  }
+  window._bccEditingId=sh.id;
+  if(sh.mode==='summary') renderBccSummaryEditor(sh.id); else renderBccGridEditor(sh.id);
 }
 function _vtsLoad(vid, period){
-  let ts=HRService.timesheets().find(t=>t.vesselId===vid && t.period===period);
+  const _sh=_vtsFindSheet(vid, period);   // v3.66.43
+  let ts=_sh?null:HRService.timesheets().find(t=>t.vesselId===vid && t.period===period);
+  const _legacy=!!(ts && ['submitted','approved','locked'].indexOf(ts.status)>=0);   // kỳ cũ đã gửi/khóa theo luồng cũ → chỉ xem
   /* Danh sách người: DANH SÁCH THUYỀN VIÊN trên tàu (căn cứ duy nhất — Sếp chốt 15/8),
      không phụ thuộc QĐ điều động. */
   const crew=(typeof vesselCrewMerged==='function')?vesselCrewMerged(vid).filter(c=>c.status!=='off')
              :crewOnboard(vid, period+'-15').map(a=>({empId:a.empId}));
   const mkRow=(empId)=>({empId, cols:{}, note:''});
+  if(_sh){
+    const ss=_vtsStatusOfSheet(_sh);
+    ts={ id:_sh.id, vesselId:vid, period, status:ss.st==='none'?'draft':ss.st, returnReason:ss.reason, _sheetId:_sh.id,
+      rows:(_sh.rows||[]).map(r=>({empId:r.empId, cols:Object.assign({}, r.sums||{}), note:r.note||''})) };
+    if(_sh.status==='draft') crew.forEach(c=>{ if(!ts.rows.some(r=>r.empId===c.empId)) ts.rows.push(mkRow(c.empId)); });
+    _vtsDraft=JSON.parse(JSON.stringify(ts)); return;
+  }
   if(!ts){
     ts={ id:uid(), vesselId:vid, period, status:'draft', rows:crew.map(c=>mkRow(c.empId)),
       createdBy:actorName(), createdAt:new Date().toISOString() };
@@ -14416,6 +14519,7 @@ function _vtsLoad(vid, period){
     crew.forEach(c=>{ if(!ts.rows.some(r=>r.empId===c.empId)) ts.rows.push(mkRow(c.empId)); });
   }
   _vtsDraft=JSON.parse(JSON.stringify(ts));
+  _vtsDraft._legacy=_legacy;
 }
 function _vtsEmpInfo(empId){
   const e=(typeof crewEmpInfo==='function')?crewEmpInfo(empId):null;
@@ -14521,28 +14625,33 @@ function _vtsSave(mode){
     if(bad.length && !confirm('Còn '+bad.length+' dòng lệch số ngày trong tháng ('+days+' ngày).\nVẫn gửi HR?')) return;
     if(!confirm('Gửi bảng chấm công kỳ '+s.period+' về HR?\nSau bước này TÀU KHÔNG SỬA ĐƯỢC nữa (HR trả lại thì mới sửa tiếp).')) return;
   }
-  let ts=HRService.timesheets().find(t=>t.vesselId===s.vesselId && t.period===s.period);
-  if(!ts){ ts={id:s.id}; HRService.addTimesheet(ts); }
-  Object.assign(ts, s);
+  // v3.66.43: ghi vào ĐÚNG 1 BCC web của tàu (tạo nếu chưa có) — không còn bảng riêng/chép hệ cũ.
+  if(s._legacy){ toast('Kỳ này đã gửi/khóa theo luồng cũ — chỉ xem','warn'); return; }
+  let sh=_vtsFindSheet(s.vesselId, s.period);
+  if(sh && sh.status!=='draft'){ toast('Bảng đã chuyển HR/đã khóa — không sửa được','bad'); return; }
+  if(!sh){
+    const _pm=s.period.split('-').map(Number); const nd=vtsDaysInPeriod(s.period); const nowIso=new Date().toISOString();
+    sh={ id:_vtsSheetId(s.vesselId, s.period), period:s.period, scope:{type:'vessel', value:s.vesselId}, month:_pm[1], year:_pm[0], numDays:nd, workDays:nd,
+      status:'draft', mode:'summary', rows:[], createdBy:actorName(), createdByUserId:(CURRENT_USER&&CURRENT_USER.id)||null, createdAt:nowIso, updatedAt:nowIso, _fromVessel:true };
+    S.bccSheets=S.bccSheets||[]; S.bccSheets.push(sh);
+  }
+  (s.rows||[]).forEach(dr=>{
+    let r=(sh.rows||[]).find(x=>x.empId===dr.empId);
+    const sums={}; Object.keys(dr.cols||{}).forEach(k=>{ const n=parseFloat(dr.cols[k]); if(n) sums[k]=n; });
+    if(!r){ r={empId:dr.empId, sums:{}}; sh.rows.push(r); }
+    if(JSON.stringify(r.sums||{})!==JSON.stringify(sums) || (r.note||'')!==(dr.note||'')){ r.sums=sums; r.note=dr.note||''; _bccTouch(sh, r); }
+  });
   if(mode==='submit'){
-    ts.status='submitted'; ts.submittedBy=actorName(); ts.submittedAt=new Date().toISOString(); ts.returnReason='';
-    // v3.20.353 (Sếp: "Tàu vẫn giữ cách cũ: Sau khi Tạo BCC tại TÀU: Kiểm tra - xác nhận - xem lại -
-    // Gửi Nhân sự → BCC sẽ chuyển tới timesheet - ghi 1 dòng: BCC tàu... HR click xem tại chỗ"): BẬT
-    // LẠI tự đổ vào hrAttendance (đã tắt từ v3.18.67 do lo trùng với BCC import Excel — nhưng
-    // _vtsPushToBCC() vốn đã tự kiểm bản ghi CHƯA KHÓA cùng kỳ+tàu để GHI ĐÈ, không tạo bản trùng —
-    // rủi ro thật ở v3.18.67 là NHẦM LẪN nguồn gốc dữ liệu, không phải trùng bản ghi. Giải quyết đúng
-    // gốc: nhãn rõ "nguồn: tàu tự nộp" trong hrmAttRender()/hrmAttView() thay vì tắt hẳn tính năng.
-    _vtsPushToBCC(ts);
-    try{ hrmAttRender(); }catch(e){}
+    sh.status='submitted'; sh.submittedBy=actorName(); sh.submittedAt=new Date().toISOString();
     try{ logAuditEvent('vessel_timesheet_submit',{vessel:(typeof anyVesselName==='function'?anyVesselName(s.vesselId):''), period:s.period, rows:(s.rows||[]).length}); }catch(e){}
   } else {
-    ts.status='confirmed'; ts.confirmedBy=actorName(); ts.confirmedAt=new Date().toISOString();
+    sh.shipConfirmedAt=new Date().toISOString(); sh.shipConfirmedBy=actorName();
     try{ logAuditEvent('vessel_timesheet_confirm',{period:s.period}); }catch(e){}
   }
-  ts.updatedAt=new Date().toISOString();
-  try{ touchRecord(ts); }catch(e){}
+  _bccTouch(sh);
   saveState();
-  toast(mode==='submit'?'✓ Đã gửi HR — chờ Phòng NS 📥 Lấy BCC từ các bộ phận rồi Lưu vào BCC kỳ '+s.period:'✓ Đã lưu — vẫn sửa tiếp được','good');
+  try{ hrmAttRender(); }catch(e){}
+  toast(mode==='submit'?'✓ Đã gửi HR — HR kiểm tra và khóa trong Nhân sự → Chấm công':'✓ Đã lưu — vẫn sửa tiếp được','good');
   if(mode==='submit'){ _vtsDraft=null; closeModal(); } else { _vtsRender(); }
 }
 /* Gửi HR = tạo/cập nhật bản ghi BCC Đội tàu trong hrAttendance (cùng cửa với file Excel HR import).
@@ -18922,6 +19031,7 @@ function applyRoleUI(){
 }
 
 async function logout(){
+  try{ _srvLogoutBg(); }catch(e){}   // v3.66.47
   if(!confirm('Đăng xuất? Dữ liệu vẫn được giữ trong thiết bị.')) return;
   try{ logAuditEvent('logout',{}); }catch(e){}
   // Clean up presence before logging out
@@ -20165,11 +20275,139 @@ function bccSchemaForScope(scope){
   }
   return BCC_SUMMARY_SCHEMAS[scope.type]||null;
 }
+/* v3.66.39 (Bản A — Sếp duyệt "kiểm tra kết nối + lỗi ngầm" BCC): 2 LỖI MẤT DỮ LIỆU NGẦM.
+   (1) Mọi thao tác trên BCC (chấm ô, OT, NV tự gửi, Chuyển HR, Khóa) KHÔNG đóng dấu updatedAt → khi
+   đồng bộ, mergeByID so thời điểm bằng nhau (chỉ createdAt) → GIỮ BẢN CLOUD → sửa trên máy khác
+   không bao giờ lên được, lần tải về sau còn bị cloud đè lại. (2) Cả bảng = 1 bản ghi → 2 NV cùng bộ
+   phận tự chấm trên 2 máy thì bản lưu sau đè mất dòng người kia. SỬA: mỗi thao tác đóng dấu cả bảng
+   lẫn ĐÚNG DÒNG NV bị sửa; đồng bộ bccSheets gộp THEO TỪNG DÒNG NV (_bccMergeSheets, gọi trong mergeByID). */
+/* v3.66.40 (Sếp: "Thứ 7, Chủ nhật trên BCC tự điền Nghỉ, nếu có công = OT" — áp TẤT CẢ các nhóm có
+   OT: Văn phòng, Công ty con, Chuyên gia, O&M, Expat, GEO. Tàu/Thuyền viên KHÔNG áp — làm theo ca
+   cả tuần và không có OT). Cuối tuần: ô ngày = Nghỉ (không tính công ngày); giờ làm nhập ô OT →
+   _bccDailyRowToCols đưa vào đúng cột hệ số cuối tuần. */
+function _bccWeekendOff(sheet){ const t=sheet&&sheet.scope&&sheet.scope.type; return !!t && t!=='vessel' && t!=='crew'; }
+function _bccIsWeekend(sheet, d){ const w=new Date(+sheet.year, (+sheet.month)-1, +d).getDay(); return w===0||w===6; }
+/* ════ v3.66.41 (Bản C) — TRẠNG THÁI TỪNG DÒNG NV · CHẶN KHÓA KHI CÒN NGƯỜI CHƯA CHẤM · ĐIỀN CÔNG
+   THƯỜNG CHO NGƯỜI CHƯA CHẤM · TỰ TẠO BCC BỘ PHẬN ĐẦU THÁNG ════ */
+function _bccRowHasData(s, r){
+  if(!r) return false;
+  if(s.mode==='summary') return Object.values(r.sums||{}).some(v=>+v);
+  return Object.keys(r.days||{}).some(k=>r.days[k]) || Object.keys(r.ot||{}).some(k=>+r.ot[k]);
+}
+function _bccRowState(s, r){
+  if(!_bccRowHasData(s, r)) return {k:'none', label:'⏳ Chưa chấm', color:'var(--bad)'};
+  if(r.selfSubmittedAt){
+    const edited = r.updatedAt && (Date.parse(r.updatedAt)-Date.parse(r.selfSubmittedAt))>2000;
+    return {k:'self', label:'✅ NV tự chấm'+(edited&&r.updatedBy?(' · sửa bởi '+r.updatedBy):''), color:'var(--good)'};
+  }
+  return {k:'proxy', label:'✍ Chấm thay'+(r.updatedBy?(' · '+r.updatedBy):''), color:'#9a5b12'};
+}
+function _bccStateCounts(s){
+  const n={none:0, self:0, proxy:0}; (s.rows||[]).forEach(r=>{ n[_bccRowState(s,r).k]++; }); return n;
+}
+function _bccGuardComplete(s, action){
+  const miss=(s.rows||[]).filter(r=>!_bccRowHasData(s,r));
+  if(!miss.length){
+    // v3.66.44: tàu — mỗi thuyền viên phải đủ số ngày trong tháng (như bảng tàu cũ đã kiểm)
+    if(s.scope && s.scope.type==='vessel' && s.mode==='daily'){
+      const off=(s.rows||[]).filter(r=>Object.keys(r.days||{}).filter(k=>r.days[k]).length!==(+s.numDays||0));
+      if(off.length) return confirm(off.length+' thuyền viên chưa đủ '+s.numDays+' ngày trong tháng (có thể lên/xuống tàu giữa tháng).\n\nVẫn '+action+'?');
+    }
+    return true;
+  }
+  const names=miss.slice(0,8).map(r=>{ const e=(HRService.employees()||[]).find(x=>x.id===r.empId)||{}; return e.fullName||e.name||r.empId; }).join(', ')+(miss.length>8?'…':'');
+  if(s.mode==='summary') return confirm(miss.length+' NV đang 0 công: '+names+'\n\nVẫn '+action+'?');
+  toast('Còn '+miss.length+' NV chưa chấm ('+names+') — chấm thay hoặc bấm "Điền công thường cho người chưa chấm" trước khi '+action,'bad');
+  return false;
+}
+function bccFillMissing(sheetId){
+  const s=(S.bccSheets||[]).find(x=>x.id===sheetId); if(!s || s.mode==='summary') return;
+  if(s.status==='confirmed'){ toast('Bảng đã khóa','bad'); return; }
+  const sc=bccSchemaForScope(s.scope); const code=sc?(((sc.cols||[]).filter(c=>c[2]==='ngày')[0]||[])[0]||''):'';
+  if(!code){ toast('Không xác định được mã công thường của nhóm này','bad'); return; }
+  const miss=(s.rows||[]).filter(r=>!_bccRowHasData(s,r));
+  if(!miss.length){ toast('Không còn NV nào chưa chấm','good'); return; }
+  if(!confirm('Điền "'+code+'" (công thường) vào các ngày làm việc cho '+miss.length+' NV chưa chấm?\nSau đó chỉ sửa những ngày ngoại lệ (nghỉ phép, ốm...).')) return;
+  miss.forEach(r=>{
+    r.days=r.days||{}; r.ot=r.ot||{};
+    for(let d=1; d<=s.numDays; d++){ if(_bccWeekendOff(s) && _bccIsWeekend(s,d)) continue; r.days[d]=code; }
+    _bccTouch(s, r);
+  });
+  saveState(); toast('✓ Đã điền công thường cho '+miss.length+' NV — kiểm tra ngày ngoại lệ rồi Lưu','good');
+  renderBccGridEditor(sheetId);
+}
+function _bccAutoCreateMonthly(){
+  try{
+    if(window._bccAutoDone) return;
+    if(!(window._syncSignal && window._syncSignal.status==='ok')) return;
+    window._bccAutoDone=true;
+    if(typeof bccMyEffectiveScopes!=='function') return;
+    const scopes=bccMyEffectiveScopes()||[]; if(!scopes.length) return;
+    const now=new Date(); const year=now.getFullYear(), month=now.getMonth()+1;
+    const period=year+'-'+String(month).padStart(2,'0');
+    let made=0;
+    scopes.forEach(scope=>{
+      if((S.bccSheets||[]).some(s=>s&&!s._deleted&&s.period===period&&s.scope&&s.scope.type===scope.type&&s.scope.value===scope.value&&(s.scope.companyId||'')===(scope.companyId||''))) return;
+      const roster=bccRosterForScope(scope); if(!roster.length) return;
+      const numDays=bccDaysInMonth(year,month);
+      const tmp={scope, year, month};
+      let wd=0; for(let d=1; d<=numDays; d++){ if(!(_bccWeekendOff(tmp)&&_bccIsWeekend(tmp,d))) wd++; }
+      const _isVsl=(scope.type==='vessel');   // v3.66.43: tàu = Tổng hợp, cùng ID với màn Chấm công của tàu
+      const id=_isVsl?_vtsSheetId(scope.value, period):('BCC-AUTO-'+period+'-'+scope.type+'-'+scope.value+'-'+(scope.companyId||'')).replace(/[^A-Za-z0-9_\-]/g,'_');
+      const nowIso=new Date().toISOString();
+      S.bccSheets=S.bccSheets||[];
+      S.bccSheets.push({ id, period, scope, month, year, numDays, workDays:wd, status:'draft', mode:'daily',   // v3.66.44: tàu cũng chi tiết theo ngày
+        rows:roster.map(e=>({empId:e.id, days:{}, ot:{}})), createdBy:actorName(), createdByUserId:(CURRENT_USER&&CURRENT_USER.id)||null,
+        createdAt:nowIso, updatedAt:nowIso, _autoCreated:true });
+      made++;
+    });
+    if(made){ saveState(); toast('📋 Đã tạo sẵn '+made+' bảng chấm công tháng '+period+' cho bộ phận anh/chị phụ trách','good'); }
+  }catch(e){ console.warn('[bcc auto-create]', e&&e.message); }
+}
+function _bccTouch(sheet, row){
+  const now=new Date().toISOString(); let by=''; try{ by=actorName(); }catch(e){}
+  if(row){ row.updatedAt=now; row.updatedBy=by; }
+  if(sheet){ sheet.updatedAt=now; sheet.updatedBy=by; }
+}
+/* Gộp 2 phiên bản CÙNG 1 bảng BCC: phần đầu bảng (trạng thái, người khóa...) theo bản MỚI hơn; từng dòng
+   NV lấy bản MỚI hơn của dòng đó (so row.updatedAt). Bảng đã KHÓA: bỏ qua sửa dòng xảy ra SAU lúc khóa
+   (máy chưa biết đã khóa vẫn sửa) — số đã khóa không bị đổi ngầm. Hòa thời điểm → giữ bản a (cloud). */
+function _bccMergeSheets(a, b){
+  const ts=x=>{ const t=x&&(x.updatedAt||x.createdAt); return t?(Date.parse(t)||0):0; };
+  // Trạng thái chỉ đi TIẾN (Nháp → Chuyển HR → Khóa): máy chưa biết bảng đã khóa/đã chuyển mà vẫn sửa
+  // (dấu thời gian mới hơn) KHÔNG được kéo trạng thái lùi về Nháp. Cùng trạng thái → bản mới hơn.
+  const RANK={draft:0, submitted:1, confirmed:2};
+  // v3.66.40: mở khóa tăng rev → lần mở khóa (rev cao hơn) THẮNG mọi bản khóa cũ; cùng rev mới xét trạng thái.
+  const kA=(+a.rev||0)*10+(RANK[a.status]||0), kB=(+b.rev||0)*10+(RANK[b.status]||0);
+  const head = (kB>kA) ? b : (kA>kB) ? a : (ts(b)>ts(a) ? b : a);
+  const lockAt = head.status==='confirmed' ? (Date.parse(head.confirmedAt||'')||0) : 0;
+  const rowsA=Array.isArray(a.rows)?a.rows:[], rowsB=Array.isArray(b.rows)?b.rows:[];
+  const mapB={}; rowsB.forEach(r=>{ if(r&&r.empId!=null) mapB[r.empId]=r; });
+  const seen=new Set(), out=[];
+  const pick=(ra, rb)=>{
+    if(!ra) return rb; if(!rb) return ra;
+    const tA=Date.parse(ra.updatedAt||'')||0, tB=Date.parse(rb.updatedAt||'')||0;
+    if(lockAt){
+      const okA=tA<=lockAt, okB=tB<=lockAt;
+      if(okA && !okB) return ra; if(okB && !okA) return rb;
+      if(!okA && !okB) return (head===b)?rb:ra;
+    }
+    return tB>tA ? rb : ra;
+  };
+  const headRows=(head===a)?rowsA:rowsB, otherRows=(head===a)?rowsB:rowsA;
+  const mapA={}; rowsA.forEach(r=>{ if(r&&r.empId!=null) mapA[r.empId]=r; });
+  headRows.concat(otherRows).forEach(r=>{
+    if(!r || r.empId==null || seen.has(r.empId)) return; seen.add(r.empId);
+    out.push(pick(mapA[r.empId], mapB[r.empId]));
+  });
+  return Object.assign({}, head, {rows:out});
+}
 function bccSumChange(sheetId, empId, code, value){
   const s=(S.bccSheets||[]).find(x=>x.id===sheetId); if(!s) return;
   const row=s.rows.find(r=>r.empId===empId); if(!row) return;
   row.sums=row.sums||{};
   row.sums[code]=+value||0;
+  _bccTouch(s, row);   // v3.66.39
 }
 // ============================================================================
 // v3.20.314 — TIMESHEET (Bảng Chấm Công / BCC) — Sếp: "Xây tính năng chấm công.
@@ -20321,12 +20559,14 @@ function bccCreateSheet(){
   // định BỘ CỘT/CÁCH TÍNH TỔNG dùng khi hiển thị/xuất — không còn tự động ép mode nữa.
   const wantDaily = ((document.getElementById('bcc-new-kind')||{}).value)==='daily';
   const isSummary = !!bccSchemaForScope(scope);
+  const _isVsl=(scope.type==='vessel');   // v3.66.43: tàu = 1 BCC Tổng hợp cho cả tàu, không chấm theo thuyền viên
   const sheet={
-    id:'BCC-'+Date.now().toString(36).toUpperCase(), period, scope, month, year, numDays,
-    workDays, status:'draft', mode:(wantDaily?'daily':(isSummary?'summary':'daily')),
-    rows:roster.map(e=>wantDaily?({empId:e.id, days:{}, ot:{}}):(isSummary?({empId:e.id, sums:{}}):({empId:e.id, days:{}}))),
+    id:_isVsl?_vtsSheetId(scope.value, period):('BCC-'+Date.now().toString(36).toUpperCase()), period, scope, month, year, numDays,
+    workDays, status:'draft', mode:_isVsl?'daily':(wantDaily?'daily':(isSummary?'summary':'daily')),   // v3.66.44: tàu = chi tiết theo ngày
+    rows:roster.map(e=>_isVsl?({empId:e.id, days:{}, ot:{}}):(wantDaily?({empId:e.id, days:{}, ot:{}}):(isSummary?({empId:e.id, sums:{}}):({empId:e.id, days:{}})))),
     createdBy:actorName(), createdByUserId:(CURRENT_USER&&CURRENT_USER.id)||null, createdAt:new Date().toISOString()
   };
+  sheet.updatedAt=sheet.createdAt;   // v3.66.39
   S.bccSheets=S.bccSheets||[]; S.bccSheets.push(sheet);
   saveState(); closeModal();
   window._bccEditingId=sheet.id;
@@ -20357,13 +20597,18 @@ function bccCellChange(sheetId, empId, day, value){
   const row=s.rows.find(r=>r.empId===empId); if(!row) return;
   row.days=row.days||{};
   const v=(value||'').trim().toUpperCase();
+  if(v && _bccWeekendOff(s) && _bccIsWeekend(s, day)){   // v3.66.40 cuối tuần = Nghỉ, làm việc → nhập OT
+    toast('Thứ 7/Chủ nhật: Nghỉ — nếu có làm việc, nhập số giờ vào ô OT','warn'); renderBccGridEditor(sheetId); return;
+  }
   if(v) row.days[day]=v; else delete row.days[day];
+  _bccTouch(s, row);   // v3.66.39
   renderBccGridEditor(sheetId);
 }
 function bccOtChange(sheetId, empId, field, value){
   const s=(S.bccSheets||[]).find(x=>x.id===sheetId); if(!s) return;
   const row=s.rows.find(r=>r.empId===empId); if(!row) return;
   row[field]=+value||0;
+  _bccTouch(s, row);   // v3.66.39
 }
 function bccSave(sheetId){
   saveState(); toast('✓ Đã lưu bản nháp');
@@ -20512,22 +20757,47 @@ function bccDeleteSheet(sheetId){
   const s=(S.bccSheets||[]).find(x=>x.id===sheetId); if(!s) return;
   if(s.status!=='draft'){ toast('Chỉ xóa được bảng còn ở trạng thái Nháp','bad'); return; }
   if(!confirm('Xóa hẳn bảng chấm công kỳ '+s.period+' — '+bccScopeLabel(s.scope)+'? Không khôi phục lại được.')) return;
-  s._deleted=true;
+  s._deleted=true; _bccTouch(s);   // v3.66.39
   saveState(); toast('✓ Đã xóa bảng nháp');
   try{ hrmAttRender(); }catch(e){}
 }
 function bccSubmitToHr(sheetId){
   const s=(S.bccSheets||[]).find(x=>x.id===sheetId); if(!s) return;
   if(s.status!=='draft'){ toast('Bảng không ở trạng thái Nháp','bad'); return; }
+  if(!_bccGuardComplete(s,'Chuyển HR')) return;   // v3.66.41
   if(!confirm('Chuyển bảng chấm công kỳ '+s.period+' cho HR kiểm tra? Sau khi chuyển, bạn KHÔNG còn sửa/xóa được nữa — chỉ HR mới sửa được từ đây.')) return;
-  s.status='submitted'; s.submittedAt=new Date().toISOString(); s.submittedBy=actorName();
+  s.status='submitted'; s.submittedAt=new Date().toISOString(); s.submittedBy=actorName(); _bccTouch(s);   // v3.66.39
   saveState(); toast('✓ Đã chuyển HR — chờ HR kiểm tra và khóa');
   (typeof renderBccGridEditor==='function')&&(S.bccSheets.find(x=>x.id===sheetId).mode==='summary'?renderBccSummaryEditor(sheetId):renderBccGridEditor(sheetId));
 }
+/* v3.66.40 (Bản B): MỞ KHÓA / TRẢ VỀ BCC web — HR/Admin/Trưởng bộ phận đúng module. Đưa bảng về Nháp,
+   tăng rev (đồng bộ: lần mở khóa thắng bản khóa cũ), ghi nhật ký + lý do. CHẶN khi kỳ lương tương ứng
+   đã duyệt/khóa (khóa theo chuỗi — muốn sửa phải mở kỳ lương trước). */
+function bccUnlock(sheetId){
+  const s=(S.bccSheets||[]).find(x=>x.id===sheetId); if(!s) return;
+  if(s.status==='draft'){ toast('Bảng đang ở Nháp','warn'); return; }
+  if(!_bccCanConfirm(s)){ toast('Chỉ HR/Admin hoặc Trưởng bộ phận đúng module','bad'); return; }
+  try{
+    const prof=_bccWebEngineOfDeptSheet(s);
+    const locked=(PayrollService.periods()||[]).find(p=>p && !p._deleted && p.period===s.period && (!prof || p.profile===prof) && payStatusIdx(p.status)>=payStatusIdx('approved'));
+    if(locked){ toast('Kỳ lương '+s.period+' ('+(PAY_PROFILE_LABEL[locked.profile]||locked.profile)+') đã duyệt/khóa — mở kỳ lương trước rồi mới mở BCC','bad'); return; }
+  }catch(e){}
+  const why=prompt((s.status==='confirmed'?'MỞ KHÓA':'TRẢ VỀ')+' BCC kỳ '+s.period+' — '+bccScopeLabel(s.scope)+'\nLý do (bắt buộc):','');
+  if(why===null) return; if(!String(why).trim()){ toast('Cần ghi lý do','bad'); return; }
+  const from=s.status;
+  s.status='draft'; s.rev=(+s.rev||0)+1;
+  s.reopenLog=(Array.isArray(s.reopenLog)?s.reopenLog:[]).concat([{at:new Date().toISOString(), by:actorName(), from, reason:String(why).trim()}]);
+  delete s.confirmedAt; delete s.confirmedBy;
+  _bccTouch(s);
+  try{ logAuditEvent('bcc_reopen',{sheetId:s.id, period:s.period, from, reason:String(why).trim()}); }catch(e){}
+  saveState(); toast('✓ Đã đưa BCC về Nháp — người chấm công sửa rồi Chuyển HR lại','good');
+  (s.mode==='summary'?renderBccSummaryEditor(sheetId):renderBccGridEditor(sheetId));
+}
 function _bccFooterActions(s){
   const isHr=_bccCanConfirm(s);   // v3.66.24: Admin/HR HOẶC Trưởng bộ phận đúng module (Quản lý tàu/O&M)
+  if(s.status==='confirmed' && isHr) return `<button class="btn-sec" onclick="bccUnlock('${s.id}')" title="Đưa bảng về Nháp để sửa (bắt buộc ghi lý do)">🔓 Mở khóa</button>`;   // v3.66.40
   if(s.status==='draft') return `<button class="btn-sec" onclick="bccSave('${s.id}')">💾 Lưu</button><button class="btn-primary" onclick="bccSubmitToHr('${s.id}')">→ Chuyển HR</button>`;
-  if(s.status==='submitted' && isHr) return `<button class="btn-sec" onclick="bccSave('${s.id}')">💾 Lưu</button><button class="btn-primary" onclick="bccConfirm('${s.id}')">🔒 Khóa</button>`;
+  if(s.status==='submitted' && isHr) return `<button class="btn-sec" onclick="bccUnlock('${s.id}')" title="Trả bảng về người chấm công để sửa (bắt buộc ghi lý do)">↩ Trả về</button><button class="btn-sec" onclick="bccSave('${s.id}')">💾 Lưu</button><button class="btn-primary" onclick="bccConfirm('${s.id}')">🔒 Khóa</button>`;
   return '';
 }
 function renderBccSummaryEditor(id){
@@ -20556,7 +20826,7 @@ function renderBccSummaryEditor(id){
     return `<tr${_bg}>
       <td style="padding:6px 8px;text-align:center">${idx+1}</td>
       <td style="padding:6px 8px;font-size:11px">${_esc(e.smartId||e.id)}</td>
-      <td style="padding:6px 8px;white-space:nowrap">${_esc(e.fullName||e.name)}</td>
+      <td style="padding:6px 8px;white-space:nowrap">${_esc(e.fullName||e.name)}${(()=>{ const st=_bccRowState(s,r); return `<div style="font-size:10px;font-weight:600;color:${st.color}">${_esc(st.label)}</div>`; })()}</td>
       <td style="padding:6px 8px;font-size:11px;color:var(--muted)">${_esc(e.jobTitle||e.title||'')}</td>
       <td class="r" style="font-weight:700">${total}</td>
       ${cells}
@@ -20630,7 +20900,7 @@ function renderBccGridEditor(id){
     return `<tr${_bg}>
       <td style="padding:6px 8px;text-align:center">${idx+1}</td>
       <td style="padding:6px 8px;font-size:11px">${_esc(e.smartId||e.id)}</td>
-      <td style="padding:6px 8px;white-space:nowrap">${_esc(e.fullName||e.name)}</td>
+      <td style="padding:6px 8px;white-space:nowrap">${_esc(e.fullName||e.name)}${(()=>{ const st=_bccRowState(s,r); return `<div style="font-size:10px;font-weight:600;color:${st.color}">${_esc(st.label)}</div>`; })()}</td>
       <td style="padding:6px 8px;font-size:11px;color:var(--muted)">${_esc(e.jobTitle||e.title||'')}</td>
       <td class="r" style="font-weight:700">${total}</td>
       ${sumCells}
@@ -20644,8 +20914,13 @@ function renderBccGridEditor(id){
     : s.status==='submitted' ? '<span style="color:var(--warn)">📨 Đã chuyển HR — chờ kiểm tra</span>'
     : 'Đang nháp — bấm Lưu để giữ tiến độ';
   const codeDatalist=`<datalist id="bcc-codes-${s.id}">${codeCols.map(c=>`<option value="${_esc(c[0])}">`).join('')}</datalist>`;
+  const _isVslG=!!(s.scope&&s.scope.type==='vessel');
+  const _lastRe=(Array.isArray(s.reopenLog)&&s.reopenLog.length&&s.status==='draft')?s.reopenLog[s.reopenLog.length-1]:null;
   const body=`
     ${codeDatalist}
+    ${_isVslG?`<div style="padding:0 4px 8px;font-size:12px;display:flex;gap:10px;align-items:center">Kỳ <input type="month" value="${_esc(s.period)}" style="padding:3px 6px;font-size:12px;border:1px solid var(--rule);border-radius:6px" onchange="closeModal();openVesselTimesheet('${_esc(s.scope.value)}',this.value)"><span style="color:var(--muted)">· 1 bảng cho cả tàu — in ra để thuyền viên ký xác nhận dòng của mình</span></div>`:''}
+    ${_lastRe?`<div style="margin:0 4px 8px;padding:8px 10px;background:rgba(192,57,43,.08);border-radius:6px;font-size:12px"><b>↩ HR trả lại</b> (${_esc(String(_lastRe.at||'').slice(0,16).replace('T',' '))} · ${_esc(_lastRe.by||'')}): ${_esc(_lastRe.reason||'')}</div>`:''}
+    ${(()=>{ const n=_bccStateCounts(s); return `<div style="padding:0 4px 8px;font-size:12px;display:flex;gap:14px;align-items:center;flex-wrap:wrap"><span style="color:var(--good)">✅ NV tự chấm: <b>${n.self}</b></span><span style="color:#9a5b12">✍ Chấm thay: <b>${n.proxy}</b></span><span style="color:var(--bad)">⏳ Chưa chấm: <b>${n.none}</b></span>${(n.none&&!readOnly)?`<button class="btn-sec" style="font-size:11px;padding:3px 10px" onclick="bccFillMissing('${s.id}')">✍ Điền công thường cho người chưa chấm</button>`:''}</div>`; })()}
     <div style="padding:0 4px 10px;font-size:12px">${stChip} · Ngày công làm việc chuẩn: <b>${s.workDays||'—'}</b>${hasOt?' · Dòng vàng "OT" ngay dưới mỗi NV — số giờ làm thêm theo đúng ngày.':''}</div>
     <div class="co-panel" style="margin-bottom:10px;padding:8px 14px;font-size:11px;line-height:1.8">${legendHtml}</div>
     <div style="overflow-x:auto;border:1px solid var(--rule);border-radius:8px">
@@ -20667,6 +20942,7 @@ function bccOtDayChange(sheetId, empId, day, value){
   row.ot=row.ot||{};
   const v=+value||0;
   if(v>0) row.ot[day]=v; else delete row.ot[day];
+  _bccTouch(s, row);   // v3.66.39
   renderBccGridEditor(sheetId);
 }
 
@@ -20730,11 +21006,12 @@ function bccConfirm(sheetId){
   if(s.status==='draft'){ toast('Bảng còn ở trạng thái Nháp — người tạo phải "Chuyển HR" trước khi khóa','bad'); return; }
   if(s.status==='confirmed'){ toast('Bảng đã khóa rồi','warn'); return; }
   if(!_bccCanConfirm(s)){ toast('Chỉ HR/Admin hoặc Trưởng bộ phận đúng module được khóa bảng chấm công','bad'); return; }
+  if(!_bccGuardComplete(s,'khóa')) return;   // v3.66.41
   if(!confirm('Khóa BCC kỳ '+s.period+'? Sau khi khóa, dữ liệu sẽ chuyển vào Timesheet tổng hợp của Nhân sự VÀ nạp thẳng vào chấm công tính lương (S.hrAttendance) — Payroll đọc được ngay. KHÔNG còn sửa được (trừ Admin).')) return;
-  const pushed=bccPushToHrAttendance(s);
-  if(!pushed) return;
-  s.status='confirmed'; s.confirmedAt=new Date().toISOString(); s.confirmedBy=actorName();
-  saveState(); toast('✓ Đã khóa — đã nạp vào chấm công tính lương');
+  // v3.66.40 (Bản B — MỘT NGUỒN): KHÔNG chép sang hệ cũ (S.hrAttendance) nữa — kỳ lương đọc THẲNG bảng
+  // BCC web đã khóa (_bccWebRowsForPeriodProfile). Hệ cũ chỉ còn để xem các tháng trước.
+  s.status='confirmed'; s.confirmedAt=new Date().toISOString(); s.confirmedBy=actorName(); _bccTouch(s);   // v3.66.39
+  saveState(); toast('✓ Đã khóa — kỳ lương đọc trực tiếp bảng này');   // v3.66.40
   renderBccGridEditor(sheetId);
 }
 // v3.20.314 (Sếp: "Tạo file PDF/Excel đính kèm. NV chấm công tải bản pdf in. BCC luôn in ngang"):
@@ -20874,7 +21151,7 @@ function bccPrintPdf(sheetId){
   </div>`;
   const _footBlock=`<div style="display:flex;justify-content:space-between;margin-top:30px">
     <div style="text-align:center;width:200px"><b>NGƯỜI LẬP</b><div style="height:50px"></div><div>${_esc((s.createdBy||'').toUpperCase())}</div></div>
-    <div style="text-align:center;width:200px"><b>XÁC NHẬN CỦA TRƯỞNG BỘ PHẬN</b><div style="height:50px"></div></div>
+    <div style="text-align:center;width:200px"><b>${(s.scope&&s.scope.type==='vessel')?'XÁC NHẬN CỦA THUYỀN TRƯỞNG':'XÁC NHẬN CỦA TRƯỞNG BỘ PHẬN'}</b><div style="height:50px"></div></div>
   </div>`;
   const _style=`<style>
     @page{size:A4 landscape;margin:8mm}
@@ -20906,15 +21183,44 @@ function bccPrintPdf(sheetId){
         <td style="font-size:8px">${_esc(e.jobTitle||e.title||'')}</td>
         <td style="font-size:8px">${_esc(e.dept||'')}</td>
         <td style="font-size:8px;text-align:center;font-weight:700">${total}</td>
-        ${sumCells}</tr>`;
+        ${sumCells}<td style="min-width:80px;height:24px"></td></tr>`;
     }).join('');
     const html=_style+_headBlock+`<table><thead>
-      <tr><th>Stt</th><th>MSNV</th><th>Họ Và Tên</th><th>Chức danh</th><th>Bộ phận</th><th>Tổng</th>${colHead}</tr>
-      <tr><th></th><th></th><th></th><th></th><th></th><th></th>${colSub}</tr>
+      <tr><th>Stt</th><th>MSNV</th><th>Họ Và Tên</th><th>Chức danh</th><th>Bộ phận</th><th>Tổng</th>${colHead}<th>KÝ XÁC NHẬN<br><span style="font-weight:400;font-size:7px">(NV ký)</span></th></tr>
+      <tr><th></th><th></th><th></th><th></th><th></th><th></th>${colSub}<th></th></tr>
     </thead><tbody>${bodyRows}</tbody></table>`+_footBlock;
     _print(html); return;
   }
   const daysArr=Array.from({length:s.numDays},(_,i)=>i+1);
+  // v3.66.44: LỖI NGẦM — bảng "Chi tiết theo ngày" đời mới (row.ot theo ngày, mã theo nhóm: tàu/O&M/Expat/GEO)
+  // trước đây in bằng khuôn VĂN PHÒNG cũ (BCC_SUMMARY_COLS + ô OT tháng) → cột tổng sai/0 với tàu và các nhóm
+  // khác. In theo ĐÚNG schema của phạm vi, ô ngày ghi mã (+giờ OT nếu có), cuối tuần nhóm có quy tắc = "Nghỉ",
+  // cột KÝ XÁC NHẬN cho từng NV/thuyền viên ký dòng của mình.
+  const _psc=bccSchemaForScope(s.scope);
+  if(_psc && (s.rows||[]).some(r=>r.ot!==undefined)){
+    const dH1=daysArr.map(d=>`<th style="font-size:8px;padding:2px">${d}</th>`).join('');
+    const dH2=daysArr.map(d=>`<th style="font-size:7px;padding:1px;color:#cfe0ee">${BCC_WEEKDAY_VN[new Date(s.year,s.month-1,d).getDay()]}</th>`).join('');
+    const sH=_psc.cols.map(c=>`<th style="font-size:8px" title="${_esc(c[1])}">${_esc(c[0])}</th>`).join('');
+    const _off=_bccWeekendOff(s);
+    const bR=s.rows.map((row,idx)=>{
+      const e=(HRService.employees()||[]).find(x=>x.id===row.empId)||{};
+      row.days=row.days||{}; row.ot=row.ot||{};
+      const cols=_bccDailyRowToCols(row, s, _psc);
+      const tot=typeof _psc.total==='function'?_psc.total(cols):Object.values(cols).reduce((a,b)=>a+(+b||0),0);
+      const dC=daysArr.map(d=>{ const code=row.days[d]||(_off&&_bccIsWeekend(s,d)?'Nghỉ':''); const ot=+row.ot[d]||0;
+        return `<td style="font-size:7px;text-align:center;padding:2px 1px${_off&&_bccIsWeekend(s,d)?';background:#eef2f6':''}">${_esc(code)}${ot?`<div style="font-size:6px;color:#9a5b12">+${ot}h</div>`:''}</td>`; }).join('');
+      const sC=_psc.cols.map(c=>`<td style="font-size:8px;text-align:center">${+cols[c[0]]||0}</td>`).join('');
+      return `<tr><td style="font-size:8px;text-align:center">${idx+1}</td><td style="font-size:8px">${_esc(e.smartId||e.id||'')}</td>
+        <td style="font-size:8px;white-space:nowrap">${_esc(e.fullName||e.name)}</td><td style="font-size:8px">${_esc(e.jobTitle||e.title||'')}</td>
+        <td style="font-size:8px;text-align:center;font-weight:700">${tot}</td>${sC}${dC}<td style="min-width:70px;height:24px"></td></tr>`;
+    }).join('');
+    const htmlN=_style+_headBlock+`<table><thead>
+      <tr><th>Stt</th><th>MSNV</th><th>Họ Và Tên</th><th>Chức danh</th><th>Tổng</th>${sH}${dH1}<th>KÝ XÁC NHẬN<br><span style="font-weight:400;font-size:7px">(NV ký dòng của mình)</span></th></tr>
+      <tr><th></th><th></th><th></th><th></th><th></th>${_psc.cols.map(()=>'<th></th>').join('')}${dH2}<th></th></tr>
+    </thead><tbody>${bR}</tbody></table>`+_footBlock+`
+    <div style="margin-top:12px;font-size:9px;line-height:1.6"><b>Ký hiệu:</b> ${_psc.cols.map(c=>`<b>${_esc(c[0])}:</b> ${_esc(c[1])}`).join(' &nbsp;·&nbsp; ')}${_off?' &nbsp;·&nbsp; <b>Nghỉ:</b> Thứ 7/Chủ nhật (có làm việc → ghi giờ OT)':''}</div>`;
+    _print(htmlN); return;
+  }
   const dayHead1=daysArr.map(d=>`<th style="font-size:8px;padding:2px">${d}</th>`).join('');
   const dayHead2=daysArr.map(d=>`<th style="font-size:7px;padding:1px;color:#cfe0ee">${BCC_WEEKDAY_VN[new Date(s.year,s.month-1,d).getDay()]}</th>`).join('');
   const sumHead=BCC_SUMMARY_COLS.map(c=>`<th style="font-size:8px">${c}</th>`).join('');
@@ -26907,6 +27213,7 @@ function openPayPeriodDetail(id){
   if(!(payCanViewPayroll() || isHrRole())){ toast('Bảng lương chỉ dành cho Kế toán / Kế toán trưởng / HR','bad'); return; }  /* v3.12.40: HR vào được, số tiền ẩn */
   const p=payPeriodById(id); if(!p){ toast('Không tìm thấy kỳ','bad'); return; }
   if(!p.status) p.status='draft';
+  try{ if(_payAttLiveRefresh(p)){ saveState(); toast('🔄 Đã cập nhật số công theo BCC mới nhất','good'); } }catch(e){}   // v3.66.42
   const ccy=_payCcy(p);   /* v3.15.03 FIX: trước hard-code project/expat=USD → kỳ RUB hiện SAI loại tiền */
   const st=p.status, si=payStatusIdx(st);
   const editable = si < payStatusIdx('submitted');  // sửa/nhập liệu/import khi chưa trình duyệt
@@ -26958,7 +27265,7 @@ function openPayPeriodDetail(id){
     const comp=_pcCols?_pcCols.map(([lb,fn,kind])=>`<td style="padding:5px 6px;text-align:right;font-family:monospace;font-size:12px${kind==='days'&&!(+fn(inp))?';color:var(--bad);font-weight:600':''}" ${kind==='days'?'title="Ngày công kéo từ BCC (biển+dock+bờ+DP) — 0 = BCC tháng chưa có công của người này"':''}>${kind==='days'?((+fn(inp))?(+fn(inp)).toLocaleString('vi-VN',{maximumFractionDigits:2}):'0'):_fm(fn(inp))}</td>`).join('')
       :`<td style="padding:5px 6px;text-align:right;font-family:monospace;font-size:12px">${_fm(_resPick(res,['AB','AC','total']))}</td>`;
     return `<tr style="border-bottom:1px solid var(--rule)">
-      <td style="padding:5px 8px">${esc(r.name||'?')}<div style="font-size:10px;color:var(--muted)">${esc(r.smartId||'')}${(()=>{ /* v3.14.65 (Sếp 08/8): VP → Bộ phận · Chức danh; thuyền viên → Tàu · Chức danh */
+      <td style="padding:5px 8px${_payRowManualAtt(p,r).length?';background:#fff4dc':''}">${esc(r.name||'?')}${_payRowManualAtt(p,r).length?`<span title="Có ô số công đã sửa tay trước đây (đang giữ số cũ, khác BCC) — bấm Nhập để xem / ↺ Dùng số BCC" style="margin-left:6px;font-size:10px;font-weight:700;color:#9a5b12;background:#ffe8b8;padding:0 5px;border-radius:3px">✎ công sửa tay</span>`:''}<div style="font-size:10px;color:var(--muted)">${esc(r.smartId||'')}${(()=>{ /* v3.14.65 (Sếp 08/8): VP → Bộ phận · Chức danh; thuyền viên → Tàu · Chức danh */
         try{ const e=(typeof hrmEmpById==='function')?hrmEmpById(r.empId):null; if(!e) return '';
           const tt=e.title||e.position||'';
           if(p.profile==='crew'||p.profile==='crew_khoan'){
@@ -29589,7 +29896,11 @@ function _bccWebRowsForPeriodProfile(period, profile, periodCompanyId){
         if(e.type==='geo' && profile!=='geo') return;
         if(isMixedScope && _empPayProfile(e)!==profile) return;   // sheet nhiều loại NV — lọc đúng từng người
         const unit=(s.scope&&s.scope.companyId)?sheetUnit:_bccWebUnitTagOf(r.empId,period);
-        rows.push({_empId:r.empId, msnv:e.smartId||'', name:e.fullName||e.name||'', unit:unit, cols:r.sums||{}});
+        // v3.66.40: LỖI NGẦM — bảng "Chi tiết theo ngày" (mode='daily', NV tự chấm) KHÔNG có r.sums → đọc
+        // qua nguồn web ra 0 công. Đếm từ dữ liệu theo ngày đúng như lúc khóa (_bccDailyRowToCols).
+        let _cols=r.sums||{};
+        if(s.mode==='daily' && r.ot!==undefined){ const _sc=bccSchemaForScope(s.scope); if(_sc) _cols=_bccDailyRowToCols(r, s, _sc); }
+        rows.push({_empId:r.empId, msnv:e.smartId||'', name:e.fullName||e.name||'', unit:unit, cols:_cols});
       });
     });
   return rows;
@@ -34010,6 +34321,40 @@ const PAY_ROW_FORM_FIELDS={
 PAY_ROW_FORM_FIELDS.crew_khoan=PAY_ROW_FORM_FIELDS.crew;
 PAY_ROW_FORM_FIELDS.expert_om=PAY_ROW_FORM_FIELDS.project;
 PAY_ROW_FORM_FIELDS.expert=PAY_ROW_FORM_FIELDS.project;
+/* ════ v3.66.42 (Sếp: kỳ lương đọc trực tiếp BCC, bỏ sửa tay số công — "các ô sửa tay có thể chỉnh màu") ════
+   - Ô số công (các ô nhận từ BCC theo PAY_ATT_MAP) KHÔNG sửa tay được nữa: sai thì Trả về chấm công.
+   - Ô ĐÃ sửa tay từ trước: GIỮ nguyên số, tô MÀU vàng để HR nhận ra; nút "↺ Dùng số BCC" bỏ sửa tay.
+   - Kỳ lương chưa duyệt TỰ CẬP NHẬT số công khi BCC web của kỳ thay đổi (mở khóa → sửa → khóa lại). */
+function _payAttFields(p){ return Object.keys((typeof PAY_ATT_MAP!=='undefined'&&PAY_ATT_MAP[p&&p.profile])||{}); }
+function _payRowManualAtt(p, row){ const af=_payAttFields(p); return (Array.isArray(row&&row._manualFields)?row._manualFields:[]).filter(k=>af.indexOf(k)>=0); }
+function payRowUseBcc(periodId, empId){
+  const p=payPeriodById(periodId); if(!p) return;
+  if(payStatusIdx(p.status)>=payStatusIdx('approved')){ toast('Kỳ đã duyệt/khóa','warn'); return; }
+  const row=(p.rows||[]).find(r=>r.empId===empId); if(!row) return;
+  const af=_payAttFields(p);
+  row._manualFields=(row._manualFields||[]).filter(k=>af.indexOf(k)<0);
+  p._attSig=null;   // buộc cập nhật lại từ BCC
+  _payAttLiveRefresh(p, true);
+  _payAudit(p,'use_bcc','Bỏ sửa tay số công — dùng số BCC: '+(row.name||empId));
+  saveState(); toast('✓ Đã dùng số công theo BCC cho '+(row.name||''),'good');
+  payRowEdit(periodId, empId);
+}
+function _payAttLiveRefresh(p, force){
+  try{
+    if(!p || payStatusIdx(p.status)>=payStatusIdx('approved')) return false;
+    if(!_payAttFields(p).length) return false;
+    const src=_bccWebSourcesForPeriod(p.period, p.profile, p.companyId)||[];
+    if(!src.length) return false;   // tháng chưa có BCC web — giữ nguyên (hệ cũ)
+    const sig=src.map(s=>s.id+'|'+(s.updatedAt||'')+'|'+(+s.rev||0)).sort().join(',');
+    if(!force && p._attSig===sig) return false;
+    const r=_payAutoPullAttendance(p);
+    (p.rows||[]).forEach(row=>{ try{ row.result=payComputeRow(p, row); }catch(e){} });
+    p._attSig=sig;
+    if(r && r.ok){ try{ _payAutoDraft(p,'Cập nhật số công theo BCC'); }catch(e){}
+      _payAudit(p,'att_live_refresh','Tự cập nhật số công theo BCC web ('+src.length+' bảng)'); }
+    return true;
+  }catch(e){ console.warn('[pay att live]', e&&e.message); return false; }
+}
 function payRowEdit(periodId, empId, backFn){
   /* v3.11.96 GĐ3: chặn từ APPROVED (trước chỉ chặn chuỗi 'locked' → kỳ approved/posted/paid/closed vẫn sửa được) */
   const p=payPeriodById(periodId); if(!p) return;
@@ -34020,9 +34365,11 @@ function payRowEdit(periodId, empId, backFn){
   // bộ field theo profile
   const fieldsByProfile=PAY_ROW_FORM_FIELDS;   /* v3.14.46: một nguồn */
   const flds=fieldsByProfile[p.profile]||[];
+  const _af=_payAttFields(p), _mf=_payRowManualAtt(p,row);
   const body=`<div style="font-size:13px;margin-bottom:8px"><b>${esc(row.name)}</b> · ${esc(PAY_PROFILE_LABEL[p.profile])}</div>
+    ${_af.length?`<div style="font-size:11px;color:var(--muted);margin-bottom:8px;padding:6px 10px;background:rgba(28,58,92,.05);border-left:3px solid var(--accent)">Ô <b>số công</b> (nền xám) lấy trực tiếp từ BCC — không sửa ở đây; sai thì HR <b>↩ Trả về</b> bảng chấm công.${_mf.length?` Ô <span style="background:#ffe8b8;padding:0 4px;border-radius:3px">nền vàng</span> = đã sửa tay trước đây, đang giữ số cũ. <button class="btn-sec" style="font-size:11px;padding:2px 8px;margin-left:6px" onclick="payRowUseBcc('${periodId}','${empId}')">↺ Dùng số BCC</button>`:''}</div>`:''}
     <div style="display:flex;gap:8px;flex-wrap:wrap;font-size:11px">
-    ${flds.map(([k,l])=>`<div style="width:140px"><label style="color:var(--muted);font-size:10px">${l}</label><input id="prow-${k}" value="${row.inputs[k]!=null?row.inputs[k]:''}" style="width:100%;padding:5px 6px;border:1px solid var(--rule);border-radius:4px"></div>`).join('')}
+    ${flds.map(([k,l])=>`<div style="width:140px"><label style="color:var(--muted);font-size:10px">${l}</label><input id="prow-${k}" ${_af.indexOf(k)>=0?`readonly title="${_mf.indexOf(k)>=0?'Đã sửa tay trước đây — đang giữ số cũ':'Lấy từ BCC — không sửa ở đây'}" data-att="1"`:''} value="${row.inputs[k]!=null?row.inputs[k]:''}" style="width:100%;padding:5px 6px;border:1px solid var(--rule);border-radius:4px;${_mf.indexOf(k)>=0?'background:#ffe8b8;font-weight:600':(_af.indexOf(k)>=0?'background:var(--paper-3);color:var(--muted)':'')}"></div>`).join('')}
     </div>`;
   openModal('Nhập liệu — '+esc(row.name), body, `<button class="btn-ghost" onclick="${esc(window._prowBack)}">← Quay lại</button><button class="btn-primary" onclick="payRowSave('${periodId}','${empId}')">💾 Lưu & tính</button>`);
 }
@@ -34037,12 +34384,13 @@ function payRowSave(periodId, empId){
      O/P/R/T/U dock-OT vừa kéo BCC); office_gross/crew_khoan keys=[] → xóa trắng inputs.
      Nay MERGE: field không có ô trên form GIỮ NGUYÊN; ô bỏ trống = xóa key đó. */
   row.inputs=Object.assign({}, _old);
-  keys.forEach(k=>{ const el=document.getElementById('prow-'+k); if(!el) return;
+  const _afS=_payAttFields(p);   // v3.66.42: ô số công lấy từ BCC — KHÔNG ghi từ form
+  keys.forEach(k=>{ const el=document.getElementById('prow-'+k); if(!el) return; if(_afS.indexOf(k)>=0) return;
     if(el.value===''){ delete row.inputs[k]; }
     else { row.inputs[k]=p.profile==='expat'&&k==='F'?+el.value:(+el.value||0); } });
   // v3.11.93 GĐ1: field đổi bằng TAY → ghi _manualFields (kéo chấm công sẽ không đè âm thầm)
   row._manualFields=row._manualFields||[];
-  keys.forEach(k=>{ if((+_old[k]||0)!==(+row.inputs[k]||0) && row._manualFields.indexOf(k)<0) row._manualFields.push(k); });
+  keys.forEach(k=>{ if(_afS.indexOf(k)>=0) return; if((+_old[k]||0)!==(+row.inputs[k]||0) && row._manualFields.indexOf(k)<0) row._manualFields.push(k); });
   row.result=payComputeRow(p, row);   /* v3.14.62 FIX (Sếp 07/8 — 'PC dự án không lưu khi chuyển trạng thái'): trước gọi thẳng engine, BỎ QUA tầng payComputeRow nơi cộng W + WD×WN theo cờ 💼 và áp Khoản PS → nhập WN xong tiền không hiện. */
   _payAudit(p,'edit_row','Nhập liệu '+row.name);
   saveState();
@@ -35598,6 +35946,8 @@ function mergeByID(cloudArr, localArr, idField, skipTombstone, fieldName){
       // v3.06.38: với LOAN, các mảng con quan trọng (drawdowns/reschedules/prepayments) được GỘP THEO ID
       //   của cả 2 bên TRƯỚC khi chọn bản mới hơn → tránh bản mới hơn ghi đè xóa mất mốc bên kia
       //   khi 2 người (admin/KTT) cùng sửa 1 khoản vay. Áp dụng cho field 'loans'.
+      // v3.66.39: bảng chấm công gộp THEO TỪNG DÒNG NV (không để 2 NV tự chấm trên 2 máy đè nhau)
+      if(fieldName==='bccSheets'){ byId[k]={src:'local', rec:_bccMergeSheets(existing.rec, r)}; return; }
       let winner = (localT>cloudT) ? r : existing.rec;
       if(fieldName==='loans'){
         try{
@@ -38818,6 +39168,7 @@ async function doChangePassword(forced){
     setAuthConfig(cfg);
     CURRENT_USER=u;  // update in-memory
     try{ logAuditEvent('password_change',{by:'self'}); saveState(); }catch(e){}
+    try{ _srvSetPwBg(newPw1); }catch(e){}   // v3.66.47: cập nhật mật khẩu máy chủ (nếu đang có phiên)
     // v3.09.58 (ADR-008): đẩy wrap mật khẩu MỚI lên cloud → đăng nhập được ở MỌI máy
     //   + vô hiệu mật khẩu cũ trên cloud. Tái dùng selfWrapInCloudCfg (đã có sẵn, dùng CRYPTO_KEY trong RAM).
     //   Nếu cloud lỗi/mất mạng → wrap mới vẫn tự lên cloud ở lần đăng nhập kế tiếp (selfWrap chạy khi login).
@@ -42835,6 +43186,8 @@ function setupFxControls(){
           const old=fxRate();
           const nv=Math.max(1,+fxIn.value||25000);
           if(nv===old) return;
+          // v3.66.46: TRƯỚC khi ghi đè — đóng dấu tỷ giá cũ lên phiếu các NĂM TRƯỚC đang dựa vào tỷ giá chung
+          try{ const _n=_fxStampPriorYears(old); if(_n) toast('Đã gắn tỷ giá cũ '+old.toLocaleString('vi-VN')+' cho '+_n+' phiếu năm trước (giữ đúng số năm cũ)','good'); }catch(e){}
           S.fxRate=nv;
           S.fxRateAt=new Date().toISOString();   // v2.99.65: đánh dấu thời điểm đặt tỷ giá
           saveState();
@@ -44628,6 +44981,7 @@ function renderPlanList(){
     html+=`<tr class="total"><td colspan="5">TỔNG ${yr} <span style="font-weight:400;font-size:10px;color:var(--muted)">(quy đổi ${displayCcy()})</span></td><td class="r">${fmt(totRev)}</td><td class="r">${fmt(totProfit)}</td><td class="r">${_negU(totRev?((totProfit/totRev)*100).toFixed(1):0)}%</td><td></td></tr>`;
     html+=`</tbody>`;
     tbl.innerHTML=html;
+   try{ _opBaselineLockSnaps(); _opRenderIntegrityBar(); }catch(e){}   // v3.66.45
   }
 
   // v1.36: Render "Hiệu suất theo mảng" + "Hiệu suất theo tàu/dự án" sections moved from Dashboard
@@ -72300,12 +72654,41 @@ function removeArPayment(kind,id,idx){
 /* v1.87.0: Quy đổi giá trị một lần TT sang CCY của tài khoản ngân hàng.
    recCcy = CCY của bản ghi AR/AP; accCcy = CCY của tài khoản nhận tiền. */
 /* v3.11.77: quy TỔNG PHÍ 1 đợt thanh toán AP về USD theo TIỀN PHÍ (feeCcy||ccy phiếu). */
+/* v3.66.46 (Sếp: "tỷ giá là tỷ giá thực tế của chính phiếu"; "tỷ giá chung quy định trọn năm"): phiếu VND
+   quy USD theo tỷ giá GHI TRÊN PHIẾU nếu có; chỉ phiếu chưa mang tỷ giá mới dùng tỷ giá quy định của năm hiện
+   hành. Lúc KTT nhập tỷ giá mới, phiếu các năm trước được đóng dấu tỷ giá cũ (_fxStampPriorYears) → số năm cũ
+   không bao giờ đổi theo tỷ giá năm mới. */
+function _vndFxOf(rec){ const f=+(rec&&rec.fxToUsd)||0; return (f>1000)?f:fxRate(); }
+function _fxStampPriorYears(oldRate){
+  try{
+    if(!(+oldRate>1000)) return 0;
+    const curY=String(new Date().getFullYear()); let n=0; const by=actorName(), at=new Date().toISOString();
+    const yOf=d=>String(d||'').slice(0,4);
+    const opIds=new Set((VesselService.opVessels()||[]).map(v=>v.id));
+    (AccountingService.payables()||[]).forEach(r=>{
+      if(!r || r._deleted || r.ccy!=='VND' || !opIds.has(r.vesselId)) return;
+      const y=yOf(r.issueDate||r.createdAt); if(!y || y>=curY) return;
+      if(+r.fxToUsd>1000) return;
+      r.fxToUsd=+oldRate; r._fxStamped={rate:+oldRate, at, by, reason:'Tỷ giá quy định năm '+y}; touchRecord(r); n++;
+    });
+    (VesselService.opTransactions()||[]).forEach(t=>{
+      if(!t || t._deleted) return;
+      const y=yOf(t.date); if(!y || y>=curY) return;
+      let ch=false;
+      if(t.ccy==='VND' && !(+t.fxToUsd>1000)){ t.fxToUsd=+oldRate; if(!(+t.amountUsd>0) || Math.abs(+t.amountUsd-(+t.amount||0))<0.01) t.amountUsd=(+t.amount||0)/(+oldRate); ch=true; }
+      if((t.feeCcy==='VND' || ((t.ccy||'USD')==='VND' && !t.feeCcy)) && ((+t.bankFee||0)+(+t.otherFee||0))>0 && !(+t.feeFxToUsd>1000)){ t.feeFxToUsd=+oldRate; ch=true; }
+      if(ch){ t._fxStamped={rate:+oldRate, at, by, reason:'Tỷ giá quy định năm '+y}; touchRecord(t); n++; }
+    });
+    if(n){ try{ logAuditEvent('fx_stamp_prior_years',{rate:+oldRate, count:n}); }catch(e){} }
+    return n;
+  }catch(e){ console.warn('[fx stamp]', e&&e.message); return 0; }
+}
 function _apPayFeeUsd(pay, rec){
   const f=(+pay.bankFee||0)+(+pay.otherFee||0);
   if(f<=0) return 0;
   const fc=pay.feeCcy||(rec&&rec.ccy)||'USD';
   if(fc==='USD') return f;
-  if(fc==='VND'){ const fx=+S.fxRate||0; return fx>0 ? f/fx : 0; }
+  if(fc==='VND'){ const fx=(+pay.feeFxToUsd>1000)?(+pay.feeFxToUsd):_vndFxOf(rec); return fx>0 ? f/fx : 0; }   // v3.66.46: tỷ giá của đợt/phiếu
   return (typeof toUsd==='function') ? toUsd(f, fc) : f;
 }
 function _arPayAmountInCcy(p, recCcy, accCcy){
@@ -73035,23 +73418,105 @@ function opMinUsd(v){
    _opBalLines(vid): liệt kê TỪNG DÒNG cấu thành từng cột của bảng "Trạng thái số dư", theo ĐÚNG các
    quy tắc opBalanceBreakdown()/opApChiHo() đang dùng (không đổi công thức) → bấm vào số nào cũng ra
    đúng các dòng cộng thành số đó. Dòng KHÔNG tính vào số dư chủ tàu vẫn liệt kê ở nhóm riêng (excl). */
+/* ════ v3.66.45 — KHÓA THẬT + TỰ KIỂM (chỉ Admin thấy) ════
+   Mốc toàn vẹn _lockSnap (các trường quyết định số tiền) ghi lúc ký khóa. Phiếu thuộc kỳ đã khóa mà bị
+   đổi qua đường KHÔNG qua giao diện (bước tự sửa dữ liệu, lỗi phần mềm) → thanh đỏ cho Admin + nút khôi
+   phục. Báo cáo vẫn đọc giá trị hiện tại của Sổ (một nguồn) — mốc chỉ để phát hiện/khôi phục. */
+const _OP_SNAP_KEYS=['amount','ccy','fxToUsd','amountUsd','date','type','vesselId','bankFee','otherFee','_mgmtFeeId','seahorseOwn','khoanRole'];
+function _opLockSnapOf(t){ const o={}; _OP_SNAP_KEYS.forEach(k=>{ o[k]=(t[k]===undefined?null:t[k]); }); return o; }
+function _opSnapDiff(t){
+  const s=t&&t._lockSnap; if(!s) return null;
+  const d=[]; _OP_SNAP_KEYS.forEach(k=>{ const a=(t[k]===undefined?null:t[k]), b=s[k]; if(String(a)!==String(b)) d.push(k); });
+  return d.length?d:null;
+}
+/* Phiếu kỳ đã khóa đang mang 2 giá trị (giá trị hiện tại ≠ số đã báo cáo chủ tàu) — sửa 1 lần về số đã báo cáo. */
+function _opFrozenMismatches(){
+  return (VesselService.opTransactions()||[]).filter(t=>t && !t._deleted && t.reportedValue!=null && t.reportedValue!=='' &&
+    isOwnerPeriodLocked(t.vesselId, t.date) && Math.abs(_opLegacyReportedUsd(t)-opTxUsd(t))>=0.005);
+}
+function openOpFrozenFix(){
+  if(!isAdmin()){ toast('Chỉ Admin','bad'); return; }
+  const list=_opFrozenMismatches();
+  const vName=id=>((VesselService.opVessels().find(v=>v.id===id)||{}).name||id);
+  const rows=list.map(t=>`<tr><td>${esc(vName(t.vesselId))}</td><td class="mono" style="font-size:11px">${esc(t.date||'')}</td><td>${esc(t.desc||'')}</td>
+    <td class="r num">${fmtCcy(opTxUsd(t),'USD')}</td><td class="r num" style="font-weight:700;color:var(--good)">${fmtCcy(_opLegacyReportedUsd(t),'USD')}</td></tr>`).join('');
+  openModal('⚠ Phiếu kỳ đã khóa đang có 2 giá trị', list.length?`<div style="font-size:12px;color:var(--muted);margin-bottom:8px">Theo quyết định "lấy số đã báo cáo làm chuẩn": đưa giá trị của phiếu về ĐÚNG số đã báo cáo chủ tàu. Ghi nhật ký từng phiếu.</div>
+    <div class="tbl-scroll"><table class="tbl" style="font-size:12px"><thead><tr><th>Tàu</th><th>Ngày</th><th>Diễn giải</th><th class="r">Giá trị hiện tại</th><th class="r">Số đã báo cáo (chuẩn)</th></tr></thead><tbody>${rows}</tbody></table></div>`
+    :'<div class="empty" style="padding:16px;color:var(--good)">✓ Không còn phiếu nào mang 2 giá trị.</div>',
+    list.length?`<button class="btn-sec" onclick="closeModal()">Hủy</button><button class="btn-primary" onclick="applyOpFrozenFix()">✓ Đưa về số đã báo cáo</button>`:'<button class="btn-primary" onclick="closeModal()">Đóng</button>');
+}
+function applyOpFrozenFix(){
+  if(!isAdmin()) return;
+  const list=_opFrozenMismatches(); let n=0; const log=[];
+  list.forEach(t=>{
+    const usd=_opLegacyReportedUsd(t); const old={amount:t.amount, amountUsd:t.amountUsd};
+    if(String(t.reportedValue)!==String(t.amount)){ if(+t.amountGross===+t.amount) t.amountGross=+t.reportedValue; t.amount=+t.reportedValue; }
+    t.amountUsd=usd;
+    t._fixedToReported={at:new Date().toISOString(), by:actorName(), from:old};
+    try{ t._lockSnap=_opLockSnapOf(t); }catch(e){}
+    touchRecord(t); n++; log.push({id:t.id, from:old, toUsd:usd});
+  });
+  if(n){ saveState(); try{ logAuditEvent('op_fix_to_reported',{count:n, items:log}); }catch(e){} }
+  closeModal(); toast('✓ Đã đưa '+n+' phiếu về số đã báo cáo','good'); try{ renderAll(); }catch(e){}
+}
+/* Mốc cho các kỳ đã khóa TRƯỚC bản này (chưa có _lockSnap): lập 1 lần khi không còn phiếu 2 giá trị. */
+function _opBaselineLockSnaps(){
+  try{
+    if(!isAdmin() || window._opSnapBaselineDone) return;
+    if(_opFrozenMismatches().length) return;
+    window._opSnapBaselineDone=true; let n=0;
+    (VesselService.opTransactions()||[]).forEach(t=>{ if(t && !t._deleted && !t._isBudget && !t._lockSnap && isOwnerPeriodLocked(t.vesselId, t.date)){ t._lockSnap=_opLockSnapOf(t); n++; } });
+    if(n){ saveState(); console.log('[op lock baseline] lập mốc cho '+n+' phiếu kỳ đã khóa'); }
+  }catch(e){}
+}
+function _opIntegrityIssues(){
+  const out={changed:[], vesselDiff:[]};
+  (VesselService.opTransactions()||[]).forEach(t=>{ if(t && !t._deleted && isOwnerPeriodLocked(t.vesselId, t.date)){ const d=_opSnapDiff(t); if(d) out.changed.push({t, d}); } });
+  (VesselService.opVessels()||[]).forEach(v=>{
+    try{ const a=opBalance(v.id), b=_opPeriodTotals(v,'0000-01-01','9999-12-31').closeBal; if(Math.abs(a-b)>0.005) out.vesselDiff.push({v, a, b}); }catch(e){}
+  });
+  return out;
+}
+function opRestoreLockedTx(id){
+  if(!isAdmin()) return;
+  const t=VesselService.opTransactions().find(x=>x.id===id); if(!t||!t._lockSnap) return;
+  const before=_opLockSnapOf(t);
+  _OP_SNAP_KEYS.forEach(k=>{ const v=t._lockSnap[k]; if(v===null) delete t[k]; else t[k]=v; });
+  touchRecord(t); saveState();
+  try{ logAuditEvent('op_restore_locked',{id, before, after:t._lockSnap}); }catch(e){}
+  toast('✓ Đã khôi phục phiếu về giá trị lúc khóa kỳ','good'); try{ renderAll(); }catch(e){}
+}
+function _opRenderIntegrityBar(){
+  try{
+    const host=document.getElementById('op-netbal-hdr'); if(!host) return;
+    const head=host.closest('.section-head')||host.parentElement; if(!head) return;
+    let bar=document.getElementById('op-integrity-bar');
+    if(!isAdmin()){ if(bar) bar.remove(); return; }
+    const I=_opIntegrityIssues(); const nFix=_opFrozenMismatches().length;
+    if(!I.changed.length && !I.vesselDiff.length && !nFix){ if(bar) bar.remove(); return; }
+    if(!bar){ bar=document.createElement('div'); bar.id='op-integrity-bar'; head.insertAdjacentElement('afterend', bar); }
+    bar.style.cssText='margin:6px 0 10px;padding:10px 14px;border:2px solid var(--bad);border-radius:8px;background:rgba(192,57,43,.07);font-size:12px';
+    bar.innerHTML=`<b style="color:var(--bad)">⛔ Chỉ Admin thấy — cần xử lý:</b>`
+      +(nFix?`<div style="margin-top:4px">• ${nFix} phiếu kỳ đã khóa đang có 2 giá trị <button class="btn-sec" style="font-size:11px;padding:2px 8px" onclick="openOpFrozenFix()">Xem &amp; sửa</button></div>`:'')
+      +I.changed.map(x=>`<div style="margin-top:4px">• Phiếu kỳ ĐÃ KHÓA bị thay đổi ngầm: ${esc(x.t.date||'')} · ${esc(x.t.desc||'')} (trường: ${esc(x.d.join(', '))}) <button class="btn-sec" style="font-size:11px;padding:2px 8px" onclick="opRestoreLockedTx('${x.t.id}')">Khôi phục</button></div>`).join('')
+      +I.vesselDiff.map(x=>`<div style="margin-top:4px">• Lỗi phần mềm: ${esc(x.v.name)} — số dư bảng ${fmtCcy(x.a,'USD')} ≠ Tồn cuối báo cáo ${fmtCcy(x.b,'USD')} (lệch ${fmtCcy(x.a-x.b,'USD')}) — chụp màn hình gửi người phát triển</div>`).join('');
+  }catch(e){ console.warn('[op integrity bar]', e&&e.message); }
+}
 function _opBalLines(vid){
   const L={thu:[], chi:[], budget:[], mgmt:[], fees:[], excl:[]};
   const vName=(VesselService.opVessels().find(x=>x.id===vid)||{}).name||'';
   VesselService.opTransactions().filter(t=>t.vesselId===vid).forEach(t=>{
-    const usd=opTxUsd(t);
+    const usd=opReportUsd(t);   // v3.66.38 (Sếp: "Lấy số đã báo cáo làm số chuẩn"): số dư CHỦ TÀU đọc LĂNG KÍNH BÁO CÁO CHỦ TÀU (opReportUsd — kỳ đã ký khóa dùng giá trị đã chốt, kỳ mở = opTxUsd như cũ), không đọc lăng kính công nợ NCC (opTxUsd). Vụ con dấu AFALINA 20/4: 15,98 (đã báo cáo) vs 14,80.
     const base={id:t.id, src:'Thu/Chi hộ', date:t.date||'', desc:t.desc||'', vendor:t.vendor||'', inv:t.invoiceNo||'', ccy:t.ccy||'USD', amount:+t.amount||0, usd, rec:t};
     if(t.khoanRole==='chi'){ L.excl.push(Object.assign({}, base, {note:'Khoán — phần chi thực (không đòi chủ tàu)'})); return; }
     if(t.seahorseOwn){ L.excl.push(Object.assign({}, base, {note:'Seahorse tự chịu'})); return; }
+    { const f=opTxFeesUsd(t);   // v3.66.45: phí NH của MỌI bút toán (Thu hộ, Dự kiến, Chi) — hiện thành dòng, cùng quy tắc số dư/báo cáo
+      if(f) L.fees.push({id:t.id+':fee', src:'Phí GD', date:t.paidDate||t.date||'', desc:'Phí NH/phí khác · '+(t.desc||''), vendor:t.vendor||'', inv:t.invoiceNo||'', ccy:'USD', amount:f, usd:f, rec:t}); }
     if(t.type==='IN'){ L.thu.push(base); return; }
-    const note=(t.reportToOwner===false)?'Không báo chủ tàu — VẪN trừ số dư':'';
+    const note='';
     if(t._isBudget) L.budget.push(Object.assign({}, base, {note}));
     else if(t._mgmtFeeId) L.mgmt.push(Object.assign({}, base, {note:note||(t._mgmtFeeDup?'⚠ trùng tháng — cần xác nhận':'')}));
     else L.chi.push(Object.assign({}, base, {note}));
-    if(!t._isBudget && t.reportToOwner!==false){
-      const f=opTxFeesUsd(t);
-      if(f) L.fees.push({id:t.id+':fee', src:'Phí GD', date:t.paidDate||t.date||'', desc:'Phí NH/phí khác · '+(t.desc||''), vendor:t.vendor||'', inv:t.invoiceNo||'', ccy:'USD', amount:f, usd:f, rec:t});
-    }
   });
   const toUsd=(raw, p)=>{ raw=+raw||0; if(raw===0) return 0; const ccy=(p&&p.ccy)||'USD'; if(ccy==='USD') return raw;
     if(ccy==='VND'){ const fx=(+S.fxRate||0); return fx>0?raw/fx:raw; } const f=(+((p&&p.fxToUsd)||0)>0)?(+p.fxToUsd):(+S.fxRate||0); return f>0?raw/f:raw; };
@@ -73102,7 +73567,7 @@ function openOpBalanceDrill(vid, kind){
     body+=`<div style="font-family:var(--font-display);font-size:13px;font-weight:600;margin:10px 0 6px;${k==='excl'?'color:var(--muted)':''}">${_OP_DRILL_LABEL[k]} · ${fmtCcy(R.tot[k],'USD')}</div>${_opDrillTable(R.lines[k])}`;
   });
   openModal('🔎 '+esc(R.vName)+' — '+(kind==='bal'?'Chi tiết số dư':_OP_DRILL_LABEL[kind]), body,
-    `<button class="btn-sec" onclick="openOpReconcile('${vid}')">⚖ Đối chiếu báo cáo chủ tàu</button><button class="btn-primary" onclick="closeModal()">Đóng</button>`);
+    `<button class="btn-primary" onclick="closeModal()">Đóng</button>`);
 }
 /* ĐỐI CHIẾU TỪNG DÒNG: bảng Trạng thái số dư (_opBalLines + opBalance) vs Báo cáo chủ tàu toàn kỳ
    (_opPeriodTotals từ đầu tới nay). Liệt kê MỌI dòng có giá trị khác nhau giữa 2 nơi + lý do. */
@@ -73257,10 +73722,11 @@ function opBalanceBreakdown(vid){
   const v=VesselService.opVessels().find(x=>x.id===vid);
   let thu=0, chi=0, chiBudget=0, fees=0, khoanChiThuc=0, chiMgmt=0;
   VesselService.opTransactions().filter(t=>t.vesselId===vid).forEach(t=>{
-    const amtUsd=opTxUsd(t);
+    const amtUsd=opReportUsd(t);   // v3.66.38 (Sếp: "Lấy số đã báo cáo làm số chuẩn"): số dư CHỦ TÀU đọc LĂNG KÍNH BÁO CÁO CHỦ TÀU (opReportUsd — kỳ đã ký khóa dùng giá trị đã chốt, kỳ mở = opTxUsd như cũ), không đọc lăng kính công nợ NCC (opTxUsd). Vụ con dấu AFALINA 20/4: 15,98 (đã báo cáo) vs 14,80.
     // v3.03.40: dòng 'chi' của khoán không trừ số dư chủ tàu (theo dõi riêng để đối chiếu).
     if(t.khoanRole==='chi'){ khoanChiThuc+=amtUsd; return; }
     if(t.seahorseOwn) return;   // v3.07.17: CP Seahorse tự chịu — không tính vào chi hộ chủ tàu/số dư
+    fees += opTxFeesUsd(t);   // v3.66.45: phí của mọi bút toán (khớp opBalance + báo cáo)
     if(t.type==='IN') thu+=amtUsd;
     else {
       chi+=amtUsd; if(t._isBudget) chiBudget+=amtUsd;
@@ -73269,7 +73735,7 @@ function opBalanceBreakdown(vid){
       // MỌI giao dịch (kể cả Thu hộ và Dự kiến chi) — khác với PDF (sumFee) chỉ cộng phí của Chi hộ
       // THỰC (loại IN, loại Dự kiến, loại reportToOwner=false) → gây lệch vài đô khi so PDF với Hub.
       // Sửa: chỉ cộng phí đúng những giao dịch PDF cũng tính, để 2 nơi khớp tuyệt đối.
-      if(!t._isBudget && t.reportToOwner!==false) fees += opTxFeesUsd(t);
+
     }
   });
   const apChi = -(typeof opApChiHo==='function'?opApChiHo(vid):0);  // dương = tổng chi hộ AP
@@ -73306,7 +73772,7 @@ function opBalance(vid){
     //   ở dòng 'doi'). Chỉ dòng 'doi' + chi hộ thường mới trừ. Tránh trừ TRÙNG số dư chủ tàu.
     if(t.khoanRole==='chi') return s;
     if(t.seahorseOwn) return s;   // v3.07.17: CP Seahorse tự chịu — KHÔNG trừ số dư chủ tàu
-    const amtUsd = opTxUsd(t);
+    const amtUsd = opReportUsd(t);   // v3.66.38 (Sếp: "Lấy số đã báo cáo làm số chuẩn"): số dư CHỦ TÀU đọc LĂNG KÍNH BÁO CÁO CHỦ TÀU (opReportUsd — kỳ đã ký khóa dùng giá trị đã chốt, kỳ mở = opTxUsd như cũ), không đọc lăng kính công nợ NCC (opTxUsd). Vụ con dấu AFALINA 20/4: 15,98 (đã báo cáo) vs 14,80.
     const delta = t.type==='IN' ? amtUsd : -amtUsd;
     const fees = opTxFeesUsd(t);
     return s + delta - fees;
@@ -73334,7 +73800,7 @@ function opApChiHo(vid){
     raw=+raw||0; if(raw===0) return 0;
     const ccy=(p&&p.ccy)||'USD';
     if(ccy==='USD') return raw;
-    if(ccy==='VND'){ const fx=(+S.fxRate||0); return fx>0 ? raw/fx : raw; }
+    if(ccy==='VND'){ const fx=_vndFxOf(p); return fx>0 ? raw/fx : raw; }   // v3.66.46: tỷ giá ghi trên phiếu (nếu có)
     const f=(+((p&&p.fxToUsd)||0)>0)?(+p.fxToUsd):(+S.fxRate||0);
     return f>0 ? raw/f : raw;
   };
@@ -73646,14 +74112,12 @@ function renderOpVessels(){
     // v3.66.37: cột Phí QL = ĐÚNG tổng các dòng cấn trừ phí QL đã ghi (dò được từng dòng); tháng CHƯA lập
     // chỉ là GHI CHÚ nhắc việc (không có dòng, không trừ số dư — đúng công thức số dư v3.65.56).
     const _BL=_opBalLines(v.id);
-    const _rc=_opReconcileRows(v.id);
-    const _rcBad=_rc && Math.abs(_rc.total)>0.005;
     return `<tr>
       <td><b>${esc(v.name)}</b>${v.owner?` <span style="color:var(--muted);font-weight:400">· ${esc(v.owner)}</span>`:''}${v.managementEnded?` <span style="color:var(--bad);font-weight:600;font-size:10px">● Chấm dứt QL${v.managementEndDate?' ('+esc(v.managementEndDate)+')':''}</span>`:` <span style="color:var(--good);font-weight:600;font-size:10px">● Đang quản lý</span>`}${v.managedSince?`<div style="font-size:10px;color:var(--muted)">QL từ ${esc(v.managedSince)} · ${months} tháng · phí ${fmt(v.fee,v.ccy)}/tháng${(v.ccy&&v.ccy!=='USD')?' <span style="color:var(--bad);font-size:10px" title="Quy định: mảng QL tàu dùng USD — sửa CCY và kiểm lại số phí/tháng ở ✎">⚠ '+esc(v.ccy)+'</span>':''}</div>`:'<div style="font-size:10px;color:var(--warn)">chưa đặt ngày QL</div>'}</td>
       <td class="r num" style="color:var(--good);font-weight:600"><span style="cursor:pointer;text-decoration:underline dotted" title="Bấm để xem từng dòng" onclick="openOpBalanceDrill('${v.id}','thu')">${fmtCcy(bd.thu,'USD')}</span></td>
       <td class="r num" style="color:var(--bad);font-weight:600"><span style="cursor:pointer;text-decoration:underline dotted" title="Bấm để xem từng dòng" onclick="openOpBalanceDrill('${v.id}','chi')">−${fmtCcy(bd.chiRealDisplay,'USD')}</span><div style="font-size:10px;color:var(--muted);font-weight:400;line-height:1.4">${bd.chiBudget>0?`<span style="cursor:pointer;text-decoration:underline dotted" onclick="openOpBalanceDrill('${v.id}','budget')">${_ended?'Chưa đủ hồ sơ':'Dự kiến thêm'}: ${fmtCcy(bd.chiBudget,'USD')}</span>`:'(đã chi thực)'}${_BL.tot.excl>0.005?`<div style="cursor:pointer;text-decoration:underline dotted;color:var(--muted)" onclick="openOpBalanceDrill('${v.id}','excl')" title="Khoán (phần chi) · Seahorse tự chịu — liệt kê đủ, KHÔNG trừ số dư chủ tàu">Không tính số dư: ${fmtCcy(_BL.tot.excl,'USD')}</div>`:''}</div></td>
       <td class="r num" title="Tổng các dòng cấn trừ phí QL đã ghi (quy USD) — bấm để xem từng dòng">${_BL.tot.mgmt>0.005?`<span style="font-weight:600;color:var(--warn);cursor:pointer;text-decoration:underline dotted" onclick="openOpBalanceDrill('${v.id}','mgmt')">${fmtCcy(_BL.tot.mgmt,'USD')}</span>`:'—'}${mgmtPendingUsd>0.005?`<div style="font-size:10px;color:var(--muted);font-weight:400" title="Tháng trong thời gian QL chưa lập phí — nhắc việc, KHÔNG trừ số dư">Chưa lập: ${fmtCcy(mgmtPendingUsd,'USD')}</div>`:''}${_BL.lines.mgmt.some(x=>x.rec&&x.rec._mgmtFeeDup)?`<div style="font-size:10px;color:var(--bad);font-weight:600">⚠ có dòng trùng tháng</div>`:''}</td>
-      <td class="r num" style="font-weight:600;color:${_ended?'var(--ink)':(bal<minUsd?'var(--bad)':bal<minUsd*1.2?'var(--warn)':'var(--ink)')}" title="Số dư thực — đã gồm phần ${_ended?'chưa đủ hồ sơ':'dự kiến chi'}. = Thu/ứng − Chi thực − Phí QL − ${_ended?'Chưa đủ hồ sơ':'Dự kiến chi'}."><span style="cursor:pointer;text-decoration:underline dotted" title="Bấm để xem toàn bộ các dòng cấu thành số dư" onclick="openOpBalanceDrill('${v.id}','bal')">${fmtCcy(_balShown,'USD')}</span><div style="font-size:10px;color:var(--muted);font-weight:400"><span style="cursor:pointer;text-decoration:underline dotted" onclick="openOpBalanceDrill('${v.id}','fees')">Bao gồm phí ngân hàng: ${fmtCcy(bd.fees||0,'USD')}</span></div>${_rcBad?`<div style="font-size:10px;color:var(--bad);font-weight:700;cursor:pointer" onclick="openOpReconcile('${v.id}')" title="Số dư bảng này khác Tồn cuối báo cáo chủ tàu (từ đầu tới nay) — bấm để xem từng dòng lệch">⚠ Lệch báo cáo: ${fmtCcy(_rc.total,'USD')}</div>`:''}</td>
+      <td class="r num" style="font-weight:600;color:${_ended?'var(--ink)':(bal<minUsd?'var(--bad)':bal<minUsd*1.2?'var(--warn)':'var(--ink)')}" title="Số dư thực — đã gồm phần ${_ended?'chưa đủ hồ sơ':'dự kiến chi'}. = Thu/ứng − Chi thực − Phí QL − ${_ended?'Chưa đủ hồ sơ':'Dự kiến chi'}."><span style="cursor:pointer;text-decoration:underline dotted" title="Bấm để xem toàn bộ các dòng cấu thành số dư" onclick="openOpBalanceDrill('${v.id}','bal')">${fmtCcy(_balShown,'USD')}</span><div style="font-size:10px;color:var(--muted);font-weight:400"><span style="cursor:pointer;text-decoration:underline dotted" onclick="openOpBalanceDrill('${v.id}','fees')">Bao gồm phí ngân hàng: ${fmtCcy(bd.fees||0,'USD')}</span></div></td>
       <td class="r num">${_ended?'—':fmtCcy(minUsd,'USD')}</td>
       <td class="c">${_ended?'':`<span class="ds-need" data-dot="${((statusCls)||'').indexOf('good')>=0?'good':((statusCls)||'').indexOf('bad')>=0?'bad':((statusCls)||'').indexOf('warn')>=0?'warn':''}">${status}</span>`}</td>
       <td><div class="row-actions">
@@ -74887,7 +75351,7 @@ function _renderOpMrModal(){
       <td><input type="text" inputmode="decimal" data-format-thousands="1" class="num" value="${l.gross?_mrFmtNum(l.gross):''}" placeholder="Gross (gồm VAT)" oninput="_opMrLineAmt('${l.tmpId}',this.value)" style="width:100%;text-align:right;font-weight:600"></td>
       <td class="num" style="font-family:var(--font-mono);color:var(--muted);min-width:90px;text-align:right">${usd?_fmtForeign(usd,'USD'):'—'}</td>
       <td style="text-align:center"><input type="checkbox" ${l.isBudget?'checked':''} onchange="_opMrLineBudget('${l.tmpId}',this.checked)" title="Chi dự kiến (chưa phát sinh thực)"></td>
-      <td style="text-align:center"><input type="checkbox" ${l.reportToOwner?'checked':''} onchange="_opMrLine('${l.tmpId}','reportToOwner',this.checked)" title="Đưa vào báo cáo chủ tàu"></td>
+      <td style="text-align:center;color:var(--muted);font-size:10px" title="v3.66.45: mọi khoản chi hộ đều lên báo cáo chủ tàu — khoản không đòi chủ tàu đánh dấu Seahorse tự chịu">✓</td>
       <td><button class="mr-del-btn" onclick="_opMrDelLine('${l.tmpId}')" title="Xóa dòng">✕</button></td>
     </tr>`;
   }).join('');
@@ -75174,7 +75638,7 @@ function _opMrSave(){
       vendor:s.vendor||'', vendorTax:s.vendorTax||'', contractNo:s.contractNo||'',
       invoiceNo:(l.invoiceNo||'').trim(),
       _isBudget:!!l.isBudget,                       // chi dự kiến
-      reportToOwner:(l.reportToOwner!==false),       // v3.04.73: đưa vào báo cáo chủ tàu (mặc định Yes)
+      reportToOwner:true,       // v3.66.45: bỏ ô chọn — mọi khoản chi hộ đều lên báo cáo chủ tàu
       opCat:'',
       attachments:(Array.isArray(s.attachments)&&s.attachments.length)?JSON.parse(JSON.stringify(s.attachments)):[],
       createdBy:actorName(), createdAt:new Date().toISOString(),
@@ -77162,21 +77626,25 @@ function _opApVirtualTx(){
     //   cộng VAT 2 lần ở hiển thị grossAmt), lưu net/vat vào field phụ để vẫn hiện "net · vat".
     const gross=(+p.amountGross>0)?(+p.amountGross):(net+vat);
     // v3.03.41: fx về USD đúng theo loại tiền — USD=1, VND=fxRate, khác=fxToUsd phiếu.
-    const fx=(ccy==='USD')?1:(ccy==='VND'?(+S.fxRate||0):((+p.fxToUsd>0)?(+p.fxToUsd):(+S.fxRate||0)));
-    const amountUsd=(ccy==='USD')?gross:(fx>0?gross/fx:gross);
+    const fx=(ccy==='USD')?1:(ccy==='VND'?_vndFxOf(p):((+p.fxToUsd>0)?(+p.fxToUsd):(+S.fxRate||0)));   /* v3.66.46 */
+    // v3.66.45 (quy tắc đã chốt): AP mảng Quản lý hộ đòi chủ tàu theo GROSS (VAT là chi hộ); mảng khác theo NET
+    // (Seahorse khấu trừ VAT) — CÙNG quy tắc với số dư (opApChiHo) để báo cáo = liệt kê đúng Sổ.
+    const _base=(p.segment==='VESSEL_MGMT')?gross:net;
+    const amountUsd=(ccy==='USD')?_base:(fx>0?_base/fx:_base);
     const pd=(typeof arPaidTotal==='function')?arPaidTotal(p):0;
     return {
       id:'apv-'+p.id, _fromAp:true, _apId:p.id,
       date:(p.issueDate||p.createdAt||'').slice(0,10),
       vesselId:p.vesselId, type:'OUT',
       desc:p.desc||'', vendor:p.partner||'', contractNo:'', invoiceNo:p.invoiceNo||'',
-      amount:gross, ccy, fxToUsd:fx, amountUsd,
+      amount:_base, ccy, fxToUsd:fx, amountUsd,
       vatPercent:+p.vatPercent||0, vatAmount:0,        // VAT đã gộp vào amount(gross)
       _netRaw:net, _vatRaw:vat,                          // giữ để hiển thị "net · vat" minh bạch
       paid:(pd>0.0001), paidDate:'', 
       // v3.10.08: mang TỔNG phí NH (bankFee+otherFee) từ các đợt thanh toán AP → hiện cột "Phí NH" khi xuất Excel.
-      bankFee:(Array.isArray(p.payments)?p.payments.reduce((s,pay)=>s+(+pay.bankFee||0),0):0),
-      otherFee:(Array.isArray(p.payments)?p.payments.reduce((s,pay)=>s+(+pay.otherFee||0),0):0),
+      // v3.66.46: phí = ĐÚNG số USD của từng đợt thanh toán qua _apPayFeeUsd (cùng hàm với số dư) — không quy đổi lần 2.
+      bankFee:(Array.isArray(p.payments)?p.payments.reduce((s,pay)=>s+_apPayFeeUsd(pay,p),0):0),
+      otherFee:0, feeCcy:'USD',
       // v3.04.12: AP có khoanCat = VẾ THỰC CHI khoán → đánh dấu khoanRole='chi'
       //   để báo cáo chủ tàu GIẤU + không trừ số dư (chi thực không đòi chủ tàu),
       //   chỉ theo dõi riêng để đối chiếu chênh với vế 'doi'.
@@ -78612,7 +79080,7 @@ function _seaOpexUsd(p){
   const net=+p.amountNet||((+p.amountGross||+p.amount||0)-(+p.vatAmount||0))||(+p.amount||0);
   const vat=+p.vatAmount||0;
   const gross=(+p.amountGross>0)?(+p.amountGross):(net+vat);
-  const fx=(ccy==='USD')?1:(ccy==='VND'?(+S.fxRate||0):((+p.fxToUsd>0)?(+p.fxToUsd):(+S.fxRate||0)));
+  const fx=(ccy==='USD')?1:(ccy==='VND'?_vndFxOf(p):((+p.fxToUsd>0)?(+p.fxToUsd):(+S.fxRate||0)));   /* v3.66.46 */
   return { net, vat, gross, ccy, amountUsd:(ccy==='USD')?gross:(fx>0?gross/fx:gross) };
 }
 /* v3.07.49: lấy danh sách phiếu chi hộ là CÔNG NỢ NCC (chi thực, đòi NCC), trong phạm vi tàu được phép. */
@@ -78984,6 +79452,7 @@ function signLockOwnerReport(){
   //   Chi DỰ KIẾN (_isBudget) KHÔNG khóa, KHÔNG dời — nằm yên đúng tháng tới khi hoàn tất thủ tục.
   VesselService.opTransactions().forEach(t=>{
     if(vids.includes(t.vesselId) && String(t.date).slice(0,7)===month){
+      if(!t._isBudget){ try{ t._lockSnap=_opLockSnapOf(t); }catch(e){} }   // v3.66.45: mốc toàn vẹn — phát hiện sửa ngầm sau khi khóa
       if(t._isBudget){
         // CHỐT A: chi dự kiến của kỳ đã ký gửi chủ tàu → ĐÃ ĐỐI CHIẾU CHỦ TÀU (vẫn dự kiến, chờ hóa đơn).
         //   KHÔNG khóa cứng số tiền — vẫn cho bổ sung hóa đơn/hồ sơ. Chỉ đánh dấu đã báo cáo chủ tàu kỳ này.
@@ -79091,9 +79560,9 @@ function _opPeriodTotals(v, from, to){
   let openBal=0;
   all.forEach(x=>{
     const _d=_effPeriodDate(x);
-    if(_d<from){ if(x.khoanRole==='chi') return; const usd=opReportUsd(x); openBal += (x.type==='IN'?usd:-usd) - opTxFeesUsd(x); }
+    if(_d<from){ if(x.khoanRole==='chi' || x.seahorseOwn) return; const usd=opReportUsd(x);   /* v3.66.45: tồn đầu cùng quy tắc với số dư (bỏ Seahorse tự chịu) */ openBal += (x.type==='IN'?usd:-usd) - opTxFeesUsd(x); }
   });
-  const period=all.filter(x=>{ const d=_effPeriodDate(x); return d>=from && d<=to && x.reportToOwner!==false && !x.seahorseOwn; });
+  const period=all.filter(x=>{ const d=_effPeriodDate(x); return d>=from && d<=to && !x.seahorseOwn; });   // v3.66.45: bỏ lọc "không báo chủ tàu" 
   const inRows=period.filter(x=>x.type==='IN');
   const outAll=period.filter(x=>x.type==='OUT' && !x._isBudget && !_isKhoanChi(x));
   // v3.65.89 (Sếp: "Phần phí quản lý trong báo cáo chủ tàu: cần phải lấy từ nguồn chuẩn — là nguồn
@@ -79124,8 +79593,7 @@ function _opPeriodTotals(v, from, to){
   // v3.09.88: PHÍ tính theo NGÀY PHÁT SINH PHÍ (paidDate/payment.date), KHÔNG theo ngày phiếu gốc.
   let sumFee=0; const extraFeeRows=[];
   all.forEach(x=>{
-    if(x.type!=='OUT' || x._isBudget || _isKhoanChi(x)) return;
-    if(x.reportToOwner===false || x.seahorseOwn) return;
+    if(_isKhoanChi(x) || x.seahorseOwn) return;   // v3.66.45: phí của MỌI bút toán tính vào số dư (Thu hộ, Dự kiến, Chi)
     const entries=(typeof opTxFeeEntries==='function')?opTxFeeEntries(x):[];
     entries.forEach(fe=>{
       const fd=fe.date||x.date||'';
@@ -99189,10 +99657,10 @@ async function openSnapshotRestore(){
     const res=await fetchWithTimeout(cfg.scriptUrl, {
       method:'POST',
       headers:{'Content-Type':'text/plain;charset=utf-8'},
-      body:JSON.stringify({action:'snapshot_list', token:cfg.apiToken||API_TOKEN})
+      body:JSON.stringify({action:'snapshot_list', token:cfg.apiToken||API_TOKEN, session:_srvSess()})   // v3.66.47
     }, 30000);
     const data=await safeJson(res);
-    if(!data.ok){ toast('Lỗi lấy danh sách: '+(data.error||''),'bad'); return; }
+    if(!data.ok){ toast('Lỗi lấy danh sách: '+_srvErrMsg(data.error||''),'bad'); return; }
     list=data.files||[];
   }catch(e){ toast('Không lấy được danh sách snapshot: '+e.message,'bad'); return; }
   if(!list.length){ toast('Chưa có snapshot nào trên Drive','bad'); return; }
@@ -99232,7 +99700,7 @@ async function _snapshotPick(fileId, name){
     const res=await fetchWithTimeout(cfg.scriptUrl, {
       method:'POST',
       headers:{'Content-Type':'text/plain;charset=utf-8'},
-      body:JSON.stringify({action:'snapshot_get', fileId, token:cfg.apiToken||API_TOKEN})
+      body:JSON.stringify({action:'snapshot_get', fileId, token:cfg.apiToken||API_TOKEN, session:_srvSess()})   // v3.66.47
     }, 30000);
     const data=await safeJson(res);
     if(!data.ok){ toast('Lỗi tải snapshot: '+(data.error||''),'bad'); return; }
@@ -108864,11 +109332,16 @@ function _modMyBccFind(empId, period){
   for(const s of sheets){ const row=(s.rows||[]).find(r=>r.empId===empId); if(row) return {sheet:s, row}; }
   return null;
 }
-function _modMyBccDetailOpen(){
+function _modMyBccDetailOpen(periodArg){
   const ids=hrmMyEmpIds();
   if(!ids.length){ toast('Tài khoản chưa liên kết hồ sơ Nhân sự — liên hệ Admin','warn'); return; }
   const empId=ids[0], e=hrmEmpById(empId);
-  const period=new Date().toISOString().slice(0,7);
+  if(e && (e.type==='crew')){ toast('Thuyền viên không tự chấm công — tàu chấm chung 1 bảng cho cả tàu','warn'); return; }   // v3.66.43
+  // v3.66.39: NV CHỌN được tháng (trước đây cố định tháng hiện tại → đầu tháng sau không chấm bù được
+  // tháng trước). Danh sách = các kỳ có bảng "Chi tiết theo ngày" chứa dòng của NV, mới nhất trước.
+  const _myPeriods=Array.from(new Set((S.bccSheets||[]).filter(s=>s&&!s._deleted&&s.mode==='daily'&&(s.rows||[]).some(r=>r.empId===empId)).map(s=>s.period))).sort().reverse();
+  const _cur=new Date().toISOString().slice(0,7);
+  const period=periodArg || (_myPeriods.includes(_cur)?_cur:(_myPeriods[0]||_cur));
   const found=_modMyBccFind(empId, period);
   if(!found){
     toast('Chưa có bảng chấm công "Chi tiết theo ngày" cho kỳ '+period+' — liên hệ HR/Admin tạo bảng trước','warn');
@@ -108885,16 +109358,23 @@ function _modMyBccDetailOpen(){
   const numDays=sheet.numDays||bccDaysInMonth(Y,M);
   // v3.65.98-style gợi ý: ngày thường CHƯA chấm → tự gợi ý mã đầu tiên "công thường" (cột đầu của schema, mọi nhóm cột đầu luôn là mã làm việc bình thường — N/DB1/NORMAL/H/B2)
   const defaultCode=(codeCols[0]||[])[0]||'';
+  // v3.66.39: khối VĂN PHÒNG (phạm vi Phòng ban / Công ty con) — Thứ 7, Chủ nhật KHÔNG tự gợi ý công
+  // thường (trước đây gợi ý mọi ngày, bấm Gửi là ghi luôn → tính đủ công cả cuối tuần). Tàu/Chuyên gia/
+  // O&M/Expat/GEO làm việc theo ca cả tuần → giữ gợi ý như cũ.
+  const _officeScope=_bccWeekendOff(sheet);   // v3.66.40: mọi nhóm trừ Tàu
   let rowsHtml='';
   for(let d=1; d<=numDays; d++){
     const w=new Date(Y,M-1,d).getDay();
     const dow=en?dowEn[w]:dowVi[w];
     const cur=row.days[d]!==undefined ? row.days[d] : '';
-    const auto=!cur;   // chưa chấm gì → sẽ tự gợi ý defaultCode khi hiện, nhưng KHÔNG ghi sẵn vào dữ liệu cho tới khi NV bấm Gửi
+    const _wkend=_officeScope && (w===0||w===6);
+    const _sug=_wkend ? '' : defaultCode;
+    const auto=!cur && !!_sug;   // chưa chấm gì → sẽ tự gợi ý defaultCode khi hiện, nhưng KHÔNG ghi sẵn vào dữ liệu cho tới khi NV bấm Gửi
     rowsHtml+=`<div style="display:flex;gap:8px;align-items:center;padding:8px 4px;border-bottom:0.5px solid var(--rule)">
       <div style="min-width:56px"><div style="font-weight:600;font-size:13px">${en?'Day '+d:'Ngày '+d}</div><div style="font-size:11px;color:var(--muted)">${dow}</div></div>
       <select data-d="${d}" class="mybcc-code" style="flex:1;padding:5px 8px;border:1px solid var(--rule);border-radius:6px;font-size:12px">
-        ${codeCols.map(c=>`<option value="${c[0]}" ${((cur||defaultCode)===c[0])?'selected':''}>${c[0]} — ${esc(c[1])}</option>`).join('')}
+        ${_wkend?`<option value="" selected>${en?'Off (weekend) — work hours → OT':'Nghỉ (cuối tuần) — có làm → nhập OT'}</option>`:`<option value="" ${!(cur||_sug)?'selected':''}>${en?'— (off / not marked)':'— (nghỉ / không chấm)'}</option>
+        ${codeCols.map(c=>`<option value="${c[0]}" ${((cur||_sug)===c[0])?'selected':''}>${c[0]} — ${esc(c[1])}</option>`).join('')}`}
       </select>
       ${auto?`<span title="${en?'Auto-suggested':'Tự gợi ý'}">✨</span>`:'<span style="width:16px;display:inline-block"></span>'}
       ${hasOt?`<input type="number" step="0.5" data-d="${d}" class="mybcc-ot" placeholder="0" value="${row.ot[d]||''}" style="width:52px;padding:5px 4px;border:1px solid var(--rule);border-radius:6px;font-size:12px;text-align:center" title="${en?'OT hours':'OT (giờ)'}">`:''}
@@ -108902,7 +109382,8 @@ function _modMyBccDetailOpen(){
   }
   const body=`
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;background:var(--paper-3);padding:8px 12px;border-radius:8px">
-      <div><div style="font-weight:600;font-size:14px">${esc(e.fullName||'')}</div><div style="font-size:11px;color:var(--muted)">${en?'Period':'Kỳ'} ${period} · ${esc(sheet.status==='confirmed'?(en?'Confirmed':'Đã khóa'):(en?'Draft':'Nháp'))}</div></div>
+      <div><div style="font-weight:600;font-size:14px">${esc(e.fullName||'')}</div><div style="font-size:11px;color:var(--muted)">${en?'Period':'Kỳ'} ${period} · ${esc(sheet.status==='confirmed'?(en?'Confirmed':'Đã khóa'):(sheet.status==='submitted'?(en?'Sent to HR':'Đã chuyển HR'):(en?'Draft':'Nháp')))}</div></div>
+      ${_myPeriods.length>1?`<select onchange="closeModal();_modMyBccDetailOpen(this.value)" style="padding:4px 8px;border:1px solid var(--rule);border-radius:6px;font-size:12px">${_myPeriods.map(pp=>`<option value="${pp}" ${pp===period?'selected':''}>${pp}</option>`).join('')}</select>`:''}
     </div>
     ${sheet.status!=='draft'?`<div style="background:var(--paper-2);border:1px solid var(--rule);border-radius:8px;padding:8px 12px;margin-bottom:10px;font-size:12px;color:var(--muted)">🔒 ${en?'This period has been confirmed/locked — read only.':'Kỳ này đã được xác nhận/khóa — chỉ xem, không sửa được.'}</div>`:''}
     <div id="mybcc-list" style="${sheet.status!=='draft'?'pointer-events:none;opacity:.6':''}">${rowsHtml}</div>
@@ -108917,11 +109398,14 @@ function _modMyBccSubmit(sheetId, empId){
   const s=(S.bccSheets||[]).find(x=>x.id===sheetId); if(!s){ toast('Không tìm thấy bảng','bad'); return; }
   const row=(s.rows||[]).find(r=>r.empId===empId); if(!row){ toast('Không tìm thấy dòng của bạn','bad'); return; }
   row.days=row.days||{}; row.ot=row.ot||{};
-  document.querySelectorAll('.mybcc-code').forEach(sel=>{ const d=sel.dataset.d; row.days[d]=sel.value; });
+  if(s.status!=='draft'){ toast('Bảng đã chuyển HR/đã khóa — không gửi được nữa','bad'); return; }   // v3.66.39
+  document.querySelectorAll('.mybcc-code').forEach(sel=>{ const d=sel.dataset.d; if(sel.value && !(_bccWeekendOff(s)&&_bccIsWeekend(s,d))) row.days[d]=sel.value; else delete row.days[d]; });   // v3.66.39: '' = nghỉ/không chấm · v3.66.40: cuối tuần luôn Nghỉ
   document.querySelectorAll('.mybcc-ot').forEach(inp=>{ const d=inp.dataset.d; const v=+inp.value||0; if(v>0) row.ot[d]=v; else delete row.ot[d]; });
+  row.selfSubmittedAt=new Date().toISOString();   // v3.66.39: ghi nhận NV tự gửi (dùng cho trạng thái dòng ở bản sau)
+  _bccTouch(s, row);   // v3.66.39
   saveState();
   closeModal();
-  toast('Đã gửi chấm công tháng này ✓','good');
+  toast('Đã gửi chấm công kỳ '+s.period+' ✓','good');
 }
 // v3.66.14: hiện/ẩn khung "Của tôi" — CHỈ hiện khi tài khoản đang đăng nhập có hồ sơ Nhân sự liên kết
 // (hrmMyEmpIds() không rỗng). Gọi trong renderVmDashboard() (module Quản lý tàu) — module khác gọi
@@ -113647,6 +114131,7 @@ const HRM_BCC_PROFILES={
    và kỳ lương kéo BCC theo đúng đường của các bộ phận khác.
    Tái dùng bộ đọc PDF đã có (_bsrToU8/_bsrTsExtract/_bsrTsParseOne), không viết mới. */
 async function hrmAttImportBsrPdf(inputEl){
+  toast('Đã bỏ Import BCC từ file (v3.66.40)','warn'); try{ inputEl.value=''; }catch(e){} return;   // v3.66.40
   const files=Array.from((inputEl&&inputEl.files)||[]);
   try{ inputEl.value=''; }catch(e){}
   if(!files.length) return;
@@ -113687,6 +114172,7 @@ async function hrmAttImportBsrPdf(inputEl){
   hrmAttRenderPreview();
 }
 function hrmAttPickFile(){
+  toast('Đã bỏ Import BCC từ file (v3.66.40) — lập bảng chấm công trong app: ➕ Tạo bảng chấm công','warn'); return;   // v3.66.40
   const per=(document.getElementById('hrm-att-period')||{}).value||'';
   if(!per){ toast('Chọn kỳ (tháng/năm) trước khi import','bad'); return; }
   const profSel=(document.getElementById('hrm-att-profile')||{}).value||'';
@@ -113800,6 +114286,7 @@ function hrmAttParseSheet(aoa, profileKey){
 }
 
 function hrmAttImportExcel(inputEl){
+  toast('Đã bỏ Import BCC từ file (v3.66.40)','warn'); try{ inputEl.value=''; }catch(e){} return;   // v3.66.40
   const file=inputEl&&inputEl.files&&inputEl.files[0]; if(!file) return;
   const per=(document.getElementById('hrm-att-period')||{}).value||'';
   const profileKey=(document.getElementById('hrm-att-profile')||{}).value||'BCC_VP';
@@ -114112,7 +114599,13 @@ function _payAutoPullAttendance(p){
     : (p.profile==='expat')?['BCC_EXPAT']
     : (p.profile==='tech')?['BCC_KYTHUAT']
     : ['BCC_VP','BCC_VP_BP'];
-  const att=(S.hrAttendance||[]).filter(a=>a&&a.period===p.period&&a.status==='locked'&&wantP.indexOf(a.profile)>=0)
+  // v3.66.40 (Bản B — MỘT NGUỒN): ưu tiên BCC web đã khóa; hệ cũ chỉ dùng cho tháng chưa có BCC web.
+  let att=null;
+  try{
+    if(_bccWebSourcesForPeriod(p.period, p.profile, p.companyId).length)
+      att={id:'__bccweb__', period:p.period, profile:p.profile, status:'locked', rows:_bccWebRowsForPeriodProfile(p.period, p.profile, p.companyId)};
+  }catch(e){ att=null; }
+  if(!att) att=(S.hrAttendance||[]).filter(a=>a&&a.period===p.period&&a.status==='locked'&&wantP.indexOf(a.profile)>=0)
     .sort((a,b)=>String(b.importedAt||'').localeCompare(String(a.importedAt||'')))[0];
   if(!att) return {ok:false, reason:'no_bcc'};
   const diff=_payAttBuildDiff(p, att, map);
@@ -114348,6 +114841,7 @@ function maOpen(id){
   else if(typeof toast==='function') toast('Không mở được phiếu','bad');
 }
 function renderAll(opts){
+  try{ _bccAutoCreateMonthly(); }catch(e){}   // v3.66.41 tạo sẵn BCC bộ phận tháng hiện tại
   try{ _opHealMgmtFees(); }catch(e){}   // v3.66.37 tự dựng hồ sơ phí QL thiếu
   try{ _applyOpTabLabel(); }catch(e){}  // v3.06.00 nhãn tab Thu-Chi hộ động
   try{ if(document.getElementById('page-periodic') && document.getElementById('page-periodic').classList.contains('active')) renderPeriodic(); }catch(e){}
