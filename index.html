@@ -4731,7 +4731,7 @@ const WH_TYPES = {
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.66.33';
+const APP_VERSION='3.66.36';
 /* HOTFIX 3.12.17-email: CHẶN TRIỆT ĐỂ gửi email TỰ ĐỘNG (mất kiểm soát — spam quota Google).
    Email phải do NV được phân quyền CHỦ ĐỘNG chọn gửi. Cờ này:
    (1) chặn auto-SCAN tạo email (hrmScanExpiries/vesselCertScanExpiries);
@@ -19590,6 +19590,35 @@ async function _cloudSyncRaw(mode, opts){
           allowedFields.forEach(f=>{
             if(merged[f]!==undefined) S[f]=merged[f];
           });
+          // v3.66.36 (Sếp — NGUYÊN TẮC: "NV đã được tạo/sửa thì dữ liệu đó PHẢI được đồng bộ; không để bản
+          // thiếu ghi đè"): TRƯỚC ĐÂY chiều ĐẨY chỉ gộp field thuộc allowedFieldsForUser() (danh sách tab —
+          // vốn chỉ để GIẢM DỮ LIỆU TẢI VỀ) → field ngoài danh sách LẤY BẢN CLOUD, bỏ qua bản vừa sửa trên máy
+          // → sinh "mồ côi" (lặp lại ≥8 lần: v3.07.05/3.12.97/3.16.13/3.18.62/3.20.159/3.64.45/3.64.89 và vụ
+          // 5 phí QL 100.000 USD — opMgmtFees chỉ cấp tab Định kỳ). NAY: tách hẳn 2 chiều — TẢI VỀ vẫn theo
+          // Module/tab; ĐẨY LÊN gộp THÊM mọi loại dữ liệu dạng danh sách bản ghi có id mà máy đang giữ, bằng
+          // ĐÚNG mergeByID đã dùng cho mọi field khác (cloud làm nền; bản ghi chỉ có trên máy → thêm; bản trên
+          // máy MỚI HƠN theo updatedAt → thay; bản ghi máy KHÔNG có → GIỮ NGUYÊN cloud; bia mộ deletedIds áp
+          // như cũ). Máy thiếu/cũ KHÔNG thể xoá hay đè bản mới hơn của người khác. KHÔNG áp cho field dạng
+          // object/giá trị đơn (cấu hình — last-write-wins nguyên khối, rủi ro đè) → giữ bản cloud như cũ.
+          try{
+            const _allowSet=new Set(allowedFields);
+            const _extra=ALL_DATA_FIELDS.filter(f=>{
+              if(_allowSet.has(f) || f==='deletedIds') return false;
+              const a=S[f];
+              return Array.isArray(a) && a.length>0 && typeof a[0]==='object' && a[0]!==null && ('id' in a[0]);
+            });
+            if(_extra.length){
+              const _mp2=mergeStateByFields(Object.assign({}, toEncrypt), S, _extra);
+              let _added=0;
+              _extra.forEach(f=>{
+                const before=Array.isArray(toEncrypt[f])?toEncrypt[f].length:0;
+                if(Array.isArray(_mp2.merged[f])){ toEncrypt[f]=_mp2.merged[f]; S[f]=_mp2.merged[f]; _added+=Math.max(0,toEncrypt[f].length-before); }
+              });
+              const _cf=Object.keys(_mp2.conflictReport||{});
+              if(_cf.length){ try{ _recordSyncConflicts(_mp2.conflictReport); }catch(e){} }
+              dlog('[sync push] v3.66.36 gộp thêm '+_extra.length+' loại dữ liệu ngoài danh sách tab ('+_extra.join(',')+'), +'+_added+' bản ghi mới');
+            }
+          }catch(_ex){ console.warn('[sync push] gộp field ngoài danh sách tab lỗi (bỏ qua, giữ cloud):', _ex&&_ex.message); }
           // v2.100.0: dựng lại onhires từ events đã merge (giữ nhất quán)
           try{ if(typeof syncEventsToOnhires==='function') syncEventsToOnhires(); }catch(e){}
           // Report conflicts to user (warning toast)
@@ -36842,6 +36871,17 @@ async function lightSyncPull(){
     for(let i=0;i<domains.length;i++){
       const frag=await _lightFetchDomain(cfg, domains[i]);
       if(frag && typeof frag==='object') Object.assign(cloudPartial, frag);
+    }
+    // v3.66.35 (Bước 0 vá khẩn — Sếp duyệt): GĐ2 mới có đường TẢI khối domain, CHƯA có nơi nào GHI
+    // lên data_tm/data_kt/data_vpqn/data_tau_kho → các khối này đang rỗng trên server. Trước đây rỗng
+    // vẫn báo "OK" → NV Light Sync không nhận được dữ liệu mới nào từ cloud (máy mới trống trơn).
+    // Nay: không có field dữ liệu nào trong các khối domain → rơi về cloudSync('pull'), đúng quy
+    // tắc #5 đã chốt ("không để NV đứng im không có dữ liệu"). Tự hết tác dụng khi Bước 1 (phát hành
+    // khối domain) chạy thật.
+    const _hasDomainData=fields.some(f=>{ const v=cloudPartial[f]; return Array.isArray(v)?v.length>0:(v!==undefined&&v!==null); });
+    if(!_hasDomainData){
+      console.warn('[lightSyncPull] khối domain rỗng ('+domains.join(',')+') — fallback cloudSync(pull)');
+      return cloudSync('pull');
     }
     const mp=mergeStateByFields(Object.assign({}, cloudPartial), S, fields);   // TÁI DÙNG nguyên hàm có sẵn — không sửa bên trong
     fields.forEach(f=>{ if(mp.merged[f]!==undefined) S[f]=mp.merged[f]; });
@@ -72992,6 +73032,72 @@ function opMinUsd(v){
   const m=+v.min||0;
   return (v.ccy==='USD') ? m : ((fxRate()>0) ? m/fxRate() : m);
 }
+/* ════ v3.66.36 — KHÔI PHỤC HỒ SƠ PHÍ QL CHO BÚT TOÁN MỒ CÔI ════
+   Dựng lại bản ghi opMgmtFees từ chính bút toán Chi hộ (Cấn trừ) + phiếu Phải thu đi kèm, GIỮ
+   ĐÚNG ID cũ (_mgmtFeeId) → mọi liên kết tự khớp lại, không sửa gì ở 2 bản ghi kia. */
+function _orphanFeePeriodMonth(t, ar){
+  const src=[t&&t.desc, ar&&ar.desc].filter(Boolean).join(' ');
+  const m=src.match(/T\s*(\d{1,2})\s*\/\s*(\d{4})/i);
+  if(m){ const mm=('0'+m[1]).slice(-2); if(+mm>=1&&+mm<=12) return m[2]+'-'+mm; }
+  return String((t&&t.date)||'').slice(0,7);
+}
+function _orphanFeeDuplicate(t){
+  const ar=AccountingService.receivables().find(x=>x._mgmtFeeId===t._mgmtFeeId)||null;
+  const pm=_orphanFeePeriodMonth(t, ar);
+  return (VesselService.opMgmtFees()||[]).find(f=>f.vesselId===t.vesselId && (f.periodMonth||String(f.date||'').slice(0,7))===pm)||null;
+}
+function _orphanActionsCell(t, vid){
+  const canDel=(isAdmin()||canApproveL2());
+  const canRes=(isAdmin()||canApproveL1()||canApproveL2());
+  const dup=_orphanFeeDuplicate(t);
+  const res = !canRes ? '' : (dup
+    ? `<span style="font-size:10px;color:var(--warn);font-weight:600" title="Tàu này đã có hồ sơ phí cho cùng tháng (${esc(dup.period||dup.periodMonth||'')}) — có thể là bản TRÙNG, xem lại trước khi xóa">⚠ trùng tháng</span>`
+    : `<button class="btn-mini" style="font-size:10px;padding:2px 8px;background:var(--good);color:#fff;border:none;border-radius:4px;cursor:pointer" title="Dựng lại hồ sơ phí QL từ bút toán này + phiếu Phải thu đi kèm (giữ nguyên ID, số tiền)" onclick="restoreOrphanMgmtFee('${t.id}','${vid||t.vesselId}')">🔧 Khôi phục</button>`);
+  const del = canDel ? `<button class="icon-btn danger" title="Xóa bút toán mồ côi này (chỉ khi chắc chắn là TRÙNG/SAI)" onclick="deleteOrphanMgmtFeeTx('${t.id}','${vid||t.vesselId}')">✕</button>` : '';
+  return (res||del) ? `<div style="display:flex;gap:6px;align-items:center;justify-content:flex-end">${res}${del}</div>` : '<span style="font-size:10px;color:var(--muted)">Chỉ Admin/KTT</span>';
+}
+function _restoreOrphanMgmtFeeCore(t){
+  const feeId=t._mgmtFeeId; if(!feeId) return {ok:false, why:'không có cờ phí QL'};
+  if((VesselService.opMgmtFees()||[]).some(f=>f.id===feeId)) return {ok:false, why:'đã có hồ sơ'};
+  if(_orphanFeeDuplicate(t)) return {ok:false, why:'trùng tháng'};
+  const ar=AccountingService.receivables().find(x=>x._mgmtFeeId===feeId)||null;
+  const v=VesselService.opVessels().find(x=>x.id===t.vesselId)||{};
+  const gross=+(ar?(ar.amountGross||ar.amount):(t.amountGross||t.amount))||0;
+  const net=ar&&ar.amountNet!=null ? +ar.amountNet : gross;
+  const pm=_orphanFeePeriodMonth(t, ar);
+  const inner=String(t.desc||'').match(/\(([^)]+)\)\s*$/);
+  const nowIso=new Date().toISOString();
+  VesselService.addOpMgmtFee({
+    id:feeId, vesselId:t.vesselId, date:t.date||'', period:(inner?inner[1]:(t.desc||'Phí quản lý')), periodMonth:pm,
+    amount:net, vatPercent:ar?(+ar.vatPercent||0):0, vatAmount:ar?(+ar.vatAmount||0):0, amountGross:gross,
+    ccy:'USD', invoiceNo:t.invoiceNo||(ar&&ar.invoiceNo)||'', deducted:true, arId:ar?ar.id:'', opTxId:t.id,
+    standardFee:+v.fee||0, adjustNote:'',
+    revenueRecognized: !!(ar && typeof wfStatus==='function' && wfStatus(ar)==='approved'),
+    createdBy:t.createdBy||'', createdAt:t.createdAt||nowIso, updatedAt:nowIso,
+    _restoredFromOrphan:true, _restoredBy:actorName(), _restoredAt:nowIso
+  });
+  return {ok:true, ar:!!ar};
+}
+function restoreOrphanMgmtFee(txId, vid){
+  if(!(isAdmin()||canApproveL1()||canApproveL2())){ toast('Không có quyền khôi phục hồ sơ phí QL','bad'); return; }
+  const t=(VesselService.opTransactions()||[]).find(x=>x.id===txId); if(!t){ toast('Không tìm thấy bút toán','bad'); return; }
+  const r=_restoreOrphanMgmtFeeCore(t);
+  if(!r.ok){ toast('Không khôi phục: '+r.why,'warn'); return; }
+  saveState();
+  try{ logAuditEvent('mgmt_fee_orphan_restore',{txId, feeId:t._mgmtFeeId, vesselId:t.vesselId}); }catch(e){}
+  toast('✓ Đã khôi phục hồ sơ phí QL'+(r.ar?'':' (không tìm thấy Phải thu đi kèm — kiểm tra lại)'),'good');
+  renderAll();
+  if(window._orphanScanOpen){ try{ openOrphanMgmtFeeScan(); }catch(e){} } else { try{ openMgmtFeeDetail(vid||t.vesselId); }catch(e){} }
+}
+function restoreAllOrphanMgmtFees(){
+  if(!(isAdmin()||canApproveL1()||canApproveL2())){ toast('Không có quyền','bad'); return; }
+  const list=_findAllOrphanMgmtFeeTx();
+  let ok=0, skip=0;
+  list.forEach(t=>{ const r=_restoreOrphanMgmtFeeCore(t); if(r.ok) ok++; else skip++; });
+  if(ok){ saveState(); try{ logAuditEvent('mgmt_fee_orphan_restore_all',{restored:ok, skipped:skip}); }catch(e){} }
+  toast('✓ Khôi phục '+ok+' hồ sơ'+(skip?(' · bỏ qua '+skip+' (trùng tháng — xem lại từng dòng)'):''), ok?'good':'warn');
+  renderAll(); try{ openOrphanMgmtFeeScan(); }catch(e){}
+}
 /* Tổng phí QL ĐÃ phát hành (thực tế) cho 1 tàu — đọc từ các bút toán phí đã ghi */
 function opMgmtFeeIssued(vid){
   return VesselService.opMgmtFees().filter(f=>f.vesselId===vid).reduce((s,f)=>s+(+f.amount||0),0);
@@ -73002,6 +73108,9 @@ function opBalanceBreakdown(vid){
   // v3.02.70: tách CHI DỰ KIẾN (_isBudget) khỏi chi thực để diễn giải rõ ở bảng số dư.
   const v=VesselService.opVessels().find(x=>x.id===vid);
   let thu=0, chi=0, chiBudget=0, fees=0, khoanChiThuc=0, chiMgmt=0;
+  // v3.66.36: CÙNG quy tắc với báo cáo PDF (_opPeriodTotals, v3.65.89) — chỉ coi là "Phí quản lý" khi
+  // cờ _mgmtFeeId khớp 1 hồ sơ CÒN THẬT trong opMgmtFees; bút toán mồ côi rơi về Chi hộ như PDF.
+  const _mgmtCanon=new Set((VesselService.opMgmtFees()||[]).filter(f=>f.vesselId===vid).map(f=>f.id));
   VesselService.opTransactions().filter(t=>t.vesselId===vid).forEach(t=>{
     const amtUsd=opTxUsd(t);
     // v3.03.40: dòng 'chi' của khoán không trừ số dư chủ tàu (theo dõi riêng để đối chiếu).
@@ -73010,7 +73119,7 @@ function opBalanceBreakdown(vid){
     if(t.type==='IN') thu+=amtUsd;
     else {
       chi+=amtUsd; if(t._isBudget) chiBudget+=amtUsd;
-      if(t._mgmtFeeId) chiMgmt+=amtUsd;   // v3.06.00: phí QL đã phát (cấn trừ) — tách riêng để hiển thị "Đã chi" KHÔNG gồm phí QL
+      if(t._mgmtFeeId && _mgmtCanon.has(t._mgmtFeeId)) chiMgmt+=amtUsd;   // v3.66.36: chỉ hồ sơ còn thật · v3.06.00: phí QL đã phát (cấn trừ) — tách riêng để hiển thị "Đã chi" KHÔNG gồm phí QL
       // v3.65.63 (Sếp: "đồng bộ để thấy số không khác biệt ở mọi nơi"): trước đây cộng phí NH của
       // MỌI giao dịch (kể cả Thu hộ và Dự kiến chi) — khác với PDF (sumFee) chỉ cộng phí của Chi hộ
       // THỰC (loại IN, loại Dự kiến, loại reportToOwner=false) → gây lệch vài đô khi so PDF với Hub.
@@ -73656,7 +73765,7 @@ function openMgmtFeeDetail(vid){
     <div style="font-size:11px;color:var(--muted);margin-bottom:6px">Đã trừ tiền thật vào số dư, nhưng KHÔNG có bản ghi theo dõi chính thức đi kèm — không hiện ở Sổ Chi hộ (bị ẩn theo thiết kế) lẫn bảng "Các kỳ đã lập" ở trên. Rà lại từng dòng: nếu SAI/TRÙNG → xóa; nếu ĐÚNG → báo em bổ sung bản ghi theo dõi cho khớp.</div>
     <div class="tbl-scroll"><table class="tbl" style="font-size:13px">
       <thead><tr><th>Ngày</th><th>Diễn giải</th><th class="r">Số tiền (USD)</th><th>Người tạo</th><th></th></tr></thead>
-      <tbody>${orphanTx.map(t=>`<tr><td class="mono" style="font-size:11px">${esc(t.date||'')}</td><td>${esc(t.desc||'')}</td><td class="r num">${fmtCcy(opTxUsd(t),'USD')}</td><td style="font-size:11px;color:var(--muted)">${esc(t.createdBy||'')}</td><td>${(isAdmin()||canApproveL2())?`<button class="icon-btn danger" title="Xóa bút toán mồ côi này" onclick="deleteOrphanMgmtFeeTx('${t.id}','${vid}')">✕</button>`:'<span style="font-size:10px;color:var(--muted)">Chỉ Admin/KTT</span>'}</td></tr>`).join('')}</tbody>
+      <tbody>${orphanTx.map(t=>`<tr><td class="mono" style="font-size:11px">${esc(t.date||'')}</td><td>${esc(t.desc||'')}</td><td class="r num">${fmtCcy(opTxUsd(t),'USD')}</td><td style="font-size:11px;color:var(--muted)">${esc(t.createdBy||'')}</td><td>${_orphanActionsCell(t, vid)}</td></tr>`).join('')}</tbody>
     </table></div>` : '';
   const histHtml = issuedList.length
     ? issuedList.map(f=>{
@@ -73732,11 +73841,12 @@ function openOrphanMgmtFeeScan(){
       <td>${esc(t.desc||'')}</td>
       <td class="r num">${fmtCcy(opTxUsd(t),'USD')}</td>
       <td style="font-size:11px;color:var(--muted)">${esc(t.createdBy||'')}</td>
-      <td>${(isAdmin()||canApproveL2())?`<button class="icon-btn danger" title="Xóa bút toán mồ côi này" onclick="deleteOrphanMgmtFeeTx('${t.id}','${t.vesselId}')">✕</button>`:'<span style="font-size:10px;color:var(--muted)">Chỉ Admin/KTT</span>'}</td>
+      <td>${_orphanActionsCell(t, t.vesselId)}</td>
     </tr>`).join('');
   const body = orphans.length
     ? `<div style="font-size:11px;color:var(--muted);margin-bottom:10px">Quét toàn bộ tàu QL hộ — tìm bút toán Chi hộ gắn cờ phí QL (<code>_mgmtFeeId</code>) nhưng KHÔNG có bản ghi "Kỳ phí QL" tương ứng (thường do lỗi giữa chừng lúc lập phí QL — xem giải thích đã trao đổi). Rà từng dòng: sai/trùng → xóa; đúng thật → báo lại để bổ sung hồ sơ thay vì xóa.</div>
-      <div style="font-size:13px;font-weight:700;margin-bottom:8px">Tổng ${orphans.length} bút toán · ${fmtCcy(total,'USD')}</div>
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;gap:10px;flex-wrap:wrap"><div style="font-size:13px;font-weight:700">Tổng ${orphans.length} bút toán · ${fmtCcy(total,'USD')}</div>${(isAdmin()||canApproveL1()||canApproveL2())?`<button class="btn-primary" onclick="restoreAllOrphanMgmtFees()" title="Dựng lại hồ sơ phí QL cho mọi dòng KHÔNG trùng tháng — dòng ⚠ trùng tháng để xem riêng">🔧 Khôi phục tất cả (trừ dòng trùng)</button>`:''}</div>
+      <div style="font-size:11px;color:var(--muted);margin-bottom:8px;padding:6px 10px;background:rgba(28,58,92,.05);border-left:3px solid var(--accent)">v3.66.36: nguyên nhân là hồ sơ phí QL không được đẩy lên cloud từ máy người lập (đã vá tận gốc — mọi dữ liệu tạo/sửa trên máy đều được đồng bộ). Phí THẬT → bấm 🔧 Khôi phục (giữ nguyên số tiền, HĐ, liên kết). Chỉ bấm ✕ khi chắc chắn là khoản TRÙNG/không phát sinh.</div>
       <div class="tbl-scroll"><table class="tbl" style="font-size:13px">
         <thead><tr><th>Tàu</th><th>Ngày</th><th>Diễn giải</th><th class="r">Số tiền (USD)</th><th>Người tạo</th><th></th></tr></thead>
         <tbody>${rows}</tbody>
@@ -102254,11 +102364,16 @@ function renderVpqnModule(){
     // thật), không còn modEmpSummaryOpen() (chỉ xem) như tab "NV Quảng Ngãi" thường nữa.
     if(_vpqnView==='om'){
       const emps=_modEmpsByDept('OM');
+      // v3.66.34 (Sếp: "Chưa có nút tạo TK tại dòng các chuyên gia" — TÌM RA thiếu sót thật: lúc xây
+      // bảng riêng cho O&M ở v3.66.22, quên đưa lại cột "Tài khoản"/nút "+ Tạo TK" vốn có sẵn trong
+      // _modStaffTable() dùng chung trước đó). Thêm lại đúng khuôn — chỉ Admin thấy cột này.
+      const _isAdm=isAdmin();
       const rows=emps.map((e,i)=>`<tr style="cursor:pointer" onclick="hrmEditEmployee('${esc(e.id)}')">
           <td style="padding:6px 8px;text-align:center">${i+1}</td>
           <td style="padding:6px 8px;font-size:11px">${esc(e.smartId||'')}</td>
           <td style="padding:6px 8px">${esc(e.fullName||'')}</td>
           <td style="padding:6px 8px;color:var(--muted)">${esc(e.title||'')}</td>
+          ${_isAdm?`<td style="padding:6px 8px;text-align:center">${e.linkUserId?'<span style="color:var(--muted);font-size:11px">🔗 đã có TK</span>':`<button class="btn-sec" style="font-size:11px;padding:3px 8px" onclick="event.stopPropagation();hrmCreateAccountFor('${esc(e.id)}')">+ Tạo TK</button>`}</td>`:''}
         </tr>`).join('');
       box.innerHTML=`
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
@@ -102268,8 +102383,8 @@ function renderVpqnModule(){
             <button class="btn-primary" style="font-size:12px" onclick="_vpqnOmAddNew()">+ Thêm chuyên gia O&amp;M</button>
           </div>
         </div>
-        <table class="tbl"><thead><tr><th>#</th><th>MSNV</th><th>Họ tên</th><th>Chức danh</th></tr></thead>
-        <tbody>${rows||'<tr><td colspan="4" style="padding:14px;text-align:center;color:var(--muted)">Chưa có chuyên gia O&amp;M</td></tr>'}</tbody></table>
+        <table class="tbl"><thead><tr><th>#</th><th>MSNV</th><th>Họ tên</th><th>Chức danh</th>${_isAdm?'<th>Tài khoản</th>':''}</tr></thead>
+        <tbody>${rows||`<tr><td colspan="${_isAdm?5:4}" style="padding:14px;text-align:center;color:var(--muted)">Chưa có chuyên gia O&amp;M</td></tr>`}</tbody></table>
         <div style="margin-top:8px;font-size:10.5px;color:var(--muted)">Bấm 1 dòng để sửa. Mọi thay đổi ghi thẳng vào Nhân sự (theo dõi chung) — không phải bảng riêng.</div>`;
       return;
     }
