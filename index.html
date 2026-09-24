@@ -4730,7 +4730,7 @@ const WH_TYPES = {
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.66.48';
+const APP_VERSION='3.66.49';
 /* HOTFIX 3.12.17-email: CHẶN TRIỆT ĐỂ gửi email TỰ ĐỘNG (mất kiểm soát — spam quota Google).
    Email phải do NV được phân quyền CHỦ ĐỘNG chọn gửi. Cờ này:
    (1) chặn auto-SCAN tạo email (hrmScanExpiries/vesselCertScanExpiries);
@@ -4778,8 +4778,28 @@ const HIDE_COMPANY_COL=false;
     try{ return typeof u==='string' && u.indexOf('script.google.com')!==-1; }
     catch(e){ return false; }
   }
-  window.fetch = function(url, options){
+  /* v3.66.49 (GĐ3 — G3 "chặn phá"): lệnh GHI/ĐỔI tới Apps Script tự kèm CHỮ KÝ GHI
+     proof = "<ms>.<HMAC-SHA256(mã chứng minh, ms|action)>", mã chứng minh = HMAC(chìa khóa dữ liệu,
+     'seahorse-write-proof-v1'). Chỉ người mở được chìa khóa dữ liệu (NV thật) mới ký được. */
+  const _WP_ACTIONS=['save','backup_upload','upload_attachment','hr_upload','trash_attachment','send_email','gemini_extract','pfsave'];
+  window.fetch = async function(url, options){
     if(_isAppsScript(url)){
+      try{
+        let _act='';
+        const _qm=/[?&]action=([a-z_]+)/.exec(url); if(_qm) _act=_qm[1];
+        if(options && typeof options.body==='string' && _act!=='pfsave'){
+          try{ const _o=JSON.parse(options.body); if(_o && typeof _o==='object' && !Array.isArray(_o) && _o.action) _act=String(_o.action); }catch(_){}
+        }
+        if(_WP_ACTIONS.indexOf(_act)>=0 && typeof _wpProof==='function'){
+          const _pf=await _wpProof(_act);
+          if(_pf){
+            if(_act==='pfsave'){ url += (url.indexOf('?')!==-1?'&':'?')+'proof='+encodeURIComponent(_pf); }
+            else if(options && typeof options.body==='string'){
+              try{ const _o2=JSON.parse(options.body); if(_o2 && typeof _o2==='object' && !Array.isArray(_o2)){ _o2.proof=_pf; options=Object.assign({}, options, {body:JSON.stringify(_o2)}); } }catch(_){}
+            }
+          }
+        }
+      }catch(_wpE){ /* chữ ký lỗi → gửi như cũ (máy chủ quyết theo công tắc) */ }
       // GET (hoặc không có body): gắn token vào query string
       url += (url.indexOf('?')!==-1 ? '&' : '?') + 'token=' + encodeURIComponent(API_TOKEN);
       // POST có body JSON: chèn token vào trong object
@@ -5675,6 +5695,7 @@ async function _srvLoginBg(name, pw){
       _SRV_SESS={token:d.session, user:d.username, exp:Date.now()+((+d.expiresInSec||21600)-120)*1000};
       try{ sessionStorage.setItem('shSrvSess', JSON.stringify(_SRV_SESS)); }catch(e){}
       console.log('[srv] phiên máy chủ OK —', d.username);
+      try{ _wpRegisterIfNeeded(); }catch(e){}   // v3.66.49 G3
     } else console.warn('[srv] không lấy được phiên máy chủ:', d && d.error);
   }catch(e){ console.warn('[srv] login lỗi:', e && e.message); }
 }
@@ -5733,6 +5754,47 @@ function _srvErrMsg(err){
   const s=String(err||'');
   if(s.indexOf('ADMIN_ONLY')===0) return 'Phiên máy chủ hết hạn hoặc chưa có — đăng xuất rồi đăng nhập lại (tài khoản admin)';
   return s;
+}
+/* ════ v3.66.49 (G3): CHỮ KÝ GHI ════ */
+let _WP_KEY_HEX='';
+function _wpHex(buf){ return Array.from(new Uint8Array(buf)).map(b=>b.toString(16).padStart(2,'0')).join(''); }
+async function _wpKey(){
+  if(_WP_KEY_HEX) return _WP_KEY_HEX;
+  try{
+    if(typeof CRYPTO_KEY==='undefined' || !CRYPTO_KEY) return '';
+    const raw=await crypto.subtle.exportKey('raw', CRYPTO_KEY);
+    const hk=await crypto.subtle.importKey('raw', raw, {name:'HMAC', hash:'SHA-256'}, false, ['sign']);
+    _WP_KEY_HEX=_wpHex(await crypto.subtle.sign('HMAC', hk, new TextEncoder().encode('seahorse-write-proof-v1')));
+    return _WP_KEY_HEX;
+  }catch(e){ return ''; }
+}
+async function _wpProof(action){
+  const k=await _wpKey(); if(!k) return '';
+  const ts=String(Date.now());
+  const hk=await crypto.subtle.importKey('raw', new TextEncoder().encode(k), {name:'HMAC', hash:'SHA-256'}, false, ['sign']);
+  return ts+'.'+_wpHex(await crypto.subtle.sign('HMAC', hk, new TextEncoder().encode(ts+'|'+action)));
+}
+async function _wpFp(k){ return _wpHex(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(k))).slice(0,12); }
+/* Admin có phiên máy chủ → đảm bảo máy chủ giữ ĐÚNG mã chứng minh (chưa có / khác dấu vân tay → đăng ký lại). */
+async function _wpRegisterIfNeeded(){
+  try{
+    const t=_srvSess(); if(!t) return;
+    const k=await _wpKey(); if(!k) return;
+    const cfg=getAuthConfig(); if(!cfg || !cfg.scriptUrl) return;
+    const post=async(o)=>safeJson(await fetchWithTimeout(cfg.scriptUrl,{method:'POST',headers:{'Content-Type':'text/plain;charset=utf-8'},body:JSON.stringify(Object.assign({token:_srvToken(), session:t}, o))},45000));
+    const st=await post({action:'write_proof_status'});
+    if(!st || !st.ok){ console.warn('[wp] status:', st && st.error); return; }
+    const fp=await _wpFp(k);
+    if(st.set && st.fp===fp){ console.log('[wp] mã chứng minh máy chủ khớp ✓'); return; }
+    const r=await post({action:'set_write_proof_key', key:k});
+    console.log(r && r.ok ? '[wp] đã đăng ký mã chứng minh lên máy chủ ✓' : '[wp] đăng ký lỗi: '+(r && r.error));
+  }catch(e){ console.warn('[wp] đăng ký lỗi:', e && e.message); }
+}
+/* Admin xem nhanh thống kê trong Console: _wpStatus() */
+async function _wpStatus(){
+  const d=await _srvPost({action:'write_proof_status'});
+  console.log('[wp] ĐÃ ĐĂNG KÝ:', d.set, '· CHẶN:', d.enforce, '· THIẾU/SAI chữ ký:', JSON.stringify(d.stats), '· MỐC:', JSON.stringify(d.highWater));
+  return d;
 }
 /* List backups from Drive */
 async function listCloudBackups(){
@@ -19799,7 +19861,14 @@ async function _cloudSyncRaw(mode, opts){
       //   Backend không giải mã được payload → dựa counts client gửi để chặn máy lỗi push nhân sự rỗng.
       const _pushCounts = {
         hrEmployees: (toEncrypt.hrEmployees||[]).length,
-        payables: (toEncrypt.payables||[]).length
+        payables: (toEncrypt.payables||[]).length,
+        // v3.66.49 (G3 lớp 2 — chặn xóa hàng loạt): thêm các loại dữ liệu quan trọng
+        receivables: (toEncrypt.receivables||[]).length,
+        opTransactions: (toEncrypt.opTransactions||[]).length,
+        bccSheets: (toEncrypt.bccSheets||[]).length,
+        payrollPeriods: (toEncrypt.payrollPeriods||[]).length,
+        crewAssignments: (toEncrypt.crewAssignments||[]).length,
+        vendors: (toEncrypt.vendors||[]).length
       };
       let finalBody = JSON.stringify({action:'save', key:'data', payload, counts:_pushCounts});
       let finalSize = finalBody.length;
