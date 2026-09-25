@@ -2004,6 +2004,7 @@ span.chip.chip-fixed{display:inline-flex;align-items:center;gap:4px}
         <div style="display:flex;gap:8px">
           <button class="btn-sec" onclick="catalogQuickAdd('expenseType')" id="cat-etype-add-btn">+ Thêm</button>
           <button class="btn-sec" onclick="catalogImport('expenseType')" id="cat-etype-import-btn">📥 Import Excel</button>
+          <button class="btn-sec" onclick="openEtypeDupScan()" title="Rà và xóa hẳn các mục trùng trong danh mục chi phí (chỉ Admin)">🔍 Rà trùng</button>
         </div>
       </div>
       <div class="section-body">
@@ -4730,7 +4731,7 @@ const WH_TYPES = {
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.66.49';
+const APP_VERSION='3.66.53';
 /* HOTFIX 3.12.17-email: CHẶN TRIỆT ĐỂ gửi email TỰ ĐỘNG (mất kiểm soát — spam quota Google).
    Email phải do NV được phân quyền CHỦ ĐỘNG chọn gửi. Cờ này:
    (1) chặn auto-SCAN tạo email (hrmScanExpiries/vesselCertScanExpiries);
@@ -4789,6 +4790,14 @@ const HIDE_COMPANY_COL=false;
         const _qm=/[?&]action=([a-z_]+)/.exec(url); if(_qm) _act=_qm[1];
         if(options && typeof options.body==='string' && _act!=='pfsave'){
           try{ const _o=JSON.parse(options.body); if(_o && typeof _o==='object' && !Array.isArray(_o) && _o.action) _act=String(_o.action); }catch(_){}
+        }
+        // v3.66.50 (G3b): lệnh TẢI dữ liệu (load mọi khối trừ 'auth', pfload) cũng kèm chữ ký (qua URL)
+        if((_act==='load' || _act==='pfload') && typeof _wpProof==='function'){
+          const _km=/[?&]key=([^&]+)/.exec(url); const _key=_km?decodeURIComponent(_km[1]):'data';
+          if(_act==='pfload' || _key!=='auth'){
+            const _pr=await _wpProof(_act);
+            if(_pr) url += (url.indexOf('?')!==-1?'&':'?')+'proof='+encodeURIComponent(_pr);
+          }
         }
         if(_WP_ACTIONS.indexOf(_act)>=0 && typeof _wpProof==='function'){
           const _pf=await _wpProof(_act);
@@ -5722,7 +5731,7 @@ function _srvLoginSchedule(name, pw){
   window._srvLastName=name;
   let tries=0;
   const attempt=async()=>{
-    if(_srvSess()) return;
+    if(_srvSess()){ try{ _wpRegisterIfNeeded(); }catch(e){} return; }   // v3.66.50: tab đã có phiên → vẫn kiểm đăng ký mã
     const busy=window._syncSignal && window._syncSignal.status==='busy';
     if(busy){ setTimeout(attempt, 10000); return; }   // đang đồng bộ → đợi thêm (không tính lượt)
     tries++;
@@ -5754,6 +5763,18 @@ function _srvErrMsg(err){
   const s=String(err||'');
   if(s.indexOf('ADMIN_ONLY')===0) return 'Phiên máy chủ hết hạn hoặc chưa có — đăng xuất rồi đăng nhập lại (tài khoản admin)';
   return s;
+}
+/* ════ v3.66.50 (G3b): QUY ĐỊNH MẬT KHẨU ════
+   Tối thiểu 8 ký tự, có cả CHỮ và SỐ, không trùng tên đăng nhập, không nằm trong danh sách mật khẩu phổ biến.
+   Áp khi đặt/đổi mật khẩu; mật khẩu HIỆN TẠI không đạt → NV bị yêu cầu đổi ngay sau khi đăng nhập. */
+const _PW_COMMON=['12345678','123456789','1234567890','password','password1','password123','abc12345','abcd1234','qwerty123','11111111','88888888','00000000','12341234','iloveyou','seahorse','seahorse1','seahorse123','admin123','admin1234','matkhau1','matkhau123','vungtau1','vietnam1','123456aa','aa123456','a1234567','1q2w3e4r'];
+function _pwPolicyErr(pw, uname){
+  pw=String(pw||'');
+  if(pw.length<8) return 'Mật khẩu tối thiểu 8 ký tự';
+  if(!/[A-Za-zÀ-ỹ]/.test(pw) || !/[0-9]/.test(pw)) return 'Mật khẩu phải có cả chữ và số';
+  if(uname && pw.toLowerCase()===String(uname).toLowerCase()) return 'Mật khẩu không được trùng tên đăng nhập';
+  if(_PW_COMMON.indexOf(pw.toLowerCase())>=0) return 'Mật khẩu quá phổ biến — chọn mật khẩu khác';
+  return '';
 }
 /* ════ v3.66.49 (G3): CHỮ KÝ GHI ════ */
 let _WP_KEY_HEX='';
@@ -6952,7 +6973,9 @@ async function selfWrapInCloudCfg(userName, password){
     if(existing){
       try{
         await unwrapCfgMasterKey(existing, password);
-        return;  // Wrap is valid, no need to update
+        // v3.66.50 (G3b): gói khóa đời cũ (100.000 vòng) → gói lại 600.000 vòng (dò mật khẩu chậm gấp 6)
+        if((+existing.iter||0) >= PBKDF2_ITER_NEW) return;  // Wrap is valid, no need to update
+        console.log('[wrap] nâng gói khóa '+userName+' từ '+(existing.iter||'?')+' lên '+PBKDF2_ITER_NEW+' vòng');
       }catch(e){
         // Existing wrap can't unwrap (password changed) → re-wrap
       }
@@ -7567,6 +7590,13 @@ async function authAction(){
     if(cfg.scriptUrl){
       selfWrapInCloudCfg(name, pw).catch(e=>console.warn('[self-wrap]', e.message));
       _srvLoginSchedule(name, pw);   // v3.66.48: phiên máy chủ — đợi đồng bộ xong, thử lại tối đa 3 lần (chỉ admin)
+    }
+    { // v3.66.50 (G3b): mật khẩu hiện tại không đạt quy định → NV phải đổi ngay; admin được nhắc
+      const _pe=_pwPolicyErr(pw, name);
+      if(_pe){
+        if(CURRENT_ROLE==='user' && CURRENT_USER){ CURRENT_USER.mustChangePassword=true; window._weakPwReason=_pe; }
+        else setTimeout(()=>{ try{ toast('⚠ Mật khẩu admin chưa đạt quy định ('+_pe+') — nên đổi ngay trong Cài đặt','warn'); }catch(e){} }, 3000);
+      }
     }
     // v3.64.11 (Phương án 2 — tải quyền mới NGẦM sau khi đã cho vào, không chặn đăng nhập): CHỈ áp
     // dụng cho NV thường (CURRENT_ROLE==='user') — admin không có luồng pull cfg này. Không await,
@@ -9015,6 +9045,7 @@ async function saveSettings(){
   if(pwOld||pwNew||pwNew2){
     if(!pwOld||!pwNew||!pwNew2){err.textContent='Đổi MK admin: điền đủ 3 ô';return;}
     if(pwNew.length<8){err.textContent='MK admin mới ≥ 8 ký tự';return;}
+    { const _pe=_pwPolicyErr(pwNew,'admin'); if(_pe){ err.textContent=_pe; return; } }   // v3.66.50
     if(pwNew!==pwNew2){err.textContent='MK admin không khớp';return;}
     try{
       const hashOld=await sha256Hex(pwOld+cfg.admin.salt);
@@ -9889,6 +9920,7 @@ async function saveUserSimplified(){
   if(!email || !/^[a-z0-9._-]+@[a-z0-9.-]+\.[a-z]{2,}$/i.test(email)){ err.textContent='Email không hợp lệ'; return; }
   if(typeof COMPANY_EMAIL_DOMAIN==='string' && COMPANY_EMAIL_DOMAIN && !email.toLowerCase().endsWith('@'+COMPANY_EMAIL_DOMAIN)){ err.textContent='Chỉ chấp nhận email @'+COMPANY_EMAIL_DOMAIN; return; }
   if(!pw || pw.length<6){ err.textContent='Mật khẩu tối thiểu 6 ký tự'; return; }
+  { const _pe=_pwPolicyErr(pw); if(_pe){ err.textContent=_pe; return; } }   // v3.66.50: cùng quy định mật khẩu
   if(!role){ err.textContent='Chọn Vai trò'; return; }
   const cfg=getAuthConfig();
   cfg.users=cfg.users||[];
@@ -11283,6 +11315,7 @@ async function saveUser(idx){
   }
   // Validate password
   if(!isEdit && pw.length<8){err.textContent='Mật khẩu ≥ 8 ký tự';return;}
+  if(pw){ const _pe=_pwPolicyErr(pw); if(_pe){ err.textContent=_pe; return; } }   // v3.66.50
   if(pw && pw.length<8){err.textContent='Mật khẩu ≥ 8 ký tự';return;}
   if(pw!==pw2){err.textContent='Mật khẩu nhập lại không khớp';return;}
   // Check name uniqueness (case-insensitive)
@@ -12098,8 +12131,19 @@ function isBOD(){
   return !!(CURRENT_USER && CURRENT_USER.isBOD);
 }
 /* v3.04.27: quyền ký & khóa báo cáo chủ tàu (gán riêng cho Manager). Admin luôn có. */
+/* v3.66.51 (Sếp duyệt 25/9 "mở quyền xóa sửa/khóa-mở khóa Thu chi hộ" cho KTT): KTT = Vai trò
+   5. Trưởng bộ phận + Module TCKT (cùng quy ước v3.66.32 cho phải trả/chi hộ). Quản lý công ty con KHÔNG.
+   Tài khoản chưa gán Vai trò: theo cờ cũ canApproveL1 + canCheckAcc (đúng KTT kiểu cũ). */
+function _opIsKTT(){
+  if(CURRENT_ROLE==='admin') return true;
+  if(!CURRENT_USER) return false;
+  const fg=Array.isArray(CURRENT_USER.funcGroups)?CURRENT_USER.funcGroups:[];
+  if(CURRENT_USER.roleTier) return CURRENT_USER.roleTier==='ceo' || (CURRENT_USER.roleTier==='truong_bp' && fg.includes('TCKT'));
+  return !!(CURRENT_USER.canApproveL1 && CURRENT_USER.canCheckAcc);
+}
 function canSignOwnerReport(){
   if(CURRENT_ROLE==='admin') return true;
+  if(_opIsKTT()) return true;   // v3.66.51
   return !!(CURRENT_USER && CURRENT_USER.canSignOwnerReport);
 }
 /* v3.07.91: Quyền KÝ Module Nhân sự (Trưởng phòng Nhân sự). Admin + BOD luôn có. */
@@ -21509,7 +21553,10 @@ function getExpenseType(code){
   if(hit) return hit;
   /* v3.20.66: mã có thể là 1 nhánh lá tự sinh (chưa ai tạo "loại chi phí" thật gắn vào) — tra tiếp
      trong danh sách đã gộp cả bản ảo, để mọi nơi hiển thị tên/nhóm vẫn ra đúng, không hiện trống. */
-  try{ return activeExpenseTypes().find(t=>t.code===code) || null; }catch(e){ return null; }
+  try{ const a=activeExpenseTypes().find(t=>t.code===code); if(a) return a; }catch(e){}
+  // v3.66.53: mã là 1 NHÁNH (kể cả nhánh có loại con) — phiếu chuyển về nhánh cha sau khi xóa trùng vẫn hiện đúng tên/nhóm
+  try{ const nd=expTreeList().find(n=>String(n.code)===String(code)); if(nd) return {code:String(code), treeCode:String(code), label:nd.name||String(code), group:'', icon:'📁', synthetic:true, nodeLevel:true}; }catch(e){}
+  return null;
 }
 
 /* Get all active (non-archived) expense types, sorted by group then label */
@@ -39236,6 +39283,7 @@ async function doChangePassword(forced){
   const newPw2=document.getElementById('cpw-new2').value;
   if(!oldPw){err.textContent='Nhập mật khẩu hiện tại';return;}
   if(newPw1.length<8){err.textContent='Mật khẩu mới tối thiểu 8 ký tự';return;}
+  { const _pe=_pwPolicyErr(newPw1, CURRENT_USER&&CURRENT_USER.name); if(_pe){ err.textContent=_pe; return; } }   // v3.66.50
   if(newPw1!==newPw2){err.textContent='Hai mật khẩu mới không khớp';return;}
   if(oldPw===newPw1){err.textContent='Mật khẩu mới phải khác mật khẩu cũ';return;}
 
@@ -40649,15 +40697,16 @@ function _doEditExpenseType(id){
     if(mergeInto){   /* v3.18.62: GỘP — chuyển phiếu rồi lưu trữ loại nguồn, KHÔNG đổi loại đích */
       const dst=(S.expenseTypes||[]).find(x=>x.id===mergeInto); if(!dst) return;
       const oldCode=t.code; let nMig=0;
-      (S.payables||[]).forEach(pp=>{ if(pp&&pp.expenseType===oldCode){ pp.expenseType=dst.code; try{touchRecord(pp);}catch(e){} nMig++; } });
-      t.archived=true; t.updatedAt=new Date().toISOString();
+      nMig=_etMigrateCodes({[oldCode]:dst.code});   // v3.66.53: chuyển MỌI nơi, không chỉ phải trả
+      // v3.66.53 (Sếp: "bỏ hẳn — không để ẩn"): XÓA HẲN loại nguồn thay vì lưu trữ (ẩn)
+      S.expenseTypes=(S.expenseTypes||[]).filter(x=>x.id!==t.id); try{ markDeleted([t.id],'expenseTypes'); }catch(e){}
       try{ logAuditEvent('etype_merge',{from:oldCode,into:dst.code,migrated:nMig,actor:actorName()}); }catch(e){}
-      migMsg=' · GỘP '+oldCode+'→'+dst.code+' ('+nMig+' phiếu chuyển, loại cũ đã lưu trữ)';
+      migMsg=' · GỘP '+oldCode+'→'+dst.code+' ('+nMig+' trường mã chuyển, loại cũ đã xóa hẳn)';
       return;
     }
     if(newCode && newCode!==t.code){
       const oldCode=t.code; let nMig=0;
-      (S.payables||[]).forEach(pp=>{ if(pp&&pp.expenseType===oldCode){ pp.expenseType=newCode; try{touchRecord(pp);}catch(e){} nMig++; } });
+      nMig=_etMigrateCodes({[oldCode]:newCode});   // v3.66.53: chuyển MỌI nơi
       t.code=newCode;
       try{ logAuditEvent('etype_code_change',{from:oldCode,to:newCode,migrated:nMig,actor:actorName()}); }catch(e){}
       migMsg=' · đổi mã '+oldCode+'→'+newCode+' ('+nMig+' phiếu chuyển theo)';
@@ -40685,14 +40734,101 @@ function _doEditExpenseType(id){
   }});
 }
 
-/* Count records using a given expense type code */
-function _countRecordsUsingExpenseType(code){
+/* ════ v3.66.53 (Sếp 25/9: "rà và bỏ hẳn các danh mục trùng — không để ẩn — chi phí đang gắn tự chuyển về
+   loại trước đó, vd trùng nhóm cháu → xóa → chi phí chuyển về nhóm cha") ════
+   LỖI NGẦM phát hiện kèm: đổi mã / gộp loại chi phí trước đây CHỈ chuyển phiếu Phải trả (S.payables) —
+   phiếu thu, quỹ, chi hộ, ngân sách... còn giữ mã cũ → chi phí "lạc" khỏi danh mục. Nay chuyển MỌI nơi
+   có trường mã chi phí (expenseType / *ExpenseType), kể cả trong các dòng con của phiếu. */
+function _etMigrateCodes(map){
+  const keys=Object.keys(map||{}); if(!keys.length) return 0;
+  const SKIP={expenseTypes:1, expenseTree:1, deletedIds:1, auditLog:1, auditEvents:1};
   let n=0;
-  ['receivables','payables'].forEach(list=>{
-    (S[list]||[]).forEach(r=>{ if(r.expenseType===code) n++; });
+  const walk=(o, depth)=>{
+    let ch=false;
+    Object.keys(o).forEach(k=>{
+      const v=o[k];
+      if(typeof v==='string' && (k==='expenseType' || /ExpenseType$/.test(k)) && map[v]!==undefined){ o[k]=map[v]; ch=true; n++; }
+      else if(Array.isArray(v) && depth<3){ v.forEach(x=>{ if(x && typeof x==='object' && walk(x, depth+1)) ch=true; }); }
+      else if(v && typeof v==='object' && depth<2){ if(walk(v, depth+1)) ch=true; }
+    });
+    return ch;
+  };
+  Object.keys(S).forEach(f=>{
+    if(SKIP[f]) return;
+    const arr=S[f]; if(!Array.isArray(arr)) return;
+    arr.forEach(r=>{ if(r && typeof r==='object' && walk(r,0)){ try{ touchRecord(r); }catch(e){} } });
   });
   return n;
 }
+function _etCountCode(code){
+  let n=0; const SKIP={expenseTypes:1, expenseTree:1, deletedIds:1, auditLog:1, auditEvents:1};
+  const walk=(o, depth)=>{ Object.keys(o).forEach(k=>{ const v=o[k];
+    if(typeof v==='string' && (k==='expenseType' || /ExpenseType$/.test(k)) && v===code) n++;
+    else if(Array.isArray(v) && depth<3) v.forEach(x=>{ if(x && typeof x==='object') walk(x, depth+1); });
+    else if(v && typeof v==='object' && depth<2) walk(v, depth+1); }); };
+  Object.keys(S).forEach(f=>{ if(SKIP[f]||!Array.isArray(S[f])) return; S[f].forEach(r=>{ if(r && typeof r==='object') walk(r,0); }); });
+  return n;
+}
+/* Rà trùng: (1) nhánh cây trùng mã; (2) loại chi phí trùng MÃ với nhánh (loại "đè" lên nhánh — lỗi chặn chọn
+   sâu hơn, vd T.01.30); (3) loại trùng MÃ nhau; (4) loại trùng TÊN trong cùng một nhánh. Loại bị bỏ → phiếu
+   chuyển về NHÁNH CHA (treeCode) — trường hợp (2)(3) mã giữ nguyên nên phiếu tự thuộc nhánh/loại còn lại. */
+function _etDupScan(){
+  const tree=expTreeList(), types=(S.expenseTypes||[]);
+  const norm=s=>String(s||'').trim().toLowerCase().replace(/\s+/g,' ');
+  const out=[]; const seenNode={};
+  tree.forEach((n,i)=>{ const k=String(n.code||''); if(!k) return; if(seenNode[k]!==undefined) out.push({kind:'node', code:k, name:n.name||'', idx:i, to:k, note:'Nhánh trùng mã — giữ nhánh đầu tiên'}); else seenNode[k]=i; });
+  const nodeCodes=new Set(tree.map(n=>String(n.code||'')));
+  const live=types.filter(t=>t && !t._deleted);
+  live.forEach(t=>{ if(t.code!=='BOD_ONLY' && nodeCodes.has(String(t.code))) out.push({kind:'type_node', t, code:t.code, name:t.label||'', to:t.code, note:'Loại trùng mã với NHÁNH '+t.code+' ('+(expTreeName(t.code)||'')+') — bỏ loại, phiếu thuộc thẳng nhánh'}); });
+  const byCode={};
+  live.forEach(t=>{ if(nodeCodes.has(String(t.code))) return; const k=String(t.code); (byCode[k]=byCode[k]||[]).push(t); });
+  Object.keys(byCode).forEach(k=>{ const g=byCode[k]; if(g.length<2) return;
+    g.sort((a,b)=>(a.archived?1:0)-(b.archived?1:0) || String(a.createdAt||a.id).localeCompare(String(b.createdAt||b.id)));
+    g.slice(1).forEach(t=>out.push({kind:'type_type', t, code:t.code, name:t.label||'', to:g[0].code, note:'Loại trùng mã với loại khác — giữ 1 bản'})); });
+  const byLab={};
+  live.forEach(t=>{ if(nodeCodes.has(String(t.code)) || !t.treeCode) return; const k=t.treeCode+'|'+norm(t.label); (byLab[k]=byLab[k]||[]).push(t); });
+  Object.keys(byLab).forEach(k=>{ const g=byLab[k]; if(g.length<2) return;
+    g.sort((a,b)=>String(a.code).localeCompare(String(b.code),'vi',{numeric:true}));
+    g.slice(1).forEach(t=>{ if(out.some(x=>x.t===t)) return; out.push({kind:'type_label', t, code:t.code, name:t.label||'', to:t.treeCode, note:'Trùng TÊN với '+g[0].code+' trong nhánh '+t.treeCode+' — bỏ, phiếu chuyển về nhánh cha '+t.treeCode}); }); });
+  return out;
+}
+function openEtypeDupScan(){
+  if(!isAdmin()){ toast('Chỉ Admin','bad'); return; }
+  const list=_etDupScan();
+  const kindLbl={node:'Nhánh trùng mã', type_node:'Loại trùng nhánh', type_type:'Loại trùng mã', type_label:'Loại trùng tên'};
+  const rows=list.map(x=>{ const cnt=(x.kind==='node')?'—':_etCountCode(x.code);
+    return `<tr><td>${esc(kindLbl[x.kind])}</td><td class="mono">${esc(x.code)}</td><td>${esc(x.name)}</td><td style="font-size:11px;color:var(--muted)">${esc(x.note)}</td><td class="r">${cnt}</td><td class="mono">${esc(x.to)}</td></tr>`; }).join('');
+  openModal('🔍 Rà trùng danh mục chi phí', list.length
+    ? `<div style="font-size:12px;color:var(--muted);margin-bottom:8px">Bấm áp dụng: XÓA HẲN các mục trùng (không ẩn). Phiếu đang dùng mục bị xóa tự chuyển về mục ở cột "Chuyển về". App tự tải bản sao lưu danh mục về máy trước khi xóa, và ghi nhật ký.</div>
+       <div class="tbl-scroll"><table class="tbl" style="font-size:12px"><thead><tr><th>Loại trùng</th><th>Mã</th><th>Tên</th><th>Ghi chú</th><th class="r">Số phiếu dùng</th><th>Chuyển về</th></tr></thead><tbody>${rows}</tbody></table></div>`
+    : '<div class="empty" style="padding:16px;color:var(--good)">✓ Danh mục chi phí không còn mục trùng.</div>',
+    list.length?`<button class="btn-sec" onclick="closeModal()">Hủy</button><button class="btn-primary" onclick="applyEtypeDupFix()">🧹 Xóa trùng &amp; chuyển phiếu</button>`:'<button class="btn-primary" onclick="closeModal()">Đóng</button>');
+}
+function applyEtypeDupFix(){
+  if(!isAdmin()) return;
+  const list=_etDupScan(); if(!list.length){ closeModal(); return; }
+  if(!confirm('Xóa hẳn '+list.length+' mục trùng và chuyển phiếu theo bảng?\nKhông hoàn tác trong app (có bản sao lưu tải về máy).')) return;
+  try{ const blob=new Blob([JSON.stringify({at:new Date().toISOString(), expenseTypes:S.expenseTypes, expenseTree:S.expenseTree},null,1)],{type:'application/json'});
+    const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download='danh-muc-chi-phi-truoc-khi-xoa-trung-'+new Date().toISOString().slice(0,10)+'.json'; a.click(); }catch(e){}
+  let nMig=0; const log=[];
+  commitMutation(()=>{
+    const map={};
+    list.forEach(x=>{ if(x.kind==='type_label' && x.to && x.to!==x.code) map[x.code]=x.to; });
+    nMig=_etMigrateCodes(map);
+    const rmIds=list.filter(x=>x.t).map(x=>x.t.id).filter(Boolean);
+    S.expenseTypes=(S.expenseTypes||[]).filter(t=>!(t && rmIds.indexOf(t.id)>=0));
+    try{ markDeleted(rmIds, 'expenseTypes'); }catch(e){}
+    const rmNodeIdx=new Set(list.filter(x=>x.kind==='node').map(x=>x.idx));
+    if(rmNodeIdx.size) S.expenseTree=(S.expenseTree||[]).filter((n,i)=>!rmNodeIdx.has(i));
+    list.forEach(x=>log.push({kind:x.kind, code:x.code, name:x.name, to:x.to}));
+  }, {action:'etype_dedupe', fields:['expenseTypes','expenseTree','deletedIds'], onOk:()=>{
+    try{ logAuditEvent('etype_dedupe',{by:actorName(), removed:log, migrated:nMig}); }catch(e){}
+    closeModal(); toast('✓ Đã xóa '+log.length+' mục trùng · '+nMig+' trường mã chi phí đã chuyển','good');
+    try{ renderCatalog(); }catch(e){} try{ renderAll(); }catch(e){}
+  }, onFail:(rr)=>{ toast('⚠ Chưa xóa được — '+(rr.error||''),'bad'); }});
+}
+/* Count records using a given expense type code */
+function _countRecordsUsingExpenseType(code){ return _etCountCode(code); }   // v3.66.53: đếm MỌI nơi (trước chỉ phải thu/phải trả)
 
 function archiveExpenseType(id){
   if(!canArchiveItem()){toast('Chỉ admin / BOD / Kế toán trưởng','bad');return;}
@@ -66951,8 +67087,9 @@ function _arTypesForTreeCode(code){
    nào gắn ở nhánh này (chưa tạo), 1=đúng như kỳ vọng, >1=hiếm gặp, tạm lấy loại đầu. */
 function _arResolveFinalType(types){
   const tsel=document.getElementById('ar-expense-type'); if(!tsel) return;
-  tsel.innerHTML = types.length ? types.map(t=>`<option value="${esc(t.code)}">${t.icon||''} ${esc(t.label)}</option>`).join('') : '<option value="">— Chưa có loại chi phí ở nhánh này —</option>';
-  tsel.value = types.length ? types[0].code : '';
+  // v3.66.53: nhánh có NHIỀU loại → bắt chọn đúng loại (trước tự lấy loại đầu → loại chi tiết không bao giờ chọn được)
+  tsel.innerHTML = types.length ? ((types.length>1?'<option value="">— Chọn chi tiết ('+types.length+' loại) —</option>':'')+types.map(t=>`<option value="${esc(t.code)}">${t.icon||''} ${esc(t.label)}</option>`).join('')) : '<option value="">— Chưa có loại chi phí ở nhánh này —</option>';
+  tsel.value = types.length===1 ? types[0].code : '';
   arExpenseTypeChanged();
 }
 // v3.65.41: tính lại số cột lưới Nhóm/Loại/Chi phí theo đúng số ô đang HIỆN (không còn cố định 3 cột
@@ -69265,6 +69402,10 @@ function _renderMultiRowModal(){
                 <label style="font-size:10px;color:var(--muted)">Chi phí <span style="font-weight:400">(không bắt buộc)</span></label>
                 <select id="mr-exp-chau" onchange="_mrHeaderChauChanged(this.value)">${chauOpts}</select>
               </div>
+              <div id="mr-exp-det-wrap" style="display:none">
+                <label style="font-size:10px;color:var(--muted)">Chi tiết</label>
+                <select id="mr-exp-det" onchange="_mrApplyHeaderType(this.value)"></select>
+              </div>
             </div>`;
         })()}
       </div>` : ''}
@@ -70694,7 +70835,8 @@ function _mrExpGridRebalance(){
   const grid=document.getElementById('mr-exp-grid'); if(!grid) return;
   const conWrap=document.getElementById('mr-exp-con-wrap');
   const chauWrap=document.getElementById('mr-exp-chau-wrap');
-  const n=1+(conWrap&&conWrap.style.display!=='none'?1:0)+(chauWrap&&chauWrap.style.display!=='none'?1:0);
+  const detWrap=document.getElementById('mr-exp-det-wrap');   // v3.66.53: ô thứ 4 "Chi tiết"
+  const n=1+(conWrap&&conWrap.style.display!=='none'?1:0)+(chauWrap&&chauWrap.style.display!=='none'?1:0)+(detWrap&&detWrap.style.display!=='none'?1:0);
   grid.style.gridTemplateColumns='repeat('+n+',1fr)';
 }
 function _mrHeaderGroupChanged(gk){
@@ -70716,19 +70858,32 @@ function _mrHeaderConChanged(conCode){
   const chau=_arTreeChauOf(conCode);
   if(!chau.length){
     if(chauWrap) chauWrap.style.display='none';
-    const types=_arTypesForTreeCode(conCode);
-    _mrApplyHeaderType(types.length?types[0].code:'');
+    _mrShowDetail(_arTypesForTreeCode(conCode));   // v3.66.53
   }else{
+    try{ _mrShowDetail([]); }catch(e){}
     if(chauWrap) chauWrap.style.display='';
     if(chauSel) chauSel.innerHTML='<option value="">— Chi phí —</option>'+chau.map(c=>`<option value="${esc(c.code)}">${esc(c.code)} · ${esc(c.name)}</option>`).join('');
     _mrApplyHeaderType('');
   }
   _mrExpGridRebalance();
 }
+/* v3.66.53: nhánh có NHIỀU loại chi phí → hiện ô thứ 4 "Chi tiết" để chọn đúng loại (trước tự lấy loại đầu,
+   các loại chi tiết không chọn được). 1 loại → áp thẳng như cũ. */
+function _mrShowDetail(types){
+  const w=document.getElementById('mr-exp-det-wrap'), s=document.getElementById('mr-exp-det');
+  if(types && types.length>1){
+    if(s) s.innerHTML='<option value="">— Chọn chi tiết ('+types.length+' loại) —</option>'+types.map(t=>`<option value="${esc(t.code)}">${esc(t.code)} · ${esc(t.label)}</option>`).join('');
+    if(w) w.style.display='';
+    _mrApplyHeaderType('');
+  } else {
+    if(w) w.style.display='none';
+    _mrApplyHeaderType(types && types.length ? types[0].code : '');
+  }
+  try{ _mrExpGridRebalance(); }catch(e){}
+}
 function _mrHeaderChauChanged(chauCode){
-  if(!chauCode){ _mrApplyHeaderType(''); return; }
-  const types=_arTypesForTreeCode(chauCode);
-  _mrApplyHeaderType(types.length?types[0].code:'');
+  if(!chauCode){ _mrShowDetail([]); _mrApplyHeaderType(''); return; }
+  _mrShowDetail(_arTypesForTreeCode(chauCode));
 }
 
 /* v3.07.13: đổi đơn vị tiền phiếu nhiều dòng → hiện/ẩn ô tỷ giá (ngoại tệ khác USD/VND cần tỷ giá → VND). */
@@ -75993,7 +76148,7 @@ function _removeOpTxOnce(id){
 function purgeOpTxForever(id){
   const t=VesselService.opTransactions().find(x=>x.id===id);
   if(!t){ toast('Không tìm thấy phiếu','bad'); return; }
-  if(!isAdmin()){ toast('Chỉ admin được xóa vĩnh viễn','bad'); return; }
+  if(!isAdmin() && !_opIsKTT()){ toast('Chỉ Admin hoặc KTT được xóa vĩnh viễn','bad'); return; }   // v3.66.52 (Sếp: cấp thêm cho KTT — app lưu vết đủ)
   if(t._locked && !t._isBudget){ toast('🔒 Phiếu đã khóa — không xóa được','bad'); return; }
   const v=VesselService.opVessels().find(x=>x.id===t.vesselId);
   confirmDelete('XÓA bút toán chi hộ (ghi bia mộ chống sống lại)',
@@ -76005,7 +76160,8 @@ function purgeOpTxForever(id){
       S.opTransactions=VesselService.opTransactions().filter(x=>x.id!==id);
       try{ markDeleted([id], 'opTransactions'); }catch(e){ try{ markDeleted(id); }catch(_){} }
       }, {action:'purge_optx_forever', fields:['opTransactions','deletedIds'], onOk:()=>{
-      try{ logAuditEvent('purge_optx_forever',{id, vesselId:t.vesselId, desc:(t.desc||'').slice(0,60)}); }catch(e){}
+      // v3.66.52: nhật ký ghi ĐỦ nội dung phiếu bị xóa (ai xóa, ngày, loại, số tiền, NCC...) — xóa vĩnh viễn vẫn truy được vết
+      try{ logAuditEvent('purge_optx_forever',{id, by:actorName(), vesselId:t.vesselId, date:t.date, type:t.type, amount:t.amount, ccy:t.ccy, amountUsd:t.amountUsd, vendor:t.vendor||'', invoiceNo:t.invoiceNo||'', desc:(t.desc||'').slice(0,200), createdBy:t.createdBy||'', budget:!!t._isBudget, paid:!!t.paid}); }catch(e){}
       toast('Đã xóa phiếu — ghi bia mộ chống sống lại','good'); renderAll();
       }, onFail:(rr)=>{ toast('⚠ CHƯA xóa được — '+(rr.error||'')+'. Giữ nguyên.','bad'); }});
     });
@@ -76021,8 +76177,8 @@ function delOpTx(id){
   if(!assertOwnerReportWritable(t)) return;
   if(t.paid){toast('Bút toán đã xác nhận TT — bỏ xác nhận trước khi xóa','bad');return;}
   // NV thường chỉ xóa được bút toán mình tạo (audit trail)
-  if(!isAdmin() && t.createdBy && t.createdBy!==actorName()){
-    toast('Chỉ admin/người tạo mới xóa được bút toán','bad');
+  if(!isAdmin() && !_opIsKTT() && t.createdBy && t.createdBy!==actorName()){   // v3.66.51: + KTT
+    toast('Chỉ admin/KTT/người tạo mới xóa được bút toán','bad');
     return;
   }
   const v=VesselService.opVessels().find(v=>v.id===t.vesselId);
@@ -76204,7 +76360,7 @@ function opDeleteBudget(id){
      Áp cho MỌI thao tác, không ngoại lệ. */
   if(t._locked){ toast('🔒 Kỳ đã khóa (chủ tàu đã xác nhận) — không hủy được khoản này','bad'); return; }
   if(!assertOwnerReportWritable(t)) return;
-  if(!isAdmin() && t.createdBy && t.createdBy!==actorName()){ toast('Chỉ admin/người tạo mới hủy được','bad'); return; }
+  if(!isAdmin() && !_opIsKTT() && t.createdBy && t.createdBy!==actorName()){ toast('Chỉ admin/KTT/người tạo mới hủy được','bad'); return; }   // v3.66.51
   const v=VesselService.opVessels().find(x=>x.id===t.vesselId);
   const ccy=t.ccy||(v?v.ccy:'VND')||'VND';
   confirmDelete('khoản dự kiến chi',
@@ -76639,7 +76795,7 @@ function editOpTx(id){
     return;
   }
   if(!assertOwnerReportWritable(t)) return;
-  if(t.paid){toast('Bút toán đã xác nhận TT — chỉ người xác nhận sửa được (nút ✎ trong dòng)','bad');return;}
+  if(t.paid && !_opIsKTT()){toast('Bút toán đã xác nhận TT — chỉ người xác nhận hoặc KTT sửa được (nút ✎ trong dòng)','bad');return;}   // v3.66.51
   if(!t.ccy) t.ccy='USD';
   if(t.fxToUsd==null) t.fxToUsd = t.ccy==='USD'?1:0;
   // v2.99.31: chuẩn hóa cờ dự kiến chi sang chuỗi để hiện trong select sửa
@@ -77910,7 +78066,7 @@ function showOpTxDetail(id){
      Lý do: nút này XÓA KHÔNG HỒI PHỤC mà lại nằm ngay cạnh nút xóa thường trong bảng → dễ bấm nhầm.
      Đưa vào phiếu chi tiết: admin phải MỞ PHIẾU, xem kỹ nội dung rồi mới thấy nút — an toàn hơn,
      bảng cũng gọn hơn. Chức năng giữ nguyên (xóa + bia mộ theo ID + chặn theo nội dung). */
-  if(typeof isAdmin==='function' && isAdmin() && !(t._locked && !t._isBudget)){
+  if(typeof isAdmin==='function' && (isAdmin() || _opIsKTT()) && !(t._locked && !t._isBudget)){   // v3.66.52: + KTT
     foot+=`<button class="btn-sec" onclick="closeModal();purgeOpTxForever('${t.id}')" title="Xóa VĨNH VIỄN — chặn sống lại qua đồng bộ (dùng khi phiếu cứ hồi sinh dù đã xóa)" style="border-color:var(--bad);color:var(--bad);opacity:.85">⛔ Xóa vĩnh viễn</button>`;
   }
   foot+=`<button class="btn-sec" onclick="closeModal()">Đóng</button>`;
@@ -79590,7 +79746,7 @@ function signLockOwnerReport(){
 /* v3.10.01 — MỞ KHÓA từ modal báo cáo (CHỈ ADMIN). Lấy tháng theo rep-from (tháng đang xem)
    + các tàu đang chọn → mở khóa từng tàu qua unlockOwnerReport (đã hỏi xác nhận + lý do + log). */
 function promptUnlockOwnerReport(){
-  if(!isAdmin()){ toast('Chỉ ADMIN mới mở khóa kỳ báo cáo chủ tàu','bad'); return; }
+  if(!isAdmin() && !_opIsKTT()){ toast('Chỉ Admin hoặc KTT (Trưởng bộ phận TCKT) mới mở khóa kỳ báo cáo chủ tàu','bad'); return; }   // v3.66.51
   var from=(document.getElementById('rep-from')||{}).value||'';
   var month=String(from).slice(0,7);
   if(!/^\d{4}-\d{2}$/.test(month)){ toast('Chọn "Từ ngày" thuộc THÁNG cần mở khóa','bad'); return; }
@@ -79601,7 +79757,7 @@ function promptUnlockOwnerReport(){
   locked.forEach(function(id){ unlockOwnerReport(id, month); });
 }
 function unlockOwnerReport(vesselId, period){
-  if(!isAdmin()){ toast('Chỉ ADMIN mới mở khóa kỳ báo cáo chủ tàu','bad'); return; }
+  if(!isAdmin() && !_opIsKTT()){ toast('Chỉ Admin hoặc KTT (Trưởng bộ phận TCKT) mới mở khóa kỳ báo cáo chủ tàu','bad'); return; }   // v3.66.51
   const v=VesselService.opVessels().find(x=>x.id===vesselId);
   if(!confirm('Mở khóa kỳ '+period+' của '+(v?v.name:'tàu')+'?\nSau khi mở, bút toán kỳ này lại sửa được. Số đã gửi chủ tàu có thể thay đổi — cân nhắc kỹ.')) return;
   const reason=prompt('Lý do mở khóa (bắt buộc — để ghi log):','')||'';
@@ -99181,7 +99337,37 @@ function saveUserRow(idx, btnEl){
 // hết cần"): modal DÙNG CHUNG sau mọi thao tác lưu Vai trò/Module/Công ty/Quỹ/Dọn máy — tóm tắt lại
 // đúng những gì vừa lưu + LUÔN kèm cảnh báo + nút đẩy cloud ngay (đúng khuôn v3.14.85 của form cũ,
 // KHÔNG viết lại logic đẩy — dùng nguyên openCfgSyncDialog()).
-function _showPermSaveReview(u){
+const PERM_REVIEW_GROUPS=[
+  ['Tài chính – Kế toán', [['canCheckAcc','Kiểm chứng từ KT'],['canApproveL1','Duyệt L1'],['canApproveL2','Duyệt L2'],['canConfirmPayment','Xác nhận thanh toán'],['canEditTreasury','Sửa ngân quỹ / tín dụng'],['canApproveFund','Duyệt quỹ tiền mặt'],['_nsnnCanEdit','Sửa nghĩa vụ NSNN']]],
+  ['Thu/Chi hộ chủ tàu', [['canSignOwnerReport','Ký & khóa báo cáo chủ tàu'],['_opIsKTT','KTT: sửa/xóa (kể cả vĩnh viễn) mọi bút toán, mở khóa kỳ'],['_canApproveOpPay','Duyệt thanh toán chi hộ'],['_canConfirmOpTT','Xác nhận thanh toán chi hộ']]],
+  ['Nhân sự – Lương', [['canSignHr','Ký Module Nhân sự'],['hrmCanSeeAll','Xem toàn bộ hồ sơ NV'],['canEditHrPolicy','Sửa chính sách nhân sự'],['payCanViewPayroll','Xem kỳ lương'],['canOperatePayroll','Lập / tính kỳ lương'],['canConfigPayroll','Cấu hình lương'],['canManageCrewAssign','Điều động thuyền viên'],['canManageCrewChange','Đổi ca thuyền viên']]],
+  ['Kho – Vật tư', [['canManageStock','Quản lý kho'],['canViewStockValue','Xem giá trị tồn kho'],['canManageMaterials','Quản lý vật tư']]],
+  ['Hệ thống', [['canManageUsers','Quản lý người dùng'],['canITManageAccounts','Quản trị tài khoản IT'],['canEditCatalog','Sửa danh mục'],['canSeeAllRecords','Xem mọi bản ghi (không lọc người tạo)']]]
+];
+function _permReviewHtml(u, row){
+  const saveU=CURRENT_USER, saveR=CURRENT_ROLE, res={};
+  try{
+    CURRENT_USER=u; CURRENT_ROLE='user';
+    PERM_REVIEW_GROUPS.forEach(g=>g[1].forEach(([fn])=>{
+      const f=(typeof window[fn]==='function')?window[fn]:null;
+      if(!f){ res[fn]=null; return; }
+      try{ res[fn]=!!f(); }catch(e){ res[fn]=null; }
+    }));
+  } finally { CURRENT_USER=saveU; CURRENT_ROLE=saveR; }
+  return PERM_REVIEW_GROUPS.map(([title, items])=>{
+    const shown=items.filter(([fn])=>res[fn]!==null);
+    if(!shown.length) return '';
+    return `<div style="font-size:11px;font-weight:700;color:var(--accent);margin:8px 0 2px;text-transform:uppercase;letter-spacing:.3px">${esc(title)}</div>
+      <div style="background:var(--paper-3);border:1px solid var(--rule);border-radius:8px;padding:2px 12px;margin-bottom:6px">`
+      +shown.map(([fn,label])=>row(label, res[fn]?'<span style="color:var(--good)">✓ Có</span>':'<span style="color:var(--muted)">— Không</span>')).join('')+'</div>';
+  }).join('');
+}
+/* v3.66.51: nút "🔑 Quyền" ở từng dòng người dùng — xem đủ quyền bất cứ lúc nào (không cần lưu). */
+function openUserPermReview(idx){
+  const cfg=getAuthConfig(); const u=cfg&&cfg.users&&cfg.users[idx]; if(!u){ toast('Không tìm thấy người dùng','bad'); return; }
+  _showPermSaveReview(u, true);
+}
+function _showPermSaveReview(u, viewOnly){
   if(!u) return;
   const row=(label,val)=>`<div style="display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px dashed var(--rule);font-size:13px"><span style="color:var(--muted)">${esc(label)}</span><span style="font-weight:600;text-align:right">${val}</span></div>`;
   const coName=(S.companies||[]).find(c=>c.id===u.companyId);
@@ -99189,14 +99375,10 @@ function _showPermSaveReview(u){
   // Vai trò+Module vừa lưu tính ra — để Admin thấy NGAY nếu thiếu Module cần thiết (VD Trưởng bộ phận
   // quên tick TCKT → canCheckAcc = KHÔNG), thay vì phát hiện muộn qua NV báo mất quyền.
   const permLabels={canCheckAcc:'Kiểm chứng từ KT (canCheckAcc)',canApproveL1:'Duyệt L1',canApproveL2:'Duyệt L2',canConfirmPayment:'Xác nhận thanh toán',canSignHr:'Ký Module Nhân sự',isPayrollAcc:'Duyệt Kỳ lương'};
-  let permHtml='';
-  if(u.roleTier){
-    permHtml='<div style="background:var(--paper-3);border:1px solid var(--rule);border-radius:8px;padding:4px 12px;margin-bottom:10px">'
-      +Object.keys(permLabels).map(flag=>{
-        const has=_roleTierPermForUser(u,flag)===true;
-        return row(permLabels[flag], has?'<span style="color:var(--good)">✓ Có</span>':'<span style="color:var(--muted)">— Không</span>');
-      }).join('')+'</div>';
-  }
+  // v3.66.51 (Sếp: "Hiển thị đủ các quyền của Người dùng"): tính QUYỀN THẬT bằng cách chạy đúng các hàm
+  // kiểm quyền của app dưới danh nghĩa NV này (đổi tạm CURRENT_USER, trả lại ngay) — áp cả tài khoản
+  // chưa gán Vai trò (cờ cũ). Không ghi gì, không đổi dữ liệu.
+  const permHtml=_permReviewHtml(u, row);
   const body=`
     <div style="background:var(--paper-3);border:1px solid var(--rule);border-radius:8px;padding:4px 12px;margin-bottom:10px">
       ${row('Họ tên', esc(u.fullName||u.name))}
@@ -99205,8 +99387,9 @@ function _showPermSaveReview(u){
       ${row('Công ty', esc(coName?coName.name:'— Không giới hạn —'))}
       ${row('Quỹ phụ trách', (Array.isArray(u.assignedFundIds)&&u.assignedFundIds.length)?u.assignedFundIds.length+' quỹ':'—')}
     </div>
-    ${u.roleTier?'<div style="font-size:11px;color:var(--muted);margin-bottom:4px">Quyền THẬT tính từ Vai trò + Module (cờ cũ không còn hiệu lực khi đã gán Vai trò):</div>'+permHtml:''}
+    <div style="font-size:11px;color:var(--muted);margin-bottom:4px">${u.roleTier?'Quyền THẬT tính từ Vai trò + Module (cờ cũ không còn hiệu lực khi đã gán Vai trò):':'Chưa gán Vai trò — quyền THẬT đang tính theo các ô tick cũ:'}</div>${permHtml}
     <div style="background:#fdf0dc;border:1px solid #e8b96b;border-radius:8px;padding:10px 14px;font-size:12.5px;color:#7a4c0a">⚠ Quyền CHỈ có hiệu lực trên máy của NV này SAU KHI đẩy auth lên cloud — chưa đẩy thì mọi thay đổi trên chỉ mới nằm ở máy bạn đang dùng.</div>`;
+  if(viewOnly){ openModal('🔑 Quyền — '+esc(u.fullName||u.name), body.replace(/<div style="background:#fdf0dc[\s\S]*?<\/div>\s*$/,''), '<button class="btn-primary" onclick="closeModal()">Đóng</button>'); return; }
   openModal('✓ Đã lưu — '+esc(u.fullName||u.name), body, `<button class="btn-sec" onclick="closeModal()">Để sau</button><button class="btn-primary" onclick="closeModal();try{openCfgSyncDialog();}catch(e){openSettings();}">☁ Đẩy auth lên cloud ngay</button>`);
 }
 function toggleUserNeedCleanup(idx, btnEl){
@@ -99416,7 +99599,7 @@ function renderStaff(){
       <td style="padding:8px 10px;text-align:center;white-space:nowrap">
         ${locked
           ? '<span style="font-size:10px;color:var(--muted)" title="NV có quyền cao — chỉ admin thao tác">🔒 admin</span>'
-          : `${isAdmin()?`<button class="btn-primary" style="font-size:10px;padding:3px 10px" title="Lưu Vai trò + Module + Công ty của dòng này" onclick="saveUserRow(${g.idx}, this)">💾 Lưu</button>`:''}
+          : `${isAdmin()?`<button class="btn-ghost" style="font-size:10px;padding:3px 8px;margin-right:4px" title="Xem đủ các quyền thật của người dùng này" onclick="openUserPermReview(${g.idx})">🔑 Quyền</button><button class="btn-primary" style="font-size:10px;padding:3px 10px" title="Lưu Vai trò + Module + Công ty của dòng này" onclick="saveUserRow(${g.idx}, this)">💾 Lưu</button>`:''}
              <button class="btn-sec" style="font-size:10px;padding:3px 10px" title="Reset Password — cấp mật khẩu mới + đẩy lên cloud" onclick="resetUserPw(${g.idx})">🔑 Reset Password</button>`}
         ${isAdmin()?`<button class="btn-sec" style="font-size:10px;padding:3px 10px" title="Xem đúng giao diện NV này đang thấy — chỉ xem, có ghi log" onclick="viewAsStart('${esc(u.name)}')">🖥 Xem thử</button>`:''}
         ${isAdmin()?`<button class="btn-sec" style="font-size:10px;padding:3px 10px;${u.needCleanup?'border-color:#e0a43b;color:#e0a43b':''}" title="${u.needCleanup?'Đang chờ NV dọn máy — bấm để huỷ':'Bật cờ: lần đăng nhập sau, NV sẽ thấy nút Dọn máy trên máy họ'}" onclick="toggleUserNeedCleanup(${g.idx}, this)">🧹 ${u.needCleanup?'Đang chờ dọn':'Bật dọn máy'}</button>`:''}
