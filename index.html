@@ -1955,6 +1955,7 @@ span.chip.chip-fixed{display:inline-flex;align-items:center;gap:4px}
           <input type="checkbox" id="staff-filter-unreviewed" onchange="renderStaff()"> ⚠ Chỉ NV chưa rà soát
         </label>
         <input type="text" id="staff-search" placeholder="🔍 Tìm tên/email…" oninput="renderStaff()" style="padding:7px 12px;border:1px solid var(--rule);border-radius:8px;font-size:13px;width:180px">
+        <button class="btn-sec" onclick="openAcctEmpAudit()" title="Đối chiếu email tài khoản ↔ email hồ sơ nhân viên — phát hiện gắn nhầm hồ sơ">🔗 Đối chiếu hồ sơ</button>
         <button class="btn-primary" onclick="staffAddUser()">+ Thêm nhân viên</button>
       </div>
     </div>
@@ -4731,7 +4732,7 @@ const WH_TYPES = {
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.66.53';
+const APP_VERSION='3.66.56';
 /* HOTFIX 3.12.17-email: CHẶN TRIỆT ĐỂ gửi email TỰ ĐỘNG (mất kiểm soát — spam quota Google).
    Email phải do NV được phân quyền CHỦ ĐỘNG chọn gửi. Cờ này:
    (1) chặn auto-SCAN tạo email (hrmScanExpiries/vesselCertScanExpiries);
@@ -7570,7 +7571,7 @@ async function authAction(){
         return;
       }
       CURRENT_ROLE='user';
-      CURRENT_USER=matched;
+      CURRENT_USER=matched; _applyTierFlags(CURRENT_USER);   // v3.66.55: Vai trò thay MỌI cờ cũ
     }
     // Success: clear failed attempts + record session start
     clearLoginFails(name);
@@ -8557,7 +8558,7 @@ function auditLegacyTabLeftovers(){
   try{
     (cfg.users||[]).forEach(u=>{
       if(!u || u.isVesselAccount || u.isAdmin) return;   // Tàu/Admin không dính, luôn có đường khác
-      CURRENT_ROLE='user'; CURRENT_USER=u;
+      CURRENT_ROLE='user'; CURRENT_USER=u; _applyTierFlags(CURRENT_USER);   // v3.66.55
       TAB_CHECKS.forEach(c=>{
         if(!c.had(u)) return;
         const tabId=c.tab.split(' ')[0].split('/')[0];   // 'pay_config/pay_engine' → kiểm cả 2
@@ -8629,7 +8630,7 @@ function viewAsStart(userName){
   try{ _viewAsSnapshot=JSON.parse(JSON.stringify(S)); }catch(e){ toast('Không chụp được bản chụp an toàn — hủy xem thử','bad'); return; }
   _viewAsLogId=logId;
   _viewAsActive=true;
-  CURRENT_ROLE='user'; CURRENT_USER=target;
+  CURRENT_ROLE='user'; CURRENT_USER=target; _applyTierFlags(CURRENT_USER);   // v3.66.55: Xem thử cũng đúng quyền mới
   closeModal();
   try{ applyRoleUI(); }catch(e){ console.error('[viewAs] applyRoleUI', e); }
   try{ renderAll(); }catch(e){ console.error('[viewAs] renderAll', e); }
@@ -10176,7 +10177,7 @@ async function _complete2FALogin(){
     CURRENT_USER = null;
   } else {
     CURRENT_ROLE = 'user';
-    CURRENT_USER = pending.user;
+    CURRENT_USER = pending.user; _applyTierFlags(CURRENT_USER);   // v3.66.55
   }
 
   // Continue normal post-login flow (mirrors original login code)
@@ -15307,7 +15308,7 @@ function crewAssignWarnings(a){
 /* Quyền: ai quản lý điều động — HR/admin/điều hành. */
 function canManageCrewAssign(){
   return isAdmin() || (typeof canApproveL2==='function'&&canApproveL2())
-    || (CURRENT_USER && (CURRENT_USER.isHR || canManageUsers()));
+    || (CURRENT_USER && (CURRENT_USER.isHR || canManageUsers() || CURRENT_USER.roleTier==='nv_ns_thuyenvien'));   // v3.66.56
 }
 
 /* ============================================================
@@ -15758,7 +15759,7 @@ function canManageCrewChange(){
   // v3.64.24 (Rà lại phân quyền — Đợt 1: canConfirmPayment): đổi 2 cờ đọc thẳng thành gọi hàm, để
   // isCEO (đã có trong canManageUsers()/canConfirmPayment()) không bị bỏ sót ở đây nữa.
   return isAdmin() || (typeof canApproveL2==='function'&&canApproveL2())
-    || (CURRENT_USER && (CURRENT_USER.isHR || canManageUsers() || canConfirmPayment()));
+    || (CURRENT_USER && (CURRENT_USER.isHR || canManageUsers() || canConfirmPayment() || CURRENT_USER.roleTier==='nv_ns_thuyenvien'));   // v3.66.56
 }
 const CREW_PLAN_STATUS={
   planned:  {label:'Đã lập kế hoạch', en:'Planned',   color:'#5a4a8c', step:1},
@@ -25345,6 +25346,7 @@ function canEditTaxPolicy(){
 function canSeePayrollAmounts(){
   if(isPayrollAdmin()) return true;
   const u=CURRENT_USER; if(!u) return false;
+  if(u.roleTier==='nv_ns_thuyenvien') return true;   // v3.66.56: thẻ lương thuyền viên = xem + thao tác (phạm vi chỉ thuyền viên)
   if(u.isBOD || u.isCEO) return true;            // BOD/CEO xem toàn cảnh
   if(u.canViewPayroll) return true;              // cờ admin bật riêng (v3.12.38)
   return false;                                   // HR/NVNS: thấy danh sách, KHÔNG thấy tiền
@@ -39310,7 +39312,7 @@ async function doChangePassword(forced){
     u.passwordChangedAt=new Date().toISOString();
     try{ touchRecord(u); }catch(e){}   /* v3.18.62: đóng dấu updatedAt — merge cfg máy khác không giữ bản cũ (cùng luật resetUserPw 3.17.94) */
     setAuthConfig(cfg);
-    CURRENT_USER=u;  // update in-memory
+    CURRENT_USER=u; _applyTierFlags(CURRENT_USER);  // update in-memory · v3.66.55
     try{ logAuditEvent('password_change',{by:'self'}); saveState(); }catch(e){}
     try{ _srvSetPwBg(newPw1); }catch(e){}   // v3.66.47: cập nhật mật khẩu máy chủ (nếu đang có phiên)
     // v3.09.58 (ADR-008): đẩy wrap mật khẩu MỚI lên cloud → đăng nhập được ở MỌI máy
@@ -99250,6 +99252,50 @@ function _roleTierPermForUser(u, flag){
   if(tier==='nv' || tier==='nv_chamcong') return false;
   return null;
 }
+/* ════ v3.66.55 (Sếp 25/9 — LỖI NGHIÊM TRỌNG: "NV Nhân sự – Thuyền viên đang có quyền sửa chính sách nhân
+   sự + lập kỳ lương. Phải dùng quyền mới — không dùng các cờ quyền cũ") ════
+   GỐC LỖI: hệ Vai trò (_roleTierPerm) chỉ đè 7 cờ; ~20 cờ cũ khác (isNVNS, isHR, isHrStaff, isBOD, isCEO,
+   canViewPayroll, canApproveFund, canSignOwnerReport...) vẫn được ĐỌC THẲNG ở hàng trăm chỗ → tài khoản đã
+   gán Vai trò vẫn mang quyền cũ còn sót. SỬA TẠI GỐC: khi tài khoản CÓ Vai trò, MỌI cờ quyền cũ bị THAY bằng
+   giá trị suy từ Vai trò + Module (bảng dưới) ngay trên đối tượng người dùng trong bộ nhớ → mọi chỗ đọc cờ
+   (kể cả đọc thẳng) đều ra đúng quyền mới. Cờ cũ không còn được lưu cho tài khoản có Vai trò.
+   Vai trò 7. Tàu, 8. Thủ kho: GIỮ cơ chế riêng như đã chốt (không đè). */
+const _TIER_OVERRIDE_FLAGS=['isBOD','isCEO','isHR','isNVNS','isHrStaff','isPayrollAcc','canViewPayroll','canPayrollHrView','canEditSalaryCard',
+  'canApproveFund','canSignOwnerReport','isViewer','isSubCoManager','canCheckAcc','canApproveL1','canApproveL2','canConfirmPayment','canSignHr','canManageUsers',
+  'isWarehouse','isCentralWarehouse'];
+function _tierFlagValue(u, flag){
+  const tier=u && u.roleTier; if(!tier) return undefined;
+  if(tier==='tau' || tier==='thu_kho') return undefined;
+  const fg=Array.isArray(u.funcGroups)?u.funcGroups:[];
+  const HR=fg.includes('HR'), TC=fg.includes('TCKT');
+  const T={
+    ceo:{isBOD:1,isCEO:1,isHR:1,isNVNS:1,isHrStaff:1,isPayrollAcc:1,canViewPayroll:1,canPayrollHrView:1,canEditSalaryCard:1,canApproveFund:1,canSignOwnerReport:1,canCheckAcc:1,canApproveL1:1,canApproveL2:1,canConfirmPayment:1,canSignHr:1,canManageUsers:1},
+    truong_bp:{isHR:HR,isNVNS:HR,isHrStaff:HR,canViewPayroll:HR,canPayrollHrView:HR,canEditSalaryCard:HR,canSignHr:HR,
+               canCheckAcc:TC,canApproveL1:TC,canConfirmPayment:TC,canApproveFund:TC,canSignOwnerReport:TC},
+    nv_ke_toan:{canCheckAcc:1,canConfirmPayment:1},
+    nv_ns_luong:{isNVNS:1,isHrStaff:1,isPayrollAcc:1,canViewPayroll:1,canPayrollHrView:1},
+    // v3.66.56 (Sếp: "NV Nhân sự – Thuyền viên phải thấy TOÀN BỘ phần thuyền viên tại module Quản lý tàu —
+    // danh sách / hồ sơ / đổi ca nhanh / thẻ lương... = XEM + THAO TÁC"): mở đúng khung "Nhân sự thuyền viên"
+    // có sẵn (canPayrollHrView + phạm vi crew) + sửa thẻ lương; phạm vi luôn khóa CHỈ khối thuyền viên.
+    nv_ns_thuyenvien:{isHrStaff:1, canPayrollHrView:1, canEditSalaryCard:1},
+    quan_ly_cty_con:{canCheckAcc:1,canApproveL1:1,isSubCoManager:1},
+    nv_chamcong:{}, nv:{},
+    thu_kho_module:{}                        // kho theo Module xử lý riêng (isDeptWarehouse)
+  };
+  const row=T[tier]; if(!row) return undefined;
+  if(tier==='thu_kho_module' && (flag==='isWarehouse' || flag==='isCentralWarehouse')) return undefined;
+  return !!row[flag];
+}
+function _applyTierFlags(u){
+  if(!u || !u.roleTier) return u;
+  // v3.66.56: phạm vi Nhân sự–Lương của Vai trò 10 luôn = CHỈ thuyền viên (không theo ô tick cũ)
+  if(u.roleTier==='nv_ns_thuyenvien'){ try{ Object.defineProperty(u,'payrollHrScopes',{value:[{type:'crew',value:'crew'}],writable:true,enumerable:false,configurable:true}); }catch(e){} }
+  _TIER_OVERRIDE_FLAGS.forEach(f=>{
+    const v=_tierFlagValue(u, f); if(v===undefined) return;
+    try{ Object.defineProperty(u, f, {value:v, writable:true, enumerable:false, configurable:true}); }catch(e){ u[f]=v; }
+  });
+  return u;
+}
 function _roleTierPerm(flag){
   if(!CURRENT_USER || !CURRENT_USER.roleTier) return null;
   const tier=CURRENT_USER.roleTier;
@@ -99344,10 +99390,95 @@ const PERM_REVIEW_GROUPS=[
   ['Kho – Vật tư', [['canManageStock','Quản lý kho'],['canViewStockValue','Xem giá trị tồn kho'],['canManageMaterials','Quản lý vật tư']]],
   ['Hệ thống', [['canManageUsers','Quản lý người dùng'],['canITManageAccounts','Quản trị tài khoản IT'],['canEditCatalog','Sửa danh mục'],['canSeeAllRecords','Xem mọi bản ghi (không lọc người tạo)']]]
 ];
+/* v3.66.56 (Sếp: "Quyền người dùng: đối chiếu-lọc đúng quyền — ghi ĐỦ các quyền hiện có trong app, THEO MODULE
+   người dùng đang sử dụng — tất cả theo quyền mới"): mỗi dòng = 1 hàm kiểm quyền THẬT của app. */
+const _TAB_LBL={dashboard:'Dashboard',periodic:'Định kỳ',plan:'Kế hoạch',rates:'Tỷ giá',hrm:'Nhân sự',staff:'Người dùng',receivables:'Phải thu',payables:'Phải trả',ap_handover:'Bàn giao chứng từ',op_input:'Thu/Chi hộ',advances:'Tạm ứng',cashfund:'Quỹ tiền mặt',banking:'Ngân hàng',cashflow:'Dòng tiền',approval:'Phê duyệt',nsnn:'NSNN',vessels:'Tàu',operations:'Vận hành',inventory:'Tồn kho',fixed_assets:'TSCĐ',tools:'CCDC & MMTB',kho:'Kho'};
+const PERM_BY_MODULE=[
+  ['TAU','Quản lý tàu',[
+    ['Tổng quan module', ()=>_modCanSeeOverview('TAU')],
+    ['Quản lý nhân viên của module', ()=>_modCanManageStaff('TAU')],
+    ['Quản lý thuyền viên — thấy mục (Đổi ca / Hồ sơ / Thẻ lương)', ()=>_canSeeCrewMgmt()],
+    ['Đổi ca nhanh — thao tác', ()=>canManageCrewChange()],
+    ['Quyết định điều động — thao tác', ()=>canManageCrewAssign()],
+    ['Thẻ lương — sửa', ()=>salaryProfileCanEdit()],
+    ['Thẻ lương — xem số tiền', ()=>canSeePayrollAmounts()],
+    ['Chi hộ — KTT: sửa/xóa (kể cả vĩnh viễn) mọi bút toán, mở khóa kỳ', ()=>_opIsKTT()],
+    ['Chi hộ — Ký & khóa báo cáo chủ tàu', ()=>canSignOwnerReport()],
+    ['Chi hộ — Duyệt thanh toán', ()=>_canApproveOpPay()],
+    ['Chi hộ — Xác nhận thanh toán', ()=>_canConfirmOpTT()],
+    ['Kho — thao tác phiếu', ()=>canManageStock()],
+    ['Kho — xem giá trị tồn', ()=>canViewStockValue()]]],
+  ['HR','Nhân sự',[
+    ['Tổng quan module', ()=>_modCanSeeOverview('HR')],
+    ['Xem toàn bộ hồ sơ NV', ()=>hrmCanSeeAll()],
+    ['Ký Module Nhân sự', ()=>canSignHr()],
+    ['Sửa chính sách nhân sự', ()=>canEditHrPolicy()],
+    ['Xem kỳ lương', ()=>payCanViewPayroll()],
+    ['Lập / tính kỳ lương', ()=>canOperatePayroll()],
+    ['Duyệt kỳ lương', ()=>payCanApprovePeriod()],
+    ['Cấu hình lương', ()=>canConfigPayroll()],
+    ['Xem số tiền lương', ()=>canSeePayrollAmounts()],
+    ['Sửa thẻ lương', ()=>salaryProfileCanEdit()],
+    ['Điều động thuyền viên', ()=>canManageCrewAssign()]]],
+  ['TCKT','Tài chính Kế toán',[
+    ['Tổng quan module', ()=>_modCanSeeOverview('TCKT')],
+    ['Kiểm chứng từ KT', ()=>canCheckAcc()],
+    ['Duyệt L1', ()=>canApproveL1()],
+    ['Duyệt L2', ()=>canApproveL2()],
+    ['Xác nhận thanh toán', ()=>canConfirmPayment()],
+    ['Sửa ngân quỹ / tín dụng', ()=>canEditTreasury()],
+    ['Duyệt quỹ tiền mặt', ()=>canApproveFund()],
+    ['Sửa nghĩa vụ NSNN', ()=>_nsnnCanEdit()],
+    ['Sửa danh mục', ()=>canEditCatalog()],
+    ['Xem mọi bản ghi (không lọc người tạo)', ()=>canSeeAllRecords()],
+    ['Chi hộ — KTT: sửa/xóa mọi bút toán, mở khóa kỳ', ()=>_opIsKTT()],
+    ['Chi hộ — Ký & khóa báo cáo chủ tàu', ()=>canSignOwnerReport()]]],
+  ['KHO','Tài sản – Kho',[
+    ['Tổng quan module', ()=>_modCanSeeOverview('KHO')],
+    ['Kho — thao tác phiếu', ()=>canManageStock()],
+    ['Kho — xem giá trị tồn', ()=>canViewStockValue()],
+    ['Quản lý vật tư', ()=>canManageMaterials()]]],
+  ['BOD','BOD (Ban Giám đốc)',[
+    ['Tổng quan module', ()=>_modCanSeeOverview('BOD')],
+    ['Duyệt L2', ()=>canApproveL2()]]],
+  ['TV','Thư viện',[
+    ['Tổng quan module', ()=>_modCanSeeOverview('TV')]]]
+];
+const PERM_SYSTEM=[['Quản lý người dùng', ()=>canManageUsers()],['Quản trị tài khoản IT', ()=>canITManageAccounts()]];
 function _permReviewHtml(u, row){
+  const saveU=CURRENT_USER, saveR=CURRENT_ROLE;
+  const uu=_applyTierFlags(Object.assign({}, u));
+  const fg=Array.isArray(uu.funcGroups)?uu.funcGroups:[];
+  const allMods=uu.roleTier==='ceo';
+  const ev=f=>{ try{ return !!f(); }catch(e){ return null; } };
+  let mods=[], extra=[], sys=[], tabsBy={};
+  try{
+    CURRENT_USER=uu; CURRENT_ROLE='user';
+    PERM_BY_MODULE.forEach(([k,label,items])=>{
+      const fgDef=(typeof FUNC_GROUPS!=='undefined'?FUNC_GROUPS:[]).find(g=>g.k===k);
+      const tabs=(fgDef&&fgDef.tabs||[]).filter(t=>ev(()=>canAccessTab(t))).map(t=>_TAB_LBL[t]||t);
+      const res=items.map(([lab,f])=>[lab, ev(f)]).filter(x=>x[1]!==null);
+      if(allMods || fg.includes(k)) mods.push({k,label,tabs,res});
+      else res.filter(x=>x[1]).forEach(x=>{ if(!extra.some(e=>e[0]===x[0])) extra.push([x[0]+' ('+label+')', true]); });
+    });
+    sys=PERM_SYSTEM.map(([lab,f])=>[lab, ev(f)]).filter(x=>x[1]);
+  } finally { CURRENT_USER=saveU; CURRENT_ROLE=saveR; }
+  const yes='<span style="color:var(--good)">✓ Có</span>', no='<span style="color:var(--muted)">— Không</span>';
+  const box=inner=>`<div style="background:var(--paper-3);border:1px solid var(--rule);border-radius:8px;padding:2px 12px;margin-bottom:6px">${inner}</div>`;
+  const head=t=>`<div style="font-size:11px;font-weight:700;color:var(--accent);margin:8px 0 2px;text-transform:uppercase;letter-spacing:.3px">${esc(t)}</div>`;
+  let html='';
+  if(!mods.length) html+='<div style="font-size:12px;color:var(--bad);margin:6px 0">⚠ Chưa chọn Module — người dùng này chưa vào được module nào.</div>';
+  mods.forEach(m=>{
+    html+=head('Module: '+m.label)+box(row('Tab được vào', m.tabs.length?esc(m.tabs.join(' · ')):no)+m.res.map(([lab,v])=>row(lab, v?yes:no)).join(''));
+  });
+  if(extra.length) html+=head('Quyền ngoài module đang dùng (kiểm lại)')+box(extra.map(([lab])=>row(lab, '<span style="color:#b8730a">⚠ Có</span>')).join(''));
+  if(sys.length) html+=head('Quyền hệ thống')+box(sys.map(([lab])=>row(lab, yes)).join(''));
+  return html;
+}
+function _permReviewHtml_OLD(u, row){
   const saveU=CURRENT_USER, saveR=CURRENT_ROLE, res={};
   try{
-    CURRENT_USER=u; CURRENT_ROLE='user';
+    CURRENT_USER=_applyTierFlags(Object.assign({}, u)); CURRENT_ROLE='user';   // v3.66.55: xem đúng quyền sau khi Vai trò đè cờ cũ
     PERM_REVIEW_GROUPS.forEach(g=>g[1].forEach(([fn])=>{
       const f=(typeof window[fn]==='function')?window[fn]:null;
       if(!f){ res[fn]=null; return; }
@@ -99599,7 +99730,7 @@ function renderStaff(){
       <td style="padding:8px 10px;text-align:center;white-space:nowrap">
         ${locked
           ? '<span style="font-size:10px;color:var(--muted)" title="NV có quyền cao — chỉ admin thao tác">🔒 admin</span>'
-          : `${isAdmin()?`<button class="btn-ghost" style="font-size:10px;padding:3px 8px;margin-right:4px" title="Xem đủ các quyền thật của người dùng này" onclick="openUserPermReview(${g.idx})">🔑 Quyền</button><button class="btn-primary" style="font-size:10px;padding:3px 10px" title="Lưu Vai trò + Module + Công ty của dòng này" onclick="saveUserRow(${g.idx}, this)">💾 Lưu</button>`:''}
+          : `${isAdmin()?`${(()=>{ const _s=_acctEmpStatusOf(g.u); return _s.ic?`<span title="${esc(_s.t)}" style="font-size:12px;font-weight:700;color:${_s.color};margin-right:6px;cursor:help">${_s.ic}</span>`:''; })()}<button class="btn-ghost" style="font-size:10px;padding:3px 8px;margin-right:4px" title="Xem đủ các quyền thật của người dùng này" onclick="openUserPermReview(${g.idx})">🔑 Quyền</button><button class="btn-primary" style="font-size:10px;padding:3px 10px" title="Lưu Vai trò + Module + Công ty của dòng này" onclick="saveUserRow(${g.idx}, this)">💾 Lưu</button>`:''}
              <button class="btn-sec" style="font-size:10px;padding:3px 10px" title="Reset Password — cấp mật khẩu mới + đẩy lên cloud" onclick="resetUserPw(${g.idx})">🔑 Reset Password</button>`}
         ${isAdmin()?`<button class="btn-sec" style="font-size:10px;padding:3px 10px" title="Xem đúng giao diện NV này đang thấy — chỉ xem, có ghi log" onclick="viewAsStart('${esc(u.name)}')">🖥 Xem thử</button>`:''}
         ${isAdmin()?`<button class="btn-sec" style="font-size:10px;padding:3px 10px;${u.needCleanup?'border-color:#e0a43b;color:#e0a43b':''}" title="${u.needCleanup?'Đang chờ NV dọn máy — bấm để huỷ':'Bật cờ: lần đăng nhập sau, NV sẽ thấy nút Dọn máy trên máy họ'}" onclick="toggleUserNeedCleanup(${g.idx}, this)">🧹 ${u.needCleanup?'Đang chờ dọn':'Bật dọn máy'}</button>`:''}
@@ -112451,17 +112582,93 @@ function _hrStaffNoSalary(){
   return !(CURRENT_USER.isBOD||CURRENT_USER.isCEO||canSignHr()||CURRENT_USER.isNVNS||CURRENT_USER.isPayrollAcc||CURRENT_USER.canViewPayroll||(typeof canApproveL1==='function'&&canApproveL1()));
 }
 /* Hồ sơ HRM của user đang đăng nhập (nối qua linkUserId = tên tài khoản). */
+/* ════ v3.66.54 (Sếp: "tự đối chiếu email tài khoản ↔ email hồ sơ NV, cảnh báo sai lệch — phòng gắn nhầm
+   hồ sơ, thấy hồ sơ người khác") ════
+   QUY TẮC: 1 tài khoản ↔ ĐÚNG 1 hồ sơ; email hồ sơ phải TRÙNG email tài khoản.
+   - Gắn tay (linkUserId) chỉ được nhận khi hồ sơ KHÔNG có email hoặc email TRÙNG email tài khoản.
+   - Khớp ≥ 2 hồ sơ → KHÔNG nhận hồ sơ nào (thà không thấy còn hơn thấy nhầm người). */
+function _acctEmailOf(u){
+  const e=String((u&&u.email)||'').trim().toLowerCase(); if(e) return e;
+  const n=String((u&&u.name)||'').trim().toLowerCase(); return n.indexOf('@')>0 ? n : '';
+}
+function _empLinkMatches(u){
+  const em=_acctEmailOf(u);
+  const emps=(HRService.employees()||[]).filter(e=>e && !e._deleted);
+  const pe=e=>String(e.email||'').trim().toLowerCase();
+  const byEmail=em ? emps.filter(e=>pe(e)===em) : [];
+  const byLink=emps.filter(e=>e.linkUserId && (e.linkUserId===u.name || (u.id && e.linkUserId===u.id)));
+  const linkBad=byLink.filter(e=>pe(e) && em && pe(e)!==em);
+  const acc=new Map();
+  byEmail.forEach(e=>acc.set(e.id,e));
+  byLink.filter(e=>linkBad.indexOf(e)<0).forEach(e=>acc.set(e.id,e));
+  return {em, byEmail, byLink, linkBad, accepted:Array.from(acc.values())};
+}
 function hrmMyEmpIds(){
   if(!CURRENT_USER) return [];
-  const me=CURRENT_USER.name;
-  const myEmail=String(CURRENT_USER.email||'').trim().toLowerCase();
-  return HRService.employees().filter(e=>{
-    // v3.07.97: ưu tiên khớp EMAIL đăng nhập = email trong hồ sơ NV (chính sách bảo mật);
-    //   vẫn giữ linkUserId cho tương thích dữ liệu cũ.
-    if(myEmail && String(e.email||'').trim().toLowerCase()===myEmail) return true;
-    if(e.linkUserId && (e.linkUserId===me || e.linkUserId===CURRENT_USER.id)) return true;
-    return false;
-  }).map(e=>e.id);
+  const m=_empLinkMatches(CURRENT_USER);
+  if(m.accepted.length>1){
+    if(!window._empLinkWarned){ window._empLinkWarned=true;
+      setTimeout(()=>{ try{ toast('⚠ Tài khoản đang gắn '+m.accepted.length+' hồ sơ nhân viên — tạm không hiện hồ sơ "Của tôi". Liên hệ HR/Admin để gắn đúng.','bad'); }catch(e){} }, 1500); }
+    return [];
+  }
+  return m.accepted.map(e=>e.id);
+}
+/* Đối chiếu toàn bộ tài khoản (Admin/HR). */
+function _acctEmpAudit(){
+  const cfg=getAuthConfig()||{}; const users=(cfg.users||[]).filter(u=>u && !u.isVesselAccount);
+  const rows=[]; const empToAcc={};
+  users.forEach((u,idx)=>{
+    const m=_empLinkMatches(u);
+    m.accepted.forEach(e=>{ (empToAcc[e.id]=empToAcc[e.id]||[]).push(u.name); });
+    let st='ok', note='';
+    if(m.linkBad.length){ st='bad'; note='Gắn tay vào hồ sơ có email KHÁC: '+m.linkBad.map(e=>(e.fullName||e.name)+' <'+(e.email||'')+'>').join('; '); }
+    else if(m.accepted.length>1){ st='bad'; note='Khớp '+m.accepted.length+' hồ sơ: '+m.accepted.map(e=>e.fullName||e.name).join(', '); }
+    else if(!m.em){ st='warn'; note='Tài khoản không có email — chỉ dựa gắn tay, không đối chiếu được'; }
+    else if(!m.accepted.length){ st='none'; note='Chưa gắn hồ sơ nào (không có hồ sơ trùng email)'; }
+    rows.push({u, idx, m, st, note, emp:m.accepted.length===1?m.accepted[0]:null});
+  });
+  // một hồ sơ bị nhiều tài khoản gắn
+  rows.forEach(r=>{ if(r.emp && (empToAcc[r.emp.id]||[]).length>1 && r.st==='ok'){ r.st='bad'; r.note='Hồ sơ '+(r.emp.fullName||r.emp.name)+' đang bị '+empToAcc[r.emp.id].length+' tài khoản gắn: '+empToAcc[r.emp.id].join(', '); } });
+  // hai hồ sơ trùng email
+  const byMail={}; (HRService.employees()||[]).forEach(e=>{ const k=String(e&&e.email||'').trim().toLowerCase(); if(k && !e._deleted) (byMail[k]=byMail[k]||[]).push(e); });
+  const dupMails=Object.keys(byMail).filter(k=>byMail[k].length>1).map(k=>({email:k, emps:byMail[k]}));
+  return {rows, dupMails, issues:rows.filter(r=>r.st==='bad'||r.st==='warn').length + dupMails.length};
+}
+function _acctEmpStatusOf(u){
+  try{ const m=_empLinkMatches(u);
+    if(m.linkBad.length || m.accepted.length>1) return {ic:'⚠', color:'var(--bad)', t:'Gắn hồ sơ chưa đúng — mở 🔗 Đối chiếu hồ sơ'};
+    if(m.accepted.length===1) return {ic:'✓', color:'var(--good)', t:'Hồ sơ: '+(m.accepted[0].fullName||m.accepted[0].name)};
+    if(!m.em) return {ic:'⚠', color:'#b8730a', t:'Tài khoản không có email'};
+    return {ic:'○', color:'var(--muted)', t:'Chưa gắn hồ sơ NV'};
+  }catch(e){ return {ic:'', color:'', t:''}; }
+}
+function openAcctEmpAudit(){
+  if(!(isAdmin() || (typeof canManageUsers==='function'&&canManageUsers()) || (typeof hrmCanSeeAll==='function'&&hrmCanSeeAll()))){ toast('Chỉ Admin/HR','bad'); return; }
+  const A=_acctEmpAudit();
+  const lbl={bad:'<b style="color:var(--bad)">⚠ Sai lệch</b>', warn:'<b style="color:#b8730a">⚠ Thiếu email</b>', none:'<span style="color:var(--muted)">○ Chưa gắn</span>', ok:'<span style="color:var(--good)">✓ Khớp</span>'};
+  const order={bad:0,warn:1,none:2,ok:3};
+  const rows=A.rows.slice().sort((a,b)=>order[a.st]-order[b.st]).map(r=>`<tr>
+    <td>${lbl[r.st]}</td><td>${esc(r.u.fullName||r.u.name)}<div style="font-size:10px;color:var(--muted)">${esc(r.u.name)}${r.m.em&&r.m.em!==String(r.u.name).toLowerCase()?' · '+esc(r.m.em):''}</div></td>
+    <td>${r.emp?`<a href="#" onclick="closeModal();hrmViewEmployee('${r.emp.id}');return false">${esc(r.emp.fullName||r.emp.name)}</a><div style="font-size:10px;color:var(--muted)">${esc(r.emp.email||'(hồ sơ không có email)')}</div>`:'—'}</td>
+    <td style="font-size:11px">${esc(r.note)}${(r.m.linkBad||[]).concat(r.st==='bad'&&r.m.accepted.length>1?r.m.accepted:[]).map(e=>` <a href="#" onclick="closeModal();hrmViewEmployee('${e.id}');return false">[mở ${esc(e.fullName||e.name)}]</a>`).join('')}</td></tr>`).join('');
+  const dup=A.dupMails.map(d=>`<tr><td><b style="color:var(--bad)">⚠ Hồ sơ trùng email</b></td><td class="mono" style="font-size:11px">${esc(d.email)}</td><td colspan="2">${d.emps.map(e=>`<a href="#" onclick="closeModal();hrmViewEmployee('${e.id}');return false">${esc(e.fullName||e.name)}</a>`).join(' · ')}</td></tr>`).join('');
+  openModal('🔗 Đối chiếu tài khoản ↔ hồ sơ nhân viên',
+    `<div style="font-size:12px;color:var(--muted);margin-bottom:8px">Quy tắc: mỗi tài khoản gắn ĐÚNG 1 hồ sơ, email hồ sơ TRÙNG email tài khoản. Dòng ⚠ Sai lệch: NV đó <b>không thấy hồ sơ "Của tôi"</b> cho tới khi sửa (tránh thấy hồ sơ người khác). Còn <b>${A.issues}</b> mục cần xử lý.</div>
+     <div class="tbl-scroll"><table class="tbl" style="font-size:12px"><thead><tr><th>Trạng thái</th><th>Tài khoản</th><th>Hồ sơ đang gắn</th><th>Chi tiết</th></tr></thead><tbody>${dup}${rows}</tbody></table></div>`,
+    '<button class="btn-primary" onclick="closeModal()">Đóng</button>');
+}
+/* Nhắc Admin/HR mỗi ngày 1 lần khi còn tài khoản gắn sai. */
+function _acctEmpAuditNudge(){
+  try{
+    if(window._acctAuditNudged) return;
+    if(!(window._syncSignal && window._syncSignal.status==='ok')) return;
+    window._acctAuditNudged=true;
+    if(!(isAdmin() || (typeof canManageUsers==='function'&&canManageUsers()))) return;
+    const day=new Date().toISOString().slice(0,10), k='shAcctAuditNudge';
+    try{ if(localStorage.getItem(k)===day) return; localStorage.setItem(k, day); }catch(e){}
+    const A=_acctEmpAudit();
+    if(A.issues) setTimeout(()=>{ try{ toast('⚠ '+A.issues+' tài khoản/hồ sơ gắn chưa đúng — vào Nhân viên (người dùng) → 🔗 Đối chiếu hồ sơ','warn'); }catch(e){} }, 4000);
+  }catch(e){}
 }
 /* Danh sách hồ sơ user ĐƯỢC PHÉP xem (toàn bộ hoặc chỉ của mình). */
 function hrmVisibleEmps(){
@@ -115110,6 +115317,7 @@ function maOpen(id){
   else if(typeof toast==='function') toast('Không mở được phiếu','bad');
 }
 function renderAll(opts){
+  try{ _acctEmpAuditNudge(); }catch(e){}   // v3.66.54
   try{ _bccAutoCreateMonthly(); }catch(e){}   // v3.66.41 tạo sẵn BCC bộ phận tháng hiện tại
   try{ _opHealMgmtFees(); }catch(e){}   // v3.66.37 tự dựng hồ sơ phí QL thiếu
   try{ _applyOpTabLabel(); }catch(e){}  // v3.06.00 nhãn tab Thu-Chi hộ động
