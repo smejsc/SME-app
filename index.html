@@ -4730,7 +4730,7 @@ const WH_TYPES = {
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.66.93';
+const APP_VERSION='3.66.94';
 /* HOTFIX 3.12.17-email: CHẶN TRIỆT ĐỂ gửi email TỰ ĐỘNG (mất kiểm soát — spam quota Google).
    Email phải do NV được phân quyền CHỦ ĐỘNG chọn gửi. Cờ này:
    (1) chặn auto-SCAN tạo email (hrmScanExpiries/vesselCertScanExpiries);
@@ -66230,6 +66230,20 @@ function _dnttApData(id){
     } else no=_dnttEnsureNo(sibs); }
   let rows=[], total=0, totalLabel='Tổng cộng';
   const rounds=(r._payRounds||[]);
+  if(r._adjOf){   /* v3.66.94: phiếu điều chỉnh / quyết toán */
+    const root=AccountingService.payables().find(x=>x.id===r._adjOf)||{};
+    const rs=root.batchId?AccountingService.payables().filter(x=>x.batchId===root.batchId&&!x._deleted&&!x._adjOf):[root];
+    const base=rs.reduce((t,x)=>t+(+x.amountGross||+x.amount||0),0);
+    const prev=AccountingService.payables().filter(x=>x._adjOf===r._adjOf&&x.id!==r.id&&wfStatus(x)==='approved').reduce((t,x)=>t+(+x._adjDelta||0),0);
+    const paid=rs.reduce((t,x)=>t+(x.payments||[]).filter(p=>p&&!p._feeOnly&&p.method!=='cnOffset').reduce((s,p)=>s+(+p.amount||0),0),0);
+    const after=base+prev+(+r._adjDelta||0);
+    const lines=[['Giá trị ban đầu — phiếu '+(root.dnttNo||'')+(root.invoiceNo?(' · HĐ '+root.invoiceNo):''),base,false],
+      ...(prev?[['Điều chỉnh trước đó (đã duyệt)',prev,false]]:[]),
+      [(r._adjKind==='SETTLE'?'Quyết toán':'Hóa đơn điều chỉnh')+' '+((+r._adjDelta<0)?'GIẢM':'TĂNG')+' — '+(r._adjReason||''),+r._adjDelta||0,true],
+      ['Giá trị sau điều chỉnh',after,false],['Đã thanh toán',-paid,false]];
+    lines.forEach(([d,a,b])=>rows.push({desc:d, invNo:b?r.invoiceNo:'', invDate:b?(r.invoiceDate||r.issueDate):'', price:a, qty:1, amount:a, bold:b}));
+    total=after-paid; totalLabel=total<0?'Trả thừa — NCC hoàn / cấn trừ':'Còn phải trả';
+  } else {
   const _pays=(r.payments||[]).filter(p=>p&&!p._feeOnly&&(+p.amount||0)>0).sort((a,b)=>String(a.date).localeCompare(String(b.date)));
   if(r.poNo && _pays.length){   /* v3.66.86: phiếu theo PO — mỗi đợt đã chi 1 dòng + đợt này IN ĐẬM + lũy kế */
     const cont=(r.payContent||r.desc||'')+' — PO '+r.poNo;
@@ -66244,6 +66258,7 @@ function _dnttApData(id){
   } else {
     rows=_dnttGroupRows(sibs, (r.payContent||'').trim()); total=rows.reduce((t,x)=>t+x.amount,0);   /* v3.66.85: 1 dòng / nhóm phân loại */
   }
+  }   /* v3.66.94 end else (phiếu điều chỉnh) */
   const att=[]; sibs.forEach(x=>(x.attachments||x.docs||[]).forEach(f=>{ const n=(f&&(f.docType||f.type||f.name||f.fileName))||''; if(n && att.indexOf(n)<0) att.push(n); }));
   return { no, payMethod:r.payMethod||'CK', priority:r.priority||'BT', date:_dnttD(r.issueDate||todayISO()), reqName:_dnttFullName(r.createdBy), reqDept:_dnttDept(r.createdBy),
     benName:ben.name, benAcc:ben.acc, benAccCcy:ben.accCcy, benBank:ben.bank, ccy, rows, total, totalLabel, attachments:att };
@@ -66345,6 +66360,144 @@ function _convSave(){
   }
 }
 
+/* ════════════════════════════════════════════════════════════════════════════════════════════════
+   v3.66.94 — ⚖ ĐIỀU CHỈNH / QUYẾT TOÁN (Sếp chốt 26/9). Trên phiếu THANH TOÁN (Phải trả + Chi hộ):
+   • Hóa đơn điều chỉnh (± số tiền, số HĐ ĐC) hoặc Quyết toán (giá trị quyết toán → app tính chênh tăng/giảm).
+   • Mỗi lần = PHIẾU RIÊNG liên kết phiếu gốc (_adjOf), số ĐNTT riêng. Người lập gốc HOẶC Kế toán lập.
+     Người dùng lập → đủ bước (Giao nhận hồ sơ → KT → KTT → L2). KT lập → KT đã kiểm, vào KTT → L2.
+   • Tăng: phiếu dương → Chờ thanh toán → Bảng kê. Giảm: phiếu âm (credit note) — duyệt xong TỰ CẤN TRỪ vào còn
+     phải trả của phiếu gốc; phần vượt = TRẢ THỪA → NCC hoàn tiền (ghi đích danh vào NCC/PO, Sổ NH) HOẶC cấn trừ phiếu khác cùng NCC.
+   • P/L: phần chênh (âm/dương) theo phân loại phiếu gốc. Chi hộ: dòng điều chỉnh ±USD lên báo cáo chủ tàu (tỷ giá phiếu gốc).
+   ════════════════════════════════════════════════════════════════════════════════════════════════ */
+let _ADJ=null;
+function _adjCanCreate(rec){ return isAdmin() || canCheckAcc() || (rec && rec.createdBy===actorName()); }
+function openAdjust(kind,id){
+  const isAp=kind==='ap';
+  const r=isAp?AccountingService.payables().find(x=>x.id===id):VesselService.opTransactions().find(x=>x.id===id); if(!r) return;
+  if(!_adjCanCreate(r)){ toast('Người lập phiếu gốc hoặc Kế toán','bad'); return; }
+  const sibs=isAp?(r.batchId?AccountingService.payables().filter(x=>x.batchId===r.batchId&&!x._deleted&&!x._adjOf):[r]):[r];
+  const base=isAp?sibs.reduce((t,x)=>t+((x.actualValue!=null&&x.actualValue!=='')?+x.actualValue:(+x.amountGross||+x.amount||0)),0):(+r.amount||0);
+  const adjs=_adjList(kind, r.id).filter(a=>_adjApproved(kind,a)); const eff=base+adjs.reduce((t,a)=>t+(+a._adjDelta||0),0);
+  _ADJ=_ADJ&&_ADJ.id===id?_ADJ:{kind, id, type:'INV', sign:'-', amount:'', settle:'', no:'', date:todayISO(), reason:''};
+  _ADJ.base=base; _ADJ.eff=eff; const A=_ADJ, ccy=r.ccy||'VND';
+  const delta=A.type==='SETTLE'?((+A.settle||0)-eff):((A.sign==='-'?-1:1)*(+A.amount||0));
+  const body=`<div style="font-size:12px;margin-bottom:10px">Phiếu gốc: <b>${esc(r.dnttNo||'')}</b> · ${esc((isAp?r.partner:r.vendor)||'')} · giá trị hiện tại <b>${fmtOrig(eff,ccy)}</b>${adjs.length?(' (gồm '+adjs.length+' lần điều chỉnh đã duyệt)'):''}</div>
+    <div style="display:flex;gap:10px;margin-bottom:10px">${[['INV','🧾 Hóa đơn điều chỉnh'],['SETTLE','📋 Quyết toán']].map(([k,l])=>`<label style="flex:1;padding:10px;border:${A.type===k?'2px solid #1c3a5c':'1px solid var(--rule)'};border-radius:8px;cursor:pointer"><input type="radio" ${A.type===k?'checked':''} onchange="_ADJ.type='${k}';openAdjust('${kind}','${id}')"> <b>${l}</b></label>`).join('')}</div>
+    ${A.type==='INV'?`<div style="display:grid;grid-template-columns:150px 1fr 1fr 150px;gap:10px">
+        <div class="field" style="margin:0"><label>Tăng / Giảm</label><select onchange="_ADJ.sign=this.value;openAdjust('${kind}','${id}')"><option value="+" ${A.sign==='+'?'selected':''}>▲ Tăng</option><option value="-" ${A.sign==='-'?'selected':''}>▼ Giảm</option></select></div>
+        <div class="field" style="margin:0"><label>Số tiền điều chỉnh (${esc(ccy)}) *</label><input type="number" step="any" value="${esc(String(A.amount))}" oninput="_ADJ.amount=this.value" onchange="openAdjust('${kind}','${id}')" style="text-align:right"></div>
+        <div class="field" style="margin:0"><label>Số hóa đơn điều chỉnh *</label><input value="${esc(A.no)}" oninput="_ADJ.no=this.value"></div>
+        <div class="field" style="margin:0"><label>Ngày</label><input type="date" value="${esc(A.date)}" oninput="_ADJ.date=this.value"></div></div>`
+     :`<div style="display:grid;grid-template-columns:1fr 1fr 150px;gap:10px">
+        <div class="field" style="margin:0"><label>Giá trị quyết toán (${esc(ccy)}) *</label><input type="number" step="any" value="${esc(String(A.settle))}" oninput="_ADJ.settle=this.value" onchange="openAdjust('${kind}','${id}')" style="text-align:right"></div>
+        <div class="field" style="margin:0"><label>Số biên bản / chứng từ quyết toán</label><input value="${esc(A.no)}" oninput="_ADJ.no=this.value"></div>
+        <div class="field" style="margin:0"><label>Ngày</label><input type="date" value="${esc(A.date)}" oninput="_ADJ.date=this.value"></div></div>`}
+    <div class="field" style="margin-top:10px"><label>Lý do *</label><input value="${esc(A.reason)}" oninput="_ADJ.reason=this.value" placeholder="VD: NCC xuất HĐ điều chỉnh giảm do trả lại hàng / nghiệm thu khối lượng thực tế"></div>
+    <div style="margin-top:10px;padding:10px 12px;border-radius:6px;background:${delta<0?'#fde7d9':'#e3ecf7'};font-size:13px">Chênh lệch: <b>${delta>=0?'▲ +':'▼ '}${fmtOrig(delta,ccy)}</b> → giá trị sau điều chỉnh <b>${fmtOrig(eff+delta,ccy)}</b>.
+      ${delta<0?'Duyệt xong: tự cấn trừ vào số còn phải trả; phần vượt số còn nợ = trả thừa (NCC hoàn tiền hoặc cấn trừ phiếu khác).':'Duyệt xong: phần tăng vào Chờ thanh toán → Bảng kê.'}
+      ${isAp?'':'<br>Chi hộ: dòng điều chỉnh ±USD lên báo cáo chủ tàu kỳ này (tỷ giá phiếu gốc).'}</div>
+    <div style="font-size:11px;color:var(--muted);margin-top:6px">Phiếu điều chỉnh là phiếu RIÊNG (số ĐNTT riêng), liên kết phiếu gốc. ${canCheckAcc()?'Kế toán lập → vào thẳng KTT → L2.':'Đi đủ bước: nộp KT → KT kiểm → KTT → L2.'}</div>`;
+  openModal('⚖ Điều chỉnh / Quyết toán', body, `<button class="btn-ghost" onclick="closeModal()">Hủy</button><button class="btn-primary" onclick="_adjSave()">Tạo phiếu điều chỉnh</button>`);
+}
+function _adjList(kind, rootId){ return kind==='ap'?AccountingService.payables().filter(x=>x&&!x._deleted&&x._adjOf===rootId):VesselService.opTransactions().filter(x=>x&&!x._deleted&&x._adjOf===rootId); }
+function _adjApproved(kind,a){ if(kind==='ap') return wfStatus(a)==='approved'; let st=''; try{ st=opWfStatus(a); }catch(e){} return st==='approved'||!!a.payApproved; }
+function _adjSave(){
+  const A=_ADJ; if(!A) return; const isAp=A.kind==='ap';
+  const r=isAp?AccountingService.payables().find(x=>x.id===A.id):VesselService.opTransactions().find(x=>x.id===A.id); if(!r) return;
+  const delta=A.type==='SETTLE'?((+A.settle||0)-A.eff):((A.sign==='-'?-1:1)*(+A.amount||0));
+  if(A.type==='SETTLE' && !(+A.settle>=0 && String(A.settle)!=='')){ toast('Nhập giá trị quyết toán','bad'); return; }
+  if(A.type==='INV' && !(+A.amount>0)){ toast('Nhập số tiền điều chỉnh','bad'); return; }
+  if(A.type==='INV' && !String(A.no||'').trim()){ toast('Nhập số hóa đơn điều chỉnh','bad'); return; }
+  if(!String(A.reason||'').trim()){ toast('Nhập lý do','bad'); return; }
+  if(Math.abs(delta)<0.001){ toast('Không có chênh lệch','warn'); return; }
+  const now=new Date().toISOString(), who=actorName(), byKT=canCheckAcc()&&!isAdmin()?true:canCheckAcc();
+  const label=(A.type==='SETTLE'?'Quyết toán':'HĐ điều chỉnh '+(delta<0?'giảm':'tăng'))+' cho '+(r.dnttNo||'')+' — '+A.reason;
+  let newId='';
+  if(isAp){
+    const amt=+delta.toFixed(2);
+    const rec={ id:'AP'+Date.now().toString(36)+Math.random().toString(36).slice(2,6), partner:r.partner, vendorId:r.vendorId||'', desc:label, payContent:label,
+      invoiceNo:String(A.no||'').trim(), invoiceDate:A.date, issueDate:A.date, dueDate:A.date,
+      amount:amt, amountNet:amt, amountGross:amt, vatAmount:0, vatPercent:0, ccy:r.ccy, fxToUsd:r.fxToUsd||0, fxToVnd:r.fxToVnd||0,
+      segment:r.segment, expenseType:r.expenseType, vesselId:r.vesselId||'', projectId:r.projectId||'', costCenterType:r.costCenterType||'', costCenterId:r.costCenterId||'', companyId:r.companyId||'',
+      seahorseOwn:!!r.seahorseOwn, purchaseKind:'SERVICE', payMethod:r.payMethod||'CK', priority:'BT', payments:[], dueAmount:0, attachments:[],
+      _adjOf:r.id, _adjKind:A.type, _adjDelta:amt, _adjReason:A.reason, _isCreditNote:amt<0, _adjustsInvoiceId:amt<0?r.id:undefined,
+      status: byKT?'pending_l1':'pending_handover', ...(byKT?{accCheckedBy:who, accCheckedAt:now}:{submittedBy:who, submittedAt:now}),
+      createdBy:who, createdByDept:(typeof getActorDeptName==='function'?(getActorDeptName()||''):''), createdAt:now };
+    newId=rec.id;
+    commitMutation(()=>{ AccountingService.addPayable(rec); try{ touchRecord(rec); }catch(e){} }, {action:'ap_adjust_create', fields:['payables'], onOk:()=>{
+      try{ logAuditEvent('ap_adjust_create',{root:r.id, id:newId, delta:amt, type:A.type}); }catch(e){} _ADJ=null; toast('✓ Đã tạo phiếu '+(amt<0?'điều chỉnh giảm':'điều chỉnh tăng')+' — '+(byKT?'chờ KTT duyệt':'nộp KT'),'good'); openPayableModal(newId); }});
+  } else {
+    const ratio=(+r.amount>0)?(+r.amountUsd||0)/(+r.amount):0, amt=+delta.toFixed(2);
+    const rec={ id:uid(), date:A.date||todayISO(), vesselId:r.vesselId, type:'OUT', desc:label, payContent:label, amount:amt, amountGross:amt, ccy:r.ccy, fxToUsd:r.fxToUsd||0, fxToVnd:r.fxToVnd||0,
+      amountUsd:+(amt*ratio).toFixed(2), vendor:r.vendor||'', vendorTax:r.vendorTax||'', invoiceNo:String(A.no||'').trim(), reportToOwner:true, seahorseOwn:!!r.seahorseOwn,
+      payMethod:r.payMethod||'CK', priority:'BT', opCat:'', payments:[], attachments:[], _adjOf:r.id, _adjKind:A.type, _adjDelta:amt, _adjReason:A.reason,
+      ncStatus: byKT?'pending_l1':'pending_handover', _ncHist:[{from:'draft', to:byKT?'pending_l1':'pending_handover', by:who, at:now, note:'Tạo phiếu điều chỉnh'}],
+      createdBy:who, createdAt:now };
+    newId=rec.id;
+    commitMutation(()=>{ VesselService.addOpTransaction(rec); }, {action:'op_adjust_create', fields:['opTransactions'], onOk:()=>{
+      try{ logAuditEvent('op_adjust_create',{root:r.id, id:newId, delta:amt}); }catch(e){} _ADJ=null; renderAll(); toast('✓ Đã tạo phiếu điều chỉnh chi hộ','good'); showOpTxDetail(newId); }});
+  }
+}
+/* Giảm đã duyệt → tự cấn trừ vào còn phải trả của phiếu gốc (idempotent). Phần vượt = trả thừa (NCC nợ lại). */
+function _adjAutoApply(){
+  if(!(isAdmin()||canCheckAcc())) return; let n=0;
+  const now=new Date().toISOString();
+  AccountingService.payables().forEach(a=>{ if(!a||a._deleted||!a._adjOf||!(+a._adjDelta<0)||a._adjApplied||wfStatus(a)!=='approved') return;
+    const root=AccountingService.payables().find(x=>x.id===a._adjOf); if(!root) return;
+    const sibs=root.batchId?AccountingService.payables().filter(x=>x.batchId===root.batchId&&!x._deleted&&!x._adjOf):[root];
+    let need=Math.abs(+a._adjDelta);
+    sibs.forEach(x=>{ if(need<=0.001) return; const rem=(typeof apRemainingEff==='function')?apRemainingEff(x):0; if(rem<=0.001) return; const use=Math.min(rem,need);
+      (x.payments=x.payments||[]).push({date:todayISO(), amount:+use.toFixed(2), ccy:x.ccy, method:'cnOffset', _cnId:a.id, note:'Cấn trừ '+(a.invoiceNo?('HĐ ĐC '+a.invoiceNo):'điều chỉnh giảm'), recordedBy:actorName(), recordedAt:now});
+      (a.payments=a.payments||[]).push({date:todayISO(), amount:-(+use.toFixed(2)), ccy:a.ccy, method:'cnOffset', _cnTo:x.id, note:'Cấn trừ vào phiếu gốc', recordedBy:actorName(), recordedAt:now});
+      need-=use; try{ touchRecord(x); }catch(e){} });
+    a._adjApplied=now; try{ touchRecord(a); }catch(e){} n++; });
+  VesselService.opTransactions().forEach(a=>{ if(!a||a._deleted||!a._adjOf||!(+a._adjDelta<0)||a._adjApplied||!_adjApproved('op',a)) return;
+    const root=VesselService.opTransactions().find(x=>x.id===a._adjOf); if(!root) return;
+    const rem=(typeof opNccRemaining==='function')?opNccRemaining(root):0; const use=Math.min(Math.max(rem,0),Math.abs(+a._adjDelta));
+    if(use>0.001){ (root.payments=root.payments||[]).push({date:todayISO(), amount:+use.toFixed(2), ccy:root.ccy, method:'cnOffset', _cnId:a.id, note:'Cấn trừ điều chỉnh giảm', by:actorName(), at:now});
+      (a.payments=a.payments||[]).push({date:todayISO(), amount:-(+use.toFixed(2)), ccy:a.ccy, method:'cnOffset', _cnTo:root.id, note:'Cấn trừ vào phiếu gốc', by:actorName(), at:now}); try{ touchRecord(root); }catch(e){} }
+    a._adjApplied=now; try{ touchRecord(a); }catch(e){} n++; });
+  if(n){ try{ saveState(); logAuditEvent('adjust_auto_apply',{n}); }catch(e){} }
+}
+function _adjOver(kind,a){ if(!a||!(+a._adjDelta<0)) return 0; const paid=(a.payments||[]).reduce((t,p)=>t+(+p.amount||0),0); return +(Math.abs(+a.amount||0)-Math.abs(paid)).toFixed(2); }   // trả thừa còn lại (NCC nợ)
+/* Trả thừa: (a) NCC hoàn tiền — ghi đích danh vào phiếu điều chỉnh (NCC/PO) + Sổ NH; (b) cấn trừ vào phiếu khác cùng NCC */
+function adjRefund(kind,id){
+  const a=(kind==='ap'?AccountingService.payables():VesselService.opTransactions()).find(x=>x.id===id); if(!a) return; if(!canCheckAcc()&&!isAdmin()){ toast('Kế toán','bad'); return; }
+  const over=_adjOver(kind,a); if(!(over>0.001)){ toast('Không còn trả thừa','warn'); return; }
+  const bks=AccountingService.bankAccounts().filter(x=>x.isActive!==false);
+  openModal('💰 NCC hoàn tiền', `<div style="font-size:13px;margin-bottom:8px">Trả thừa còn lại: <b>${fmtOrig(over,a.ccy||'VND')}</b> — ${esc(kind==='ap'?a.partner:a.vendor)}</div>
+    <div style="display:grid;grid-template-columns:1fr 1fr 150px;gap:10px"><div class="field" style="margin:0"><label>Số tiền NCC hoàn</label><input id="adjr-amt" type="number" step="any" value="${over}"></div>
+    <div class="field" style="margin:0"><label>Về tài khoản</label><select id="adjr-bank"><option value="CASH">💵 Tiền mặt</option>${bks.map(b=>`<option value="${b.id}">🏦 ${esc((b.bankName||'')+' ·'+String(b.accountNo||'').slice(-6))} — ${esc(b.ccy||'')}</option>`).join('')}</select></div>
+    <div class="field" style="margin:0"><label>Ngày</label><input id="adjr-date" type="date" value="${todayISO()}"></div></div>`,
+    `<button class="btn-ghost" onclick="closeModal()">Hủy</button><button class="btn-primary" onclick="_adjRefundSave('${kind}','${id}')">Ghi nhận hoàn tiền</button>`);
+}
+function _adjRefundSave(kind,id){
+  const a=(kind==='ap'?AccountingService.payables():VesselService.opTransactions()).find(x=>x.id===id); if(!a) return;
+  const amt=+((document.getElementById('adjr-amt')||{}).value)||0, src=(document.getElementById('adjr-bank')||{}).value||'CASH', d=(document.getElementById('adjr-date')||{}).value||todayISO();
+  const over=_adjOver(kind,a); if(!(amt>0)||amt>over+0.001){ toast('Số tiền không hợp lệ (≤ trả thừa)','bad'); return; }
+  commitMutation(()=>{ const pay={date:d, amount:-amt, ccy:a.ccy, method:src==='CASH'?'cash':'bank', note:'NCC hoàn tiền (trả thừa)', _refund:true, recordedBy:actorName(), recordedAt:new Date().toISOString(), fxRate:+S.fxRate||0};
+    if(src!=='CASH'){ pay.bankAccountId=src; const acc=AccountingService.bankAccounts().find(x=>x.id===src); if(acc){ try{ acc.balance=(+acc.balance||0)+_arPayAmountInCcy(Object.assign({},pay,{amount:amt}), a.ccy||'VND', acc.ccy||'VND'); touchRecord(acc); }catch(e){} } }
+    (a.payments=a.payments||[]).push(pay); try{ touchRecord(a); }catch(e){} },
+    {action:'adjust_refund', fields:[kind==='ap'?'payables':'opTransactions','bankAccounts'], onOk:()=>{ try{ logAuditEvent('adjust_refund',{id, amount:amt}); }catch(e){} toast('✓ Đã ghi NCC hoàn tiền','good'); closeModal(); renderAll(); }});
+}
+function adjOffsetOther(kind,id){
+  const a=(kind==='ap'?AccountingService.payables():VesselService.opTransactions()).find(x=>x.id===id); if(!a) return; if(!canCheckAcc()&&!isAdmin()){ toast('Kế toán','bad'); return; }
+  const over=_adjOver(kind,a); if(!(over>0.001)){ toast('Không còn trả thừa','warn'); return; }
+  const same=kind==='ap'?AccountingService.payables().filter(x=>x&&!x._deleted&&x.id!==a.id&&!x._adjOf&&x.partner===a.partner&&(x.ccy||'')===(a.ccy||'')&&apRemainingEff(x)>0.001)
+                        :VesselService.opTransactions().filter(x=>x&&!x._deleted&&x.id!==a.id&&!x._adjOf&&x.type==='OUT'&&x.vendor===a.vendor&&(x.ccy||'')===(a.ccy||'')&&opNccRemaining(x)>0.001);
+  if(!same.length){ toast('Chưa có phiếu nào khác của NCC này còn phải trả','warn'); return; }
+  openModal('⚖ Cấn trừ trả thừa vào phiếu khác', `<div style="font-size:13px;margin-bottom:8px">Trả thừa: <b>${fmtOrig(over,a.ccy||'VND')}</b></div><select id="adjo-to" style="width:100%">${same.map(x=>`<option value="${x.id}">${esc(x.dnttNo||x.invoiceNo||x.id.slice(-6))} · ${esc(x.payContent||x.desc||'')} · còn ${fmtOrig(kind==='ap'?apRemainingEff(x):opNccRemaining(x),x.ccy||'VND')}</option>`).join('')}</select>`,
+    `<button class="btn-ghost" onclick="closeModal()">Hủy</button><button class="btn-primary" onclick="_adjOffsetSave('${kind}','${id}')">Cấn trừ</button>`);
+}
+function _adjOffsetSave(kind,id){
+  const L=kind==='ap'?AccountingService.payables():VesselService.opTransactions(); const a=L.find(x=>x.id===id), to=L.find(x=>x.id===((document.getElementById('adjo-to')||{}).value)); if(!a||!to) return;
+  const use=Math.min(_adjOver(kind,a), kind==='ap'?apRemainingEff(to):opNccRemaining(to)); if(!(use>0.001)) return; const now=new Date().toISOString();
+  commitMutation(()=>{ (to.payments=to.payments||[]).push({date:todayISO(), amount:+use.toFixed(2), ccy:to.ccy, method:'cnOffset', _cnId:a.id, note:'Cấn trừ trả thừa từ '+(a.dnttNo||a.invoiceNo||''), recordedBy:actorName(), recordedAt:now});
+    (a.payments=a.payments||[]).push({date:todayISO(), amount:-(+use.toFixed(2)), ccy:a.ccy, method:'cnOffset', _cnTo:to.id, note:'Cấn trừ vào '+(to.dnttNo||to.invoiceNo||''), recordedBy:actorName(), recordedAt:now});
+    try{ touchRecord(to); touchRecord(a); }catch(e){} },
+    {action:'adjust_offset', fields:[kind==='ap'?'payables':'opTransactions'], onOk:()=>{ try{ logAuditEvent('adjust_offset',{from:id, to:to.id, amount:use}); }catch(e){} toast('✓ Đã cấn trừ '+fmtOrig(use,a.ccy||'VND'),'good'); closeModal(); renderAll(); }});
+}
+
 function apUpdatePO(id){
   const r=AccountingService.payables().find(x=>x.id===id); if(!r) return;
   const canEd=isAdmin()||r.createdBy===actorName()||canCheckAcc()||(typeof _opIsKTT==='function'&&_opIsKTT());
@@ -66444,7 +66597,7 @@ function _mrApplyPoLink(batchId, poLinkId){
 function openPoCostPanel(id){
   const root=_poRootOf(id); if(!root) return;
   const recs=AccountingService.payables().filter(x=>_poBatchIds(root).indexOf(x.id)>=0);
-  const rel=_poRelated(root), doc=_poStockDoc(root);
+  const rel=_poRelated(root).concat(AccountingService.payables().filter(x=>x&&!x._deleted&&x._adjOf&&_poBatchIds(root).indexOf(x._adjOf)>=0)), doc=_poStockDoc(root);   // v3.66.94: + điều chỉnh
   const st=r=>{ const i=(typeof docStatusInfo==='function')?docStatusInfo(r):null; return i?(esc(i.icon||'')+' '+esc(i.label||'')):esc(r.status||''); };
   const toV=r=>{ try{ const x=_apPlVnd(r); return x.ccy==='VND'?x.amount:toDisplay(+r.amountGross||+r.amount||0, r.ccy, r.fxToUsd); }catch(e){ return 0; } };
   const row=(lab,r)=>`<tr><td>${lab}</td><td>${esc(r.partner||'')}</td><td style="font-family:var(--font-mono);font-size:11px">${esc(r.dnttNo||'')}</td><td class="r num">${fmtOrig(+r.amountGross||+r.amount||0, r.ccy||'VND')}</td><td style="font-size:11px">${st(r)}</td><td><button class="icon-btn" onclick="openPayableModal('${r.id}')">✎</button></td></tr>`;
@@ -69832,6 +69985,8 @@ function openPayableModal(id){
     foot=`<button class="btn-sec" onclick="closeModal()">Đóng</button><button class="btn-sec" onclick="printDnttAp('${id}')" title="In Phiếu đề nghị thanh toán (MH 04-DNTT) — Lưu thành PDF">🖨 In ĐNTT</button>`   // v3.66.78
       + ((r && (r._isProvisional||r._isBudget) && !r.poNo)?`<button class="btn-primary" style="background:#1c3a5c;border-color:#1c3a5c" onclick="apConvertToPay('${id}')">💵 Chuyển Đề xuất thanh toán</button>`:'')   // v3.66.91
       + ((r && r.poNo)?`<button class="btn-sec" style="border-color:#1c3a5c;color:#1c3a5c" onclick="apUpdatePO('${id}')">📄 PO ${esc(r.poNo)}</button>`:'')
+      + ((r && !r._adjOf && !r._isProvisional && !r._isBudget && !r._payrollPeriodId && ['pending_acc','pending_l1','pending_l2','approved'].indexOf(wfStatus(r))>=0 && _adjCanCreate(r))?`<button class="btn-sec" onclick="closeModal();openAdjust('ap','${id}')" title="Hóa đơn điều chỉnh tăng/giảm hoặc quyết toán">⚖ Điều chỉnh / Quyết toán</button>`:'')   // v3.66.94
+      + ((r && r._adjOf && _adjOver('ap',r)>0.001 && (canCheckAcc()||isAdmin()))?`<button class="btn-sec" onclick="closeModal();adjRefund('ap','${id}')">💰 NCC hoàn tiền</button><button class="btn-sec" onclick="closeModal();adjOffsetOther('ap','${id}')">⚖ Cấn trừ phiếu khác</button>`:'')
       + ((r && r.poNo && ['approved','pending_acc'].indexOf(wfStatus(r))>=0)?`<button class="btn-sec" style="border-color:#1c3a5c;color:#1c3a5c" onclick="closeModal();apProposeDot('${id}')">➕ Đề xuất đợt thanh toán</button>`:'')
       + ((r && !r._payrollPeriodId && (r.poNo || r.purchaseKind==='GOODS' || r.poLinkId || _poRelated(_poRootOf(id)||r).length))?`<button class="btn-sec" style="border-color:#1c3a5c;color:#1c3a5c" onclick="closeModal();openPoCostPanel('${r.poLinkId||id}')">📊 Tổng chi phí PO</button>`:'')   // v3.66.89
       + (function(){ const _r=r; if(!_r || _r._payrollPeriodId || _r.purchaseKind==='SERVICE') return ''; return `<button class="btn-sec" style="border-color:#1c5a8c;color:#1c5a8c" onclick="closeModal();stockInFromAp('${id}')" title="Tạo phiếu nhập kho từ hóa đơn này (độc lập duyệt thanh toán — nhận nhiều đợt được)">📦 Nhập kho</button>`; })()   // v3.66.74: 📦 ở chân phiếu
@@ -79773,6 +79928,8 @@ function showOpTxDetail(id){
   foot+=`<button class="btn-sec" onclick="closeModal()">Đóng</button>`;
   if(isOut) foot=`<button class="btn-sec" onclick="printDnttOp('${id}')" title="In Phiếu đề nghị thanh toán MH 04-DNTT">🖨 In ĐNTT</button>`+(foot||'');   // v3.66.78
   if(isOut && t._isBudget && !t._locked) foot=`<button class="btn-primary" style="background:#1c3a5c;border-color:#1c3a5c" onclick="opConvertToPay('${id}')">💵 Chuyển Đề xuất thanh toán</button>`+foot;   // v3.66.91
+  if(isOut && !t._isBudget && !t._adjOf && !t.khoanRole && !t._mgmtFeeId && _adjCanCreate(t)) foot=`<button class="btn-sec" onclick="closeModal();openAdjust('op','${id}')">⚖ Điều chỉnh / Quyết toán</button>`+foot;   // v3.66.94
+  if(isOut && t._adjOf && _adjOver('op',t)>0.001 && (canCheckAcc()||isAdmin())) foot=`<button class="btn-sec" onclick="closeModal();adjRefund('op','${id}')">💰 NCC hoàn tiền</button><button class="btn-sec" onclick="closeModal();adjOffsetOther('op','${id}')">⚖ Cấn trừ phiếu khác</button>`+foot;
   openModal('👁 Chi tiết phiếu '+(isOut?'Chi hộ':'Thu hộ'), body, foot);
 }
 
@@ -103710,7 +103867,7 @@ function _hsFolders(){
   const items=_hsItems(), F=new Map();
   const add=(k,title,sub,it)=>{ if(!F.has(k)) F.set(k,{k,title,sub,items:[],root:null}); F.get(k).items.push(it); };
   items.forEach(it=>{ const r=it.recs[0];
-    let rootId=''; if(it.kind==='ap'){ if(r.poNo) rootId=r.batchId||r.id; else if(r.poLinkId){ const rt=_poRootOf(r.poLinkId); if(rt&&(rt.poNo)) rootId=rt.batchId||rt.id; } }
+    let rootId=''; if(it.kind==='ap'){ if(r.poNo) rootId=r.batchId||r.id; else if(r.poLinkId||r._adjOf){ const rt=_poRootOf(r.poLinkId||r._adjOf); if(rt&&(rt.poNo)) rootId=rt.batchId||rt.id; } }
     if(rootId){ const rt=it.kind==='ap'&&r.poNo?r:_poRootOf(r.poLinkId); add('PO:'+rootId,'📁 PO '+(rt&&rt.poNo||''),(rt&&rt.partner)||'',it); if(it.kind==='ap'&&r.poNo) F.get('PO:'+rootId).root=it; }
     else { const m=String(it.date||'').slice(0,7)||'—'; add('M:'+m,'📁 Không thuộc PO — '+(m.slice(5,7)+'/'+m.slice(0,4)),'',it); } });
   F.forEach(f=>{ f.missing=f.items.filter(it=>it.st==='BS').length + f.items.filter(it=>!(it.recs||[]).some(x=>(x.attachments||[]).length||(x.dnttPdfs||[]).length)).length; });
@@ -103802,7 +103959,7 @@ function _renderFinLedgerModal(){
     const si=(typeof docStatusInfo==='function')?docStatusInfo(p):null;   // v3.64.73: dùng nhãn trạng thái chuẩn (gồm cả "🚚 Chờ giao hàng" mới) thay vì hiện thẳng mã trạng thái thô
     // v3.64.76 (Sếp): thêm dòng diễn giải/số hóa đơn dưới tên NCC — cùng khuôn "HĐ ..." đã dùng ở
     // Sổ phải trả gốc (dòng 12444/12465).
-    const _sub=[p.poLinkId?('🔗 Chi phí đi kèm '+esc(((_poRootOf(p.poLinkId)||{}).poNo)?('PO '+_poRootOf(p.poLinkId).poNo):'PO/HĐ')):'', p.poNo?('📄 PO '+esc(p.poNo)+' · còn '+fmtOrig((typeof apRemainingEff==='function')?apRemainingEff(p):0,p.ccy||'VND')):'', p.invoiceNo?('HĐ '+esc(p.invoiceNo)):'', p.desc?esc(String(p.desc).slice(0,60)):''].filter(Boolean).join(' · ');   // v3.66.86
+    const _sub=[p._adjOf?(((+p._adjDelta<0)?'▼ Điều chỉnh giảm ':'▲ Điều chỉnh tăng ')+fmtOrig(+p._adjDelta||0,p.ccy||'VND')+(_adjOver('ap',p)>0.001?(' · ↩ NCC nợ lại '+fmtOrig(_adjOver('ap',p),p.ccy||'VND')):'')):'', p.poLinkId?('🔗 Chi phí đi kèm '+esc(((_poRootOf(p.poLinkId)||{}).poNo)?('PO '+_poRootOf(p.poLinkId).poNo):'PO/HĐ')):'', p.poNo?('📄 PO '+esc(p.poNo)+' · còn '+fmtOrig((typeof apRemainingEff==='function')?apRemainingEff(p):0,p.ccy||'VND')):'', p.invoiceNo?('HĐ '+esc(p.invoiceNo)):'', p.desc?esc(String(p.desc).slice(0,60)):''].filter(Boolean).join(' · ');   // v3.66.86
     return `<tr style="box-shadow:inset 4px 0 0 ${((p._isProvisional||p._isBudget)&&!p.poNo)?_PL_CAM:_PL_NAVY}${((p._isProvisional||p._isBudget)&&!p.poNo)?';background:rgba(217,119,6,.06)':''}">
       <td style="font-size:11px;white-space:nowrap">${esc(p.issueDate||'')}</td>
       <td>${esc(p.partner||'')}${_sub?`<div style="font-size:10.5px;color:var(--muted)">${_sub}</div>`:''}</td>
@@ -117276,7 +117433,8 @@ function renderAll(opts){
   try{ _acctEmpAuditNudge(); }catch(e){}   // v3.66.54
   try{ _bccAutoCreateMonthly(); }catch(e){}   // v3.66.41 tạo sẵn BCC bộ phận tháng hiện tại
   try{ _opHealMgmtFees(); }catch(e){}   // v3.66.37 tự dựng hồ sơ phí QL thiếu
-  try{ _apPayRoundMigrate(); }catch(e){}   // v3.66.75 lệnh chi dở → vòng thanh toán của phiếu (1 lần, Admin)
+  try{ _apPayRoundMigrate(); }catch(e){}
+  try{ _adjAutoApply(); }catch(e){}   // v3.66.94: điều chỉnh giảm đã duyệt → cấn trừ phiếu gốc   // v3.66.75 lệnh chi dở → vòng thanh toán của phiếu (1 lần, Admin)
   try{ _applyOpTabLabel(); }catch(e){}  // v3.06.00 nhãn tab Thu-Chi hộ động
   try{ if(document.getElementById('page-periodic') && document.getElementById('page-periodic').classList.contains('active')) renderPeriodic(); }catch(e){}
   try{ if(document.getElementById('page-fin_accounting') && document.getElementById('page-fin_accounting').classList.contains('active')) renderFinAccounting(); }catch(e){}
