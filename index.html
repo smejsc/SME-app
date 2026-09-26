@@ -4729,7 +4729,7 @@ const WH_TYPES = {
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.67.15';
+const APP_VERSION='3.67.17';
 /* HOTFIX 3.12.17-email: CHẶN TRIỆT ĐỂ gửi email TỰ ĐỘNG (mất kiểm soát — spam quota Google).
    Email phải do NV được phân quyền CHỦ ĐỘNG chọn gửi. Cờ này:
    (1) chặn auto-SCAN tạo email (hrmScanExpiries/vesselCertScanExpiries);
@@ -15984,8 +15984,11 @@ function crewRenderQuickChange(hostId, vidFilter, rankFilter, nameFilter){
       : `<button class="btn-sec" style="font-size:10px;padding:3px 7px" onclick="hrQuickAssign('${empId}','board','crewQuickChangeReopen')">⚓ Xuống tàu</button>
          <button class="btn-sec" style="font-size:10px;padding:3px 7px;color:var(--bad)" onclick="hrQuickAssign('${empId}','terminate','crewQuickChangeReopen')">🔴 Nghỉ việc</button>`;
     const offCell=r.onboard?(esc((r.a.actualSignoffDate||r.a.plannedSignoffDate||'').slice(0,10)||'—')+(r.a.actualSignoffDate?'':r.a.plannedSignoffDate?' <span style="color:var(--muted)">(DK)</span>':'')):'—';
-    const attachCell=r.onboard?(r.a.docRef&&r.a.docRef.driveId?`<span title="Đã đính kèm QĐ: ${esc(r.a.docRef.fileName||'')}" style="color:var(--good)">📎</span>`:`<span title="Chưa đính kèm QĐ ký" style="color:var(--bad)">✗</span>`):'—';
-    const editBtn=(r.onboard&&canEdit)?` <button class="icon-btn" style="font-size:10px" title="Sửa Số QĐ / đính kèm bản ký" onclick="openCrewAssignModal('${r.a.id}')">✎</button>`:'';
+    /* v3.67.16 (Sếp): ô QĐ ký = quyết định trong app — ĐÃ KÝ (mở được) / Nháp / ✗; bấm ✎ → 2 dòng: Quyết định · Hướng dẫn nhanh */
+    const _qdDoc=_cqQdOf(empId, r.onboard?r.a:null);
+    const attachCell=_qdDoc?(_qdDoc.signedAt?`<a href="javascript:void 0" onclick="_cdView('${_qdDoc.id}')" title="Mở quyết định đã ký" style="border:2px solid #b3122e;color:#b3122e;font-weight:900;font-size:10px;padding:1px 5px;border-radius:4px;text-decoration:none;white-space:nowrap">ĐÃ KÝ ${esc(_qdDoc.no3||'')}</a>`:`<a href="javascript:void 0" onclick="_cdView('${_qdDoc.id}')" style="font-size:10.5px;color:#9a5a05;white-space:nowrap" title="Quyết định nháp — chưa in/ký">Nháp ${esc(_qdDoc.no3||'')}</a>`)
+      :((r.onboard&&r.a.docRef&&r.a.docRef.driveId)?`<span title="Đã đính kèm QĐ: ${esc(r.a.docRef.fileName||'')}" style="color:var(--good)">📎</span>`:`<span title="Chưa có quyết định" style="color:var(--bad)">✗</span>`);
+    const editBtn=_cdCanUse()?` <button class="icon-btn" style="font-size:10px" title="Quyết định / Hướng dẫn nhanh" onclick="cqDocMenu('${empId}','${r.onboard?r.a.id:''}')">✎</button>`:'';
     return `<tr>
     <td><b>${esc(r.e?(r.e.fullName||r.e.name):'?')}</b> <span style="font-size:10px;color:var(--accent);cursor:pointer;border:1px solid var(--rule);border-radius:9px;padding:1px 6px" onclick="openSeafarerProfile('${empId}')" title="Xem quá trình làm việc + bằng cấp/chứng chỉ">📋 Hồ sơ</span><div style="font-size:9px;color:var(--muted)">${esc((r.e&&r.e.smartId)||'')}</div></td>
     <td style="font-size:11px">${r.onboard?`<b>${esc(anyVesselName(r.a.vesselId)||'')}</b>`:'<span style="color:var(--muted)">— chưa lên tàu —</span>'}</td>
@@ -49150,19 +49153,30 @@ function _cdEn(s){ return String(s||'').normalize('NFD').replace(/[\u0300-\u036f
 function _cdD(d){ d=String(d||''); return /^\d{4}-\d{2}-\d{2}/.test(d)?(d.slice(8,10)+'/'+d.slice(5,7)+'/'+d.slice(0,4)):d; }
 function _cdDEn(d){ if(!/^\d{4}-\d{2}-\d{2}/.test(String(d||''))) return d||''; const m=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']; return (+d.slice(8,10))+' '+m[+d.slice(5,7)-1]+' '+d.slice(0,4); }
 function _cdList(kind){ return (S.crewDocs||[]).filter(d=>d&&!d._deleted&&d.kind===kind); }
-function openCrewDocs(kind){
+function openCrewDocs(kind, showDraft){
+  /* v3.67.16 (Sếp): sidebar = THƯ VIỆN các Quyết định / Hướng dẫn nhanh ĐÃ KÝ — sắp theo số thứ tự · ngày · tên · đường dẫn mở.
+     Tạo / điền / lưu làm tại ô QĐ ký của từng thuyền viên (Đổi ca nhanh). */
   if(!_cdCanUse()){ toast('Chỉ Quản lý thuyền viên / Trưởng bộ phận','bad'); return; }
   const isQD=kind==='QD', q=whNormName(_CD_Q||'');
-  const list=_cdList(kind).filter(d=>!q||whNormName([d.empName,d.vesselName,d.no3,d.rank,d.tpl].join(' ')).indexOf(q)>=0).sort((a,b)=>String(b.createdAt||'').localeCompare(String(a.createdAt||'')));
-  const rows=list.map(d=>`<tr><td>${esc(_cdD(d.date))}</td><td>${isQD?esc((d.no3||'')+'/QĐNS/'+(d.year||'')):esc((CREW_TPL.meta[d.tpl]||{}).label||d.tpl)}</td>${isQD?`<td>${d.sub==='NC'?'Nghỉ ca':'Điều động'}</td>`:''}<td><b>${esc(d.empName||'')}</b><div style="font-size:11px;color:var(--muted)">${esc(d.rank||'')}</div></td><td>${esc(d.vesselName||'')}</td>
-    <td>${_cdStatusChip(d)}</td><td style="white-space:nowrap"><button class="btn-sec" style="font-size:11px" onclick="_cdView('${d.id}')">👁 Xem</button> <button class="btn-sec" style="font-size:11px" onclick="_cdPrint('${d.id}')">🖨 ${d.signedAt?'In lại':'In PDF'}</button>${d.signedAt?'':` <button class="icon-btn" title="Sửa" onclick="openCrewDocForm('${kind}','${d.id}')">✎</button> <button class="icon-btn" title="Xóa" onclick="_cdDelete('${d.id}','${kind}')">✕</button>`}</td></tr>`).join('');
-  openModal(isQD?'📜 Quyết định điều động':'📋 Hướng dẫn nhanh nhận ca',
-    `<div style="display:flex;gap:8px;margin-bottom:10px;flex-wrap:wrap"><button class="btn-primary" onclick="openCrewDocForm('${kind}')">+ Tạo ${isQD?'quyết định':'phiếu hướng dẫn'}</button>${isQD?'<button class="btn-sec" onclick="openCrewRankMap()">⚙ Bảng chức danh</button>':''}
-      ${!isQD?`<select onchange="if(this.value)_cdPrintBlank(this.value);this.value=''" style="font-size:12px"><option value="">🖨 In phiếu trống…</option>${['FRM014','FRM015','FRM016E','FRM016G'].map(k=>`<option value="${k}">${esc(CREW_TPL.meta[k].label)}</option>`).join('')}</select>`:''}
-      <input placeholder="Tìm thuyền viên / tàu / số…" value="${esc(_CD_Q)}" onchange="_CD_Q=this.value;openCrewDocs('${kind}')" style="flex:1;min-width:200px"></div>
-     <div class="tbl-scroll"><table class="tbl"><thead><tr><th>Ngày</th><th>${isQD?'Số QĐ':'Mẫu'}</th>${isQD?'<th>Loại</th>':''}<th>Thuyền viên</th><th>Tàu</th><th>Trạng thái</th><th></th></tr></thead><tbody>${rows||`<tr><td colspan="7" style="text-align:center;color:var(--muted);padding:14px">Chưa có phiếu</td></tr>`}</tbody></table></div>`,
+  const all=_cdList(kind).filter(d=>!q||whNormName([d.empName,d.vesselName,d.no3,d.rank,d.tpl].join(' ')).indexOf(q)>=0);
+  const signed=all.filter(d=>d.signedAt), drafts=all.filter(d=>!d.signedAt);
+  const key=d=>isQD?(String(d.year||'')+String(d.no3||'').padStart(3,'0')):String(d.signedAt||'');
+  const list=(showDraft?drafts:signed).sort((x,y)=>key(x).localeCompare(key(y)));
+  const rows=list.map((d,i)=>`<tr><td style="text-align:center">${i+1}</td>${isQD?`<td style="font-family:var(--font-mono)"><b>${esc(d.no3||'')}</b>/QĐNS/${esc(d.year||'')}</td>`:''}<td>${esc(_cdD(String(d.signedAt||d.date||'').slice(0,10)))}</td>
+    <td><b>${esc(d.empName||'')}</b><div style="font-size:11px;color:var(--muted)">${esc(d.rank||'')}${d.vesselName?' · '+esc(d.vesselName):''}</div></td>
+    <td style="font-size:12px">${isQD?(d.sub==='NC'?'Nghỉ ca':'Điều động'):esc((CREW_TPL.meta[d.tpl]||{}).label||d.tpl)}</td>
+    <td style="white-space:nowrap"><a href="javascript:void 0" onclick="_cdOpenOrView('${d.id}')">🔗 Mở</a></td></tr>`).join('');
+  openModal((isQD?'📜 Thư viện Quyết định điều động':'📋 Thư viện Hướng dẫn nhanh nhận ca')+(showDraft?' — bản nháp':' — đã ký'),
+    `<div style="display:flex;gap:8px;margin-bottom:10px;flex-wrap:wrap;align-items:center">
+      <input placeholder="Tìm số / tên / tàu…" value="${esc(_CD_Q)}" onchange="_CD_Q=this.value;openCrewDocs('${kind}',${!!showDraft})" style="flex:1;min-width:200px">
+      <button class="${showDraft?'btn-sec':'btn-primary'}" style="font-size:12px" onclick="openCrewDocs('${kind}',false)">Đã ký (${signed.length})</button>
+      <button class="${showDraft?'btn-primary':'btn-sec'}" style="font-size:12px" onclick="openCrewDocs('${kind}',true)">Bản nháp (${drafts.length})</button>
+      ${isQD?'<button class="btn-sec" style="font-size:12px" onclick="openCrewRankMap()">⚙ Bảng chức danh</button>':`<select onchange="if(this.value)_cdPrintBlank(this.value);this.value=''" style="font-size:12px"><option value="">🖨 In phiếu trống…</option>${['FRM014','FRM015','FRM016E','FRM016G'].map(k=>`<option value="${k}">${esc(CREW_TPL.meta[k].label)}</option>`).join('')}</select>`}</div>
+     <div class="tbl-scroll"><table class="tbl"><thead><tr><th style="width:44px">STT</th>${isQD?'<th>Số QĐ</th>':''}<th>${showDraft?'Ngày lập':'Ngày ký'}</th><th>Thuyền viên</th><th>${isQD?'Loại':'Mẫu'}</th><th></th></tr></thead><tbody>${rows||`<tr><td colspan="6" style="text-align:center;color:var(--muted);padding:14px">${showDraft?'Không có bản nháp':'Chưa có phiếu đã ký'}</td></tr>`}</tbody></table></div>
+     <div style="font-size:11px;color:var(--muted);margin-top:8px">Tạo / điền / lưu: tại <b>Crew Change → Đổi ca nhanh</b>, ô <b>QĐ ký</b> (✎) của từng thuyền viên. In PDF lần đầu = ký → phiếu vào thư viện.</div>`,
     `<button class="btn-ghost" onclick="closeModal()">Đóng</button>`);
 }
+
 function openCrewDocForm(kind, id){
   const ex=id?(S.crewDocs||[]).find(x=>x.id===id):null;
   if(ex && ex.signedAt){ toast('Phiếu đã ký — khóa sửa. Trưởng BP mở khóa nếu cần sửa','warn'); _cdView(id); return; }   // v3.67.15
@@ -49224,7 +49238,7 @@ function _cdSave(andPrint){
     if(C.id){ rec=S.crewDocs.find(x=>x.id===C.id); Object.assign(rec,C,{updatedAt:now, updatedBy:who}); }
     else { rec=Object.assign({},C,{id:'CD'+Date.now().toString(36)+Math.random().toString(36).slice(2,5), createdAt:now, createdBy:who}); S.crewDocs.push(rec); }
     try{ touchRecord(rec); }catch(e){} },
-    {action:'crew_doc_save', fields:['crewDocs'], onOk:()=>{ try{ logAuditEvent('crew_doc_save',{id:rec.id, kind:rec.kind, emp:rec.empName}); }catch(e){} toast('✓ Đã lưu','good'); if(andPrint) _cdPrint(rec.id); openCrewDocs(rec.kind); }});
+    {action:'crew_doc_save', fields:['crewDocs'], onOk:()=>{ try{ logAuditEvent('crew_doc_save',{id:rec.id, kind:rec.kind, emp:rec.empName}); }catch(e){} toast('✓ Đã lưu','good'); if(andPrint) _cdPrint(rec.id); _cdView(rec.id); try{ hrmRenderCrew(); }catch(e){} }});   // v3.67.16: lưu xong → xem bản lưu (In PDF = ký)
 }
 function _cdDelete(id, kind){ const d=(S.crewDocs||[]).find(x=>x.id===id); if(!d||!confirm('Xóa phiếu của '+d.empName+'?')) return;
   commitMutation(()=>{ d._deleted=true; d.deletedAt=new Date().toISOString(); d.deletedBy=actorName(); try{ touchRecord(d); }catch(e){} }, {action:'crew_doc_delete', fields:['crewDocs'], onOk:()=>openCrewDocs(kind)}); }
@@ -49328,9 +49342,13 @@ function _cdOpenPrint(inner, title){
 function _cdPrint(id){
   const d=(S.crewDocs||[]).find(x=>x.id===id); if(!d) return;
   if(!d.signedAt){   /* v3.67.15: In PDF lần đầu = XÁC NHẬN ra quyết định → đóng dấu ĐÃ KÝ lên BẢN LƯU (bản giấy không có dấu) */
-    if(!confirm('In PDF = XÁC NHẬN ra '+(d.kind==='QD'?'quyết định':'phiếu hướng dẫn')+'.\n\nBản lưu trong app sẽ đóng dấu "ĐÃ KÝ · '+_cdD(todayISO())+'" và khóa sửa. Tiếp tục?')) return;
-    const now=new Date().toISOString();
-    commitMutation(()=>{ d.signedAt=now; d.signedBy=actorName(); try{ touchRecord(d); }catch(e){} }, {action:'crew_doc_sign', fields:['crewDocs'], onOk:()=>{ try{ logAuditEvent('crew_doc_sign',{id, kind:d.kind, emp:d.empName}); }catch(e){} }});
+    const _qdTxt=d.kind==='QD'?('\n\nĐồng thời ÁP DỤNG '+(d.sub==='NC'?'NGHỈ CA':'ĐIỀU ĐỘNG → tàu '+(d.vesselName||''))+' từ '+_cdD(d.fromDate)+': cập nhật hồ sơ thuyền viên, danh sách thuyền viên tại tàu, BCC tháng.'):'';
+    if(!confirm('In PDF = XÁC NHẬN ra '+(d.kind==='QD'?'quyết định':'phiếu hướng dẫn')+'.\n\nBản lưu trong app sẽ đóng dấu "ĐÃ KÝ · '+_cdD(todayISO())+'" và khóa sửa.'+_qdTxt+'\n\nTiếp tục?')) return;
+    const now=new Date().toISOString(); let _warn=[];
+    commitMutation(()=>{ d.signedAt=now; d.signedBy=actorName(); if(d.kind==='QD'){ try{ _warn=_cdApplyQD(d); }catch(e){ _warn=['Lỗi áp dụng điều động: '+e.message]; } } try{ touchRecord(d); }catch(e){} },
+      {action:'crew_doc_sign', fields:['crewDocs','hrEmployees','crewAssignments','bccSheets'], onOk:()=>{ try{ logAuditEvent('crew_doc_sign',{id, kind:d.kind, emp:d.empName, applied:!!d._applied}); }catch(e){}
+        try{ hrmRenderCrew(); }catch(e){} try{ _cdView(id); }catch(e){}
+        if(_warn.length) setTimeout(()=>alert('Đã ký & áp dụng. Cần lưu ý:\n\n• '+_warn.join('\n• ')),200); else if(d.kind==='QD') toast('✓ Đã ký & cập nhật điều động, hồ sơ, danh sách tàu, BCC','good'); }});
   } else { _cdOpenPrint(_cdStamped(d,_cdInner(d)), 'BAN LUU - '+(d.empName||'')); return; }
   if(d.kind==='QD'){ const dt=String(d.date||''); const tag=d.sub==='NC'?'QĐ nghỉ ca':'QĐĐĐ'; const task=d.sub==='NC'?'Nghỉ ca':(d.task||d.rank||'');
     _cdOpenPrint(_cdQdHtml(d), `${d.no3} - ${d.empName} - ${task} - ${d.sub==='NC'?'SME JSC':(d.vesselName||'')} - ${tag} ${dt.slice(8,10)}.${dt.slice(5,7)}.${dt.slice(0,4)}`); }
@@ -49387,6 +49405,7 @@ function openCrewDocFor(kind, empId, opts){
   if(opts.sub) C.sub=opts.sub; if(opts.fromDate) C.fromDate=String(opts.fromDate).slice(0,10);
   if(kind==='BRIEF') C.tpl=opts.tpl||_CD_DEPT_TPL[ri.dept]||'FRM016G';
   if(opts.planId) C.planId=opts.planId;
+  if(opts.assignId) C.assignId=opts.assignId;   // v3.67.16
   _cdRender();
 }
 function openCrewDocChooser(empId, opts){
@@ -49438,6 +49457,94 @@ function _cdUnlock(id){
   const why=prompt('Lý do mở khóa (gỡ dấu ĐÃ KÝ):'); if(!why||!why.trim()) return;
   commitMutation(()=>{ (d._unlockHist=d._unlockHist||[]).push({at:new Date().toISOString(), by:actorName(), reason:why.trim(), prevSignedAt:d.signedAt, prevSignedBy:d.signedBy}); d.signedAt=''; d.signedBy=''; try{ touchRecord(d); }catch(e){} },
     {action:'crew_doc_unlock', fields:['crewDocs'], onOk:()=>{ try{ logAuditEvent('crew_doc_unlock',{id, reason:why}); }catch(e){} toast('✓ Đã mở khóa — sửa rồi In PDF để ký lại','good'); _cdView(id); }});
+}
+
+
+/* v3.67.16: QĐ gắn theo thuyền viên tại Đổi ca nhanh */
+function _cqQdOf(empId, a){
+  const L=(S.crewDocs||[]).filter(d=>d&&!d._deleted&&d.kind==='QD'&&d.empId===empId);
+  if(!L.length) return null;
+  const byA=a?L.filter(d=>d.assignId===a.id||(d.vesselId===a.vesselId&&d.sub!=='NC')):L;
+  const pick=(byA.length?byA:L).sort((x,y)=>String(y.signedAt||'').localeCompare(String(x.signedAt||''))||String(y.createdAt||'').localeCompare(String(x.createdAt||'')));
+  return pick[0];
+}
+function cqDocMenu(empId, assignId){
+  const e=(HRService.employees()||[]).find(x=>x.id===empId); if(!e) return;
+  const a=assignId?(HRService.crewAssignments()||[]).find(x=>x.id===assignId):null;
+  const opts={vesselId:a?a.vesselId:(e.linkVesselId||''), fromDate:a?(a.onboardDate||'').slice(0,10):todayISO(), assignId:assignId||'', rank:e.title||''};
+  const o=JSON.stringify(opts).replace(/"/g,'&quot;');
+  const qd=_cqQdOf(empId,a), ri=_cdRankInfo(e.title||''), tpl=_CD_DEPT_TPL[ri.dept]||'FRM016G';
+  const hd=(S.crewDocs||[]).filter(d=>d&&!d._deleted&&d.kind==='BRIEF'&&d.empId===empId).sort((x,y)=>String(y.createdAt||'').localeCompare(String(x.createdAt||'')))[0];
+  const row=(ic,lab,sub,doc,js)=>`<div onclick="${js}" style="display:flex;gap:12px;align-items:center;padding:12px 14px;border:1px solid var(--rule);border-radius:8px;margin-bottom:8px;cursor:pointer;background:var(--paper)">
+    <span style="font-size:22px">${ic}</span><div style="flex:1"><b>${lab}</b><div style="font-size:11px;color:var(--muted)">${sub}</div></div>${doc?_cdStatusChip(doc):'<span style="font-size:11px;color:var(--muted)">+ Tạo mới</span>'}</div>`;
+  openModal('✎ '+esc(e.fullName||'')+' — '+esc(e.title||''),
+    row('📜','Quyết định','Điều động / nghỉ ca · điền sẵn tên, chức danh, tàu, ngày', qd, qd?`_cdOpenOrView('${qd.id}')`:`openCrewDocFor('QD','${empId}',Object.assign(${o},{sub:'DD'}))`)
+   +row('📋','Hướng dẫn nhanh nhận ca',esc(CREW_TPL.meta[tpl].label)+' · theo chức danh', hd, hd?`_cdOpenOrView('${hd.id}')`:`openCrewDocFor('BRIEF','${empId}',Object.assign(${o},{tpl:'${tpl}'}))`)
+   +`<div style="display:flex;gap:10px;font-size:11px;margin-top:6px"><a href="javascript:void 0" onclick="openCrewDocFor('QD','${empId}',Object.assign(${o},{sub:'DD'}))">+ QĐ điều động mới</a><a href="javascript:void 0" onclick="openCrewDocFor('QD','${empId}',Object.assign(${o},{sub:'NC'}))">+ QĐ nghỉ ca mới</a><a href="javascript:void 0" onclick="openCrewDocChooser('${empId}',${o})">Tất cả giấy tờ</a>${assignId?`<a href="javascript:void 0" onclick="openCrewAssignModal('${assignId}')" style="margin-left:auto;color:var(--muted)">Số QĐ / bản scan (cũ)</a>`:''}</div>`,
+    `<button class="btn-ghost" onclick="closeModal()">Đóng</button>`);
+}
+function _cdOpenOrView(id){ const d=(S.crewDocs||[]).find(x=>x.id===id); if(!d) return; if(d.signedAt) _cdView(id); else openCrewDocForm(d.kind,id); }
+
+/* ════════════════════════════════════════════════════════════════════════════════════════════════
+   v3.67.17 (Sếp 26/9): KÝ QUYẾT ĐỊNH (In PDF lần đầu) = ÁP DỤNG điều động — dùng đúng logic Đổi ca nhanh:
+   • QĐ điều động: đóng đoạn tàu cũ tại ngày hiệu lực, mở đoạn mới (tàu, chức danh, số QĐ, ngày QĐ) → hồ sơ thuyền viên
+     (tàu công tác, chức danh, bỏ trạng thái nghỉ ca) + danh sách thuyền viên tại tàu tự cập nhật.
+   • QĐ nghỉ ca: đóng đoạn tàu hiện tại, trạng thái "Nghỉ ca".
+   • BCC tháng: tàu cũ — xóa các ngày từ ngày hiệu lực (nghỉ ca: ghi mã nghỉ ca nếu đã cấu hình); tàu mới — thêm dòng
+     thuyền viên (NV quản lý tàu tự điền công). BCC đã gửi/chốt → KHÔNG sửa, chỉ cảnh báo. Kỳ lương đã tính/khóa → cảnh báo.
+   • Ký lại sau khi mở khóa: cập nhật ĐÚNG đoạn công tác đã tạo, không tạo đoạn mới.
+   ════════════════════════════════════════════════════════════════════════════════════════════════ */
+const CREW_NC_CODE='';   // mã công ngày nghỉ ca trên BCC — chờ Sếp chốt (trống = chỉ xóa các ngày sau ngày hiệu lực)
+function _cdBccSheet(vid, eff){ try{ return _vtsFindSheet(vid, eff.slice(0,7)); }catch(e){ return null; } }
+function _cdBccLocked(sh){ return !!(sh && (sh.status==='confirmed'||sh.status==='submitted'||sh.status==='locked')); }
+function _cdBccLeave(vid, empId, eff, warn, nc, qdLabel){
+  if(!vid) return; const sh=_cdBccSheet(vid, eff); if(!sh) return;
+  const vn=anyVesselName(vid)||vid;
+  if(_cdBccLocked(sh)){ warn.push('BCC tháng '+sh.period+' tàu '+vn+' đã gửi/chốt — cần điều chỉnh theo '+qdLabel); return; }
+  const row=(sh.rows||[]).find(r=>r&&r.empId===empId); if(!row) return;
+  const d0=+eff.slice(8,10); row.days=row.days||{}; row.ot=row.ot||{};
+  for(let d=d0; d<=(+sh.numDays||31); d++){ if(nc && CREW_NC_CODE) row.days[d]=CREW_NC_CODE; else delete row.days[d]; delete row.ot[d]; }
+  row._leftFrom=eff; row._leftBy=qdLabel; try{ _bccTouch(sh,row); }catch(e){}
+}
+function _cdBccJoin(vid, empId, eff, warn, qdLabel){
+  if(!vid) return; const sh=_cdBccSheet(vid, eff); if(!sh) return;   // chưa có bảng tháng → khi tạo bảng, roster tự lấy theo tàu công tác
+  const vn=anyVesselName(vid)||vid;
+  if(_cdBccLocked(sh)){ warn.push('BCC tháng '+sh.period+' tàu '+vn+' đã gửi/chốt — cần thêm thuyền viên theo '+qdLabel); return; }
+  sh.rows=sh.rows||[]; let row=sh.rows.find(r=>r&&r.empId===empId);
+  if(!row){ row={empId, days:{}, ot:{}}; sh.rows.push(row); }
+  row._joinedFrom=eff; row._joinedBy=qdLabel; delete row._leftFrom; try{ _bccTouch(sh,row); }catch(e){}
+}
+function _cdApplyQD(d){
+  const warn=[]; if(!d||d.kind!=='QD') return warn;
+  const e=(S.hrEmployees||[]).find(x=>x.id===d.empId);
+  if(!e){ warn.push('Không tìm thấy hồ sơ thuyền viên — chưa cập nhật điều động (chọn thuyền viên trong danh sách khi lập QĐ)'); return warn; }
+  const eff=String(d.fromDate||d.date||todayISO()).slice(0,10), now=new Date().toISOString(), who=actorName();
+  const qdLabel='QĐ '+(d.no3||'')+'/QĐNS/'+(d.year||''), prevVid=e.linkVesselId||'';
+  const own=(d._applied&&d._applied.assignId)?(HRService.crewAssignments()||[]).find(a=>a.id===d._applied.assignId):null;
+  let assignId=own?own.id:'';
+  if(d.sub==='NC'){
+    const cur=_hrCrewCloseCurrent(e.id, eff); if(cur){ cur.signoffDecisionNo=qdLabel; cur.signoffDocId=d.id; }
+    e.linkVesselId=''; e.division='Nghỉ ca';
+    _cdBccLeave(prevVid, e.id, eff, warn, true, qdLabel);
+  } else {
+    if(!d.vesselId){ warn.push('QĐ chưa chọn tàu — chưa cập nhật điều động'); return warn; }
+    if(own && !own.actualSignoffDate && d._applied && d._applied.eff && d._applied.eff!==eff){   // ký lại đổi ngày → dời luôn ngày rời tàu cũ
+      (HRService.crewAssignments()||[]).forEach(a=>{ if(a.empId===e.id && a.id!==own.id && a.actualSignoffDate===d._applied.eff) a.actualSignoffDate=eff; }); }
+    if(own && !own.actualSignoffDate){ own.vesselId=d.vesselId; own.onboardDate=eff; own.title=d.rank||own.title; own.decisionNo=qdLabel; own.decisionDate=String(d.date||'').slice(0,10); own.updatedAt=now; own.updatedBy=who; }
+    else {
+      _hrCrewCloseCurrent(e.id, eff);
+      assignId='ca_'+Date.now().toString(36)+Math.random().toString(36).slice(2,5);
+      HRService.addCrewAssignment({id:assignId, empId:e.id, vesselId:d.vesselId, kind:prevVid?'transfer':'onboard', title:d.rank||e.title||'', onboardDate:eff, status:'active',
+        decisionNo:qdLabel, decisionDate:String(d.date||'').slice(0,10), qdDocId:d.id, createdBy:who, createdAt:now});
+    }
+    e.linkVesselId=d.vesselId; if(d.rank) e.title=d.rank; if(e.division==='Nghỉ ca'||e.division==='Nghỉ không lương') e.division='';
+    if(prevVid && prevVid!==d.vesselId) _cdBccLeave(prevVid, e.id, eff, warn, false, qdLabel);
+    _cdBccJoin(d.vesselId, e.id, eff, warn, qdLabel);
+  }
+  try{ touchRecord(e); }catch(x){}
+  d._applied={at:now, by:who, assignId, prevVessel:prevVid, eff};
+  try{ const pp=PayrollService.periodByMonth(eff.slice(0,7)); if(pp && pp.status && pp.status!=='draft') warn.push('Kỳ lương '+eff.slice(0,7)+' đã '+(pp.status==='locked'?'khóa':'tính')+' — cần tính lại cho '+(e.fullName||'')); }catch(x){}
+  return warn;
 }
 
 function _cdPrintBlank(tpl){ _cdOpenPrint(_cdBriefHtml({tpl, ans:{}}, true), (CREW_TPL.meta[tpl]||{}).code+' (blank)'); }
