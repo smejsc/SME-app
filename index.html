@@ -4727,7 +4727,7 @@ const WH_TYPES = {
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.67.02';
+const APP_VERSION='3.67.09';
 /* HOTFIX 3.12.17-email: CHẶN TRIỆT ĐỂ gửi email TỰ ĐỘNG (mất kiểm soát — spam quota Google).
    Email phải do NV được phân quyền CHỦ ĐỘNG chọn gửi. Cờ này:
    (1) chặn auto-SCAN tạo email (hrmScanExpiries/vesselCertScanExpiries);
@@ -44106,6 +44106,7 @@ function approvedTx(includeAll){
     // v3.01.97: CHI PHÍ (AP) ghi nhận NGAY khi nhập — KHÔNG phụ thuộc trạng thái duyệt.
     // Nháp/chờ duyệt/đã duyệt/từ chối chỉ là nhãn theo dõi hồ sơ. (AR vẫn theo _statusOK ở trên.)
     // BOD filter
+    if(r._nsnnV2 && r.excludeFromPl) return;   // v3.67.04: nộp NSNN không phải chi phí (GTGT phải nộp, TNCN, BHXH, GTGT NK)
     if(!canSeeBOD){
       if(r.isBODOnly) return;
       if(isExpenseBODOnly(r.expenseType)) return;
@@ -66349,9 +66350,10 @@ function _convRender(){
 function _convSave(){
   const C=_CONV; if(!C) return;
   C.partner=((document.getElementById('conv-partner')||{}).value||C.partner||'').trim();
-  const v=_benVendorByName(C.partner);
-  if(!v){ toast('Người nhận chưa có trong danh mục NCC — bấm "+ Thêm mới" ở thẻ người nhận','bad'); return; }
-  const e=_benCheck(C.partner); if(e){ toast(e,'bad'); return; }
+  const v0=_benVendorByName(C.partner);
+  if(!String(C.partner||'').trim()){ toast('Nhập người nhận','bad'); return; }
+  { const e=_benCheck(C.partner); if(e) toast('Gợi ý: '+e,'warn'); }   // v3.67.03: chỉ gợi ý
+  const v=v0||{name:String(C.partner).trim(), id:'', taxCode:''};
   if(!String(C.no||'').trim()){ toast('Nhập số hóa đơn / PO','bad'); return; }
   if(!(+C.value>0)){ toast('Nhập giá trị thực','bad'); return; }
   const now=new Date().toISOString(), who=actorName();
@@ -68447,7 +68449,7 @@ function _arExpGridRebalance(){
   const conWrap=document.getElementById('ar-expense-con-wrap');
   const chauWrap=document.getElementById('ar-expense-chau-wrap');
   const n=1+(conWrap&&conWrap.style.display!=='none'?1:0)+(chauWrap&&chauWrap.style.display!=='none'?1:0);
-  grid.style.gridTemplateColumns='repeat('+n+',1fr)';
+  grid.style.gridTemplateColumns='repeat('+Math.max(3,n)+',minmax(0,1fr))';   // v3.67.03: luôn đủ 3 cột → ô không giãn lệch
 }
 function arExpenseGroupChanged(){
   const gsel=document.getElementById('ar-expense-group');
@@ -70180,6 +70182,146 @@ function _dxGo(){
    ════════════════════════════════════════════════════════════════════════════════════════════════ */
 let _WZ=null;
 const _WZ_CAM='#d97706', _WZ_NAVY='#1c3a5c';
+/* ════════════════════════════════════════════════════════════════════════════════════════════════
+   v3.67.04 — 🏛 NỘP NSNN (Sếp duyệt 26/9). Ô riêng ở bước 1 (chỉ Kế toán / KTT / Admin). Phiếu Phải trả loại thuế:
+   tự gán đúng loại chi phí + nsnnType + kỳ thuế → tab NSNN tự cộng "ĐÃ NỘP" khi CHI qua Bảng kê (tạo phiếu chưa tính).
+   P/L (áp từ lần nộp tiếp theo — chỉ phiếu lập bằng màn này): GTGT phải nộp, TNCN khấu trừ, BHXH, GTGT hàng NK → KHÔNG vào P/L
+   (excludeFromPl); Thuế NK / TTĐB / Nhà thầu / Môn bài / Phạt → vào P/L; Thuế NK gắn PO có nhập kho → vào giá vốn.
+   ════════════════════════════════════════════════════════════════════════════════════════════════ */
+const _NSNN_OPTS=[
+  ['VAT_PAYABLE','🧾 GTGT phải nộp (kỳ)','TAX_NSNN',false,'Kho bạc Nhà nước — Chi cục Thuế'],
+  ['PIT','👤 Thuế TNCN (khấu trừ của NV)','TAX_PIT',false,'Kho bạc Nhà nước — Chi cục Thuế'],
+  ['INSURANCE_SOCIAL','🏥 BHXH / BHYT / BHTN','TAX_NSNN',false,'Cơ quan Bảo hiểm xã hội'],
+  ['IMPORT_DUTY','📦 Thuế nhập khẩu','TAX_IMPORT_DUTY',true,'Chi cục Hải quan'],
+  ['IMPORT_VAT','📦 GTGT hàng nhập khẩu','TAX_IMPORT_VAT',false,'Chi cục Hải quan'],
+  ['EXCISE','📦 Thuế tiêu thụ đặc biệt','TAX_EXCISE',true,'Chi cục Hải quan'],
+  ['FCT','🏢 Thuế nhà thầu (FCT)','TAX_FCT',true,'Kho bạc Nhà nước — Chi cục Thuế'],
+  ['CIT','🏛 Thuế TNDN','TAX_CIT',true,'Kho bạc Nhà nước — Chi cục Thuế'],
+  ['BUSINESS_LICENSE','📋 Thuế môn bài','TAX_LICENSE',true,'Kho bạc Nhà nước — Chi cục Thuế'],
+  ['PENALTY','⚠ Phạt thuế / chậm nộp','TAX_PENALTY',true,'Kho bạc Nhà nước — Chi cục Thuế']];
+let _NS=null;
+function _nsnnIsKT(){ return isAdmin() || canCheckAcc() || (typeof canApproveL1==='function'&&canApproveL1()); }
+/* v3.67.05 (Sếp): mở cho người dùng khác — bộ phận mua hàng nộp thuế HẢI QUAN (NK / GTGT NK / TTĐB) và GẮN PO. Kế toán: mọi loại. */
+const _NSNN_CUSTOMS=['IMPORT_DUTY','IMPORT_VAT','EXCISE'];
+function _nsnnCanUse(){ return !(typeof whIsVesselSideUser==='function' && whIsVesselSideUser()); }
+function _nsnnOpts(){ return _nsnnIsKT()?_NSNN_OPTS:_NSNN_OPTS.filter(o=>_NSNN_CUSTOMS.indexOf(o[0])>=0); }
+function openNsnnForm(){
+  if(!_nsnnCanUse()){ toast('Không có quyền','bad'); return; }
+  _NS=_NS||{type:(_nsnnIsKT()?'PIT':'IMPORT_DUTY'), period:todayISO().slice(0,7), due:'', amount:'', ccy:'VND', collector:'', decl:'', sub:'', po:'', content:''};
+  _nsnnRender();
+}
+function _nsnnRender(){
+  const _L=_nsnnOpts(); if(!_L.some(o=>o[0]===_NS.type)) _NS.type=_L[0][0];
+  const N=_NS, opt=_L.find(o=>o[0]===N.type)||_L[0];
+  if(!N.collector) N.collector=opt[4];
+  const isImp=(N.type==='IMPORT_DUTY'||N.type==='IMPORT_VAT');
+  const f=(lab,html)=>`<div class="field" style="margin:0"><label style="display:block;font-size:10px;margin-bottom:4px">${lab}</label>${html}</div>`;
+  const _imp=`<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:12px;padding:10px 12px;border:1px dashed #1c3a5c;border-radius:6px">
+      <input type="file" id="ns-imp-file" accept=".pdf,.png,.jpg,.jpeg,.webp,.xlsx,.xls,.doc,.docx" style="display:none" onchange="_nsnnImport(this)">
+      <button class="btn-sec" onclick="document.getElementById('ns-imp-file').click()">📎 Nhập tờ khai HQ (PDF / ảnh / Excel / Word)</button>
+      <span id="ns-imp-st" style="font-size:12px;color:var(--muted)">Đọc số liệu + tự đính kèm file vào phiếu — không phải làm 2 lần</span>
+      ${(N.attachments||[]).length?`<span style="font-size:12px">📎 ${N.attachments.map(a=>esc(a.name)).join(', ')}</span>`:''}</div>
+    ${(N.lines||[]).length>1?`<div style="margin-bottom:12px"><div style="font-size:11px;font-weight:600;text-transform:uppercase;color:var(--muted);margin-bottom:4px">Các sắc thuế đọc từ tờ khai — mỗi dòng tick = 1 phiếu, tạo cùng lúc</div>
+      <table class="tbl"><tbody>${N.lines.map((l,i)=>`<tr><td style="width:30px"><input type="checkbox" ${l.on?'checked':''} onchange="_NS.lines[${i}].on=this.checked"></td><td>${esc((_NSNN_OPTS.find(o=>o[0]===l.type)||[])[1]||l.type)}</td><td class="r"><input type="number" step="any" value="${l.amount}" oninput="_NS.lines[${i}].amount=+this.value||0" style="width:150px;text-align:right"></td></tr>`).join('')}</tbody></table></div>`:''}`;   // v3.67.06
+  const body=`<div style="padding:8px 12px;border-left:5px solid #7a1f1f;background:#fbeeee;border-radius:6px;font-weight:700;color:#7a1f1f;margin-bottom:12px">🏛 NỘP NGÂN SÁCH NHÀ NƯỚC</div>${_imp}
+    <div style="display:grid;grid-template-columns:1.4fr 1fr 1fr;gap:12px;margin-bottom:12px">
+      ${f('① Loại thuế / khoản nộp *',`<select style="width:100%;height:36px" onchange="_NS.type=this.value;_NS.collector='';_nsnnRender()">${_L.map(o=>`<option value="${o[0]}" ${N.type===o[0]?'selected':''}>${o[1]}</option>`).join('')}</select>`)}
+      ${f('② Kỳ thuế *',`<input type="month" style="width:100%;height:36px" value="${esc(N.period)}" oninput="_NS.period=this.value">`)}
+      ${f('③ Hạn nộp',`<input type="date" style="width:100%;height:36px" value="${esc(N.due)}" oninput="_NS.due=this.value">`)}</div>
+    <div style="display:grid;grid-template-columns:1fr .5fr 1.4fr;gap:12px;margin-bottom:12px">
+      ${f('Số tiền *',`<input type="number" step="any" style="width:100%;height:36px;text-align:right;font-family:var(--font-mono)" value="${esc(String(N.amount))}" oninput="_NS.amount=this.value">`)}
+      ${f('Loại tiền',`<select style="width:100%;height:36px" onchange="_NS.ccy=this.value">${['VND','USD'].map(c=>`<option ${N.ccy===c?'selected':''}>${c}</option>`).join('')}</select>`)}
+      ${f('Cơ quan thu *',`<input style="width:100%;height:36px" value="${esc(N.collector)}" oninput="_NS.collector=this.value">`)}</div>
+    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;margin-bottom:12px">
+      ${f('Số tờ khai / thông báo',`<input style="width:100%;height:36px" value="${esc(N.decl)}" oninput="_NS.decl=this.value">`)}
+      ${f('Tiểu mục NSNN',`<input style="width:100%;height:36px" value="${esc(N.sub)}" oninput="_NS.sub=this.value">`)}
+      ${f('Gắn PO / tờ khai hải quan <span style="font-weight:400;text-transform:none">(nên gắn)</span>',(isImp||N.type==='EXCISE')?`<select style="width:100%;height:36px" onchange="_NS.po=this.value"><option value="">— Không gắn —</option>${_poCandidates('').map(r=>`<option value="${r.id}" ${N.po===r.id?'selected':''}>${esc(_poLabel(r))}</option>`).join('')}</select>`:`<div style="height:36px;display:flex;align-items:center;color:var(--muted);font-size:12px">— chỉ thuế NK / GTGT NK —</div>`)}</div>
+    ${f('Nội dung thanh toán',`<input style="width:100%;height:36px" value="${esc(N.content||('Nộp '+opt[1].replace(/^\S+\s/,'')+' kỳ '+N.period))}" oninput="_NS.content=this.value">`)}
+    <div style="margin-top:12px;padding:10px 12px;border:1px dashed #1c3a5c;border-radius:6px;font-size:12px">Loại chi phí <b>${opt[2]}</b> · ${opt[3]?'<b>vào P/L</b>':'<b>không vào P/L</b>'}${N.type==='CIT'?' (tạm giữ như hiện tại — dòng "Thuế TNDN" riêng sẽ làm cùng báo cáo P/L)':''} · ${_nsnnIsKT()?'Kế toán lập → vào thẳng KTT → L2':'nộp KT → KT kiểm → KTT → L2'} → Bảng kê · phiếu nằm trong bìa hồ sơ của PO đã gắn · tab NSNN cộng "đã nộp" khi CHI qua Bảng kê · chứng từ đính kèm sau khi lưu (mở phiếu).</div>`;
+  openModal('🏛 Nộp NSNN', body, `<button class="btn-ghost" onclick="closeModal()">Hủy</button><button class="btn-primary" onclick="_nsnnSave()">Tạo phiếu nộp NSNN</button>`);
+}
+/* v3.67.06 (Sếp): NHẬP FILE TỜ KHAI HQ (PDF / ảnh / Excel / Word) = ĐỌC + ĐÍNH KÈM trong 1 lần (NV không làm 2 lần).
+   Excel (ECUS) → tkhqParse sẵn có; PDF/ảnh → AI (chế độ đọc hóa đơn AP); Word → chỉ đính kèm (nhập tay số liệu).
+   Nhiều sắc thuế (NK + GTGT NK + TTĐB…) → mỗi sắc thuế 1 phiếu, tạo cùng lúc, chung tờ khai / PO / file. */
+const _ET2NS={TAX_IMPORT_DUTY:'IMPORT_DUTY', TAX_IMPORT_VAT:'IMPORT_VAT', TAX_EXCISE:'EXCISE'};
+async function _nsnnImport(inputEl){
+  const file=inputEl&&inputEl.files&&inputEl.files[0]; if(!file) return; inputEl.value='';
+  const N=_NS; if(!N) return;
+  const st=document.getElementById('ns-imp-st'); const say=(t,c)=>{ if(st){ st.textContent=t; st.style.color=c||'var(--muted)'; } };
+  say('⏳ Đang đọc và đính kèm…');
+  // 1) ĐÍNH KÈM (luôn làm)
+  try{
+    const cfg=getAuthConfig(); if(cfg&&cfg.scriptUrl){
+      const b64=await new Promise((res,rej)=>{ const r=new FileReader(); r.onload=()=>{ const x=String(r.result||''); res(x.includes(',')?x.split(',')[1]:x); }; r.onerror=()=>rej(new Error('đọc file')); r.readAsDataURL(file); });
+      const resp=await fetch(cfg.scriptUrl,{method:'POST',headers:{'Content-Type':'text/plain'},body:JSON.stringify({action:'upload_attachment', fileBase64:b64, mimeType:file.type||'application/octet-stream', fileName:file.name, sub:'CHUNGTU', viewers:[]})});
+      const d=await resp.json(); if(d&&d.ok&&d.file){ (N.attachments=N.attachments||[]).push({name:file.name, docType:'Tờ khai hải quan', url:d.file.url||'', driveId:d.file.id||'', uploadedBy:actorName(), uploadedAt:new Date().toISOString()}); }
+    }
+  }catch(e){ console.warn('[ns-attach]',e); }
+  // 2) ĐỌC
+  let taxes=[], decl='', regDate='', invNo='';
+  try{
+    if(/\.(xlsx|xls)$/i.test(file.name)){
+      const buf=await file.arrayBuffer(); const wb=XLSX.read(buf,{type:'array'}); const d=tkhqParse(wb);
+      decl=d.declNo||''; regDate=d.regDate||''; invNo=d.invoiceNo||''; taxes=(d.taxes||[]).filter(t=>_ET2NS[t.et]).map(t=>({type:_ET2NS[t.et], amount:Math.round(+t.amount||0)}));
+    } else if(/\.(pdf|png|jpe?g|webp)$/i.test(file.name)){
+      const d=await aiExtract(file,'ap');
+      decl=String(d.invoiceNo||d.declNo||''); regDate=d.issueDate||''; invNo=d.invoiceNo||'';
+      (Array.isArray(d.lines)?d.lines:[]).forEach(L=>{ const s=String(L.desc||''); const a=Math.round(+L.amountNet||+L.amount||0); if(!a) return;
+        const ty=/GTGT|gia tri gia tang|giá trị gia tăng/i.test(s)?'IMPORT_VAT':(/TTĐB|tiêu thụ đặc biệt/i.test(s)?'EXCISE':(/nhập khẩu|nhap khau|import/i.test(s)?'IMPORT_DUTY':''));
+        if(ty) taxes.push({type:ty, amount:a}); });
+    }
+  }catch(e){ console.warn('[ns-read]',e); }
+  const byT={}; taxes.forEach(t=>{ if(!byT[t.type]||t.amount>byT[t.type]) byT[t.type]=t.amount; });
+  N.lines=Object.entries(byT).map(([type,amount])=>({type, amount, on:true}));
+  if(decl) N.decl=decl;
+  const iso=(typeof _aiDateISO==='function')?_aiDateISO(regDate):''; if(iso) N.period=iso.slice(0,7);
+  if(!N.po && invNo){ const hit=_poCandidates(invNo)[0]; if(hit) N.po=hit.id; }   // gợi ý PO theo số hóa đơn trên tờ khai
+  if(N.lines.length){ N.type=N.lines[0].type; N.amount=N.lines[0].amount; }
+  _nsnnRender();
+  say(N.lines.length?('✓ Đã đọc '+N.lines.length+' sắc thuế + đính kèm "'+file.name+'"'):('✓ Đã đính kèm "'+file.name+'" — không đọc được số liệu, nhập tay'), N.lines.length?'var(--good)':'#9a5a05');
+}
+
+
+function _nsnnSaveMany(lines){
+  const N=_NS; const _kt=_nsnnIsKT(); if(!String(N.collector||'').trim()){ toast('Nhập cơ quan thu','bad'); return; }
+  if(!N.po && !confirm('Chưa gắn PO — các phiếu thuế hải quan sẽ KHÔNG vào hồ sơ / tổng chi phí của PO.\n\nVẫn tạo '+lines.length+' phiếu?')) return;
+  const now=new Date().toISOString(), who=actorName(), batch='B'+Date.now().toString(36)+Math.random().toString(36).slice(2,5); const recs=[];
+  lines.forEach(l=>{ const opt=_NSNN_OPTS.find(o=>o[0]===l.type); if(!opt) return; const amt=+l.amount;
+    const content='Nộp '+opt[1].replace(/^\S+\s/,'')+(N.decl?(' — TKHQ '+N.decl):'')+' kỳ '+N.period;
+    recs.push({ id:'AP'+Date.now().toString(36)+Math.random().toString(36).slice(2,6), batchId:batch, partner:String(N.collector).trim(), vendorId:'', desc:content, payContent:'Nộp thuế hải quan'+(N.decl?(' — TKHQ '+N.decl):''),
+      invoiceNo:String(N.decl||'').trim(), invoiceDate:todayISO(), issueDate:todayISO(), dueDate:N.due||'', amount:amt, amountNet:amt, amountGross:amt, vatAmount:0, vatPercent:0, ccy:N.ccy||'VND',
+      segment:'OTHER', expenseType:opt[2], nsnnType:opt[0], taxPeriod:N.period, nsnnSubItem:String(N.sub||'').trim(), excludeFromPl:!opt[3], _nsnnV2:true,
+      purchaseKind:'SERVICE', payMethod:'CK', priority:'BT', payments:[], dueAmount:0, attachments:JSON.parse(JSON.stringify(N.attachments||[])), poLinkId:N.po||'',
+      ...(_kt?{status:'pending_l1', accCheckedBy:who, accCheckedAt:now}:{status:'pending_handover', submittedBy:who, submittedAt:now}),
+      createdBy:who, createdByDept:(typeof getActorDeptName==='function'?(getActorDeptName()||''):''), createdAt:now }); });
+  commitMutation(()=>{ recs.forEach(r=>{ AccountingService.addPayable(r); try{ touchRecord(r); }catch(e){} });
+      if(N.po){ try{ const root=_poRootOf(N.po), doc=root&&_poStockDoc(root); if(doc){ recs.forEach(r=>{ if(r.nsnnType==='IMPORT_DUTY'||r.nsnnType==='EXCISE') whAttachCostApToDoc(doc, r, r.nsnnType==='EXCISE'?'excise':'import_tax', _allocLanded); }); touchRecord(doc); } }catch(e){} } },
+    {action:'nsnn_create_many', fields:['payables','stockDocs'], onOk:()=>{ try{ logAuditEvent('nsnn_create_many',{n:recs.length, decl:N.decl}); }catch(e){} _NS=null; toast('✓ Đã tạo '+recs.length+' phiếu nộp thuế hải quan (1 phiếu nhiều dòng)','good'); openPayableModal(recs[0].id); }});
+}
+
+function _nsnnSave(){
+  const N=_NS; if(!N) return; const opt=_nsnnOpts().find(o=>o[0]===N.type); if(!opt){ toast('Loại thuế không hợp lệ','bad'); return; }
+  const _multi=(N.lines||[]).filter(l=>l.on&&+l.amount>0);
+  if(_multi.length>1){ return _nsnnSaveMany(_multi); }   // v3.67.06
+  const amt=+N.amount||0; if(!(amt>0)){ toast('Nhập số tiền','bad'); return; }
+  const _kt=_nsnnIsKT();
+  if(!N.po && _NSNN_CUSTOMS.indexOf(N.type)>=0 && !confirm('Chưa gắn PO — phiếu thuế hải quan sẽ KHÔNG vào hồ sơ / tổng chi phí của PO.\n\nVẫn tạo phiếu?')) return;   // v3.67.06: nhắc nhở, không bắt buộc
+  if(!N.period){ toast('Chọn kỳ thuế','bad'); return; }
+  if(!String(N.collector||'').trim()){ toast('Nhập cơ quan thu','bad'); return; }
+  const now=new Date().toISOString(), who=actorName(), content=String(N.content||('Nộp '+opt[1].replace(/^\S+\s/,'')+' kỳ '+N.period)).trim();
+  const rec={ id:'AP'+Date.now().toString(36)+Math.random().toString(36).slice(2,6), partner:String(N.collector).trim(), vendorId:'', desc:content, payContent:content,
+    invoiceNo:String(N.decl||'').trim(), invoiceDate:todayISO(), issueDate:todayISO(), dueDate:N.due||'',
+    amount:amt, amountNet:amt, amountGross:amt, vatAmount:0, vatPercent:0, ccy:N.ccy||'VND',
+    segment:'OTHER', expenseType:opt[2], nsnnType:opt[0], taxPeriod:N.period, nsnnSubItem:String(N.sub||'').trim(),
+    excludeFromPl:!opt[3], _nsnnV2:true, purchaseKind:'SERVICE', payMethod:'CK', priority:'BT', payments:[], dueAmount:0, attachments:JSON.parse(JSON.stringify(N.attachments||[])),
+    poLinkId:(N.po&&_NSNN_CUSTOMS.indexOf(N.type)>=0)?N.po:'',
+    ...(_kt?{status:'pending_l1', accCheckedBy:who, accCheckedAt:now}:{status:'pending_handover', submittedBy:who, submittedAt:now}),   // v3.67.05: người dùng khác → đủ bước
+    createdBy:who, createdByDept:(typeof getActorDeptName==='function'?(getActorDeptName()||''):''), createdAt:now };
+  commitMutation(()=>{ AccountingService.addPayable(rec); try{ touchRecord(rec); }catch(e){}
+      if(rec.poLinkId && (N.type==='IMPORT_DUTY'||N.type==='EXCISE')){ try{ const root=_poRootOf(rec.poLinkId), doc=root&&_poStockDoc(root); if(doc){ whAttachCostApToDoc(doc, rec, 'import_tax', _allocLanded); touchRecord(doc); } }catch(e){} } },
+    {action:'nsnn_create', fields:['payables','stockDocs'], onOk:()=>{ try{ logAuditEvent('nsnn_create',{id:rec.id, type:N.type, period:N.period, amount:amt}); }catch(e){} _NS=null; toast(_kt?'✓ Đã tạo phiếu nộp NSNN — chờ KTT duyệt':'✓ Đã tạo phiếu nộp thuế hải quan — nộp KT kiểm','good'); openPayableModal(rec.id); }});
+}
+
 function openPaymentProposal(flow){
   _WZ={ step:1, flow:flow||'PT', loai:'DX', vesselId:'', nature:'THUC', khoanAmt:'', mode:'', partner:'',
         dk:{desc:'', amount:'', ccy:'VND', fx:'', date:'', expenseType:'', segment:'', projectId:''} };
@@ -70206,7 +70348,7 @@ function _wzRender(){
     const vs=_wzVessels();
     body+=`<div style="font-size:14px;margin-bottom:8px">Khoản chi này của ai?</div>
       <div style="display:flex;gap:12px;flex-wrap:wrap">${_wzCard('PT','🏢 Công ty','Chi phí của Hải Mã',isPT,_WZ_NAVY,'_wzFlow')}${vs.length?_wzCard('CH','🚢 Quản lý hộ tàu','Chi thay chủ tàu',!isPT,_WZ_NAVY,'_wzFlow'):''}</div>`;
-    if(isPT) body+=`<div style="margin-top:14px;display:flex;gap:8px;flex-wrap:wrap">${_wzPill('loai','DX','Đề xuất thanh toán',W.loai==='DX')}${_wzPill('loai','LUONG','Phiếu lương',W.loai==='LUONG')}${_wzPill('loai','TU','Tạm ứng',W.loai==='TU')}</div>`;
+    if(isPT) body+=`<div style="margin-top:14px;display:flex;gap:8px;flex-wrap:wrap">${_wzPill('loai','DX','Đề xuất thanh toán',W.loai==='DX')}${_wzPill('loai','LUONG','Phiếu lương',W.loai==='LUONG')}${_wzPill('loai','TU','Tạm ứng',W.loai==='TU')}${_nsnnCanUse()?_wzPill('loai','NSNN','🏛 Nộp NSNN',W.loai==='NSNN'):''}</div>`;
     else body+=`<div style="margin-top:14px;display:flex;gap:12px;flex-wrap:wrap;align-items:flex-end">
         <div class="field" style="margin:0;min-width:220px"><label>Tàu *</label><select onchange="_WZ.vesselId=this.value"><option value="">— Chọn tàu —</option>${vs.map(v=>`<option value="${v.id}" ${W.vesselId===v.id?'selected':''}>${esc(v.name)}</option>`).join('')}</select></div>
         ${_wzPill('nature','THUC','Chi thực',W.nature==='THUC')}${_wzPill('nature','HAIMA','🏢 Hải Mã chịu',W.nature==='HAIMA')}${_wzPill('nature','KHOAN','📨 Được khoán',W.nature==='KHOAN')}</div>
@@ -70252,13 +70394,14 @@ function _wzNext1(){
   const W=_WZ;
   if(W.flow==='PT' && W.loai==='LUONG'){ closeModal(); openPayrollModal(); return; }
   if(W.flow==='PT' && W.loai==='TU'){ closeModal(); openAdvanceModal(); return; }
+  if(W.flow==='PT' && W.loai==='NSNN'){ closeModal(); _NS=null; openNsnnForm(); return; }   // v3.67.04
   if(W.flow==='CH' && !W.vesselId){ toast('Chọn tàu','bad'); return; }
   if(W.flow==='CH' && W.nature==='KHOAN' && !(+W.khoanAmt>0)){ toast('Nhập mức khoán của chủ tàu','bad'); return; }
   W.step=2; _wzRender();
 }
 function _wzNext3(){
   const W=_WZ; W.partner=((document.getElementById('wz-partner')||{}).value||W.partner||'').trim();
-  if(W.mode==='TT'){ const e=_benCheck(W.partner); if(e){ toast(e,'bad'); return; } _wzOpenForm(false); return; }
+  if(W.mode==='TT'){ const e=_benCheck(W.partner); if(e){ toast('Gợi ý: '+e,'warn'); } _wzOpenForm(false); return; }   // v3.67.03: chỉ gợi ý
   W.step=4; _wzRender();
 }
 function _wzUploadInvoice(){   // v3.66.85: mở phiếu rồi mở ngay hộp chọn file AI (cùng thao tác bấm)
@@ -70332,11 +70475,11 @@ function _benCardHtml(ctx, rawName){
   const v=_benVendorByName(name);
   if(!v) return `<div style="display:flex;gap:10px;align-items:center;padding:8px 10px;border:1px dashed var(--warn);border-radius:6px;font-size:12px"><span style="flex:1">Chưa có <b>${esc(name)}</b> trong danh mục người thụ hưởng.</span><button class="btn-sec" style="font-size:12px" onclick="openBenForm('${ctx}','',${JSON.stringify(name).replace(/"/g,'&quot;')})">+ Thêm mới</button></div>`;
   const b=v.bank||{}, miss=_benMissing(v);
-  const row=(k,val)=>`<div style="display:flex;gap:10px;font-size:12px"><span style="width:92px;color:var(--muted);flex-shrink:0">${k}</span><span>${val?esc(val):'<span style="color:var(--bad)">— thiếu —</span>'}</span></div>`;
+  const row=(k,val)=>`<div style="display:flex;gap:10px;font-size:12px"><span style="width:92px;color:var(--muted);flex-shrink:0">${k}</span><span>${val?esc(val):'<span style="color:var(--muted)">— chưa có —</span>'}</span></div>`;   // v3.67.03: gợi ý, không báo lỗi
   const acct=[b.accountNo, b.ccy, b.bankName, (v.origin==='FOREIGN'?(b.swift?'SWIFT '+b.swift:''):b.branch)].filter(Boolean).join(' · ');
   return `<div style="display:flex;gap:12px;padding:10px 12px;border:1px solid ${miss.length?'var(--warn)':'var(--rule)'};border-radius:6px;background:var(--paper)">
     <div style="flex:1;display:flex;flex-direction:column;gap:3px">${row('Tên đầy đủ',v.legalName)}${row('Địa chỉ',v.address)}${row(v.kind==='PERSON'?'CCCD':'Mã số thuế',v.taxCode)}${row('Tài khoản',acct)}${v.origin==='FOREIGN'?row('Quốc gia',v.country):''}</div>
-    <div style="display:flex;flex-direction:column;gap:6px;align-items:flex-end">${miss.length?`<span style="font-size:11px;font-weight:600;color:var(--bad)">Thiếu: ${esc(miss.join(', '))}</span>`:'<span style="font-size:11px;font-weight:600;color:var(--good)">Đủ thông tin</span>'}
+    <div style="display:flex;flex-direction:column;gap:6px;align-items:flex-end">${miss.length?`<span style="font-size:11px;font-weight:600;color:#9a5a05">Nên bổ sung: ${esc(miss.join(', '))}</span>`:'<span style="font-size:11px;font-weight:600;color:var(--good)">Đủ thông tin</span>'}
       <button class="btn-sec" style="font-size:12px" onclick="openBenForm('${ctx}','${v.id}')">✎ Sửa</button></div></div>`;
 }
 function _benRefresh(ctx){
@@ -71039,7 +71182,7 @@ function _renderMultiRowModal(){
       <div style="display:flex;align-items:center;gap:8px;margin:0;font-size:12px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--ink)"><span style="display:inline-flex;width:22px;height:22px;border-radius:50%;background:var(--ink);color:#fff;font-size:11px;align-items:center;justify-content:center">1</span>Đầu phiếu</div>
         ${isPayable?`<div style="display:flex;align-items:center;gap:8px">
           <span style="font-size:10px;color:var(--muted)" title="Excel/CSV/XML đọc trực tiếp, không qua AI Gemini — nhanh hơn PDF/ảnh chụp.">Ưu tiên Excel/CSV/XML nếu có — nhanh hơn</span>
-          <input type="file" id="mr-invoice-file" accept=".csv,.xml,.xlsx,.xls" style="display:none" onchange="_mrReadInvoiceFile(this.files[0])">
+          <input type="file" id="mr-invoice-file" accept="${s.purchaseKind==='GOODS'?'.csv,.xml,.xlsx,.xls,.pdf,.png,.jpg,.jpeg,.webp':'.csv,.xml,.xlsx,.xls'}" style="display:none" onchange="_mrReadInvoiceFile(this.files[0])">
           <button type="button" class="btn-sec" style="font-size:11px;padding:5px 12px" onclick="document.getElementById('mr-invoice-file').click()" title="Đọc hóa đơn XML / PDF / CSV + ẢNH & PDF scan (AI Gemini) → app tự điền. Ưu tiên chọn Excel/CSV/XML nếu NCC có gửi — nhanh hơn.">📎 Đọc hóa đơn (AI)</button>
         </div>`:''}
       </div>
@@ -71103,24 +71246,25 @@ function _renderMultiRowModal(){
           // fix như form đơn dòng (ar-expense-grid) — số cột = số ô đang thật sự hiện, không cố định 3.
           const _nCols=1+(gcur?1:0)+(chauList.length?1:0);
           return `
-            <div id="mr-exp-grid" style="display:grid;grid-template-columns:repeat(${_nCols},1fr);gap:8px">
-              <div>
-                <label style="font-size:10px" title="Mặc định cho các dòng thêm SAU — từng dòng vẫn tự chọn lại được riêng ở cột Loại chi phí trong bảng">Nhóm chi phí (mặc định dòng)</label>
-                <select id="mr-exp-group" onchange="_mrHeaderGroupChanged(this.value)">${groupOpts}</select>
+            <div id="mr-exp-grid" style="display:grid;grid-template-columns:repeat(${Math.max(3,_nCols)},minmax(0,1fr));gap:12px;align-items:end">   <!-- v3.67.03: phương án A — 3 cột thẳng hàng -->
+              <div class="field" style="margin:0">
+                <label style="display:block;font-size:10px;margin-bottom:4px" title="Mặc định cho các dòng thêm SAU — từng dòng vẫn tự chọn lại được riêng ở cột Loại chi phí trong bảng">① Nhóm chi phí</label>
+                <select id="mr-exp-group" style="width:100%;height:36px" onchange="_mrHeaderGroupChanged(this.value)">${groupOpts}</select>
               </div>
-              <div id="mr-exp-con-wrap" style="display:${gcur?'':'none'}">
-                <label style="font-size:10px;color:var(--muted)">Loại chi phí</label>
-                <select id="mr-exp-con" onchange="_mrHeaderConChanged(this.value)">${conOpts}</select>
+              <div id="mr-exp-con-wrap" class="field" style="margin:0;display:${gcur?'':'none'}">
+                <label style="display:block;font-size:10px;margin-bottom:4px">② Loại chi phí</label>
+                <select id="mr-exp-con" style="width:100%;height:36px" onchange="_mrHeaderConChanged(this.value)">${conOpts}</select>
               </div>
-              <div id="mr-exp-chau-wrap" style="display:${chauList.length?'':'none'}">
-                <label style="font-size:10px;color:var(--muted)">Chi phí <span style="font-weight:400">(không bắt buộc)</span></label>
-                <select id="mr-exp-chau" onchange="_mrHeaderChauChanged(this.value)">${chauOpts}</select>
+              <div id="mr-exp-chau-wrap" class="field" style="margin:0;display:${chauList.length?'':'none'}">
+                <label style="display:block;font-size:10px;margin-bottom:4px">③ Chi phí <span style="font-weight:400;text-transform:none">(không bắt buộc)</span></label>
+                <select id="mr-exp-chau" style="width:100%;height:36px" onchange="_mrHeaderChauChanged(this.value)">${chauOpts}</select>
               </div>
-              <div id="mr-exp-det-wrap" style="display:none">
-                <label style="font-size:10px;color:var(--muted)">Chi tiết</label>
-                <select id="mr-exp-det" onchange="_mrApplyHeaderType(this.value)"></select>
+              <div id="mr-exp-det-wrap" class="field" style="margin:0;display:none">
+                <label style="display:block;font-size:10px;margin-bottom:4px">③ Chi tiết</label>
+                <select id="mr-exp-det" style="width:100%;height:36px" onchange="_mrApplyHeaderType(this.value)"></select>
               </div>
-            </div>`;
+            </div>
+            <div style="font-size:11px;color:var(--muted);margin-top:6px">Phân loại mặc định cho mọi dòng của phiếu — dòng nào khác thì đổi ở cột Loại chi phí của dòng đó.</div>`;
         })()}
       </div>` : ''}
       ${isPayable?`<div style="display:flex;align-items:center;gap:8px;margin:14px 0 6px;font-size:12px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--ink)"><span style="display:inline-flex;width:22px;height:22px;border-radius:50%;background:var(--ink);color:#fff;font-size:11px;align-items:center;justify-content:center">2</span>Người thụ hưởng</div>`:''}
@@ -71926,6 +72070,8 @@ async function _invoiceViaAI(file){
     else if(rv.matched==='similar') toast('⚠ NCC gần giống: '+rv.similarName+' — kiểm lại tránh trùng','warn');
     // v3.04.66: hóa đơn nhiều dòng (khác thuế suất) → nhiều dòng preview
     const aiLines=Array.isArray(d.lines)&&d.lines.length?d.lines:[{desc:d.desc||'',amountNet:+d.amountNet||0,vatPercent:+d.vatPercent||0}];
+    try{ const _qi=aiLines.map(L=>({name:String(L.desc||L.name||'').trim(), code:String(L.code||'').trim(), unit:String(L.unit||L.uom||'').trim(), qty:+(L.qty||L.quantity||0), price:+(L.unitPrice||L.price||0)})).filter(x=>x.name&&x.qty>0);
+      if(_qi.length && !(window._mrQuoteDetailLines&&window._mrQuoteDetailLines.length)) window._mrQuoteDetailLines=_qi; }catch(e){}   // v3.67.09: ảnh/scan — lấy SL/đơn giá nếu AI trả về
     _invoiceParsed={ source:'ai', lines: aiLines.map(L=>{
       const net=Number(L.amountNet)||0, vatPct=Number(L.vatPercent)||0;
       return {
@@ -71995,7 +72141,8 @@ async function _mrReadInvoiceFile(file, target){
   {
     const _ext=(file.name.split('.').pop()||'').toLowerCase();
     const _isImg=String(file.type||'').startsWith('image/');
-    if(_ext==='pdf' || _isImg){
+    const _goods=(_invoiceTarget==='multirow' && _multiRowState && _multiRowState.purchaseKind==='GOODS');   // v3.67.07 (Sếp): nhập kho → đọc lại PDF/ảnh
+    if((_ext==='pdf' || _isImg) && !_goods){
       toast('Không đọc PDF/ảnh ở đây — dùng CSV/XML/Excel để tạo phiếu. Muốn đọc PDF/ảnh, thực hiện ở bước Nhập kho (nút 📦 ngoài Sổ phải trả).','bad');
       return;
     }
@@ -72042,11 +72189,15 @@ async function _mrReadInvoiceFile(file, target){
       const buf=await file.arrayBuffer();
       const wb=XLSX.read(new Uint8Array(buf),{type:'array'});
       try{
-        const aoa=XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]],{header:1,defval:''});
-        const {items}=whParseQuoteRows(aoa);
-        if(items&&items.length) window._mrQuoteDetailLines=items;
+        let best=[]; wb.SheetNames.forEach(sn=>{ try{ const aoa=XLSX.utils.sheet_to_json(wb.Sheets[sn],{header:1,defval:''}); const {items}=whParseQuoteRows(aoa); if(items&&items.length>best.length) best=items; }catch(e){} });   // v3.67.07: mọi sheet
+        if(best.length) window._mrQuoteDetailLines=best;
       }catch(e){ console.warn('[mr-quote-detail-xlsx]',e); }
       _invoiceParsed=_invoiceFromTkhq(wb);
+      if(!_invoiceParsed && window._mrQuoteDetailLines && window._mrQuoteDetailLines.length){   /* v3.67.07: Excel hóa đơn / báo giá / packing list → dòng phiếu từ bảng hàng */
+        const _cc=(_multiRowState&&_multiRowState.ccy)||'VND';
+        _invoiceParsed={source:'xlsx-items', lines:window._mrQuoteDetailLines.map(it=>({_qItem:it, partner:'', vendorTaxCode:'', invoiceNo:'', issueDate:'', desc:it.name+(it.unit?(' ('+it.qty+' '+it.unit+')'):(' (SL '+it.qty+')')), amountNet:Math.round((+it.qty||0)*(+it.price||0)*100)/100, vatPercent:0, vatAmount:0, ccy:_cc}))};
+        toast('✓ Đọc được '+_invoiceParsed.lines.length+' dòng hàng (tên / SL / đơn giá) — kiểm lại NCC, số HĐ, thuế','good');
+      }
       if(!_invoiceParsed){ toast('Excel không nhận diện được là tờ khai hải quan — nhập tay'+(window._mrQuoteDetailLines?' (đã đọc được '+window._mrQuoteDetailLines.length+' dòng SL/Đơn giá — vẫn giữ lại, dùng khi Nhập kho)':''),'bad'); return; }
       toast('✓ Đã đọc tờ khai HQ '+(_invoiceParsed._declNo||''),'good');
     } else if(/^(png|jpe?g|webp|gif|bmp|tif?f|heic)$/i.test(ext) || /^image\//i.test(file.type||'')){
@@ -72355,7 +72506,8 @@ function _applyInvoiceToForm(){
      như trước — nếu không, import hóa đơn A rồi B vào cùng 1 phiếu sẽ khiến cả 2 dòng cùng thấy
      chung 1 danh sách mặt hàng gộp, lẫn hàng của B vào lúc Nhập kho hóa đơn A. _mrSave đọc
      l._quoteLines (xem đoạn tạo record). */
-  const qLines=(window._mrQuoteDetailLines&&window._mrQuoteDetailLines.length&&srcLines.length===1)?window._mrQuoteDetailLines:null;
+  const _perLine=srcLines.some(l=>l&&l._qItem);   // v3.67.09: Excel bảng hàng → mỗi dòng mang đúng mặt hàng của nó
+  const qLines=(!_perLine && window._mrQuoteDetailLines && window._mrQuoteDetailLines.length)?window._mrQuoteDetailLines:null;   // v3.67.09: bỏ điều kiện "chỉ 1 dòng" — gắn dòng đầu của CHÍNH hóa đơn này
   window._mrQuoteDetailLines=null;
   const first=srcLines[0]||{};
   const newLines=srcLines.map((l,idx)=>{
@@ -72368,7 +72520,8 @@ function _applyInvoiceToForm(){
       costCategory:l.expenseType||'', expenseType:l.expenseType||'', segment:s.segment||'OTHER', ccy:l.ccy||s.ccy||'VND',
       dueDate:'', vesselId:'', projectId:''
     };
-    if(idx===0 && qLines) nl._quoteLines=qLines;
+    if(l._qItem) nl._quoteLines=[l._qItem];
+    else if(idx===0 && qLines) nl._quoteLines=qLines;
     return nl;
   });
   const onlyEmpty = s.lines.length===1 && !(s.lines[0].amountNet>0) && !s.lines[0].desc;
@@ -72559,7 +72712,7 @@ function _mrExpGridRebalance(){
   const chauWrap=document.getElementById('mr-exp-chau-wrap');
   const detWrap=document.getElementById('mr-exp-det-wrap');   // v3.66.53: ô thứ 4 "Chi tiết"
   const n=1+(conWrap&&conWrap.style.display!=='none'?1:0)+(chauWrap&&chauWrap.style.display!=='none'?1:0)+(detWrap&&detWrap.style.display!=='none'?1:0);
-  grid.style.gridTemplateColumns='repeat('+n+',1fr)';
+  grid.style.gridTemplateColumns='repeat('+Math.max(3,n)+',minmax(0,1fr))';   // v3.67.03: luôn đủ 3 cột → ô không giãn lệch
 }
 function _mrHeaderGroupChanged(gk){
   _multiRowState.expenseGroup=gk||'';
@@ -72854,7 +73007,7 @@ async function _mrSave(targetStatus){
   const err = document.getElementById('mr-err');
   err.textContent = '';
   // v3.66.72: người thụ hưởng phải đủ thông tin (trừ Phiếu lương, Dự kiến, Phải thu)
-  if(s.mode==='ap' && !s.payroll && !s.budgetMode){ const _be=_benCheck(s.partner); if(_be){ err.textContent=_be; try{ toast(_be,'bad'); }catch(e){} return; } }
+  if(s.mode==='ap' && !s.payroll && !s.budgetMode){ const _be=_benCheck(s.partner); if(_be){ try{ toast('Gợi ý: '+_be,'warn'); }catch(e){} } }   // v3.67.03 (Sếp): không bắt buộc — chỉ gợi ý
   if(s.mode==='ap' && s.khoanOn){ const _km=[]; if(!s.khoanVesselId)_km.push('Tàu QL hộ'); if(!s.khoanCat)_km.push('Loại khoản khoán'); if(!s.khoanPeriod)_km.push('Kỳ khoán'); if(!(+s.khoanDoiAmt>0))_km.push('Mức khoán đòi chủ tàu');
     if(_km.length){ err.textContent='Khoán: còn thiếu '+_km.join(', '); return; } }   // v3.66.73
 
@@ -77727,7 +77880,7 @@ function _opMrSave(){
   if(s.ccy!=='USD' && s.ccy!=='VND' && !(+s.fxUsd>0)){ if(+S.fxRate>0) s.fxUsd=+((+s.fxInput)/(+S.fxRate)).toFixed(4); else { if(err) err.textContent='Nhập tỷ giá → USD (1 '+s.ccy+' = ? USD)'; return; } }   /* v3.66.83 */
   const valid=s.lines.filter(l=>(+l.gross||0)>0 && (l.desc||'').trim());
   if(!valid.length){ if(err) err.textContent='Cần ít nhất 1 dòng có Diễn giải + Gross > 0'; return; }
-  if(!s.defaultBudget){ const _be=_benCheck(s.vendor); if(_be){ if(err) err.textContent=_be; try{ toast(_be,'bad'); }catch(e){} return; } }   // v3.66.72
+  if(!s.defaultBudget){ const _be=_benCheck(s.vendor); if(_be){ try{ toast('Gợi ý: '+_be,'warn'); }catch(e){} } }   // v3.67.03: chỉ gợi ý
   // v3.06.00: cảnh báo nhập trễ > 5 ngày so với ngày phiếu/HĐ → bắt nhập lý do.
   let _lateReasonOp='', _lateDaysOp=0;
   { const _lc=_checkLateEntry(s.date);
@@ -88402,16 +88555,17 @@ function whPriorReceivedByKey(docs){
 function whParseQuoteRows(aoa){
   const items=[], errors=[]; const norm=s=>whNormName(s);
   let hRow=-1, col={};
-  for(let r=0;r<Math.min((aoa||[]).length,10);r++){
+  for(let r=0;r<Math.min((aoa||[]).length,40);r++){   // v3.67.07: 10 → 40 dòng (phần đầu hóa đơn dài)
     const cells=(aoa[r]||[]).map(c=>norm(c));
-    const iName=cells.findIndex(c=>/^ten( hang( hoa)?| vat tu| vt)?$/.test(c)||/dien giai|hang hoa/.test(c));
-    const iQty=cells.findIndex(c=>/so luong|^sl$|khoi luong/.test(c));
+    let iName=cells.findIndex(c=>/^ten( hang( hoa)?| vat tu| vt)?$/.test(c)||/dien giai|hang hoa|ten san pham|mo ta|noi dung|quy cach|description|product|goods|material/.test(c));
+    if(iName<0) iName=cells.findIndex(c=>/^item( name)?$/.test(c));   // "Item" chỉ dùng khi không có cột mô tả
+    const iQty=cells.findIndex(c=>/so luong|^sl$|khoi luong|^qty|quantity|q ty/.test(c));
     if(iName>=0&&iQty>=0){
       hRow=r;
       col={name:iName, qty:iQty,
         code:cells.findIndex(c=>/^ma( vat tu| vt| hang)?$/.test(c)||c==='ma'),
-        unit:cells.findIndex(c=>/don vi|dvt/.test(c)),
-        price:cells.findIndex(c=>/don gia|gia/.test(c)) };
+        unit:cells.findIndex(c=>/don vi|dvt|^unit$|uom/.test(c)),
+        price:cells.findIndex(c=>/don gia|unit price|^price|^gia|rate/.test(c)) };
       break;
     }
   }
@@ -88420,12 +88574,14 @@ function whParseQuoteRows(aoa){
     const row=aoa[r]||[];
     const name=String(row[col.name]||'').trim();
     if(!name) continue;
-    const rawQ=String(row[col.qty]||'').replace(/[, ]/g,'');
+    const _num=v=>{ if(typeof v==='number') return v; let t=String(v||'').replace(/[^\d.,\-]/g,''); if(!t) return NaN; const lc=t.lastIndexOf(','), ld=t.lastIndexOf('.');
+      if(lc>=0&&ld>=0){ t=lc>ld?t.replace(/\./g,'').replace(',','.'):t.replace(/,/g,''); } else if(lc>=0){ t=(t.length-lc-1===3&&t.split(',').length>1)?t.replace(/,/g,''):t.replace(',','.'); } else if(ld>=0&&t.split('.').length>2){ t=t.replace(/\./g,''); }
+      return +t; };   // v3.67.07: đọc số cả kiểu 1.234,5 và 1,234.5
+    const rawQ=String(row[col.qty]??'').trim();
     if(rawQ==='') continue;
-    const qty=+rawQ;
+    const qty=_num(row[col.qty]);
     if(!(qty>0)){ if(isNaN(qty)) errors.push({row:r+1,msg:'Dòng "'+name.slice(0,30)+'" SL không phải số'}); continue; }
-    const rawP=col.price>=0?String(row[col.price]||'').replace(/[^\d,.\-]/g,''):'';
-    const price=rawP?(+rawP.replace(/\./g,'').replace(',','.')||0):0;   /* v3.20.21: dò được cột Đơn giá từ trước nhưng bỏ phí — nay lấy vào để NV đối chiếu với báo giá */
+    const price=col.price>=0?(_num(row[col.price])||0):0;   /* v3.20.21: dò được cột Đơn giá từ trước nhưng bỏ phí — nay lấy vào để NV đối chiếu với báo giá */
     items.push({ name, code:String(row[col.code>=0?col.code:-1]||'').trim(), unit:String(row[col.unit>=0?col.unit:-1]||'').trim(), qty, price });
   }
   return {items, errors};
@@ -89418,7 +89574,14 @@ function whCanConfirmByBbgn(d){
    không đoán số liệu. */
 function whParseQuotePdfLines(text){
   const T=String(text||'').replace(/\u00a0/g,' ');
-  const lines=T.split(/\n+/).map(l=>l.replace(/\s+/g,' ').trim()).filter(Boolean);
+  let lines=T.split(/\n+/).map(l=>l.replace(/\s+/g,' ').trim()).filter(Boolean);
+  /* v3.67.08 (Sếp — file báo giá DHN/Keystone): pdf.js tách MỖI Ô của 1 dòng bảng thành dòng riêng (STT đứng một
+     mình, tên hàng xuống 2 dòng, ĐVT một dòng, "SL đơn giá thành tiền" một dòng). Ghép lại: gặp dòng CHỈ có STT
+     → gom các dòng sau cho tới dòng kết thúc bằng ≥2 con số (SL + đơn giá / thành tiền) thành 1 dòng hoàn chỉnh. */
+  { const merged=[]; for(let i=0;i<lines.length;i++){ const l=lines[i];
+      if(/^\d{1,3}$/.test(l)){ let buf=l, j=i+1; while(j<lines.length && j<=i+8){ buf+=' '+lines[j]; if(/(\d[\d.,]*)\s+(\d[\d.,]*)\s*$/.test(lines[j])) break; if(/^\d{1,3}$/.test(lines[j+1]||'')) break; j++; }
+        merged.push(buf); i=j; } else merged.push(l); }
+    lines=merged; }
   /* v3.20.19b (test thật trên file PhuThaiCat 8 dòng): PDF thật ngắt dòng tiêu đề qua nhiều dòng
      ("STT Mã Số Mã Số" / "Mới Diễn Giải ĐVT" / "Số" / "lượng Đơn Giá..." tách rời) — chờ đủ cả 3 từ
      khóa trên CÙNG 1 dòng sẽ không bao giờ khớp. Bỏ hẳn cổng dò dòng tiêu đề, chỉ dựa vào KHUÔN DÒNG
@@ -89453,7 +89616,7 @@ function whParseQuotePdfLines(text){
     const um=umList[umList.length-1];
     const before=body.slice(0,um.index).trim();
     const after=body.slice(um.index+um[0].length).trim();
-    const codeMatch=before.match(/^([A-Z0-9][A-Z0-9\-\.\/]{2,20})\s+/i);
+    const codeMatch=before.match(/^((?=[A-Z0-9\-\.\/]*\d)[A-Z0-9][A-Z0-9\-\.\/]{2,20})\s+/i);   // v3.67.08: mã hàng phải có chữ số (tránh nhận nhầm "Dung", "Bơm"… làm mã)
     const code=codeMatch?codeMatch[1]:'';
     let name=(codeMatch?before.slice(codeMatch[0].length):before).trim();
     /* v3.20.144 (Sếp — file Hải Bình/An Phú: tên hàng dài bị PDF ngắt xuống dòng RIÊNG phía TRÊN,
@@ -98061,6 +98224,7 @@ function _nsnnSumManual(period){
 /* v3.10.24 — map expenseType.code → nsnnType (loại thuế NSNN). Đọc từ catalog expenseTypes. */
 function _expenseCodeToNsnnType(code){
   if(!code) return null;
+  if(typeof code==='object'){ if(code.nsnnType) return code.nsnnType; code=code.expenseType; if(!code) return null; }   // v3.67.04: phiếu Nộp NSNN mang nsnnType riêng
   const et=(S.expenseTypes||[]).find(t=>t.code===code);
   return (et && et.nsnnType) ? et.nsnnType : null;
 }
@@ -98074,7 +98238,7 @@ function _nsnnSumPaidFromAP(period){
   const yr=String(period).slice(0,4);
   (AccountingService.payables()||[]).forEach(r=>{
     if(!r || !r.expenseType) return;
-    const nt=_expenseCodeToNsnnType(r.expenseType);
+    const nt=_expenseCodeToNsnnType(r.nsnnType?r:r.expenseType);   // v3.67.04
     if(!nt) return;   // không phải phiếu thuế
     // kỳ thuế của phiếu: taxPeriod (nếu nhập) → năm; mặc định = năm ngày hóa đơn
     const taxYr=String(r.taxPeriod||r.issueDate||r.date||'').slice(0,4);
