@@ -1558,6 +1558,8 @@ span.chip.chip-fixed{display:inline-flex;align-items:center;gap:4px}
       <div class="hrm-side-item" id="vm-si-crewchange" style="display:none" onclick="vmModSwitchView('crewchange')" title="Crew Change — mọi thay đổi ghi thẳng vào theo dõi chung tại Nhân sự">⚓ Crew Change</div>
       <div class="hrm-side-item" id="vm-si-crewlist" style="display:none" onclick="vmModSwitchView('crewlist')">👤 Hồ sơ thuyền viên</div>
       <div class="hrm-side-item" id="vm-si-crewsalary" style="display:none" onclick="vmModSwitchView('crewsalary')">🪪 Thẻ lương thuyền viên</div>
+      <div class="hrm-side-item" id="vm-si-crewqd" style="display:none" onclick="openCrewDocs('QD')">📜 Quyết định điều động</div>   <!-- v3.67.12 -->
+      <div class="hrm-side-item" id="vm-si-crewbrief" style="display:none" onclick="openCrewDocs('BRIEF')">📋 Hướng dẫn nhanh nhận ca</div>
       <div class="hrm-side-hdr">Báo cáo ngày</div>
       <div class="hrm-side-item" onclick="openDailyReportModal(null)">📝 Thêm báo cáo ngày</div>
       <div class="hrm-side-hdr">Dự án</div>
@@ -4727,7 +4729,7 @@ const WH_TYPES = {
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.67.10';
+const APP_VERSION='3.67.15';
 /* HOTFIX 3.12.17-email: CHẶN TRIỆT ĐỂ gửi email TỰ ĐỘNG (mất kiểm soát — spam quota Google).
    Email phải do NV được phân quyền CHỦ ĐỘNG chọn gửi. Cờ này:
    (1) chặn auto-SCAN tạo email (hrmScanExpiries/vesselCertScanExpiries);
@@ -8329,8 +8331,8 @@ const PRESET_ROLES={
 const TAB_TO_FIELDS={
   plan:           ['plans','dockPlans','projects','vessels','opVessels','receivables','payables','fixedAssets'],
   projects:       ['projects'],
-  vessels:        ['vessels','onhires','events','dailyReports','darReports','darTemplates','warehouses','stockDocs','materials','materialGroups','invGroups','tools','toolMovements'],   /* v3.18.62 · v3.66.62: +tools (MMTB & CCDC từng tàu) · v3.66.61: +dữ liệu tồn (chỉ số lượng) cho "📦 Tồn kho" tại module Quản lý tàu */
-  hrm:            ['hrEmployees','hrHistory','hrAttendance','crewAssignments','crewTimesheets','crewChangePlans','crewManning','crewRotationConfig','positions','vessels','opVessels','opTransactions','projects','bccSheets','ntpPayCards'],   /* v3.65.19: +ntpPayCards — thẻ lương NTP, HR tạo/sửa tại đây */
+  vessels:        ['crewDocs','crewRankMap','vessels','onhires','events','dailyReports','darReports','darTemplates','warehouses','stockDocs','materials','materialGroups','invGroups','tools','toolMovements'],   /* v3.18.62 · v3.66.62: +tools (MMTB & CCDC từng tàu) · v3.66.61: +dữ liệu tồn (chỉ số lượng) cho "📦 Tồn kho" tại module Quản lý tàu */
+  hrm:            ['crewDocs','crewRankMap','hrEmployees','hrHistory','hrAttendance','crewAssignments','crewTimesheets','crewChangePlans','crewManning','crewRotationConfig','positions','vessels','opVessels','opTransactions','projects','bccSheets','ntpPayCards'],   /* v3.65.19: +ntpPayCards — thẻ lương NTP, HR tạo/sửa tại đây */
   receivables:    ['receivables','projects','vessels','opVessels'],
   periodic:       ['receivables','payables','opVessels','opTransactions','opMgmtFees','ownerReportLocks','qnExpenseCats','projects','vessels'],
   fin_accounting: ['receivables','payables','cashFunds','cashTxns','bankAccounts','bankSnapshots','bankTransfers','loans','creditFacilities','opVessels','opTransactions','projects','vessels','advances','taxes','bccSheets'],   /* v3.65.17: +bccSheets — TCKT cũng có BCC riêng (modBccModalOpen('KT',...)), cùng lỗi thiếu sync như hrm */
@@ -8371,7 +8373,7 @@ const TAB_TO_FIELDS={
 const SHARED_FIELDS=['fxRate','fxRateAt','displayCcy','displayCcyAt','companyInfo','meta','presence','vesselExpenseCats','omProjectExpenseCats','hrExpenseCats','qnExpenseCats','departments','vendors','expenseTypes','revenueTypes','companies','deletedIds','purgedBatches','purgedContent','auditLogShared','cashflowConfig'];
 /* All possible data fields (used by admin or for save-merge) */
 const ALL_DATA_FIELDS=[
-  'archiveLibrary',
+  'archiveLibrary','crewDocs','crewRankMap',   /* v3.67.12: Quyết định điều động / Hướng dẫn nhanh nhận ca */
   'plans','dockPlans','projects','vessels','onhires','events','dailyReports',
   // v3.20.369 (Sếp: "Doanh thu dự kiến nhập tay 1 lần cho cả năm... đánh giá thực hiện theo dự kiến
   // với từng tàu" — module Thương mại, tàu CHỈ gắn theo (vesselId tham chiếu), KHÔNG đụng form tàu):
@@ -16351,10 +16353,26 @@ function crewRenderPlans(hostId, filterVid){
       <td class="mono" style="font-size:11px">${esc((p.reliefDate||'').slice(0,10)||'—')}</td>
       <td>${_crewPlanStatusChip(p.status)}</td>
       <td style="font-size:11px;color:var(--muted)">${esc((p.note||'').slice(0,30))}</td>
-      <td class="c">${canEdit?`<button class="icon-btn" onclick="openCrewPlanModal('${p.id}')" title="Sửa">✎</button><button class="icon-btn danger" onclick="deleteCrewPlan('${p.id}')" title="Xóa">✕</button>`:''}</td>
+      <td class="c">${_cdCanUse()?`<button class="icon-btn" onclick="crewPlanDocs('${p.id}')" title="Giấy tờ: QĐ điều động / nghỉ ca / hướng dẫn">📄</button>`:''}${canEdit?`<button class="icon-btn" onclick="openCrewPlanModal('${p.id}')" title="Sửa">✎</button><button class="icon-btn danger" onclick="deleteCrewPlan('${p.id}')" title="Xóa">✕</button>`:''}</td>
     </tr>`;
   }).join('');
 }
+
+/* v3.67.15: Crew Change → giấy tờ cho người LÊN tàu (QĐ điều động + hướng dẫn) và người XUỐNG tàu (QĐ nghỉ ca) */
+function crewPlanDocs(planId){
+  const p=(S.crewChangePlans||[]).find(x=>x.id===planId); if(!p) return;
+  const on=p.reliefEmpId?(HRService.employees()||[]).find(x=>x.id===p.reliefEmpId):null, off=p.empId?(HRService.employees()||[]).find(x=>x.id===p.empId):null;
+  const vn=anyVesselName(p.vesselId)||'', ri=_cdRankInfo(p.title||(on&&on.title)||''), rec=_CD_DEPT_TPL[ri.dept];
+  const o=(extra)=>JSON.stringify(Object.assign({vesselId:p.vesselId, planId:p.id, rank:p.title||''},extra)).replace(/"/g,'&quot;');
+  const btn=(lab,js)=>`<button class="btn-sec" style="display:block;width:100%;text-align:left;margin-bottom:6px" onclick="${js}">${lab}</button>`;
+  openModal('📄 Giấy tờ Crew Change — '+esc(vn), `
+    <div style="font-size:12px;font-weight:700;margin-bottom:6px">⬆ LÊN TÀU: ${on?esc(on.fullName||''):'<span style="color:var(--warn)">chưa chỉ định người thay</span>'} · ${esc(p.title||'')} · ${esc(_cdD(p.reliefDate||''))}</div>
+    ${on?btn('📜 Quyết định điều động',`openCrewDocFor('QD','${on.id}',${o({sub:'DD',fromDate:p.reliefDate||''})})`)+(rec?btn('📋 Hướng dẫn theo chức danh — '+esc(CREW_TPL.meta[rec].label),`openCrewDocFor('BRIEF','${on.id}',${o({tpl:rec})})`):'')+btn('📋 Hướng dẫn chung trước khi lên tàu (FRM-003)',`openCrewDocFor('BRIEF','${on.id}',${o({tpl:'FRM016G'})})`):''}
+    <div style="font-size:12px;font-weight:700;margin:12px 0 6px">⬇ XUỐNG TÀU: ${off?esc(off.fullName||''):'—'} · ${esc(_cdD(p.plannedSignoffDate||''))}</div>
+    ${off?btn('📜 Quyết định nghỉ ca',`openCrewDocFor('QD','${off.id}',${o({sub:'NC',fromDate:p.plannedSignoffDate||'',rank:off.title||p.title||''})})`):''}`,
+    `<button class="btn-ghost" onclick="closeModal()">Đóng</button>`);
+}
+
 function openCrewPlanModal(id, presetEmp, presetVessel){
   const isEdit=!!id;
   const p=isEdit?(S.crewChangePlans||[]).find(x=>x.id===id):{status:'planned', empId:presetEmp||'', vesselId:presetVessel||''};
@@ -44777,6 +44795,7 @@ function finGoSection(page,sectionId,afterFn){
   }, 60);
 }
 function navigateToPage(pageId){
+  setTimeout(()=>{ try{ _modMyTabsRefresh(); }catch(e){} },0);   // v3.67.11
   if(pageId==='catalog') window._catalogDeptOnly=false;   // v3.17.27: vào Danh mục đường thường → đầy đủ
   // v3.63.57 (Sếp — ảnh: "NS danh sách bị kẹt ở công ty con"): TÌM RA LỖI THẬT — window._coDashSelectedCompanyId
   // (công ty đang chọn trong dropdown "Công ty con") được SET khi mở co_dashboard nhưng KHÔNG BAO GIỜ
@@ -49116,6 +49135,313 @@ function vmModSwitchView(v){
 // v3.66.07 (Sếp: "Tab QUẢN LÝ THUYỀN VIÊN CHỈ Trưởng bộ phận và Nhân sự thuyền viên được thấy"):
 // đúng khuôn _modCanManageStaff (Admin/BOD/CEO/Trưởng bộ phận Module) — CỘNG THÊM vai trò mới "Nhân
 // sự thuyền viên" (canPayrollHrView + payrollHrScopes chứa 'crew').
+const CREW_LOGO="data:image/png;base64,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";
+const CREW_TPL={"data": {"FRM014": [{"no": "1", "t": "Chức danh, nhiệm vụ, trách nhiệm và tuyến báo cáo khi làm việc trên tàu.\nRank-specific duties, responsibilities and reporting line on board."}, {"no": "2", "t": "Yêu cầu trực ca boong/buồng lái, bàn giao ca trực, ghi chép nhật ký và quản lý mệt mỏi/giờ nghỉ.\nDeck/bridge watchkeeping requirements, watch handover, log keeping and fatigue/hours of rest management."}, {"no": "3", "t": "Nội quy buồng lái, Master's Standing Orders/Night Orders, COLREG, cảnh giới và thông tin liên lạc.\nBridge discipline, Master's Standing Orders/Night Orders, COLREG, lookout and communication requirements."}, {"no": "4", "t": "Trang thiết bị thông tin liên lạc: GMDSS, VHF/UHF, VSAT, Inmarsat và thiết bị liên quan.\nCommunication equipment: GMDSS, VHF/UHF, VSAT, Inmarsat and related equipment."}, {"no": "5", "t": "Trang thiết bị hàng hải: radar, ECDIS/chart, GPS, AIS, la bàn điện, la bàn từ, echo sounder và các thiết bị liên quan.\nNavigation equipment: radar, ECDIS/charts, GPS, AIS, gyro compass, magnetic compass, echo sounder and related equipment."}, {"no": "6", "t": "Hệ thống DP, reference systems, ASOG/CAMO và yêu cầu trực DP nếu áp dụng.\nDP system, position reference systems, ASOG/CAMO and DP watchkeeping requirements, if applicable."}, {"no": "7", "t": "Kế hoạch hành trình, hải đồ/ấn phẩm hàng hải, Notices to Mariners và kiểm soát passage plan.\nPassage plan, charts/publications, Notices to Mariners and passage plan control."}, {"no": "8", "t": "Hệ thống neo, tời neo, xích neo, windlass brake và yêu cầu anchor watch.\nAnchor, windlass, anchor chain, windlass brake and anchor watch requirements."}, {"no": "9", "t": "Hệ thống mooring: dây buộc tàu, tời/capstan/tugger, fairlead, bollard, chock, stopper và snap-back zone.\nMooring system: mooring lines, winches/capstans/tuggers, fairleads, bollards, chocks, stoppers and snap-back zones."}, {"no": "10", "t": "An toàn thao tác buộc/cởi dây, làm việc với tàu kéo, cập/rời cảng và giao tiếp trong mooring operation.\nSafety during mooring/unmooring, tug assistance, berthing/unberthing and communications during mooring operations."}, {"no": "11", "t": "Thiết bị nâng hạ, lifting gear, kiểm tra trước sử dụng, SWL, color code và kiểm soát lifting operation.\nLifting appliances/gears, pre-use inspection, SWL, color code and lifting operation control."}, {"no": "12", "t": "Deck cargo, cargo securing, cargo manifest và kiểm soát hàng nguy hiểm/IMDG nếu áp dụng.\nDeck cargo, cargo securing, cargo manifest and dangerous goods/IMDG control, if applicable."}, {"no": "13", "t": "FRC/rescue boat/SOLAS boat: nhiệm vụ, yêu cầu an toàn, launching/recovery và giới hạn vận hành nếu áp dụng.\nFRC/rescue boat/SOLAS boat: duties, safety requirements, launching/recovery and operating limitations, if applicable."}, {"no": "14", "t": "LSA/FFA, tín hiệu báo động, muster list, vị trí tập trung, nhiệm vụ khẩn cấp và đường thoát nạn.\nLSA/FFA, emergency alarms, muster list, muster station, emergency duties and escape routes."}, {"no": "15", "t": "Hệ thống PTW: hot work, enclosed space entry, working at height, over-side work, lifting work và các công việc yêu cầu giấy phép.\nPTW system: hot work, enclosed space entry, working at height, over-side work, lifting work and other permit-required tasks."}, {"no": "16", "t": "Risk Assessment/JSA, toolbox meeting, và yêu cầu dừng việc khi không an toàn.\nRisk Assessment/JSA, toolbox meeting, and requirement to stop work when unsafe."}, {"no": "17", "t": "Stop Work Authority, PPE, housekeeping, kiểm soát trượt/ngã và an toàn khi làm việc trên boong.\nStop Work Authority, PPE, housekeeping, slip/trip/fall prevention and deck working safety."}, {"no": "18", "t": "Quy trình báo cáo near miss, unsafe act/condition, incident, non-conformity, defect và yêu cầu corrective action.\nNear miss, unsafe act/condition, incident, non-conformity and defect reporting, including corrective action requirements."}, {"no": "19", "t": "Bảo vệ môi trường: SOPEP/SMPEP, oil spill response, garbage management, MARPOL và ngăn ngừa ô nhiễm.\nEnvironmental protection: SOPEP/SMPEP, oil spill response, garbage management, MARPOL and pollution prevention."}, {"no": "20", "t": "ISPS, kiểm soát người lên tàu, gangway watch, visitor log và thái độ ứng xử với khách hàng/charterer.\nISPS, access control, gangway watch, visitor log and conduct toward Client/Charterer personnel."}, {"no": "21", "t": "Yêu cầu dự án/khách hàng/Charterer, OVID/GOMO, 500m safety zone và pre-entry checklist nếu áp dụng.\nProject/Client/Charterer requirements, OVID/GOMO, 500m safety zone and pre-entry checklist, if applicable."}, {"no": "22", "t": "Các tồn tại, hạn chế, hoặc nội dung cần tiếp tục familiarization sau khi lên tàu.\nOutstanding matters, limitations or items requiring further onboard familiarization after joining."}], "FRM014_conf": "I confirm that I have been briefed on the above items, understood the requirements relevant to my rank and department, and will comply with the Company SMS/IMS, vessel procedures, and applicable safety, environmental, security and client requirements. Any unclear item or outstanding matter shall be reported to the Master/responsible officer after joining.\nTôi xác nhận đã được hướng dẫn các nội dung nêu trên, đã hiểu các yêu cầu liên quan đến chức danh và bộ phận của mình, và sẽ tuân thủ SMS/IMS của Công ty, quy trình trên tàu, cũng như các yêu cầu về an toàn, môi trường, an ninh và khách hàng nếu áp dụng. Các nội dung chưa rõ hoặc còn tồn tại sẽ được báo cáo cho Thuyền trưởng/sĩ quan phụ trách sau khi lên tàu.", "FRM015_note": "Ghi chú: Ngoài các nội dung hướng dẫn trên đây, Thuyền trưởng chịu trách nhiệm tuân thủ và hướng dẫn cho thuyền viên tuân thủ các nội dung quy định theo  Thông tư số 07 / 2012 / TT-BGTVT - Quy định về chức danh, nhiệm vụ theo chức danh của thuyền viên và đăng ký thuyền viên làm việc trên tàu biển Việt Nam.\nNote: In addition to the above guidance, Captain shall be responsible to comply with and guide for crew to comply with the contents specified in Circular No 07/2012/TT-BGTVT – stipulated the title, the mission of the crew and registration of the crew working on board of Vietnamese ships.", "FRM015": [{"no": "I", "t": "Hệ thống Máy lạnh thực phẩm / Freeze System"}, {"no": "1", "t": "Hướng dẫn theo dõi, ghi chép, nhiệt độ kho lạnh/ Instructed to monitor & note the system temperature on daily"}, {"no": "II", "t": "Trang thiết bị bộ phận bếp / Kitchen equipment"}, {"no": "1", "t": "Hướng dẫn vệ sinh dụng cụ, khu vực bếp sau khi sử dụng/ Instructed the hygienic the cooking tool & working area"}, {"no": "III", "t": "Trang thiết bị cứu sinh, cứu hỏa / LSA and FFA"}, {"no": "", "t": "Hệ thống trang thiết bị cứu sinh (theo UKOOA dành cho tàu st/by đặc biệt). - LSA"}, {"no": "", "t": "Hệ thống SCBA, Fireman outfit cho tàu FiFi 1 – SCBA and Fireman Outfit"}, {"no": "", "t": "Hệ thống trang thiết bị cứu hỏa di động (các bình cứu hỏa xách tay) /FFA."}, {"no": "", "t": "Hướng dẫn nhiệm vụ trong tình huống khẩn cấp/ Instructed duty in emergency case."}, {"no": "IV", "t": "Thực phẩm, vật tư tiêu dùng thường xuyên / Food, consumable"}, {"no": "", "t": "Tiêu chuẩn định mức bữa ăn cho thuyền viên/Meal allowance for crew members"}, {"no": "", "t": "Tiêu chuẩn định mức cho hành khách theo tàu (nếu có)/Meal allowance for passenger"}, {"no": "", "t": "Theo dõi nhiệt độ kho lạnh thực phẩm/ Mornitor the Chiller temperature"}, {"no": "", "t": "Hướng dẫn đọc kỹ quy trình  HSE-PR-004 Inspection of Labor Safety, Sanitation and Hygiene, HSE-PR-005 Medical - Food Safety - Sanitation , SME-IMS-PR-010-PLN-001 Ship Contingency Plan"}], "FRM016E": [{"no": "I", "t": "Đặc điểm chính của tàu/Specification", "fixed": "Tham khảo bảng thông số tàu đính kèm"}, {"no": "II", "t": "Tình trạng kỹ thuật/Technical status.", "fixed": ""}, {"no": "1", "t": "Máy chính và hệ trục/ Máy đèn\nMain engine and shafting system/Generator", "fixed": ""}, {"no": "2", "t": "Hệ thống tời Kéo chính/Tời phụ/Tugger/AHTWsystem/Tugger/Towing Pin/Sharkjaw System", "fixed": ""}, {"no": "3", "t": "Tổ hợp máy nén khí khởi động\nStarting air compressor unit", "fixed": ""}, {"no": "4", "t": "Hệ thống điều hòa trung tâm\nAccommodation Air Condition System", "fixed": ""}, {"no": "5", "t": "Hệ thống lạnh thực phẩm\nProvison refrigeration System", "fixed": ""}, {"no": "6", "t": "Hệ thống hàng bồn rời, hàng lỏng\nCargo bulk/ Liquid mud System", "fixed": ""}, {"no": "7", "t": "Hệ thống bơm-van-ống- phân ly\nPiping – Valve – Pumping System \nDW/FW/SW/LO/FO/ OWS/", "fixed": ""}, {"no": "8", "t": "Trained in the use and calibration of portable oxygen and gas analyse as instruction manual( for C/E)/ Đào tạo về hiệu chuẩn máy do nồng độ khí và oxi như sách hướng dẫn.( áp dụng cho sỹ quan quản lý)", "fixed": ""}, {"no": "9", "t": "Các hệ thống khác..\nOther systems...", "fixed": ""}, {"no": "III", "t": "Hướng dẫn thực hiện giấy phép làm việc/ Nhận định các mối nguy hại/Đánh giá rủi ro/Hướng dẫn điều tra tai nạn sự cố/ Traning PTW/Identification of Hazard/Risk Assessment, Incident Investigation( Chỉ dành cho Sỹ Quan Quản Lý/Vận Hành./Application for Management and Operation Officers)", "fixed": ""}, {"no": "1", "t": "Miêu tả cách thức thức thực hiện các bước  cấp giấy phép/Describe these step how to issue PTW", "fixed": ""}, {"no": "2", "t": "Ai là người cấp giấy phép dưới tàu/ Who is issue PTW onboard.", "fixed": ""}, {"no": "3", "t": "Loại giấy phép nào cần phải xin phép người phụ trách trên bờ/Which PTW need permission of DPA", "fixed": ""}, {"no": "4", "t": "Hướng dẫn đọc kỹ quy trình Risk assessment and PTW", "fixed": ""}], "FRM016E_B": [{"no": "1", "t": "Kiểm tra và hướng dẫn sơ bộ công tác lập, báo cáo PMS(Briefing the way to make report as PMS .etc"}, {"no": "2", "t": "Việc cung cấp thông tin khi đặt vật tư/Required information for Spare part ordering"}, {"no": "3", "t": "Công tác bảo dưỡng lớn trang thiết bị / Major overhaul or Repair of equipment\nHướng dẫn công tác lập hạng mục vật tư (cơ sở lập, số lượng yêu cầu…) theo Instruction book, số giờ hoạt động của thiết bị, tình trạng kỹ thuật hiện tại của thiết bị…vv và theo quy trình SLMS 18/Check and guide the establishment of material item (reason for establishment, the number of requests...) according to Instruction book, the running hours of the equipment, the current technical condition of the equipment etc. and according the SLMS 18"}, {"no": "4", "t": "Hướng dẫn công tác lập hạng mục bảo dưỡng (cơ sở lập, phạm vi công việc…) theo Instruction book, số giờ hoạt động của thiết bị, tình trạng kỹ thuật hiện tại của thiết bị…vv và theo quy trình SLMS 11/Check and guide the establishment of maintenance item (reason for establishment, the scope of work...) according to Instruction book, the running hours of the equipment, the current technical condition of the equipment etc. and according the SLMS 11"}, {"no": "5", "t": "Hướng dẫn công tác giám sát trong quá trình thực hiện bảo dưỡng (nhiệm vụ, trách nhiệm, quyền hạn) theo quy trình SME-MO-PR-001 Ship & Equipment Maintenance Guide of the supervising during maintenance process (tasks, responsibilities and authorities) according to SME-MO-PR-001"}, {"no": "6", "t": "Các lưu ý khác (Ghi rõ các hạn chế của người được hướng dẫn- Máy trưởng, Sỹ quan máy, điện trưởng-  cần phải tìm hiểu thêm và lưu ý khắc phục trong thời gian tới)/Other notes (Specify the limitations of the crew – Chief Engineer, Engine officer, chief electrician - need to update more and the remedy in nera future)."}], "FRM016E_note": "Ghi chú: Ngoài các nội dung hướng dẫn trên đây, Máy trưởng có trách nhiệm tuân thủ và hướng dẫn cho  thuyền viên ngành Máy tuân thủ các nội dung quy định theo  Thông tư số 07 / 2012 / TT-BGTVT - Quy định về chức danh, nhiệm vụ theo chức danh của thuyền viên và đăng ký thuyền viên làm việc trên tàu biển Việt Nam  và các kỹ năng quản lý, nghiệp vụ ngành máy, điện.\nNote: In addition to the above guidance, Chief engineer shall be responsible to comply with and guide engine  crew to comply with the contents specified in Circular No 07/2012/TT-BGTVT – stipulated the title, the mission of the crew and registration of the crew working on board of Vietnamese ships and the management skills and professional competence of the electrical and engine branches.", "FRM016G": [{"dep": "Bộ phận nhân sự\nHR Department", "t": "Thuyền viên có đủ giấy chứng nhận khả năng chuyên môn theo STCW 95 và yêu cầu của khách hàng ( nếu có).\nThe crew holds valid and necessary STCW 95 competence and training certificates in accordance with STCW 95 and client requirements."}, {"dep": "Bộ phận nhân sự\nHR Department", "t": "Hướng dẫn về  nội quy lao động, thỏa ước lao động tập thể /HĐ lao động /lương-thưởng…\nInternal labour regulations, collective labour agreements/ contract of employment/ including salary…"}, {"dep": "Bộ phận nhân sự\nHR Department", "t": "Hướng dẫn về điều kiện làm việc trên tàu, nghỉ ca.\nTerms and conditions working on board/ Vacation."}, {"dep": "Bộ phận nhân sự\nHR Department", "t": "Hướng dẫn về các chính sách Công ty về quyền lợi và nghĩa vụ thuyền viên, quy định về bảo hiểm, quy định thực hiện khiếu nại…\nCompany‘s policy regarding: Crew’s responsibility and interest, Crew’ins insurance, and procedure for complaint…"}, {"dep": "Bộ phận ATCL\nQHSE Department", "t": "Kiểm tra sự phù hợp giấy chứng nhận sức khoẻ theo yêu cầu luật và khách hàng ( nếu có).\nCheck the Medical examination certificate against the requirements of the rules and clients."}, {"dep": "Bộ phận ATCL\nQHSE Department", "t": "Hướng dẫn về HTQL ATCLSKMT của Công ty, Hướng dẫn chính sách HSE của Công ty.\nExplanation of the knowledge of the Company’s ISM, SMS, and ISPS system onboard.        \nHSE Policy ( D&A policy, Stop work policy)."}, {"dep": "Bộ phận ATCL\nQHSE Department", "t": "Hướng dẫn nhanh kiến thức an toàn trên tàu, quy định PPE, PTW, Risk assessment.\nKnowledge of onboard safety awareness (PPE, PTW, Risk assessment)."}, {"dep": "Giám sát hàng hải/Marine Superintendent", "t": "Hướng dẫn nhanh về chức danh, nhiệm vụ khi xuống tàu.\nGuidance and job description of embarking vessel."}]}, "meta": {"QD": {"code": "SME-HR-PR-002-FRM-002", "rev": "04", "date": "01 Jan 2026", "pages": 1}, "FRM014": {"code": "SME-HR-PR-002-FRM-014", "rev": "05", "date": "1 June 2026", "pages": 2, "title": "DECK DEPARTMENT PRE-EMBARKATION BRIEFING / FAMILIARIZATION CHECKLIST<br><i>DANH MỤC KIỂM TRA / HƯỚNG DẪN TRƯỚC KHI LÊN TÀU CHO THUYỀN VIÊN NGÀNH BOONG</i>", "label": "FRM-014 · Boong (Deck)"}, "FRM015": {"code": "SME-HR-PR-002-FRM-015", "rev": "04", "date": "1 Jan 2026", "pages": 1, "title": "DANH MỤC KIỂM TRA, HƯỚNG DẪN NHANH CHO THUYỀN VIÊN BẾP<br><i>BRIEFING GUIDELINES CHECKLIST FOR COOKER</i>", "label": "FRM-015 · Bếp (Cook)"}, "FRM016E": {"code": "SME-HR-PR-002-FRM-016", "rev": "04", "date": "1 Jan 2026", "pages": 2, "title": "DANH MỤC KIỂM TRA, HƯỚNG DẪN NHANH CHO THUYỀN VIÊN NGÀNH MÁY/ĐIỆN<br><i>BRIEFING GUIDELINES / CHECKLIST FOR ENGINE/ELECTRIC CREWS</i>", "label": "FRM-016 · Máy / Điện"}, "FRM016G": {"code": "SME-HR-PR-002-FRM-003", "rev": "04", "date": "01 Jan 2026", "pages": 2, "title": "BRIEFING GUIDELINES CHECKLIST FOR PRE-EMBARKATION<br><i>DANH MỤC KIỂM TRA, HƯỚNG DẪN NHANH TRƯỚC KHI LÊN TÀU</i>", "label": "Hướng dẫn chung trước khi lên tàu (các phòng)"}}};
+/* ════════════════════════════════════════════════════════════════════════════════════════════════
+   v3.67.12 (Sếp 26/9) — QUẢN LÝ THUYỀN VIÊN: 📜 Quyết định điều động · 📋 Hướng dẫn nhanh nhận ca.
+   Tạo phiếu, lưu (S.crewDocs, gắn hồ sơ thuyền viên), in PDF đúng mẫu ISO (logo · mã · Rev · ngày hiệu lực · trang).
+   Số QĐ: 3 số đầu nhập tay + "/QĐNS/năm". Ô người ký QĐ để trống. Checklist: tick Y/N/N/A trong app HOẶC in trống.
+   ════════════════════════════════════════════════════════════════════════════════════════════════ */
+let _CD=null, _CD_Q='';
+function _cdCanUse(){ try{ return _canSeeCrewMgmt(); }catch(e){ return isAdmin(); } }
+function _cdCrew(){ try{ return (HRService.employees()||[]).filter(e=>e&&!e._deleted&&e.status!=='inactive'&&e.type==='crew').sort((a,b)=>String(a.fullName||'').localeCompare(String(b.fullName||''),'vi')); }catch(e){ return []; } }
+function _cdVessels(){ const a=[]; try{ (VesselService.vessels()||[]).forEach(v=>a.push({id:v.id,name:v.name})); }catch(e){} try{ (VesselService.opVessels()||[]).forEach(v=>a.push({id:v.id,name:v.name})); }catch(e){} return a; }
+function _cdEn(s){ return String(s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[đĐ]/g,m=>m==='đ'?'d':'D').toUpperCase(); }
+function _cdD(d){ d=String(d||''); return /^\d{4}-\d{2}-\d{2}/.test(d)?(d.slice(8,10)+'/'+d.slice(5,7)+'/'+d.slice(0,4)):d; }
+function _cdDEn(d){ if(!/^\d{4}-\d{2}-\d{2}/.test(String(d||''))) return d||''; const m=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']; return (+d.slice(8,10))+' '+m[+d.slice(5,7)-1]+' '+d.slice(0,4); }
+function _cdList(kind){ return (S.crewDocs||[]).filter(d=>d&&!d._deleted&&d.kind===kind); }
+function openCrewDocs(kind){
+  if(!_cdCanUse()){ toast('Chỉ Quản lý thuyền viên / Trưởng bộ phận','bad'); return; }
+  const isQD=kind==='QD', q=whNormName(_CD_Q||'');
+  const list=_cdList(kind).filter(d=>!q||whNormName([d.empName,d.vesselName,d.no3,d.rank,d.tpl].join(' ')).indexOf(q)>=0).sort((a,b)=>String(b.createdAt||'').localeCompare(String(a.createdAt||'')));
+  const rows=list.map(d=>`<tr><td>${esc(_cdD(d.date))}</td><td>${isQD?esc((d.no3||'')+'/QĐNS/'+(d.year||'')):esc((CREW_TPL.meta[d.tpl]||{}).label||d.tpl)}</td>${isQD?`<td>${d.sub==='NC'?'Nghỉ ca':'Điều động'}</td>`:''}<td><b>${esc(d.empName||'')}</b><div style="font-size:11px;color:var(--muted)">${esc(d.rank||'')}</div></td><td>${esc(d.vesselName||'')}</td>
+    <td>${_cdStatusChip(d)}</td><td style="white-space:nowrap"><button class="btn-sec" style="font-size:11px" onclick="_cdView('${d.id}')">👁 Xem</button> <button class="btn-sec" style="font-size:11px" onclick="_cdPrint('${d.id}')">🖨 ${d.signedAt?'In lại':'In PDF'}</button>${d.signedAt?'':` <button class="icon-btn" title="Sửa" onclick="openCrewDocForm('${kind}','${d.id}')">✎</button> <button class="icon-btn" title="Xóa" onclick="_cdDelete('${d.id}','${kind}')">✕</button>`}</td></tr>`).join('');
+  openModal(isQD?'📜 Quyết định điều động':'📋 Hướng dẫn nhanh nhận ca',
+    `<div style="display:flex;gap:8px;margin-bottom:10px;flex-wrap:wrap"><button class="btn-primary" onclick="openCrewDocForm('${kind}')">+ Tạo ${isQD?'quyết định':'phiếu hướng dẫn'}</button>${isQD?'<button class="btn-sec" onclick="openCrewRankMap()">⚙ Bảng chức danh</button>':''}
+      ${!isQD?`<select onchange="if(this.value)_cdPrintBlank(this.value);this.value=''" style="font-size:12px"><option value="">🖨 In phiếu trống…</option>${['FRM014','FRM015','FRM016E','FRM016G'].map(k=>`<option value="${k}">${esc(CREW_TPL.meta[k].label)}</option>`).join('')}</select>`:''}
+      <input placeholder="Tìm thuyền viên / tàu / số…" value="${esc(_CD_Q)}" onchange="_CD_Q=this.value;openCrewDocs('${kind}')" style="flex:1;min-width:200px"></div>
+     <div class="tbl-scroll"><table class="tbl"><thead><tr><th>Ngày</th><th>${isQD?'Số QĐ':'Mẫu'}</th>${isQD?'<th>Loại</th>':''}<th>Thuyền viên</th><th>Tàu</th><th>Trạng thái</th><th></th></tr></thead><tbody>${rows||`<tr><td colspan="7" style="text-align:center;color:var(--muted);padding:14px">Chưa có phiếu</td></tr>`}</tbody></table></div>`,
+    `<button class="btn-ghost" onclick="closeModal()">Đóng</button>`);
+}
+function openCrewDocForm(kind, id){
+  const ex=id?(S.crewDocs||[]).find(x=>x.id===id):null;
+  if(ex && ex.signedAt){ toast('Phiếu đã ký — khóa sửa. Trưởng BP mở khóa nếu cần sửa','warn'); _cdView(id); return; }   // v3.67.15
+  _CD=ex?JSON.parse(JSON.stringify(ex)):{kind, sub:'DD', tpl:'FRM014', date:todayISO(), year:todayISO().slice(0,4), no3:'', empId:'', empName:'', empNameEn:'', gender:'M', rank:'', rankEn:'', vesselId:'', vesselName:'', task:'', taskEn:'', fromDate:todayISO(), instructor:'', joinDate:'', dept:'', method:'', ans:{}, extra:{}};
+  _cdRender();
+}
+function _cdPickEmp(id){ const e=_cdCrew().find(x=>x.id===id); const C=_CD; C.empId=id; if(e){ C.empName=e.fullName||''; C.empNameEn=_cdEn(e.fullName); C.rank=C.rank||e.title||''; C.gender=(String(e.gender||'').toLowerCase().startsWith('f')||/nữ/i.test(e.gender||''))?'F':'M';
+  if(!C.vesselId && e.linkVesselId){ const v=_cdVessels().find(x=>x.id===e.linkVesselId); if(v){ C.vesselId=v.id; C.vesselName=v.name; } }
+  const ri=_cdRankInfo(C.rank); if(ri.en) C.rankEn=ri.en; if(C.kind==='BRIEF' && !Object.keys(C.ans||{}).length) C.tpl=_CD_DEPT_TPL[ri.dept]||C.tpl; } _cdRender(); }   // v3.67.15
+function _cdF(k,v){ _CD[k]=v; }
+function _cdAns(k,f,v){ const a=(_CD.ans[k]=_CD.ans[k]||{}); a[f]=v; }
+function _cdItemsOf(tpl){
+  const D=CREW_TPL.data, out=[];
+  if(tpl==='FRM014') D.FRM014.forEach((x,i)=>out.push({k:'a'+i, no:x.no, t:x.t}));
+  else if(tpl==='FRM015'||tpl==='FRM016E'){ D[tpl].forEach((x,i)=>{ const sec=/^[IVX]+$/.test(x.no||''); out.push({k:'r'+i, no:x.no, t:x.t, sec, fixed:x.fixed||''}); }); if(tpl==='FRM016E') D.FRM016E_B.forEach((x,i)=>out.push({k:'b'+i, no:x.no, t:x.t, partB:true})); }
+  else if(tpl==='FRM016G') D.FRM016G.forEach((x,i)=>out.push({k:'g'+i, dep:x.dep, t:x.t}));
+  return out;
+}
+function _cdRender(){
+  const C=_CD, isQD=C.kind==='QD'; const crew=_cdCrew(), ves=_cdVessels();
+  const f=(lab,html,span)=>`<div class="field" style="margin:0;${span?'grid-column:span '+span:''}"><label style="display:block;font-size:10px;margin-bottom:3px">${lab}</label>${html}</div>`;
+  const inp=(k,ph,type)=>`<input ${type?`type="${type}"`:''} value="${esc(C[k]||'')}" placeholder="${esc(ph||'')}" oninput="_cdF('${k}',this.value)" style="width:100%">`;
+  let body=`<div style="display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin-bottom:10px">
+    ${f('Thuyền viên *',`<select style="width:100%" onchange="_cdPickEmp(this.value)"><option value="">— Chọn thuyền viên —</option>${crew.map(e=>`<option value="${e.id}" ${C.empId===e.id?'selected':''}>${esc(e.fullName)}${e.title?' · '+esc(e.title):''}</option>`).join('')}</select>`)}
+    ${f('Họ tên (in trên phiếu)',inp('empName'))}
+    ${f('Chức danh / Rank',`<input value="${esc(C.rank||'')}" placeholder="VD: Máy hai" oninput="_cdF('rank',this.value)" onchange="const ri=_cdRankInfo(this.value);if(ri.en){_cdF('rankEn',ri.en);_cdRender();}" style="width:100%">`)}
+    ${f('Tàu / Vessel',`<select style="width:100%" onchange="const o=this.options[this.selectedIndex];_cdF('vesselId',this.value);_cdF('vesselName',this.value?o.text:'')"><option value="">— Chọn tàu —</option>${ves.map(v=>`<option value="${v.id}" ${C.vesselId===v.id?'selected':''}>${esc(v.name)}</option>`).join('')}</select>`)}
+    ${f(isQD?'Ngày quyết định':'Ngày hướng dẫn',inp('date','','date'))}`;
+  if(isQD){
+    body+=`${f('Loại quyết định',`<select style="width:100%" onchange="_cdF('sub',this.value);_cdRender()"><option value="DD" ${C.sub!=='NC'?'selected':''}>Điều động (lên tàu)</option><option value="NC" ${C.sub==='NC'?'selected':''}>Nghỉ ca (Off-sign leave)</option></select>`)}
+      ${f('Số QĐ — 3 số đầu *',`<div style="display:flex;gap:6px;align-items:center"><input value="${esc(C.no3)}" maxlength="3" oninput="_cdF('no3',this.value.replace(/\\D/g,''))" style="width:70px;text-align:center"><span>/QĐNS/${esc(C.year||todayISO().slice(0,4))}</span></div>`)}
+      ${f('Họ tên tiếng Anh',inp('empNameEn','NGUYEN VAN A'))}
+      ${f('Ông / Bà',`<select style="width:100%" onchange="_cdF('gender',this.value)"><option value="M" ${C.gender!=='F'?'selected':''}>Ông / Mr.</option><option value="F" ${C.gender==='F'?'selected':''}>Bà / Ms.</option></select>`)}
+      ${f('Chức danh tiếng Anh',inp('rankEn','VD: 2nd Engineer'))}
+      ${C.sub!=='NC'?f('Nhận nhiệm vụ (VI)',inp('task','Mặc định = chức danh')):''}
+      ${C.sub!=='NC'?f('Undertake a task (EN)',inp('taskEn','Mặc định = rank EN')):''}
+      ${f('Kể từ ngày / From date',inp('fromDate','','date'))}</div>
+      <div style="font-size:11px;color:var(--muted)">Ô người ký (Giám đốc điều hành) để trống — ký tay. Tên file PDF: "Số - Tên thuyền viên - Nhiệm vụ - Tàu - ${C.sub==='NC'?'QĐ nghỉ ca':'QĐĐĐ'} dd.mm.yyyy".</div>`;
+  } else {
+    body+=`${f('Mẫu phiếu *',`<select style="width:100%" onchange="_cdF('tpl',this.value);_CD.ans={};_cdRender()">${['FRM014','FRM015','FRM016E','FRM016G'].map(k=>`<option value="${k}" ${C.tpl===k?'selected':''}>${esc(CREW_TPL.meta[k].label)}</option>`).join('')}</select>`)}
+      ${f('Người hướng dẫn / Instructor',inp('instructor','Chức danh + họ tên'))}
+      ${C.tpl==='FRM014'?f('Ngày nhập tàu / Joining date',inp('joinDate','','date'))+f('Bộ phận',`<select style="width:100%" onchange="_cdF('dept',this.value)">${['','Master','Deck Officer','Bosun','AB','OS','Other'].map(x=>`<option ${C.dept===x?'selected':''}>${x}</option>`).join('')}</select>`)+f('Hình thức',`<select style="width:100%" onchange="_cdF('method',this.value)">${['','Office','Online','Phone','Email'].map(x=>`<option ${C.method===x?'selected':''}>${x}</option>`).join('')}</select>`):''}</div>`;
+    const items=_cdItemsOf(C.tpl);
+    const yn=it=>{ const a=C.ans[it.k]||{}; return ['Y','N','NA'].map(v=>`<label style="margin-right:6px;white-space:nowrap"><input type="radio" name="cd-${it.k}" ${a.v===v?'checked':''} onchange="_cdAns('${it.k}','v','${v}')"> ${v==='NA'?'N/A':v}</label>`).join(''); };
+    const rem=(it,fld,ph)=>`<input value="${esc((C.ans[it.k]||{})[fld]||'')}" placeholder="${ph}" oninput="_cdAns('${it.k}','${fld}',this.value)" style="width:100%;font-size:12px">`;
+    body+=`<div style="font-size:11px;color:var(--muted);margin-bottom:6px">Tick trong app rồi in — hoặc để trống và bấm "In phiếu trống" để tick tay trên tàu.</div><div class="tbl-scroll" style="max-height:48vh;overflow:auto"><table class="tbl" style="font-size:12px"><tbody>${items.map(it=>it.sec?`<tr style="background:var(--rule)"><td><b>${esc(it.no)}</b></td><td colspan="3"><b>${esc(it.t)}</b>${it.fixed?' — <i>'+esc(it.fixed)+'</i>':''}</td></tr>`
+      :`<tr><td style="width:40px">${esc(it.dep?'':it.no||'')}</td><td>${it.dep?('<div style="font-size:10px;color:var(--muted)">'+esc(it.dep).replace(/\n/g,' / ')+'</div>'):''}${esc(it.t).replace(/\n/g,'<br>')}</td><td style="width:150px">${yn(it)}</td><td style="width:200px">${rem(it,'r',C.tpl==='FRM016G'?'Người KT / hướng dẫn':'Ghi chú')}</td></tr>`).join('')}</tbody></table></div>`;
+  }
+  openModal((isQD?'📜 Quyết định điều động':'📋 Hướng dẫn nhanh nhận ca')+(C.id?' — sửa':' — tạo mới'), body,
+    `<button class="btn-ghost" onclick="openCrewDocs('${C.kind}')">← Danh sách</button>${!isQD?`<button class="btn-sec" onclick="_cdPrintBlank('${C.tpl}')">🖨 In phiếu trống</button>`:''}<button class="btn-sec" onclick="_cdSave(false)">💾 Lưu</button><button class="btn-primary" onclick="_cdSave(true)">💾 Lưu &amp; In PDF</button>`);
+}
+function _cdSave(andPrint){
+  const C=_CD; if(!C) return;
+  if(!String(C.empName||'').trim()){ toast('Chọn / nhập thuyền viên','bad'); return; }
+  if(C.kind==='QD' && !/^\d{1,3}$/.test(String(C.no3||''))){ toast('Nhập 3 số đầu của số quyết định','bad'); return; }
+  if(C.kind==='QD'){ C.no3=String(C.no3).padStart(3,'0'); if(!C.empNameEn) C.empNameEn=_cdEn(C.empName); }
+  const now=new Date().toISOString(), who=actorName(); let rec;
+  commitMutation(()=>{ S.crewDocs=S.crewDocs||[];
+    if(C.id){ rec=S.crewDocs.find(x=>x.id===C.id); Object.assign(rec,C,{updatedAt:now, updatedBy:who}); }
+    else { rec=Object.assign({},C,{id:'CD'+Date.now().toString(36)+Math.random().toString(36).slice(2,5), createdAt:now, createdBy:who}); S.crewDocs.push(rec); }
+    try{ touchRecord(rec); }catch(e){} },
+    {action:'crew_doc_save', fields:['crewDocs'], onOk:()=>{ try{ logAuditEvent('crew_doc_save',{id:rec.id, kind:rec.kind, emp:rec.empName}); }catch(e){} toast('✓ Đã lưu','good'); if(andPrint) _cdPrint(rec.id); openCrewDocs(rec.kind); }});
+}
+function _cdDelete(id, kind){ const d=(S.crewDocs||[]).find(x=>x.id===id); if(!d||!confirm('Xóa phiếu của '+d.empName+'?')) return;
+  commitMutation(()=>{ d._deleted=true; d.deletedAt=new Date().toISOString(); d.deletedBy=actorName(); try{ touchRecord(d); }catch(e){} }, {action:'crew_doc_delete', fields:['crewDocs'], onOk:()=>openCrewDocs(kind)}); }
+/* ── In PDF ─────────────────────────────────────────────────────────────────── */
+const _CD_CSS=`<style>@page{size:A4;margin:12mm}body{font-family:"Times New Roman",serif;font-size:12.5px;color:#000;margin:0}
+.h{width:100%;border-collapse:collapse;margin-bottom:10px}.h td{border:1px solid #000;padding:5px}
+table.t{width:100%;border-collapse:collapse}table.t td,table.t th{border:1px solid #000;padding:4px 6px;vertical-align:top}table.t th{font-weight:700;text-align:center}
+.cb{display:inline-block;width:11px;height:11px;border:1px solid #000;margin:0 3px -1px 4px;text-align:center;line-height:10px;font-size:10px;font-weight:700}
+.lbl{font-size:10.5px}.nb td{border:none!important}</style>`;
+function _cdHdr(m, title, pg){ return `<table class="h"><tr><td style="width:17%;text-align:center"><img src="${CREW_LOGO}" style="height:62px"></td>
+  <td style="text-align:center;font-weight:700;font-size:15px;color:#1c3a5c">SEAHORSE MARINE AND ENERGY JSC<br>INTEGRATED MANAGEMENT SYSTEM<br>DOCUMENT</td>
+  <td style="width:25%;font-size:11px;line-height:1.5">${m.code}<br>Rev.: ${m.rev}<br>Date: ${m.date}<br>Page: ${pg||('1/ '+m.pages)}</td></tr>${title?`<tr><td colspan="3" style="text-align:center;font-weight:700;font-size:13px">${title}</td></tr>`:''}</table>`; }
+function _cdBox(on){ return `<span class="cb">${on?'✓':''}</span>`; }
+function _cdQdHtml(d){
+  /* v3.67.13 (Sếp: "căn chỉnh giống mẫu gửi"): bố cục theo đúng file gốc SME-HR-PR-002-FRM-002 — lề trái 2,75cm / phải 1,5cm /
+     trên 2,2cm; khung đầu trang 2 tầng (logo · tên hệ thống · mã/Rev/ngày/trang; tầng dưới: QUYẾT ĐỊNH / DECISION / V/v, Số và
+     ngày tháng NẰM TRONG khung); Điều 1–3 in đậm gạch chân, tiếng Anh nghiêng cỡ nhỏ thụt lề; "Nơi nhận" dời XUỐNG CUỐI TRANG,
+     ngăn bằng dòng kẻ chân trang. */
+  const m=CREW_TPL.meta.QD, nc=d.sub==='NC', ong=d.gender==='F'?'Bà':'Ông', mr=d.gender==='F'?'Ms.':'Mr.', en=d.empNameEn||_cdEn(d.empName), vn=d.vesselName||'…';
+  const nm=String(d.empName||'…').toUpperCase(), task=nc?'Nghỉ ca':(d.task||d.rank||'…'), taskEn=nc?'Off-sign leave':(d.taskEn||d.rankEn||'…'), dt=String(d.date||todayISO());
+  const E=t=>`<div class="qd-en">${t}</div>`;
+  return `<style>@page{size:A4;margin:11mm 15mm 8mm 27.5mm}
+    .qd{font-family:"Times New Roman",serif;font-size:12pt;line-height:1.18;height:276mm;overflow:hidden;display:flex;flex-direction:column}
+    .qd-h{width:100%;border-collapse:collapse}.qd-h td{border:1px solid #000;padding:4px 6px;vertical-align:middle}
+    .qd-en{font-style:italic;font-size:9.5pt;margin-left:6mm}.qd-b{margin-left:9mm}.qd-art{font-weight:700;text-decoration:underline}
+    .qd p{margin:0}</style>
+  <div class="qd">
+   <table class="qd-h"><tr><td style="width:16%;text-align:center;height:22mm"><img src="${CREW_LOGO}" style="height:19mm"></td>
+     <td style="text-align:center;font-weight:700;font-size:11.5pt;line-height:1.35;white-space:nowrap">SEAHORSE MARINE AND ENERGY JSC<br>INTEGRATED MANAGEMENT SYSTEM<br>DOCUMENT</td>
+     <td style="width:25%;text-align:right;font-size:8.5pt;line-height:1.45">${m.code}<br>Rev: ${m.rev}<br>Effective Date: ${m.date}<br>Page <b>1</b> of <b>1</b></td></tr>
+     <tr><td colspan="3" style="padding:6px 8px 8px">
+       <div style="text-align:center;font-weight:700;font-size:12.5pt">QUYẾT ĐỊNH<br>DECISION</div>
+       <div style="text-align:center;font-style:italic;font-size:11.5pt">V/v: Điều động nhân sự (Subj: Personnel mobilization)</div>
+       <div style="display:flex;justify-content:space-between;font-style:italic;font-size:11pt;margin-top:4px"><span>Số (No): <b style="font-style:normal">${esc(d.no3)}</b>/QĐNS/${esc(d.year||dt.slice(0,4))}</span>
+       <span>TP.HCM, ngày <span style="font-size:9.5pt">(date)</span> ${dt.slice(8,10)} tháng <span style="font-size:9.5pt">(month)</span> ${dt.slice(5,7)} năm <span style="font-size:9.5pt">(year)</span> ${dt.slice(0,4)}</span></div></td></tr></table>
+   <div style="text-align:center;font-weight:700;margin-top:12mm">GIÁM ĐỐC CÔNG TY CỔ PHẦN HÀNG HẢI VÀ NĂNG LƯỢNG HẢI MÃ</div>
+   <div style="text-align:center;font-weight:700;font-size:10.5pt">THE DIRECTOR OF SEAHORSE MARINE AND ENERGY JSC</div>
+   <div style="margin:3mm 0 0 14mm">
+     <p>- Căn cứ Bộ luật lao động và các văn bản hướng dẫn thi hành Bộ luật lao động;</p>${E('Pursuant to Labor Code and guideline document for the implementation of the Labor Code;')}
+     <p>- Căn cứ vào chức năng, nhiệm vụ và quyền hạn của Giám đốc Công ty;</p>${E('Pursuant to Director&#39;s responsibility and rights of the Company;')}
+     <p>- Xét đạo đức và khả năng của người lao động;</p>${E('Having considered the morals and ability of employee;')}
+     <p>- Xét đề nghị của Trưởng Bộ phận Quản lý tàu.</p>${E('At proposal of Vessel Management.')}</div>
+   <div style="text-align:center;font-weight:700;font-size:13pt;margin:4mm 0 2mm">QUYẾT ĐỊNH (HAS DECIDED)</div>
+   <p><span class="qd-art">Điều 1</span> <i style="font-size:9.5pt">(Article 1):</i></p>
+   <div class="qd-b"><p>- Điều động ${ong}: <b>${esc(nm)}</b></p>${E('To mobilize: '+mr+' '+esc(en))}
+     <p>- Chức danh: <b>${esc(d.rank||'…')}</b></p>${E('Rank: '+esc(d.rankEn||d.rank||'…'))}
+     <p>- Đến/<i>To</i>: <b>${nc?'SME JSC':'Tàu '+esc(vn)}</b></p>
+     <p>- Nhận nhiệm vụ: <b>${esc(task)}</b></p>${E('Undertake a task: '+esc(taskEn))}
+     <p>- Kể từ ngày: <b>${_cdD(d.fromDate)}</b></p>${E('From date: '+_cdDEn(d.fromDate))}</div>
+   <p style="margin-top:1mm"><span class="qd-art">Điều 2</span> <i style="font-size:9.5pt">(Article 2):</i></p>
+   <div class="qd-b" style="text-align:justify"><p>${ong} ${esc(nm)} hưởng lương và các khoản phụ cấp theo quy định của Công ty Cổ phần Hàng hải và Năng lượng Hải Mã.</p>
+     <div class="qd-en" style="margin-left:0">${mr} ${esc(en)} enjoys salary and allowances in accordance with regulations of the Seahorse Marine and Energy JSC.</div></div>
+   <p style="margin-top:1mm"><span class="qd-art">Điều 3</span> <i style="font-size:9.5pt">(Article 3):</i></p>
+   <div class="qd-b" style="text-align:justify"><p>Các ông/bà Trưởng Bộ phận Quản lý tàu, Trưởng Bộ phận Kế toán, Thuyền trưởng tàu ${esc(vn)} và ${ong.toLowerCase()} ${esc(nm)} chịu trách nhiệm thi hành quyết định này.</p>
+     <div class="qd-en" style="margin-left:0">The Managers of Vessel Management Dept, Accounting Dept, Master of M/v ${esc(vn)} and ${mr} ${esc(en)} are responsible for the execution of this decision.</div></div>
+   <div style="margin:7mm 0 0 auto;width:50%;text-align:center"><b>GIÁM ĐỐC ĐIỀU HÀNH</b><br><b style="font-size:10.5pt">(MANAGING DIRECTOR)</b></div>
+   <div style="margin-top:auto;border-bottom:1px solid #000;padding-bottom:2mm;font-size:10.5pt"><b><i>Nơi nhận:(addressee)</i></b>   <!-- v3.67.14: Nơi nhận nằm TRÊN dòng kẻ chân trang -->
+     <div style="margin-left:6mm;font-style:italic">- Như điều 3 (as Article 3)<br>- Lưu NS (Filed at Marine Dept)</div></div>
+  </div>`;
+}
+function _cdBriefHtml(d, blank){
+  const tpl=d.tpl, m=CREW_TPL.meta[tpl], D=CREW_TPL.data, A=blank?{}:(d.ans||{});
+  const v=x=>blank?'':esc(x||''), yn=k=>{ const a=A[k]||{}; return `${_cdBox(a.v==='Y')}YES ${_cdBox(a.v==='N')}NO ${_cdBox(a.v==='NA')}N/A`; }, r=(k,f)=>esc((A[k]||{})[f]||'');
+  const items=_cdItemsOf(tpl); let h=_cdHdr(m, m.title);
+  if(tpl==='FRM014'){
+    const dep=['Master','Deck Officer','Bosun','AB','OS','Other'].map(x=>_cdBox(!blank&&d.dept===x)+x).join(' '), met=['Office','Online','Phone','Email'].map(x=>_cdBox(!blank&&d.method===x)+x).join(' ');
+    h+=`<table class="t"><tr><td class="lbl" style="width:22%">Full Name / Họ và tên:</td><td>${v(d.empName)}</td><td class="lbl" style="width:22%">Date of Briefing / Ngày hướng dẫn:</td><td>${blank?'':_cdD(d.date)}</td></tr>
+      <tr><td class="lbl">Rank / Chức danh:</td><td>${v(d.rank)}</td><td class="lbl">Vessel / Tàu:</td><td>${v(d.vesselName)}</td></tr>
+      <tr><td class="lbl">Department / Bộ phận:</td><td>${dep}</td><td class="lbl">Joining Date / Ngày nhập tàu:</td><td>${blank?'':_cdD(d.joinDate)}</td></tr>
+      <tr><td class="lbl">Briefing Method / Hình thức:</td><td>${met}</td><td class="lbl">Conducted by / Người hướng dẫn:</td><td>${v(d.instructor)}</td></tr></table>
+      <p style="font-weight:700;margin:8px 0 4px">A. Department-Specific Briefing Items / Nội dung hướng dẫn chuyên ngành</p>
+      <table class="t"><tr><th style="width:5%">No.</th><th>Briefing / Checking Items<br>Nội dung kiểm tra / hướng dẫn</th><th style="width:5%">Y</th><th style="width:5%">N</th><th style="width:5%">N/A</th><th style="width:20%">Remarks / Follow-up Action<br>Ghi chú / Hành động tiếp theo</th></tr>
+      ${items.map(it=>{ const a=A[it.k]||{}; return `<tr><td style="text-align:center">${esc(it.no)}</td><td>${esc(it.t).replace(/\n/g,'<br><i>')+'</i>'}</td><td style="text-align:center">${_cdBox(a.v==='Y')}</td><td style="text-align:center">${_cdBox(a.v==='N')}</td><td style="text-align:center">${_cdBox(a.v==='NA')}</td><td>${r(it.k,'r')}</td></tr>`; }).join('')}</table>
+      <p style="font-weight:700;margin:10px 0 4px">Confirmation / Xác nhận</p><table class="t"><tr><td colspan="3" style="font-size:11.5px">${esc(D.FRM014_conf).replace(/\n/g,'<br>')}</td></tr>
+      <tr><th>Crew Member / Thuyền viên</th><th>Instructor / Superintendent<br>Người hướng dẫn / Superintendent</th><th>Master / Responsible Officer<br>Thuyền trưởng / Sĩ quan phụ trách</th></tr>
+      <tr><td style="height:80px">Name / Rank: ${v(d.empName)}${d.rank&&!blank?' / '+esc(d.rank):''}<br>Signature:<br><br>Date:</td><td>Name / Rank: ${v(d.instructor)}<br>Signature:<br><br>Date:</td><td>Name / Rank:<br>Signature:<br><br>Date:</td></tr></table>`;
+  } else if(tpl==='FRM016G'){
+    h+=`<table class="t nb" style="margin-bottom:6px"><tr><td>Họ và tên / Full name: <b>${v(d.empName)||'…………………'}</b></td><td>Ngày / Date: <b>${blank?'…………':_cdD(d.date)}</b></td></tr><tr><td>Chức danh / Rank: <b>${v(d.rank)||'…………'}</b></td><td>Tàu / Vessel: <b>${v(d.vesselName)||'…………'}</b></td></tr></table>
+      <table class="t"><tr><th style="width:20%">Phòng chức năng<br>Department</th><th>Nội dung kiểm tra / Hướng dẫn<br>Briefing check list / Instruction</th><th style="width:12%">Y / N</th><th style="width:20%">Người KT / hướng dẫn<br>Check / Instruction by</th></tr>
+      ${items.map(it=>{ const a=A[it.k]||{}; return `<tr><td>${esc(it.dep).replace(/\n/g,'<br>')}</td><td>${esc(it.t).replace(/\n/g,'<br><i>')+'</i>'}</td><td style="text-align:center">${_cdBox(a.v==='Y')}Y ${_cdBox(a.v==='N')}N</td><td>${r(it.k,'r')}</td></tr>`; }).join('')}</table>
+      <table class="t nb" style="margin-top:14px"><tr><td style="text-align:center;width:50%"><b>Xác nhận của người được hướng dẫn</b><br><i>Acknowledged by the crew</i><br><br><br><br>${v(d.empName)}</td><td style="text-align:center"><b>Bộ phận nhân sự</b><br><i>Checked by the HR Department</i><br><br><br><br>${v(d.instructor)}</td></tr></table>`;
+  } else {
+    h+=`<table class="t" style="margin-bottom:6px"><tr><td class="lbl" style="width:18%">TÊN TÀU / VESSEL NAME</td><td><b>${v(d.vesselName)}</b></td><td class="lbl" style="width:18%">Tên thuyền viên / Crew Name</td><td><b>${v(d.empName)}</b></td><td class="lbl" style="width:16%">Ngày hướng dẫn / Date of briefing</td><td><b>${blank?'':_cdD(d.date)}</b></td></tr></table>`;
+    const main=items.filter(x=>!x.partB), pb=items.filter(x=>x.partB);
+    h+=`${tpl==='FRM016E'?'<p style="font-weight:700;margin:4px 0">A. Nội dung hướng dẫn / Content of guidance</p>':''}<table class="t"><tr><th style="width:5%">Stt<br>No</th><th>Tên hệ thống / thiết bị<br>Name of system/equipment</th><th style="width:17%">Miêu tả tồn tại / sự cố<br>Description of outstanding or incidence</th><th style="width:22%">Khuyến cáo / lưu ý khi khai thác, vận hành<br>Recommendation / Attention for operation</th></tr>
+      ${main.map(it=>it.sec?`<tr><td style="text-align:center"><b>${esc(it.no)}</b></td><td><b>${esc(it.t).replace(/\n/g,'<br>')}</b></td><td colspan="2">${esc(it.fixed)}</td></tr>`:`<tr><td style="text-align:center">${esc(it.no)}</td><td>${esc(it.t).replace(/\n/g,'<br>')}</td><td style="white-space:nowrap">${yn(it.k)}</td><td>${r(it.k,'r')}</td></tr>`).join('')}</table>`;
+    if(tpl==='FRM016E'){
+      h+=`<p style="font-weight:700;margin:10px 0 4px">B. Phần dành riêng cho Sỹ quan quản lý và vận hành máy / For Manager Engineer and Engineer.</p><p style="margin:2px 0">1. Tình trạng các giấy tờ đăng kiểm / Status of Class Certificate:</p>
+        <table class="t"><tr><td rowspan="2" style="width:12%">Thời hạn dock</td><td style="width:22%">Intermediate</td><td style="width:18%"></td><td>Thời hạn kiểm tra hàng năm / Annual Class Survey:</td></tr><tr><td>Special Drydocking</td><td></td><td>Các kiểm tra khác / Other inspections</td></tr></table>
+        <p style="margin:6px 0 2px">2. Công tác lập, báo cáo PMS / Making report as PMS</p><table class="t">${pb.map(it=>`<tr><td style="width:5%;text-align:center">${esc(it.no)}</td><td>${esc(it.t).replace(/\n/g,'<br>')}</td><td style="width:20%;white-space:nowrap">${yn(it.k)}</td></tr>`).join('')}</table>
+        <p style="font-size:11px">${esc(D.FRM016E_note).replace(/\n/g,'<br>')}</p>`;
+    } else h+=`<p style="font-size:11px">${esc(D.FRM015_note||'').replace(/\n/g,'<br>')}</p>`;
+    h+=`<table class="t nb" style="margin-top:10px"><tr><td style="text-align:center;width:50%"><b>Người được hướng dẫn / Guided person</b><br><i>(Ghi rõ chức danh và họ tên) (Specify the rank and name)</i><br><br><br><br>${blank?'':esc((d.rank?d.rank+' — ':'')+(d.empName||''))}</td><td style="text-align:center"><b>Người hướng dẫn / Instructor</b><br><i>(Ghi rõ chức danh và họ tên) (Specify the rank and name)</i><br><br><br><br>${v(d.instructor)}</td></tr></table>`;
+  }
+  return h;
+}
+function _cdOpenPrint(inner, title){
+  const w=window.open('','_blank'); if(!w){ toast('Trình duyệt chặn cửa sổ in — cho phép popup','bad'); return; }
+  w.document.open(); w.document.write(`<!doctype html><html><head><meta charset="utf-8"><title>${esc(title)}</title>${_CD_CSS}</head><body>${inner}<script>window.onload=function(){setTimeout(function(){window.print();},300);}<\/script></body></html>`); w.document.close();
+}
+function _cdPrint(id){
+  const d=(S.crewDocs||[]).find(x=>x.id===id); if(!d) return;
+  if(!d.signedAt){   /* v3.67.15: In PDF lần đầu = XÁC NHẬN ra quyết định → đóng dấu ĐÃ KÝ lên BẢN LƯU (bản giấy không có dấu) */
+    if(!confirm('In PDF = XÁC NHẬN ra '+(d.kind==='QD'?'quyết định':'phiếu hướng dẫn')+'.\n\nBản lưu trong app sẽ đóng dấu "ĐÃ KÝ · '+_cdD(todayISO())+'" và khóa sửa. Tiếp tục?')) return;
+    const now=new Date().toISOString();
+    commitMutation(()=>{ d.signedAt=now; d.signedBy=actorName(); try{ touchRecord(d); }catch(e){} }, {action:'crew_doc_sign', fields:['crewDocs'], onOk:()=>{ try{ logAuditEvent('crew_doc_sign',{id, kind:d.kind, emp:d.empName}); }catch(e){} }});
+  } else { _cdOpenPrint(_cdStamped(d,_cdInner(d)), 'BAN LUU - '+(d.empName||'')); return; }
+  if(d.kind==='QD'){ const dt=String(d.date||''); const tag=d.sub==='NC'?'QĐ nghỉ ca':'QĐĐĐ'; const task=d.sub==='NC'?'Nghỉ ca':(d.task||d.rank||'');
+    _cdOpenPrint(_cdQdHtml(d), `${d.no3} - ${d.empName} - ${task} - ${d.sub==='NC'?'SME JSC':(d.vesselName||'')} - ${tag} ${dt.slice(8,10)}.${dt.slice(5,7)}.${dt.slice(0,4)}`); }
+  else _cdOpenPrint(_cdBriefHtml(d,false), `${(CREW_TPL.meta[d.tpl]||{}).code||d.tpl} - ${d.empName} - ${d.vesselName||''} - ${_cdD(d.date).replace(/\//g,'.')}`);
+}
+/* ════════════════════════════════════════════════════════════════════════════════════════════════
+   v3.67.15 (Sếp 26/9): GẮN THEO THUYỀN VIÊN + DẤU "ĐÃ KÝ" + CREW CHANGE.
+   • Chọn thuyền viên → QĐ điều động / nghỉ ca hoặc Hướng dẫn (tự chọn mẫu theo chức danh) → điền sẵn → xem → In PDF.
+   • In PDF lần đầu = XÁC NHẬN ra quyết định → bản lưu đóng dấu tròn "ĐÃ KÝ · ngày" (bản giấy in ra KHÔNG có dấu);
+     sau đó khóa sửa, chỉ Xem / In lại (có dấu + chữ mờ BẢN LƯU). Trưởng BP mở khóa (ghi lý do) → gỡ dấu.
+   • Bảng quy đổi chức danh Việt → Anh + khối (Boong / Máy-Điện / Bếp) sửa được trong app (S.crewRankMap).
+   • Crew Change: nút "📄 Giấy tờ" trên kế hoạch thay ca → QĐ điều động + Hướng dẫn cho người LÊN tàu, QĐ nghỉ ca cho người XUỐNG.
+   ════════════════════════════════════════════════════════════════════════════════════════════════ */
+const _CD_RANK_DEFAULT=[
+  ['Thuyền trưởng','Master','DECK'],['Đại phó','Chief Officer','DECK'],['Phó hai','2nd Officer','DECK'],['Phó ba','3rd Officer','DECK'],
+  ['Sỹ quan boong','Deck Officer','DECK'],['Thủy thủ trưởng','Bosun','DECK'],['Thủy thủ','AB','DECK'],['Thủy thủ AB','AB','DECK'],['Thủy thủ OS','OS','DECK'],
+  ['Máy trưởng','Chief Engineer','ENGINE'],['Máy hai','2nd Engineer','ENGINE'],['Máy ba','3rd Engineer','ENGINE'],['Máy tư','4th Engineer','ENGINE'],
+  ['Sỹ quan máy','Engineer','ENGINE'],['Điện trưởng','Electrical Officer (ETO)','ENGINE'],['Thợ điện','Electrician','ENGINE'],['Thợ máy','Oiler','ENGINE'],['Thợ cả','Fitter','ENGINE'],
+  ['Bếp trưởng','Chief Cook','COOK'],['Bếp','Cook','COOK'],['Phục vụ','Steward','COOK']];
+const _CD_DEPT_LABEL={DECK:'Boong',ENGINE:'Máy / Điện',COOK:'Bếp / Phục vụ',OTHER:'Khác'};
+const _CD_DEPT_TPL={DECK:'FRM014',ENGINE:'FRM016E',COOK:'FRM015'};
+function _cdRankMap(){ const m=S.crewRankMap; return (Array.isArray(m)&&m.length)?m:_CD_RANK_DEFAULT.map(([vi,en,dept])=>({vi,en,dept})); }
+function _cdNorm(s){ return String(s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[đĐ]/g,'d').toLowerCase().replace(/\s+/g,' ').trim(); }
+function _cdRankInfo(title){
+  const t=_cdNorm(title); if(!t) return {en:'',dept:'OTHER'};
+  const map=_cdRankMap(); let hit=map.find(r=>_cdNorm(r.vi)===t)||map.slice().sort((a,b)=>_cdNorm(b.vi).length-_cdNorm(a.vi).length).find(r=>t.indexOf(_cdNorm(r.vi))>=0||_cdNorm(r.en)===t);
+  if(hit) return {en:hit.en, dept:hit.dept||'OTHER'};
+  let k=''; try{ k=crewRankOf(title); }catch(e){}
+  return {en:'', dept:(k==='master'||k==='cho'||k==='deck')?'DECK':((k==='che'||k==='engineer')?'ENGINE':(/bep|cook|phuc vu|steward/.test(t)?'COOK':'OTHER'))};
+}
+function openCrewRankMap(){
+  if(!_cdCanUse()){ toast('Không có quyền','bad'); return; }
+  window._CDRM=JSON.parse(JSON.stringify(_cdRankMap())); _cdRankMapRender();
+}
+function _cdRankMapRender(){
+  const L=window._CDRM;
+  openModal('⚙ Bảng chức danh Việt → Anh', `<div style="font-size:12px;color:var(--muted);margin-bottom:8px">Dùng để điền chức danh tiếng Anh trên quyết định và tự chọn mẫu hướng dẫn theo khối.</div>
+    <div class="tbl-scroll" style="max-height:55vh;overflow:auto"><table class="tbl"><thead><tr><th>Chức danh (Việt)</th><th>Rank (English)</th><th>Khối</th><th></th></tr></thead><tbody>${L.map((r,i)=>`<tr>
+      <td><input value="${esc(r.vi)}" oninput="_CDRM[${i}].vi=this.value" style="width:100%"></td><td><input value="${esc(r.en)}" oninput="_CDRM[${i}].en=this.value" style="width:100%"></td>
+      <td><select onchange="_CDRM[${i}].dept=this.value">${Object.keys(_CD_DEPT_LABEL).map(k=>`<option value="${k}" ${r.dept===k?'selected':''}>${_CD_DEPT_LABEL[k]}</option>`).join('')}</select></td>
+      <td><button class="icon-btn" onclick="_CDRM.splice(${i},1);_cdRankMapRender()">✕</button></td></tr>`).join('')}</tbody></table></div>
+    <button class="btn-sec" style="margin-top:8px" onclick="_CDRM.push({vi:'',en:'',dept:'OTHER'});_cdRankMapRender()">+ Thêm chức danh</button>`,
+    `<button class="btn-ghost" onclick="openCrewDocs('QD')">← Quay lại</button><button class="btn-primary" onclick="_cdRankMapSave()">💾 Lưu bảng</button>`);
+}
+function _cdRankMapSave(){ const L=(window._CDRM||[]).filter(r=>String(r.vi||'').trim());
+  commitMutation(()=>{ S.crewRankMap=L; }, {action:'crew_rank_map', fields:['crewRankMap'], onOk:()=>{ toast('✓ Đã lưu bảng chức danh','good'); openCrewDocs('QD'); }}); }
+/* Mở phiếu cho 1 thuyền viên, điền sẵn */
+function openCrewDocFor(kind, empId, opts){
+  opts=opts||{}; openCrewDocForm(kind); const C=_CD; C.empId=empId;
+  const e=_cdCrew().find(x=>x.id===empId)||((typeof HRService!=='undefined')?(HRService.employees()||[]).find(x=>x.id===empId):null);
+  if(e){ C.empName=e.fullName||''; C.empNameEn=_cdEn(e.fullName); C.gender=(/^f|nữ|nu$/i.test(String(e.gender||'')))?'F':'M'; C.rank=opts.rank||e.title||''; }
+  const ri=_cdRankInfo(C.rank); C.rankEn=ri.en||C.rankEn||'';
+  const vid=opts.vesselId||(e&&e.linkVesselId)||''; const v=_cdVessels().find(x=>x.id===vid); if(v){ C.vesselId=v.id; C.vesselName=v.name; }
+  if(opts.sub) C.sub=opts.sub; if(opts.fromDate) C.fromDate=String(opts.fromDate).slice(0,10);
+  if(kind==='BRIEF') C.tpl=opts.tpl||_CD_DEPT_TPL[ri.dept]||'FRM016G';
+  if(opts.planId) C.planId=opts.planId;
+  _cdRender();
+}
+function openCrewDocChooser(empId, opts){
+  opts=opts||{}; const e=(HRService.employees()||[]).find(x=>x.id===empId); if(!e) return; const ri=_cdRankInfo(opts.rank||e.title);
+  const docs=(S.crewDocs||[]).filter(d=>d&&!d._deleted&&d.empId===empId).sort((a,b)=>String(b.createdAt||'').localeCompare(String(a.createdAt||'')));
+  const rec=_CD_DEPT_TPL[ri.dept];
+  const o=JSON.stringify(opts).replace(/"/g,'&quot;');
+  const btn=(lab,js,hint)=>`<button class="btn-sec" style="display:block;width:100%;text-align:left;margin-bottom:6px;padding:10px 12px" onclick="${js}"><b>${lab}</b>${hint?`<div style="font-size:11px;color:var(--muted);font-weight:400">${hint}</div>`:''}</button>`;
+  openModal('📄 Giấy tờ thuyền viên — '+esc(e.fullName||''), `<div style="font-size:12px;margin-bottom:10px">Chức danh: <b>${esc(opts.rank||e.title||'—')}</b> · Khối: <b>${_CD_DEPT_LABEL[ri.dept]}</b>${ri.en?' · '+esc(ri.en):''}</div>
+    ${btn('📜 Quyết định điều động',`openCrewDocFor('QD','${empId}',Object.assign(${o},{sub:'DD'}))`,'Lên tàu / nhận nhiệm vụ')}
+    ${btn('📜 Quyết định nghỉ ca',`openCrewDocFor('QD','${empId}',Object.assign(${o},{sub:'NC'}))`,'Off-sign leave')}
+    ${rec?btn('📋 Hướng dẫn theo chức danh — '+esc(CREW_TPL.meta[rec].label),`openCrewDocFor('BRIEF','${empId}',Object.assign(${o},{tpl:'${rec}'}))`,'Đề xuất theo khối '+_CD_DEPT_LABEL[ri.dept]):''}
+    ${btn('📋 Hướng dẫn chung trước khi lên tàu (FRM-003)',`openCrewDocFor('BRIEF','${empId}',Object.assign(${o},{tpl:'FRM016G'}))`,'Mọi thuyền viên')}
+    <div style="font-size:11px;font-weight:600;text-transform:uppercase;color:var(--muted);margin:12px 0 4px">Đã lưu trong hồ sơ (${docs.length})</div>
+    ${docs.map(d=>`<div style="display:flex;gap:8px;align-items:center;padding:5px 0;border-bottom:1px solid var(--rule);font-size:12px"><span style="flex:1">${d.kind==='QD'?('📜 '+esc(d.no3||'')+'/QĐNS/'+esc(d.year||'')+' · '+(d.sub==='NC'?'Nghỉ ca':'Điều động')):('📋 '+esc((CREW_TPL.meta[d.tpl]||{}).label||d.tpl))} · ${esc(_cdD(d.date))}</span>${_cdStatusChip(d)}<button class="btn-sec" style="font-size:11px" onclick="_cdView('${d.id}')">👁 Xem</button></div>`).join('')||'<div style="font-size:12px;color:var(--muted)">Chưa có</div>'}`,
+    `<button class="btn-ghost" onclick="closeModal()">Đóng</button>`);
+}
+/* Dấu tròn ĐÃ KÝ (SVG) */
+function _cdStampSvg(d){
+  const dt=_cdD(String(d.signedAt||'').slice(0,10)), no=d.kind==='QD'?((d.no3||'')+'/QĐNS/'+(d.year||'')):((CREW_TPL.meta[d.tpl]||{}).code||'');
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200" width="46mm" height="46mm" style="transform:rotate(-12deg);opacity:.88">
+    <defs><path id="cdTop" d="M 30,100 A 70,70 0 0 1 170,100"/><path id="cdBot" d="M 36,104 A 64,64 0 0 0 164,104"/></defs>
+    <circle cx="100" cy="100" r="94" fill="none" stroke="#b3122e" stroke-width="5"/><circle cx="100" cy="100" r="86" fill="none" stroke="#b3122e" stroke-width="1.6"/>
+    <circle cx="100" cy="100" r="54" fill="none" stroke="#b3122e" stroke-width="1.4"/>
+    <text font-family="Arial,sans-serif" font-size="13.5" font-weight="700" fill="#b3122e" letter-spacing="1.2"><textPath href="#cdTop" startOffset="50%" text-anchor="middle">SEAHORSE MARINE &amp; ENERGY JSC</textPath></text>
+    <text font-family="Arial,sans-serif" font-size="12.5" font-weight="700" fill="#b3122e" letter-spacing="3"><textPath href="#cdBot" startOffset="50%" text-anchor="middle">★ BẢN LƯU ★</textPath></text>
+    <text x="100" y="97" text-anchor="middle" font-family="Arial Black,Arial,sans-serif" font-size="25" font-weight="900" fill="#b3122e">ĐÃ KÝ</text>
+    <line x1="60" y1="105" x2="140" y2="105" stroke="#b3122e" stroke-width="1.2"/>
+    <text x="100" y="121" text-anchor="middle" font-family="Arial,sans-serif" font-size="14" font-weight="700" fill="#b3122e">${esc(dt)}</text>
+    <text x="100" y="136" text-anchor="middle" font-family="Arial,sans-serif" font-size="8.5" fill="#b3122e">${esc(no)}</text></svg>`;
+}
+function _cdStamped(d, inner){
+  const pos=d.kind==='QD'?'top:184mm;right:24mm':'bottom:2mm;right:38mm';   // hướng dẫn: dấu cạnh chữ ký người hướng dẫn
+  return `<div style="position:relative">${inner}<div style="position:absolute;${pos};pointer-events:none">${_cdStampSvg(d)}</div>
+    <div style="position:absolute;top:110mm;left:0;right:0;text-align:center;transform:rotate(-30deg);font-family:Arial;font-size:56pt;font-weight:900;color:rgba(179,18,46,.08);pointer-events:none">BẢN LƯU</div></div>`;
+}
+function _cdStatusChip(d){ return d.signedAt?`<span style="border:2px solid #b3122e;color:#b3122e;font-weight:900;padding:1px 7px;border-radius:4px;font-size:10.5px;white-space:nowrap">ĐÃ KÝ · ${esc(_cdD(String(d.signedAt).slice(0,10)))}</span>`:'<span style="border:1px dashed #999;color:#777;padding:1px 7px;border-radius:4px;font-size:10.5px;white-space:nowrap">Nháp — chưa in</span>'; }
+function _cdInner(d){ return d.kind==='QD'?_cdQdHtml(d):_cdBriefHtml(d,false); }
+function _cdView(id){
+  const d=(S.crewDocs||[]).find(x=>x.id===id); if(!d) return;
+  const html='<!doctype html><html><head><meta charset="utf-8">'+_CD_CSS+'<style>body{background:#fff;padding:10px}</style></head><body>'+(d.signedAt?_cdStamped(d,_cdInner(d)):_cdInner(d))+'</body></html>';
+  const canUnlock=d.signedAt&&(isAdmin()||_modCanManageStaff('TAU'));
+  openModal('👁 '+(d.kind==='QD'?'Quyết định':'Hướng dẫn')+' — '+esc(d.empName||''), `<div style="margin-bottom:6px">${_cdStatusChip(d)}${d.signedBy?` <span style="font-size:11px;color:var(--muted)">in &amp; xác nhận: ${esc(d.signedBy)}</span>`:''}</div><iframe id="cd-prev" style="width:100%;height:68vh;border:1px solid var(--rule);background:#fff"></iframe>`,
+    `<button class="btn-ghost" onclick="openCrewDocs('${d.kind}')">← Danh sách</button>${canUnlock?`<button class="btn-sec" onclick="_cdUnlock('${id}')">🔓 Mở khóa (gỡ dấu)</button>`:''}${!d.signedAt?`<button class="btn-sec" onclick="openCrewDocForm('${d.kind}','${id}')">✎ Sửa</button>`:''}<button class="btn-primary" onclick="_cdPrint('${id}')">🖨 ${d.signedAt?'In lại (bản lưu)':'In PDF'}</button>`);
+  setTimeout(()=>{ const f=document.getElementById('cd-prev'); if(f) f.srcdoc=html; },30);
+}
+function _cdUnlock(id){
+  const d=(S.crewDocs||[]).find(x=>x.id===id); if(!d) return;
+  const why=prompt('Lý do mở khóa (gỡ dấu ĐÃ KÝ):'); if(!why||!why.trim()) return;
+  commitMutation(()=>{ (d._unlockHist=d._unlockHist||[]).push({at:new Date().toISOString(), by:actorName(), reason:why.trim(), prevSignedAt:d.signedAt, prevSignedBy:d.signedBy}); d.signedAt=''; d.signedBy=''; try{ touchRecord(d); }catch(e){} },
+    {action:'crew_doc_unlock', fields:['crewDocs'], onOk:()=>{ try{ logAuditEvent('crew_doc_unlock',{id, reason:why}); }catch(e){} toast('✓ Đã mở khóa — sửa rồi In PDF để ký lại','good'); _cdView(id); }});
+}
+
+function _cdPrintBlank(tpl){ _cdOpenPrint(_cdBriefHtml({tpl, ans:{}}, true), (CREW_TPL.meta[tpl]||{}).code+' (blank)'); }
+
 function _canSeeCrewMgmt(){
   /* v3.66.97 (Sếp): CHỈ người có quyền "Quản lý thuyền viên" (Vai trò 10) mới thấy sidebar QUẢN LÝ THUYỀN VIÊN —
      ẩn với mọi NV khác (kể cả Trưởng bộ phận). Admin/CEO giữ để giám sát. Không dùng cờ cũ. */
@@ -49132,7 +49458,8 @@ function renderVmCrewList(){
       <td style="padding:6px 8px">${esc(e.fullName||'')}</td>
       <td style="padding:6px 8px;color:var(--muted)">${esc(e.title||'')}</td>
       <td style="padding:6px 8px;color:var(--muted);font-size:11px">${esc(hrmVesselName(e.linkVesselId)||'')}</td>
-    </tr>`).join('');
+      <td style="padding:6px 8px;white-space:nowrap" onclick="event.stopPropagation()">${(()=>{ const n=(S.crewDocs||[]).filter(d=>d&&!d._deleted&&d.empId===e.id).length; return `<button class="btn-sec" style="font-size:11px;padding:3px 8px" onclick="openCrewDocChooser('${esc(e.id)}')" title="Quyết định điều động / Hướng dẫn nhận ca">📄 Giấy tờ${n?' ('+n+')':''}</button>`; })()}</td>
+    </tr>`).join('');   // v3.67.15
   box.innerHTML=`
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
       <div style="font-family:var(--font-display);font-size:16px;font-weight:700">👤 Hồ sơ thuyền viên</div>
@@ -49141,7 +49468,7 @@ function renderVmCrewList(){
         <button class="btn-primary" style="font-size:12px" onclick="hrmEditEmployee()">+ Thêm thuyền viên</button>
       </div>
     </div>
-    <table class="tbl"><thead><tr><th>#</th><th>MSNV</th><th>Họ tên</th><th>Chức danh</th><th>Tàu công tác</th></tr></thead>
+    <table class="tbl"><thead><tr><th>#</th><th>MSNV</th><th>Họ tên</th><th>Chức danh</th><th>Tàu công tác</th><th></th></tr></thead>
     <tbody>${rows||'<tr><td colspan="5" style="padding:14px;text-align:center;color:var(--muted)">Chưa có thuyền viên</td></tr>'}</tbody></table>
     <div style="margin-top:8px;font-size:10.5px;color:var(--muted)">Bấm 1 dòng để sửa. Mọi thay đổi ghi thẳng vào Nhân sự (theo dõi chung) — không phải bảng riêng.</div>`;
 }
@@ -49311,7 +49638,7 @@ function _vmSidebarApply(){
   const head=_modCanManageStaff('TAU');
   const show=(id,on)=>{ const el=document.getElementById(id); if(el) el.style.display=on?'':'none'; };
   ['vm-si-dash','vm-si-headgrp-hdr','vm-si-staff','vm-si-timesheet','vm-si-opex'].forEach(id=>show(id,head));
-  const ccm=_canSeeCrewMgmt(); ['vm-si-crewmgmt-hdr','vm-si-crewchange','vm-si-crewlist','vm-si-crewsalary'].forEach(id=>show(id,ccm));
+  const ccm=_canSeeCrewMgmt(); ['vm-si-crewmgmt-hdr','vm-si-crewchange','vm-si-crewlist','vm-si-crewsalary','vm-si-crewqd','vm-si-crewbrief'].forEach(id=>show(id,ccm));
   try{ _modMyTabShow('vm-mytab'); }catch(e){}
 }
 function renderVmDashboard(){
@@ -66151,7 +66478,8 @@ function _dnttBen(name){
 const _DNTT_C='border:1px solid #222;padding:5px 7px;font-size:12px';
 function _dnttBx(on){ return `<span style="display:inline-flex;width:15px;height:15px;border:1px solid #222;align-items:center;justify-content:center;font-size:12px;font-weight:700;vertical-align:middle">${on?'x':''}</span>`; }
 function _dnttHead(co){
-  return `<div style="display:flex;gap:12px;align-items:center">${co.logo?`<img src="${esc(co.logo)}" style="width:90px;height:auto">`:'<div style="width:90px"></div>'}
+  const _lg=co.logo||(typeof CREW_LOGO!=='undefined'?CREW_LOGO:'');   // v3.67.12: luôn có logo công ty trên MH 04 / MH 06
+  return `<div style="display:flex;gap:12px;align-items:center">${_lg?`<img src="${_lg.startsWith('data:')?_lg:esc(_lg)}" style="width:90px;height:auto">`:'<div style="width:90px"></div>'}
     <div style="flex:1;text-align:center"><div style="font-size:15px;font-weight:700">${esc(co.name)}</div><div style="font-size:14px;font-weight:700">${esc(co.nameEn)}</div><div style="font-size:11px">${esc(co.address)}</div></div></div>`;
 }
 function _dnttPeople(d){
@@ -112296,6 +112624,10 @@ function _modMyBccSubmit(sheetId, empId){
 // nhóm này, khớp BCC chi tiết/Thẻ lương): tự đổi nhãn khung sang tiếng Anh khi người đang xem thuộc
 // đúng 1 trong 3 Loại nhân sự đó — không cần khung riêng cho từng module, dùng chung khung đã có,
 // chỉ đổi CHỮ hiển thị theo đúng hồ sơ của họ.
+/* v3.67.11 (Sếp: "mọi NV không thấy thông tin của tôi ngay khi mở app — phải bấm Employees mới hiện"): khung "Của tôi"
+   trước chỉ bật trong các hàm chuyển mục (tmSwitchView/ktModSwitchView…), KHÔNG chạy khi mở app. Nay bật cho CẢ 7 module
+   ở mỗi lần renderAll (mở app, sau đồng bộ) và mỗi lần chuyển trang. Liên kết hồ sơ = email trong hồ sơ nhân viên. */
+function _modMyTabsRefresh(){ ['tm-mytab','vm-mytab','kt-mytab','kho-mytab','vpqn-mytab','hrm-mytab','fin-mytab'].forEach(id=>{ try{ _modMyTabShow(id); }catch(e){} }); }
 function _modMyTabShow(elId){
   try{ const _all=isAdmin()||!!(CURRENT_USER&&(CURRENT_USER.isDeptHead||['truong_bp','ceo','thu_kho','thu_kho_module'].indexOf(CURRENT_USER.roleTier)>=0))||(typeof canCheckAcc==='function'&&canCheckAcc());
     document.querySelectorAll('[onclick^="openToolsHeldModal"]').forEach(el=>{ el.textContent=_all?'📍 Sổ theo dõi MMTB văn phòng':'📍 Theo dõi MMTB cá nhân'; }); }catch(e){}   // v3.66.98
@@ -117805,6 +118137,7 @@ function maOpen(id){
   else if(typeof toast==='function') toast('Không mở được phiếu','bad');
 }
 function renderAll(opts){
+  try{ _modMyTabsRefresh(); }catch(e){}   // v3.67.11: khung "Của tôi" hiện ngay khi mở app
   try{ _acctEmpAuditNudge(); }catch(e){}   // v3.66.54
   try{ _bccAutoCreateMonthly(); }catch(e){}   // v3.66.41 tạo sẵn BCC bộ phận tháng hiện tại
   try{ _opHealMgmtFees(); }catch(e){}   // v3.66.37 tự dựng hồ sơ phí QL thiếu
