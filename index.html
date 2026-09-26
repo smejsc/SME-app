@@ -4727,7 +4727,7 @@ const WH_TYPES = {
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.67.09';
+const APP_VERSION='3.67.10';
 /* HOTFIX 3.12.17-email: CHẶN TRIỆT ĐỂ gửi email TỰ ĐỘNG (mất kiểm soát — spam quota Google).
    Email phải do NV được phân quyền CHỦ ĐỘNG chọn gửi. Cờ này:
    (1) chặn auto-SCAN tạo email (hrmScanExpiries/vesselCertScanExpiries);
@@ -66329,6 +66329,85 @@ function opConvertToPay(id){
   _CONV=_CONV&&_CONV.id===id?_CONV:{id, kind:'op', partner:t.vendor||'', no:'', date:todayISO(), value:+t.amount||0, mode:'one', dot1:''};
   _convRender();
 }
+/* ════════════════════════════════════════════════════════════════════════════════════════════════
+   v3.67.10 — Chuyển Đề nghị thanh toán (CHỈ đổi loại phiếu) + TRẢ TRƯỚC + cập nhật NHẬP KHO theo hóa đơn.
+   • Số HĐ / PO không bắt buộc: trống → "💳 Trả trước — chờ hóa đơn" (_prepayNoInv); sau đó "🧾 Cập nhật hóa đơn".
+   • Phiếu có nhập kho dự kiến (từ báo giá): nhắc kiểm tra hóa đơn khác báo giá (không bắt buộc); import hóa đơn →
+     bảng so sánh → cập nhật phiếu nhập kho THEO HÓA ĐƠN (SL đã nhận giữ nguyên, lệch SL nhận ↔ HĐ thì cảnh báo).
+   • Hồ sơ lưu cả báo giá và hóa đơn (file hóa đơn tự đính kèm vào phiếu).
+   ════════════════════════════════════════════════════════════════════════════════════════════════ */
+function _convSibIds(r){ return r.batchId?AccountingService.payables().filter(x=>x.batchId===r.batchId&&!x._deleted).map(x=>x.id):[r.id]; }
+function _convStockDocs(r){ const ids=_convSibIds(r); try{ return (InventoryService.stockDocs?InventoryService.stockDocs():(S.stockDocs||[])).filter(d=>d&&!d._deleted&&d.type==='IN'&&ids.indexOf(d.apId)>=0&&d.status!=='cancelled'); }catch(e){ return []; } }
+function _convStockBlock(){
+  const C=_CONV; if(!C||C.kind!=='ap') return '';
+  const r=AccountingService.payables().find(x=>x.id===C.id); if(!r) return '';
+  const docs=_convStockDocs(r); if(!docs.length) return '';
+  const lines=[]; docs.forEach(d=>(d.lines||[]).forEach(l=>lines.push(l)));
+  const tot=lines.reduce((t,l)=>t+(+l.qty||0)*(+(l.price||l.unitPrice)||0),0);
+  const nRecv=docs.filter(d=>d.status==='received'||d.status==='confirmed').length;
+  let diff='';
+  if(C.inv && C.inv.length){
+    const key=l=>whNormName(l.code||l.name||''); const qm={}; lines.forEach(l=>{ qm[key(l)]=l; }); const im={}; C.inv.forEach(l=>{ im[key(l)]=l; });
+    const rows=[]; C.inv.forEach(i=>{ const q=qm[key(i)]; const same=q&&(+q.qty===+i.qty)&&(Math.abs((+(q.price||q.unitPrice)||0)-(+i.price||0))<0.01);
+      rows.push(`<tr><td>${esc(i.name)}</td><td class="r">${q?(whFmtQty(q.qty)+' × '+(+(q.price||q.unitPrice)||0).toLocaleString('vi-VN')):'—'}</td><td class="r"><b>${whFmtQty(i.qty)} × ${(+i.price||0).toLocaleString('vi-VN')}</b></td><td>${!q?'<span style="color:#1d6b3a;font-weight:700">+ thêm</span>':(same?'<span style="color:var(--muted)">= giống</span>':'<span style="color:#9a5a05;font-weight:700">≠ đổi</span>')}</td></tr>`); });
+    lines.forEach(l=>{ if(!im[key(l)]) rows.push(`<tr><td>${esc(l.name||l.code)}</td><td class="r">${whFmtQty(l.qty)} × ${(+(l.price||l.unitPrice)||0).toLocaleString('vi-VN')}</td><td class="r">—</td><td><span style="color:var(--bad);font-weight:700">− không có trên HĐ</span></td></tr>`); });
+    diff=`<div style="margin-top:8px;font-size:11px;font-weight:600;text-transform:uppercase;color:var(--muted)">So sánh báo giá ↔ hóa đơn (${C.inv.length} dòng HĐ)</div><div class="tbl-scroll" style="max-height:240px;overflow:auto"><table class="tbl" style="font-size:12px"><thead><tr><th>Mặt hàng</th><th class="r">Báo giá (SL × giá)</th><th class="r">Hóa đơn</th><th></th></tr></thead><tbody>${rows.join('')}</tbody></table></div>
+      <div style="font-size:11px;color:var(--muted);margin-top:4px">Xác nhận → phiếu nhập kho cập nhật THEO HÓA ĐƠN. SL đã nhận giữ nguyên; lệch SL nhận ↔ hóa đơn sẽ cảnh báo cho Thủ kho.</div>`;
+  }
+  return `<div style="margin-top:12px;padding:10px 12px;border:1px solid #1c5a8c;border-radius:6px;background:#eef4fa">
+    <div style="font-size:13px"><b>📦 Nhập kho dự kiến:</b> ${docs.length} phiếu · ${lines.length} mặt hàng · tổng ${fmtOrig(tot, r.ccy||'VND')}${nRecv?(' · '+nRecv+' phiếu đã nhận hàng'):''}</div>
+    <div style="font-size:12px;color:#9a5a05;margin-top:4px">⚠ Kiểm tra hóa đơn có khác báo giá không. Đúng báo giá → chỉ cần số HĐ / ngày. Khác → import hóa đơn (không bắt buộc).</div>
+    <div style="display:flex;gap:10px;align-items:center;margin-top:8px"><input type="file" id="conv-inv-file" accept=".pdf,.xlsx,.xls,.csv,.png,.jpg,.jpeg" style="display:none" onchange="_convReadInv(this)">
+      <button class="btn-sec" style="font-size:12px" onclick="document.getElementById('conv-inv-file').click()">📎 Import hóa đơn (nếu khác báo giá)</button><span id="conv-inv-st" style="font-size:12px;color:var(--muted)">${C.invFile?('📎 '+esc(C.invFile.name)):''}</span></div>${diff}</div>`;
+}
+async function _convReadInv(inputEl){
+  const file=inputEl&&inputEl.files&&inputEl.files[0]; if(!file) return; inputEl.value='';
+  const C=_CONV; const st=document.getElementById('conv-inv-st'); if(st) st.textContent='⏳ Đang đọc hóa đơn…';
+  let items=[];
+  try{
+    const ext=(file.name.split('.').pop()||'').toLowerCase();
+    if(ext==='xlsx'||ext==='xls'){ await _loadScriptOnce('https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js','XLSX'); const wb=XLSX.read(new Uint8Array(await file.arrayBuffer()),{type:'array'});
+      wb.SheetNames.forEach(sn=>{ const {items:it}=whParseQuoteRows(XLSX.utils.sheet_to_json(wb.Sheets[sn],{header:1,defval:''})); if(it&&it.length>items.length) items=it; }); }
+    else if(ext==='csv'){ await _loadScriptOnce('https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js','Papa'); items=(whParseQuoteRows(Papa.parse(await file.text(),{skipEmptyLines:true}).data)||{}).items||[]; }
+    else if(ext==='pdf'){ items=await _provQuoteReadPdfLines(file); }
+    else { try{ const d=await aiExtract(file,'ap'); items=(d.lines||[]).map(L=>({name:String(L.desc||L.name||''), unit:String(L.unit||''), qty:+(L.qty||L.quantity||0), price:+(L.unitPrice||L.price||0)})).filter(x=>x.name&&x.qty>0); }catch(e){} }
+  }catch(e){ console.warn('[conv-inv]',e); }
+  C.inv=items; C.invFile=file;
+  _convRender();
+  const s2=document.getElementById('conv-inv-st'); if(s2){ s2.textContent=items.length?('✓ Đọc '+items.length+' dòng hàng · 📎 '+file.name):('Không đọc được dòng hàng — vẫn đính kèm "'+file.name+'"'); s2.style.color=items.length?'var(--good)':'#9a5a05'; }
+}
+async function _convAttachInv(r){
+  const C=_CONV; if(!C||!C.invFile) return;
+  try{ const cfg=getAuthConfig(); if(!cfg||!cfg.scriptUrl) return; const f=C.invFile;
+    const b64=await new Promise((res,rej)=>{ const rd=new FileReader(); rd.onload=()=>{ const x=String(rd.result||''); res(x.includes(',')?x.split(',')[1]:x); }; rd.onerror=()=>rej(new Error('đọc file')); rd.readAsDataURL(f); });
+    const resp=await fetch(cfg.scriptUrl,{method:'POST',headers:{'Content-Type':'text/plain'},body:JSON.stringify({action:'upload_attachment', fileBase64:b64, mimeType:f.type||'application/octet-stream', fileName:f.name, sub:'CHUNGTU', viewers:[]})});
+    const d=await resp.json(); if(d&&d.ok&&d.file){ (r.attachments=r.attachments||[]).push({name:f.name, docType:'Hóa đơn', url:d.file.url||'', driveId:d.file.id||'', uploadedBy:actorName(), uploadedAt:new Date().toISOString()}); try{ touchRecord(r); }catch(e){} saveState(); }
+  }catch(e){ console.warn('[conv-attach]',e); }
+}
+/* cập nhật phiếu nhập kho theo hóa đơn + ghi số HĐ; trả về số cảnh báo lệch SL nhận ↔ HĐ */
+function _convApplyStock(r, no, date){
+  const C=_CONV, docs=_convStockDocs(r); let warn=0; if(!docs.length) return 0;
+  const key=l=>whNormName(l.code||l.name||'');
+  docs.forEach(d=>{ if(d.status==='confirmed') return; if(no){ d.invoiceNo=no; d.invoiceDate=date||''; } });
+  if(C && C.inv && C.inv.length){
+    const im={}; C.inv.forEach(i=>{ im[key(i)]=i; }); const used={};
+    docs.forEach(d=>{ if(d.status==='confirmed') return;
+      d.lines=(d.lines||[]).filter(l=>{ const i=im[key(l)];
+        if(!i){ if(d.status==='pending'||d.status==='draft') return false; l._notInInvoice=true; warn++; return true; }
+        used[key(l)]=1; l.price=+i.price||l.price; if(l.unitPrice!=null) l.unitPrice=+i.price||l.unitPrice; l.invQty=+i.qty;
+        if(d.status==='pending'||d.status==='draft'){ l.qty=+i.qty; if(l.orderedQty!=null) l.orderedQty=+i.qty; } else if(+l.qty!==+i.qty){ l._qtyMismatch=true; warn++; }
+        return true; });
+      d._invUpdatedAt=new Date().toISOString(); d._invUpdatedBy=actorName(); try{ touchRecord(d); }catch(e){} });
+    const tgt=docs.find(d=>d.status==='pending'||d.status==='draft');
+    C.inv.forEach(i=>{ if(used[key(i)]) return; if(tgt){ tgt.lines.push({code:i.code||'', name:i.name, unit:i.unit||'', qty:+i.qty, orderedQty:+i.qty, price:+i.price||0, invQty:+i.qty, _fromInvoice:true}); } else warn++; });
+  } else docs.forEach(d=>{ try{ touchRecord(d); }catch(e){} });
+  return warn;
+}
+function apUpdateInvoice(id){
+  const r=AccountingService.payables().find(x=>x.id===id); if(!r) return;
+  _CONV={id, kind:'ap', invOnly:true, partner:r.partner||'', no:'', date:todayISO(), value:+r.amountGross||+r.amount||0, mode:'one'}; _convRender();
+}
+
 function _convRender(){
   const C=_CONV; const isAp=C.kind==='ap';
   const rec=isAp?AccountingService.payables().find(x=>x.id===C.id):VesselService.opTransactions().find(x=>x.id===C.id);
@@ -66337,15 +66416,16 @@ function _convRender(){
     <div class="field" style="margin:0"><label>Người nhận (phải có trong danh mục NCC) *</label><input id="conv-partner" list="conv-partner-sug" value="${esc(C.partner)}" oninput="_CONV.partner=this.value;_benRefresh('conv')" autocomplete="off"><datalist id="conv-partner-sug">${(typeof _vendorDatalistOptions==='function')?_vendorDatalistOptions():''}</datalist></div>
     <div id="conv-ben-card" style="margin:6px 0 10px">${_benCardHtml('conv', C.partner)}</div>
     <div style="display:grid;grid-template-columns:1fr 150px 1fr;gap:10px">
-      <div class="field" style="margin:0"><label>Số hóa đơn / PO *</label><input value="${esc(C.no)}" oninput="_CONV.no=this.value"></div>
+      <div class="field" style="margin:0"><label>Số hóa đơn / PO ${C.invOnly?'*':'<span style="font-weight:400;text-transform:none">(trống = trả trước, chờ hóa đơn)</span>'}</label><input value="${esc(C.no)}" oninput="_CONV.no=this.value"></div>
       <div class="field" style="margin:0"><label>Ngày</label><input type="date" value="${esc(C.date)}" oninput="_CONV.date=this.value"></div>
-      <div class="field" style="margin:0"><label>Giá trị thực (${esc(ccy)}) — thay giá dự kiến *</label><input type="number" step="any" value="${esc(String(C.value))}" oninput="_CONV.value=+this.value||0" style="text-align:right;font-family:var(--font-mono)"></div></div>
-    ${isAp?`<div style="display:flex;gap:14px;align-items:center;margin-top:10px;font-size:13px"><b>Thanh toán:</b>
+      <div class="field" style="margin:0;${C.invOnly?'display:none':''}"><label>Giá trị thực (${esc(ccy)}) — thay giá dự kiến *</label><input type="number" step="any" value="${esc(String(C.value))}" oninput="_CONV.value=+this.value||0" style="text-align:right;font-family:var(--font-mono)"></div></div>
+    ${_convStockBlock()}
+    ${(isAp&&!C.invOnly)?`<div style="display:flex;gap:14px;align-items:center;margin-top:10px;font-size:13px"><b>Thanh toán:</b>
       <label><input type="radio" name="conv-mode" ${C.mode!=='multi'?'checked':''} onchange="_CONV.mode='one';_convRender()"> 1 lần</label>
       <label><input type="radio" name="conv-mode" ${C.mode==='multi'?'checked':''} onchange="_CONV.mode='multi';_convRender()"> Nhiều lần (theo PO / HĐ)</label>
       ${C.mode==='multi'?`<span>Đợt 1: <input type="number" step="any" value="${esc(String(C.dot1||''))}" oninput="_CONV.dot1=+this.value||0" style="width:150px;text-align:right"></span>`:''}</div>`:''}
     <div style="font-size:11px;color:var(--muted);margin-top:10px">Xác nhận: phiếu chuyển sang THANH TOÁN (cam → navy), về "Chờ KT kiểm" để duyệt chi. Chênh lệch với giá dự kiến tự điều chỉnh${isAp?' P/L':' báo cáo chủ tàu'}. Chứng từ đính kèm ở phần chứng từ của phiếu.</div>`;
-  openModal('💵 Chuyển Đề xuất thanh toán', body, `<button class="btn-ghost" onclick="closeModal()">Hủy</button><button class="btn-primary" onclick="_convSave()">Xác nhận chuyển</button>`);
+  openModal(C.invOnly?'🧾 Cập nhật hóa đơn (phiếu trả trước)':'💵 Chuyển Đề xuất thanh toán', body, `<button class="btn-ghost" onclick="closeModal()">Hủy</button><button class="btn-primary" onclick="_convSave()">${C.invOnly?'Cập nhật hóa đơn':'Xác nhận chuyển'}</button>`);
 }
 function _convSave(){
   const C=_CONV; if(!C) return;
@@ -66354,23 +66434,33 @@ function _convSave(){
   if(!String(C.partner||'').trim()){ toast('Nhập người nhận','bad'); return; }
   { const e=_benCheck(C.partner); if(e) toast('Gợi ý: '+e,'warn'); }   // v3.67.03: chỉ gợi ý
   const v=v0||{name:String(C.partner).trim(), id:'', taxCode:''};
-  if(!String(C.no||'').trim()){ toast('Nhập số hóa đơn / PO','bad'); return; }
-  if(!(+C.value>0)){ toast('Nhập giá trị thực','bad'); return; }
   const now=new Date().toISOString(), who=actorName();
+  if(C.invOnly){   /* v3.67.10: phiếu trả trước — cập nhật hóa đơn */
+    if(!String(C.no||'').trim()){ toast('Nhập số hóa đơn','bad'); return; }
+    const r=AccountingService.payables().find(x=>x.id===C.id); if(!r) return; let warn=0;
+    commitMutation(()=>{ _convSibIds(r).forEach(id=>{ const x=AccountingService.payables().find(y=>y.id===id); if(!x) return; x.invoiceNo=String(C.no).trim(); x.invoiceDate=C.date; x._prepayNoInv=false; x._invUpdatedAt=now; x._invUpdatedBy=who; try{ touchRecord(x); }catch(e){} }); warn=_convApplyStock(r, String(C.no).trim(), C.date); },
+      {action:'ap_update_invoice', fields:['payables','stockDocs'], onOk:()=>{ _convAttachInv(r); try{ logAuditEvent('ap_update_invoice',{id:C.id, no:C.no}); }catch(e){} _CONV=null; toast('✓ Đã cập nhật hóa đơn'+(warn?(' · ⚠ '+warn+' dòng lệch SL nhận ↔ hóa đơn — báo Thủ kho'):'')+'. Giá trị khác số đã đề nghị → dùng ⚖ Điều chỉnh / Quyết toán','good'); openPayableModal(C.id); }});
+    return;
+  }
+  if(!(+C.value>0)){ toast('Nhập giá trị thực','bad'); return; }
+  const _noInv=!String(C.no||'').trim();   // v3.67.10: trống số HĐ/PO → trả trước
   if(C.kind==='ap'){
     const r=AccountingService.payables().find(x=>x.id===C.id); if(!r) return;
     if(C.mode==='multi' && !(+C.dot1>0 && +C.dot1<=+C.value)){ toast('Số đợt 1 phải > 0 và ≤ giá trị thực','bad'); return; }
     commitMutation(()=>{
       const gross=+r.amountGross||+r.amount||0;
       r._provisionalGross=gross; r.partner=v.name; r.vendorId=v.id;
-      if(C.mode==='multi'){ r.poNo=String(C.no).trim(); r.poDate=C.date; r.payMode='multi'; r.dueAmount=(+C.dot1>=+C.value)?0:+C.dot1; (r._dotReqs=r._dotReqs||[]).push({n:1, amount:+C.dot1, note:'Đợt 1', at:now, by:who}); }
+      if(_noInv){ r._prepayNoInv=true; }
+      else if(C.mode==='multi'){ r.poNo=String(C.no).trim(); r.poDate=C.date; r.payMode='multi'; r.dueAmount=(+C.dot1>=+C.value)?0:+C.dot1; (r._dotReqs=r._dotReqs||[]).push({n:1, amount:+C.dot1, note:'Đợt 1', at:now, by:who}); }
       else { r.invoiceNo=String(C.no).trim(); r.invoiceDate=C.date; }
       r.actualValue=+C.value; r.amountGross=+C.value; r.amount=+C.value; if(!(+r.vatAmount)) r.amountNet=+C.value;
       if(!r.payContent) r.payContent=r.desc||'';
       r._isProvisional=false; r._isBudget=false; r._convertedAt=now; r._convertedBy=who;
-      const st=wfStatus(r); if(st!=='draft'&&st!=='rejected'){ ['accCheckedBy','accCheckedAt','approvedL1By','approvedL1At','approvedL2By','approvedL2At'].forEach(k=>{ if(r[k]) r[k]=''; }); r.status='pending_acc'; }
-      try{ touchRecord(r); }catch(e){} },
-      {action:'ap_convert_to_pay', fields:['payables'], onOk:()=>{ try{ logAuditEvent('ap_convert_to_pay',{id:C.id, no:C.no, value:C.value, mode:C.mode}); }catch(e){} _CONV=null; toast('✓ Đã chuyển sang Đề xuất thanh toán','good'); openPayableModal(C.id); }});
+      /* v3.67.10 (Sếp): CHỈ đổi loại phiếu — giữ trạng thái; riêng phiếu đã gửi/duyệt mà SỐ TIỀN ĐỔI → về Chờ KT kiểm */
+      const st=wfStatus(r); if(st!=='draft'&&st!=='rejected'&&Math.abs(gross-(+C.value))>0.001){ ['accCheckedBy','accCheckedAt','approvedL1By','approvedL1At','approvedL2By','approvedL2At'].forEach(k=>{ if(r[k]) r[k]=''; }); r.status='pending_acc'; }
+      try{ touchRecord(r); }catch(e){}
+      try{ window._convWarn=_convApplyStock(r, _noInv?'':String(C.no).trim(), C.date); }catch(e){ console.warn('[conv-stock]',e); } },
+      {action:'ap_convert_to_pay', fields:['payables','stockDocs'], onOk:()=>{ try{ _convAttachInv(r); }catch(e){} if(window._convWarn) toast('⚠ '+window._convWarn+' dòng lệch SL nhận ↔ hóa đơn — báo Thủ kho','warn'); try{ logAuditEvent('ap_convert_to_pay',{id:C.id, no:C.no, value:C.value, mode:C.mode}); }catch(e){} _CONV=null; toast('✓ Đã chuyển sang Đề xuất thanh toán','good'); openPayableModal(C.id); }});
   } else {
     const t=VesselService.opTransactions().find(x=>x.id===C.id); if(!t) return;
     commitMutation(()=>{
@@ -66380,7 +66470,7 @@ function _convSave(){
       t.amountUsd=(old>0)?+((+C.value)*(oldUsd/old)).toFixed(2):t.amountUsd;   // giữ tỷ giá đã lập
       t._isBudget=false; t._convertedAt=now; t._convertedBy=who;
       let st=''; try{ st=opWfStatus(t); }catch(e){}
-      if(st && st!=='draft' && st!=='rejected'){ t.payApproved=false; t.ncStatus='pending_acc'; (t._ncHist=t._ncHist||[]).push({from:st, to:'pending_acc', by:who, at:now, note:'Chuyển dự kiến → thanh toán'}); }
+      if(st && st!=='draft' && st!=='rejected' && Math.abs(old-(+C.value))>0.001){ t.payApproved=false; t.ncStatus='pending_acc'; (t._ncHist=t._ncHist||[]).push({from:st, to:'pending_acc', by:who, at:now, note:'Chuyển dự kiến → thanh toán'}); }
       try{ touchRecord(t); }catch(e){} },
       {action:'op_convert_to_pay', fields:['opTransactions'], onOk:()=>{ try{ logAuditEvent('op_convert_to_pay',{id:C.id, no:C.no, value:C.value}); }catch(e){} _CONV=null; renderAll(); toast('✓ Đã chuyển sang Đề xuất thanh toán','good'); showOpTxDetail(C.id); }});
   }
@@ -70011,6 +70101,7 @@ function openPayableModal(id){
     foot=`<button class="btn-sec" onclick="closeModal()">Đóng</button><button class="btn-sec" onclick="printDnttAp('${id}')" title="In Phiếu đề nghị thanh toán (MH 04-DNTT) — Lưu thành PDF">🖨 In ĐNTT</button>`   // v3.66.78
       + ((r && (r._isProvisional||r._isBudget) && !r.poNo)?`<button class="btn-primary" style="background:#1c3a5c;border-color:#1c3a5c" onclick="apConvertToPay('${id}')">💵 Chuyển Đề xuất thanh toán</button>`:'')   // v3.66.91
       + ((r && r.poNo)?`<button class="btn-sec" style="border-color:#1c3a5c;color:#1c3a5c" onclick="apUpdatePO('${id}')">📄 PO ${esc(r.poNo)}</button>`:'')
+      + ((r && r._prepayNoInv)?`<button class="btn-primary" style="background:#7a4b00;border-color:#7a4b00" onclick="closeModal();apUpdateInvoice('${id}')" title="Phiếu trả trước — cập nhật hóa đơn khi có">🧾 Cập nhật hóa đơn</button>`:'')   // v3.67.10
       + ((r && !r._adjOf && !r._isProvisional && !r._isBudget && !r._payrollPeriodId && ['pending_acc','pending_l1','pending_l2','approved'].indexOf(wfStatus(r))>=0 && _adjCanCreate(r))?`<button class="btn-sec" onclick="closeModal();openAdjust('ap','${id}')" title="Hóa đơn điều chỉnh tăng/giảm hoặc quyết toán">⚖ Điều chỉnh / Quyết toán</button>`:'')   // v3.66.94
       + ((r && r._adjOf && _adjOver('ap',r)>0.001 && (canCheckAcc()||isAdmin()))?`<button class="btn-sec" onclick="closeModal();adjRefund('ap','${id}')">💰 NCC hoàn tiền</button><button class="btn-sec" onclick="closeModal();adjOffsetOther('ap','${id}')">⚖ Cấn trừ phiếu khác</button>`:'')
       + ((r && r.poNo && ['approved','pending_acc'].indexOf(wfStatus(r))>=0)?`<button class="btn-sec" style="border-color:#1c3a5c;color:#1c3a5c" onclick="closeModal();apProposeDot('${id}')">➕ Đề xuất đợt thanh toán</button>`:'')
@@ -70378,7 +70469,7 @@ function _wzRender(){
       ${isPT?`<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:10px"><div class="field" style="margin:0"><label>Loại chi phí</label><select onchange="_wzDk('expenseType',this.value)">${expenseTypeOpts(d.expenseType)}</select></div>
         <div class="field" style="margin:0"><label>Mảng KD</label><select onchange="_wzDk('segment',this.value)"><option value="">— Theo mặc định —</option>${segOpts}</select></div></div>`:''}
       <div style="font-size:11px;color:var(--muted);margin-top:8px">Báo giá đính kèm sau khi lưu (mở phiếu → chứng từ). Có PO / hóa đơn thì mở phiếu để chuyển thanh toán.</div>`;
-    foot=`<button class="btn-ghost" onclick="_WZ.step=3;_wzRender()">← Quay lại</button><button class="btn-primary" style="background:${_WZ_CAM};border-color:${_WZ_CAM}" onclick="_wzSaveDk()">💾 Lưu dự kiến</button>`;
+    foot=`<button class="btn-ghost" onclick="_WZ.step=3;_wzRender()">← Quay lại</button>${(W.flow==='PT'||W.nature==='HAIMA')?`<button class="btn-sec" style="border-color:${_WZ_CAM};color:${_WZ_CAM}" onclick="_wzDkGoods()" title="Hàng hóa có báo giá: import báo giá, tạo phiếu chờ nhận hàng nhãn DỰ KIẾN">📦 Hàng hóa — có báo giá (nhập kho)</button>`:''}<button class="btn-primary" style="background:${_WZ_CAM};border-color:${_WZ_CAM}" onclick="_wzSaveDk()">💾 Lưu dự kiến</button>`;   // v3.67.10
   }
   openModal(title+(W.step>1?(' · '+(isPT?'🏢 Công ty':'🚢 Chi hộ chủ tàu')):''), body, foot);
 }
@@ -70403,6 +70494,15 @@ function _wzNext3(){
   const W=_WZ; W.partner=((document.getElementById('wz-partner')||{}).value||W.partner||'').trim();
   if(W.mode==='TT'){ const e=_benCheck(W.partner); if(e){ toast('Gợi ý: '+e,'warn'); } _wzOpenForm(false); return; }   // v3.67.03: chỉ gợi ý
   W.step=4; _wzRender();
+}
+/* v3.67.10: Dự kiến HÀNG HÓA có báo giá → mở phiếu dự kiến loại Nhập kho + hộp chọn file báo giá; lưu bằng "Lưu & Nhập kho" */
+function _wzDkGoods(){
+  const W=_WZ; W.partner=((document.getElementById('wz-partner')||{}).value||W.partner||'').trim(); closeModal();
+  openMultiRowModal('ap',{budget:true, purchaseKind:'GOODS'}); const s=_multiRowState; if(!s) return;
+  s.partner=W.partner||''; try{ const v=_benVendorByName(s.partner); if(v) s.vendorId=v.id; }catch(e){}
+  _renderMultiRowModal(); try{ _benRefresh('ap'); }catch(e){}
+  setTimeout(()=>{ const el=document.getElementById('mr-invoice-file'); if(el) el.click(); },150);
+  toast('Chọn file báo giá — app đọc các dòng hàng; lưu bằng "Lưu & Nhập kho" để tạo phiếu chờ nhận hàng (nhãn DỰ KIẾN)','good');
 }
 function _wzUploadInvoice(){   // v3.66.85: mở phiếu rồi mở ngay hộp chọn file AI (cùng thao tác bấm)
   _WZ.partner=((document.getElementById('wz-partner')||{}).value||_WZ.partner||'').trim();
@@ -89268,7 +89368,7 @@ function openStockInTracking(){
          BBGN ở dòng phiếu — dồn hết lên nút "🚚 Nhận hàng" cấp cụm hóa đơn phía trên (mở đúng phiếu
          pending đầu tiên của cụm này, đủ dùng vì 1 cụm hiện chỉ có tối đa 1 phiếu đang pending). */
       return `<div class="wh-track-row" data-docid="${esc(d.id)}" style="display:flex;flex-wrap:wrap;gap:6px 8px;align-items:center;padding:5px 10px;border-top:1px solid var(--rule);font-size:11px;cursor:pointer" onclick="_sitRowToggle(event,'${esc(d.id)}')">
-        <span style="font-family:monospace"><b>${esc(d.docNo)}</b></span><span style="color:var(--muted)">${esc(d.date||'')}</span>
+        <span style="font-family:monospace"><b>${esc(d.docNo)}</b></span>${(d.apId&&_whApIsDk(d.apId))?'<span style="font-size:10px;font-weight:700;color:#fff;background:#d97706;border-radius:4px;padding:1px 6px">DỰ KIẾN</span>':''}${(d.apId&&_whApIsPrepay(d.apId))?'<span style="font-size:10px;font-weight:700;color:#fff;background:#7a4b00;border-radius:4px;padding:1px 6px">TRẢ TRƯỚC · CHỜ HĐ</span>':''}${(d.status==='received'&&d.apId&&_whApInvoiceGate(d.apId))?'<span style="font-size:10px;color:#9a5a05">⏳ chờ hóa đơn mới nhập kho</span>':''}<span style="color:var(--muted)">${esc(d.date||'')}</span>
         <span style="color:var(--muted)">${esc(_whName(d.warehouseId))}</span><span>${whFmtQty((d.lines||[]).length)} mã · SL ${whFmtQty(totQ)}</span>
         ${(d.landedCosts&&d.landedCosts.length)?`<span class="ds-need" style="color:#6a1b9a;font-size:10px" title="Phiếu có chi phí nhập kho kèm theo (thuế/vận chuyển…) — giá vốn gồm cả CP">+CP</span>`:''}
         ${d.apInvoiceSent?'<span class="ds-need" style="color:#1e7d44;font-size:10px" title="'+esc(d.apInvoiceSentBy||'')+' · '+esc((d.apInvoiceSentAt||'').slice(0,10))+'">✓ Đã chuyển KT</span>':''}
@@ -93059,6 +93159,7 @@ function _stockSave(confirmNow, stay){   // v3.17.01: stay=true → lưu xong �
   s.lines=_asg.lines;
   const val=whValidateStockSave(s, confirmNow, code=>stockOnHand(s.warehouseId, code), (id,code)=>_stockSelfQty(id,code));
   if(!val.ok){ toast(val.reason,'bad'); return; }
+  if(confirmNow && s.type==='IN' && s.apId){ const g=_whApInvoiceGate(s.apId); if(g){ toast(g,'bad'); return; } }   // v3.67.10
   s.lines=val.lines;
   _asg.created.forEach(m=>{ try{ InventoryService.addMaterial(m); }catch(e){} });
   if(_asg.created.length) toast('App đã cấp '+_asg.created.length+' mã tạm — thủ kho soát lại ở 🏷 Soát mã','warn');
@@ -93114,9 +93215,24 @@ function whCanConfirmDoc(d){
   return {ok:true};
 }
 // Validate nghiệp vụ thuần: trạng thái hợp lệ + (nếu OUT) tồn đủ. stockOf(code)->số tồn.
+
+/* v3.67.10 (Sếp): nhận hàng làm được TRƯỚC (giao nhiều lần → Chờ nhập kho); Thủ kho CHỈ xác nhận nhập kho khi phiếu
+   Phải trả gốc đã có HÓA ĐƠN — không còn là Dự kiến, không phải "Trả trước — chờ hóa đơn". */
+function _whApInvoiceGate(apId){
+  if(!apId || typeof AccountingService==='undefined') return '';
+  const ap=AccountingService.payables().find(x=>x.id===apId); if(!ap) return '';
+  const sibs=ap.batchId?AccountingService.payables().filter(x=>x.batchId===ap.batchId&&!x._deleted):[ap];
+  if(sibs.some(x=>x._isProvisional||x._isBudget)) return 'Chờ hóa đơn — phiếu Phải trả còn là DỰ KIẾN (chuyển Đề nghị thanh toán khi có PO / hóa đơn)';
+  if(sibs.some(x=>x._prepayNoInv)) return 'Chờ hóa đơn — phiếu TRẢ TRƯỚC chưa cập nhật hóa đơn';
+  return '';
+}
+function _whApIsDk(apId){ try{ const ap=AccountingService.payables().find(x=>x.id===apId); return !!(ap&&(ap._isProvisional||ap._isBudget)); }catch(e){ return false; } }
+function _whApIsPrepay(apId){ try{ const ap=AccountingService.payables().find(x=>x.id===apId); return !!(ap&&ap._prepayNoInv); }catch(e){ return false; } }
+
 function whValidateConfirmDoc(d, stockOf){
   if(!d) return {ok:false, reason:'Không tìm thấy chứng từ'};
   if(d.status==='confirmed') return {ok:false, reason:'Đã xác nhận rồi'};
+  if(d.type==='IN' && d.apId){ const g=_whApInvoiceGate(d.apId); if(g) return {ok:false, reason:g}; }   // v3.67.10
   if(d.type==='OUT'){
     for(const l of (d.lines||[])){
       const oh = stockOf(l.code);
@@ -103993,6 +104109,7 @@ function _hsStatusAp(recs){
   const paid=recs.reduce((t,x)=>t+(x.payments||[]).filter(p=>p&&!p._feeOnly).reduce((s,p)=>s+(+p.amount||0),0),0);
   const rem=recs.reduce((t,x)=>t+((typeof apRemainingEff==='function')?apRemainingEff(x):0),0);
   if(st==='rejected' || (st==='draft' && r.rejectReason)) return 'BS';
+  if(recs.some(x=>x._prepayNoInv) && st!=='draft') return 'BS';   // v3.67.10: trả trước chưa có hóa đơn = Cần bổ sung
   if(st==='draft') return r._printedAt?'KY':'NHAP';
   if(st==='pending_handover') return 'NOP';
   if(paid>0.001) return rem<=0.001?'DONG':'TT';
@@ -104214,7 +104331,7 @@ function _renderFinLedgerModal(){
     const si=(typeof docStatusInfo==='function')?docStatusInfo(p):null;   // v3.64.73: dùng nhãn trạng thái chuẩn (gồm cả "🚚 Chờ giao hàng" mới) thay vì hiện thẳng mã trạng thái thô
     // v3.64.76 (Sếp): thêm dòng diễn giải/số hóa đơn dưới tên NCC — cùng khuôn "HĐ ..." đã dùng ở
     // Sổ phải trả gốc (dòng 12444/12465).
-    const _sub=[p._adjOf?(((+p._adjDelta<0)?'▼ Điều chỉnh giảm ':'▲ Điều chỉnh tăng ')+fmtOrig(+p._adjDelta||0,p.ccy||'VND')+(_adjOver('ap',p)>0.001?(' · ↩ NCC nợ lại '+fmtOrig(_adjOver('ap',p),p.ccy||'VND')):'')):'', p.poLinkId?('🔗 Chi phí đi kèm '+esc(((_poRootOf(p.poLinkId)||{}).poNo)?('PO '+_poRootOf(p.poLinkId).poNo):'PO/HĐ')):'', p.poNo?('📄 PO '+esc(p.poNo)+' · còn '+fmtOrig((typeof apRemainingEff==='function')?apRemainingEff(p):0,p.ccy||'VND')):'', p.invoiceNo?('HĐ '+esc(p.invoiceNo)):'', p.desc?esc(String(p.desc).slice(0,60)):''].filter(Boolean).join(' · ');   // v3.66.86
+    const _sub=[p._prepayNoInv?'💳 Trả trước — chờ hóa đơn':'', p._adjOf?(((+p._adjDelta<0)?'▼ Điều chỉnh giảm ':'▲ Điều chỉnh tăng ')+fmtOrig(+p._adjDelta||0,p.ccy||'VND')+(_adjOver('ap',p)>0.001?(' · ↩ NCC nợ lại '+fmtOrig(_adjOver('ap',p),p.ccy||'VND')):'')):'', p.poLinkId?('🔗 Chi phí đi kèm '+esc(((_poRootOf(p.poLinkId)||{}).poNo)?('PO '+_poRootOf(p.poLinkId).poNo):'PO/HĐ')):'', p.poNo?('📄 PO '+esc(p.poNo)+' · còn '+fmtOrig((typeof apRemainingEff==='function')?apRemainingEff(p):0,p.ccy||'VND')):'', p.invoiceNo?('HĐ '+esc(p.invoiceNo)):'', p.desc?esc(String(p.desc).slice(0,60)):''].filter(Boolean).join(' · ');   // v3.66.86
     return `<tr style="box-shadow:inset 4px 0 0 ${((p._isProvisional||p._isBudget)&&!p.poNo)?_PL_CAM:_PL_NAVY}${((p._isProvisional||p._isBudget)&&!p.poNo)?';background:rgba(217,119,6,.06)':''}">
       <td style="font-size:11px;white-space:nowrap">${esc(p.issueDate||'')}</td>
       <td>${esc(p.partner||'')}${_sub?`<div style="font-size:10.5px;color:var(--muted)">${_sub}</div>`:''}</td>
