@@ -1560,6 +1560,7 @@ span.chip.chip-fixed{display:inline-flex;align-items:center;gap:4px}
       <div class="hrm-side-item" id="vm-si-crewsalary" style="display:none" onclick="vmModSwitchView('crewsalary')">🪪 Thẻ lương thuyền viên</div>
       <div class="hrm-side-item" id="vm-si-crewqd" style="display:none" onclick="openCrewDocs('QD')">📜 Quyết định điều động</div>   <!-- v3.67.12 -->
       <div class="hrm-side-item" id="vm-si-crewbrief" style="display:none" onclick="openCrewDocs('BRIEF')">📋 Hướng dẫn nhanh nhận ca</div>
+      <div class="hrm-side-item" id="vm-si-crewbcc" style="display:none" onclick="openCrewBccImport()">📥 Cập nhật từ BCC tổng hợp</div>   <!-- v3.67.21 -->
       <div class="hrm-side-hdr">Báo cáo ngày</div>
       <div class="hrm-side-item" onclick="openDailyReportModal(null)">📝 Thêm báo cáo ngày</div>
       <div class="hrm-side-hdr">Dự án</div>
@@ -4729,7 +4730,7 @@ const WH_TYPES = {
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.67.17';
+const APP_VERSION='3.67.23';
 /* HOTFIX 3.12.17-email: CHẶN TRIỆT ĐỂ gửi email TỰ ĐỘNG (mất kiểm soát — spam quota Google).
    Email phải do NV được phân quyền CHỦ ĐỘNG chọn gửi. Cờ này:
    (1) chặn auto-SCAN tạo email (hrmScanExpiries/vesselCertScanExpiries);
@@ -22706,6 +22707,7 @@ function segmentCostLabel(seg){
    - source 'manual': admin/KT nhập tay vào S.taxes.records
    - source 'auto_override': auto compute + admin có thể override per period
 */
+const _NSNN_EXTRA=['ENV','TRADE_REMEDY','EXPORT_DUTY','CUSTOMS_FEE'];   // v3.67.20
 const NSNN_TAX_TYPES = {
   VAT_OUTPUT:       {label:'GTGT đầu ra',     icon:'🧾', color:'#2a5a8c', source:'auto',          hint:'Tự tính từ AR đã duyệt (sum của vatAmount)'},
   VAT_INPUT:        {label:'GTGT đầu vào',    icon:'🧾', color:'#5a7a3e', source:'auto',          hint:'Tự tính từ AP đã duyệt (sum của vatAmount)'},
@@ -22715,6 +22717,10 @@ const NSNN_TAX_TYPES = {
   IMPORT_DUTY:      {label:'Thuế Nhập khẩu',  icon:'📦', color:'#7a5a2a', source:'auto',          hint:'Tự gom từ AP loại "Thuế Nhập khẩu" (theo ngày HĐ)'},
   IMPORT_VAT:       {label:'GTGT Nhập khẩu',  icon:'📦', color:'#a06b3e', source:'auto',          hint:'Tự gom từ AP loại "GTGT hàng Nhập khẩu" (theo ngày HĐ)'},
   EXCISE:           {label:'Thuế TTĐB',       icon:'📦', color:'#8a5a3a', source:'auto',          hint:'Tự gom từ AP loại "Thuế Tiêu thụ đặc biệt" (theo ngày HĐ)'},
+  ENV:              {label:'Thuế BVMT',       icon:'🌿', color:'#3e7a4a', source:'auto',          hint:'Tự gom từ phiếu Nộp NSNN loại "Thuế bảo vệ môi trường" (v3.67.20)'},
+  TRADE_REMEDY:     {label:'Chống bán phá giá / tự vệ', icon:'⚖', color:'#7a3e5a', source:'auto', hint:'Tự gom từ phiếu Nộp NSNN loại "Chống bán phá giá / trợ cấp / tự vệ" (v3.67.20)'},
+  EXPORT_DUTY:      {label:'Thuế xuất khẩu',  icon:'📤', color:'#5a6a2a', source:'auto',          hint:'Tự gom từ phiếu Nộp NSNN loại "Thuế xuất khẩu" (v3.67.20)'},
+  CUSTOMS_FEE:      {label:'Lệ phí hải quan', icon:'📄', color:'#6a6a6a', source:'auto',          hint:'Tự gom từ phiếu Nộp NSNN loại "Lệ phí hải quan" (v3.67.20)'},
   FCT:              {label:'Nhà thầu (FCT)',  icon:'🏢', color:'#6a4a8c', source:'auto',          hint:'Tự gom từ AP loại "Thuế Nhà thầu (FCT)" (theo ngày HĐ)'},
   CIT:              {label:'TNDN',            icon:'🏛', color:'#1c3a5c', source:'manual',        hint:'Thuế thu nhập DN (tạm tính quý / quyết toán năm, nhập tay)'},
   BUSINESS_LICENSE: {label:'Môn bài',         icon:'📋', color:'#5a4a8c', source:'manual',        hint:'Thuế môn bài hàng năm (nhập tay)'},
@@ -24924,10 +24930,22 @@ function _tkhqFindLabel(cells, ...labels){
   return null;
 }
 function tkhqParse(wb){
-  const XLSXr=XLSX;
-  const data={ taxes:[], fees:[] };
   const tkn=wb.Sheets[wb.SheetNames[0]];
-  const aoa=XLSXr.utils.sheet_to_json(tkn,{header:1,defval:''});
+  const aoa=XLSX.utils.sheet_to_json(tkn,{header:1,defval:''});
+  return tkhqParseAoa(aoa, wb.SheetNames[0]);
+}
+/* v3.67.19 (mẫu TKHQ thật Sếp gửi): đọc từ bảng "Tên sắc thuế | Tổng tiền thuế" (N Thuế NK, V Thuế GTGT, T TTĐB, M BVMT…) —
+   trước chỉ nhặt được GTGT, bỏ sót Thuế NK; đối chiếu "Tổng tiền thuế phải nộp"; số hóa đơn bỏ mã phân loại "A - " / "B";
+   nhận biết tờ khai XUẤT KHẨU (TKX) — thuế XK / lệ phí. Dùng chung cho Excel và PDF (PDF dựng lại bảng theo tọa độ). */
+const _TKHQ_TAX_MAP=[
+  [/^N\b|thu[eế]\s*NK|nh[aậ]p\s*kh[aẩ]u/i,'IMPORT_DUTY','Thuế nhập khẩu','TAX_IMPORT_DUTY'],
+  [/^V\b|GTGT|gi[aá]\s*tr[iị]\s*gia\s*t[aă]ng/i,'IMPORT_VAT','GTGT hàng nhập khẩu','TAX_IMPORT_VAT'],
+  [/^T\b|TT[ĐD]B|ti[eê]u\s*th[uụ]\s*đ[aặ]c\s*bi[eệ]t/i,'EXCISE','Thuế tiêu thụ đặc biệt','TAX_EXCISE'],
+  [/^M\b|BVMT|b[aả]o\s*v[eệ]\s*m[oô]i\s*tr[uư][oờ]ng/i,'ENV','Thuế bảo vệ môi trường','TAX_NSNN'],
+  [/b[aá]n\s*ph[aá]\s*gi[aá]|tr[oợ]\s*c[aấ]p|t[uự]\s*v[eệ]/i,'TRADE_REMEDY','Thuế chống bán phá giá / trợ cấp / tự vệ','TAX_NSNN'],
+  [/xu[aấ]t\s*kh[aẩ]u|^X\b/i,'EXPORT_DUTY','Thuế xuất khẩu','TAX_NSNN']];
+function tkhqParseAoa(aoa, sheetName){
+  const data={ taxes:[], fees:[] };
   const cells=[]; aoa.forEach((row,r)=>row.forEach((v,c)=>{ if(v!==''&&v!=null) cells.push({r,c,v:String(v).trim()}); }));
   data.declNo   = _tkhqFindLabel(cells,'Số tờ khai');
   data.declType = _tkhqFindLabel(cells,'Mã loại hình');
@@ -24939,7 +24957,15 @@ function tkhqParse(wb){
     if(nm){ const val=cells.filter(x=>x.r===nm.r && x.c>nm.c).sort((a,b)=>a.c-b.c)[0]; return val?val.v:''; }
     return '';
   })();
-  data.invoiceNo = _tkhqFindLabel(cells,'Số hóa đơn');
+  data.invoiceNo = (function(){ const hit=cells.find(x=>x.v.indexOf('Số hóa đơn')===0); if(!hit) return '';
+    const vals=cells.filter(y=>y.r===hit.r && y.c>hit.c).sort((a,b)=>a.c-b.c).map(y=>y.v).filter(v=>v && v!=='-');
+    let v=vals.find(x=>!/^[A-C]$/.test(x))||vals[0]||''; return String(v).replace(/^[A-C]\s*-\s*/,'').trim(); })();   // v3.67.19: bỏ mã phân loại A/B
+  data.invValue=0; data.invCcy=''; (function(){ const hit=cells.find(x=>x.v.indexOf('Tổng trị giá hóa đơn')===0); if(!hit) return;
+    const row=cells.filter(y=>y.r===hit.r && y.c>hit.c).sort((a,b)=>a.c-b.c);
+    row.forEach(y=>{ const m=String(y.v).match(/\b(USD|EUR|SGD|JPY|CNY|GBP|AUD|KRW|NOK|VND|MYR|THB)\b/); if(m&&!data.invCcy) data.invCcy=m[1]; });
+    const n=row.map(y=>_tkhqNum(y.v)).find(v=>v>0); data.invValue=n||0; })();
+  data.poRefs=[]; cells.forEach(x=>{ String(x.v).split(/[\s,;]+/).forEach(tok=>{ if(/PO/i.test(tok) && /\d/.test(tok) && tok.length>=5 && data.poRefs.indexOf(tok)<0) data.poRefs.push(tok); }); });
+  data.kind = (/^TKX/i.test(sheetName||'') || cells.some(x=>/h[aà]ng\s*h[oó]a\s*xu[aấ]t\s*kh[aẩ]u|thu[eế]\s*xu[aấ]t\s*kh[aẩ]u/i.test(x.v))) ? 'EXPORT' : 'IMPORT';
   data.taxableValue = _tkhqNum(_tkhqFindLabel(cells,'Tổng trị giá tính thuế'));
   data.totalTax = _tkhqNum(_tkhqFindLabel(cells,'Tổng tiền thuế phải nộp'));
   // phí vận chuyển / bảo hiểm — khoản điều chỉnh trị giá (đưa thành dòng riêng để Sếp chọn gắn hay bỏ)
@@ -24949,8 +24975,22 @@ function tkhqParse(wb){
   if(freightV>0) data.fees.push({label:'Phí vận chuyển (theo tờ khai HQ)', amount:freightV, et:'LOGISTICS'});
   const insurV=_rowAmount('Phí bảo hiểm');
   if(insurV>0) data.fees.push({label:'Phí bảo hiểm (theo tờ khai HQ)', amount:insurV, et:'INSURANCE_OTHER'});
-  // các sắc thuế: tìm vùng có 'Tên sắc thuế' / 'Tổng tiền thuế' theo dòng 1..n
-  cells.forEach(x=>{
+  // v3.67.19: ƯU TIÊN bảng tổng "Tên sắc thuế" (1 dòng / sắc thuế, số đã là TỔNG của mọi dòng hàng)
+  const _sum=cells.find(x=>/T[eê]n\s*s[aắ]c\s*thu[eế]/i.test(x.v));
+  if(_sum){
+    for(let r=_sum.r+1; r<=_sum.r+8; r++){
+      const row=cells.filter(y=>y.r===r).sort((a,b)=>a.c-b.c);
+      const nameCell=row.find(y=>y.c<=_sum.c+3 && /[A-Za-zÀ-ỹ]/.test(y.v) && !/VND|T[ỷy]\s*gi[aá]|ph[aả]i\s*n[oộ]p|b[aả]o\s*l[aã]nh|M[aã]\s*x[aá]c|ng[uư][oờ]i\s*n[oộ]p|L[yý]\s*do|Ph[aâ]n\s*lo[aạ]i/i.test(y.v));
+      if(!nameCell) continue;
+      const amtCell=row.find(y=>y.c>nameCell.c && _tkhqNum(y.v)>0);
+      const amt=amtCell?Math.round(_tkhqNum(amtCell.v)):0; if(!amt) continue;
+      const nm=nameCell.v.replace(/\s+/g,' ').trim(); const m=_TKHQ_TAX_MAP.find(z=>z[0].test(nm));
+      data.taxes.push({name:m?m[2]:nm, amount:amt, et:m?m[3]:'TAX_NSNN', ns:m?m[1]:'OTHER', code:nm.split(' ')[0], raw:nm});
+    }
+  }
+  if(data.kind==='EXPORT'){ const xt=_tkhqNum(_tkhqFindLabel(cells,'Tổng số tiền thuế xuất khẩu')); if(xt>0 && !data.taxes.length) data.taxes.push({name:'Thuế xuất khẩu', amount:Math.round(xt), et:'TAX_NSNN', ns:'EXPORT_DUTY'});
+    const fee=_tkhqNum(_tkhqFindLabel(cells,'Tổng số tiền lệ phí')); if(fee>0) data.taxes.push({name:'Lệ phí hải quan', amount:Math.round(fee), et:'TAX_NSNN', ns:'CUSTOMS_FEE'}); }
+  if(!data.taxes.length) cells.forEach(x=>{   // dự phòng: mẫu cũ không có bảng tổng
     const v=x.v;
     // bỏ qua dòng chứa 'Tỷ giá' / 'Tổng tiền thuế phải nộp' (đã lấy riêng) để không nhặt nhầm số
     if(/Tỷ giá|phải nộp|bảo lãnh/i.test(v)) return;
@@ -24965,9 +25005,12 @@ function tkhqParse(wb){
       const amt=grab(); if(amt) data.taxes.push({name:'Thuế BVMT hàng NK', amount:amt, et:'TAX_NSNN'});
     }
   });
-  // khử trùng lặp thuế (cùng et) — giữ giá trị LỚN NHẤT cho mỗi loại
-  const byEt={}; data.taxes.forEach(t=>{ if(!byEt[t.et]||t.amount>byEt[t.et].amount) byEt[t.et]=t; });
+  // khử trùng lặp (cùng loại) — giữ giá trị LỚN NHẤT
+  const byEt={}; data.taxes.forEach(t=>{ const k=t.ns||t.et; if(!byEt[k]||t.amount>byEt[k].amount) byEt[k]=t; });
   data.taxes=Object.values(byEt);
+  data.sumTax=data.taxes.reduce((a,t)=>a+(+t.amount||0),0);
+  data.partner = data.kind==='EXPORT' ? (function(){ const ex=cells.find(x=>x.v.indexOf('Người nhập khẩu')===0); if(!ex) return ''; const nm=cells.filter(x=>x.r>ex.r && x.r<ex.r+5 && /^Tên/.test(x.v)).sort((a,b)=>a.r-b.r)[0]; if(!nm) return ''; const v=cells.filter(x=>x.r===nm.r && x.c>nm.c).sort((a,b)=>a.c-b.c)[0]; return v?v.v:''; })() : (data.exporter||'');
+  data.totalMismatch=(data.totalTax>0 && Math.abs(data.totalTax-data.sumTax)>1)?(data.totalTax-data.sumTax):0;   // v3.67.19: đối chiếu tổng
   return data;
 }
 function _invoiceFromTkhq(wb){
@@ -27239,8 +27282,11 @@ function _payBccVesselMap(p){
     const byName={}, nameDup={};
     (att.rows||[]).forEach(r=>{
       const k=String(r.msnv||'').trim().toUpperCase(); if(!k) return;
-      const rec={ unit:String((r.vessel||r.unit)||'').trim(), nghica:+(((r.cols||{}).NGHICA))||0 };   /* v3.14.83: TÀU = tiêu đề nhóm trong file (r.vessel); file cũ chưa import lại → unit cột E */
-      out[k]=rec;
+      const cl=r.cols||{}, work=['DB1','DB2','DOCK','BO','BO2'].reduce((t,cc)=>t+(+cl[cc]||0),0), days=work+(+cl.NGHICA||0);
+      const part={unit:String((r.vessel||r.unit)||'').trim(), days, work};
+      let rec=out[k];
+      if(!rec){ rec={ unit:part.unit, nghica:+cl.NGHICA||0, parts:[part] }; out[k]=rec; }   /* v3.14.83: TÀU = tiêu đề nhóm trong file (r.vessel); file cũ chưa import lại → unit cột E */
+      else { rec.nghica+=(+cl.NGHICA||0); rec.parts.push(part); const main=rec.parts.slice().sort((a,b)=>b.work-a.work||b.days-a.days)[0]; rec.unit=main.unit; }   // v3.67.23: nhiều dòng → tàu chính = nhiều ngày làm việc nhất
       /* v3.19.61 (Sếp 29/8 — BCC ghi SMEV100, hồ sơ CREW003, kéo công khớp theo TÊN nhưng nhóm tàu trượt): chỉ mục theo TÊN
          (bỏ dấu, thường hóa), CHỈ dùng khi tên duy nhất trong BCC — trùng tên thì không đoán. */
       const nk=String(r.name||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/đ/g,'d').replace(/Đ/g,'D').toLowerCase().replace(/\s+/g,' ').trim();
@@ -30031,8 +30077,15 @@ function _payAttBuildDiff(p, att, map){
       if(nm.indexOf('STER')>=0) return 'STER';
       if(nm.indexOf('PON')>=0) return 'PON';
     }catch(e){} return 'SME'; })();
-  const attRows=(att.rows||[]).filter(r=>_coTag(r.unit)===_perTag);
-  const _nOtherCo=(att.rows||[]).length-attRows.length;
+  const _attRaw=(att.rows||[]).filter(r=>_coTag(r.unit)===_perTag);
+  const _nOtherCo=(att.rows||[]).length-_attRaw.length;
+  /* v3.67.23 (Sếp duyệt — lỗi kéo công): người ĐỔI TÀU / NGHỈ CA trong tháng có NHIỀU dòng BCC — trước dòng sau GHI ĐÈ dòng
+     trước (mất công). Nay CỘNG DỒN mọi dòng của cùng 1 người (MSNV → mã hồ sơ → tên) trước khi đổ vào kỳ. */
+  const _mk=r=>r.msnv?('M:'+String(r.msnv).trim().toUpperCase()):(r._empId?('E:'+r._empId):('N:'+String(r.name||'').trim().toUpperCase().replace(/\s+/g,' ')));
+  const _mg=new Map(); _attRaw.forEach(r=>{ const k=_mk(r);
+    if(!_mg.has(k)){ _mg.set(k, Object.assign({}, r, {cols:Object.assign({}, r.cols||{}), _parts:[r]})); return; }
+    const m=_mg.get(k); Object.keys(r.cols||{}).forEach(cc=>{ m.cols[cc]=(+m.cols[cc]||0)+(+r.cols[cc]||0); }); m.total=(+m.total||0)+(+r.total||0); m._parts.push(r); if(!m._empId&&r._empId) m._empId=r._empId; });
+  const attRows=Array.from(_mg.values());
   const byEmp={}, bySmart={}, byName={};
   attRows.forEach((r,_ai)=>{ r._attIdx=_ai;   /* v3.14.64: nhớ VỊ TRÍ DÒNG trong bảng BCC — nguồn thứ tự chuẩn */
     if(r._empId) byEmp[r._empId]=r;
@@ -30049,7 +30102,8 @@ function _payAttBuildDiff(p, att, map){
       const manual=Array.isArray(row._manualFields)&&row._manualFields.indexOf(F)>=0;
       if((+from||0)!==to){ changes[F]={from:(from==null?null:+from), to:to, manual:manual}; n++; }   /* v3.14.46: null→0 = KHỚP (engine coi trống = 0) — hết nhiễu 'ĐỔI …:0' cả bảng */
     });
-    items.push({empId:row.empId,name:row.name,status:n? (Object.values(changes).some(c=>c.manual)?'CÓ GIỮ TAY':'ĐỔI') :'KHỚP',changes:changes,_attIdx:ar._attIdx});   /* v3.14.64 */
+    const _dpWarn=!!(map.M && (map.M.reduce((t,cc)=>t+(+((ar.cols||{})[cc])||0),0)>0) && !(+((row.inputs||{}).T)>0) && (p.profile==='crew'||p.profile==='crew_khoan'));   // v3.67.23
+    items.push({empId:row.empId,name:row.name,status:(n? (Object.values(changes).some(c=>c.manual)?'CÓ GIỮ TAY':'ĐỔI') :'KHỚP')+(ar._parts&&ar._parts.length>1?(' · cộng '+ar._parts.length+' dòng BCC'):'')+(_dpWarn?' · ⚠ có DP nhưng thẻ lương chưa có đơn giá DP (T)':''),changes:changes,_attIdx:ar._attIdx, dpWarn:_dpWarn});   /* v3.14.64 / v3.67.23 */
   });
   /* v3.14.82 (Sếp 09/8 — "danh sách cần căn cứ là BCC của tháng"): BCC quyết định DANH SÁCH kỳ,
      không chỉ số công. Dòng BCC chưa khớp ai trong kỳ → phân loại:
@@ -35645,6 +35699,14 @@ function _payPeriodCostGroups(p){
       key='V:'+(ccId||label); }
     else if(p.profile==='project'||p.profile==='expat'){ const pid=(e.projectIds&&e.projectIds[0])||''; ccType='project'; ccId=pid; const pr=(S.projects||[]).find(x=>x.id===pid); label=pr?pr.code:(e.dept||PAY_PROFILE_LABEL[p.profile]); key='P:'+(ccId||label); }
     else { ccType='department'; ccId=''; label=e.dept||'Văn phòng'; key='D:'+label; }
+    /* v3.67.23: thuyền viên làm NHIỀU tàu trong tháng → chia chi phí theo tỷ lệ số ngày trên từng tàu (N1 tính cho tàu của dòng đó) */
+    if(p.profile==='crew' && p.__bccVmap){ const vr=p.__bccVmap[String(r.smartId||'').trim().toUpperCase()]; const parts=(vr&&vr.parts||[]).filter(x=>x.days>0);
+      if(parts.length>1){ const tot=parts.reduce((t,x)=>t+x.days,0)||1; const _vNorm=x=>String(x||'').toUpperCase().replace(/^M[.\/]?\s*V[.\s]+/,'').replace(/[-_.]/g,' ').replace(/\s+/g,' ').trim();
+        parts.forEach((pt,i)=>{ let ves=null; try{ ves=VesselService.vessels().find(v=>v&&_vNorm(v.name)===_vNorm(pt.unit)); }catch(_){}
+          const k2='V:'+((ves&&ves.id)||pt.unit), sh=pt.days/tot;
+          if(!groups[k2]) groups[k2]={label:(ves&&ves.name)||pt.unit, ccType:'opVessel', ccId:(ves&&ves.id)||'', gross:0, net:0, count:0};
+          groups[k2].gross+=gross*sh; groups[k2].net+=net*sh; if(pt===parts.reduce((a,b)=>b.days>a.days?b:a)) groups[k2].count++; });
+        return; } }
     if(!groups[key]) groups[key]={label, ccType, ccId, gross:0, net:0, count:0};
     groups[key].gross += gross; groups[key].net += net; groups[key].count++;
   });
@@ -49247,7 +49309,12 @@ const _CD_CSS=`<style>@page{size:A4;margin:12mm}body{font-family:"Times New Roma
 .h{width:100%;border-collapse:collapse;margin-bottom:10px}.h td{border:1px solid #000;padding:5px}
 table.t{width:100%;border-collapse:collapse}table.t td,table.t th{border:1px solid #000;padding:4px 6px;vertical-align:top}table.t th{font-weight:700;text-align:center}
 .cb{display:inline-block;width:11px;height:11px;border:1px solid #000;margin:0 3px -1px 4px;text-align:center;line-height:10px;font-size:10px;font-weight:700}
-.lbl{font-size:10.5px}.nb td{border:none!important}</style>`;
+.lbl{font-size:10.5px}.nb td{border:none!important}
+@media screen{html,body{background:#e9e7e1}body{padding:12px 0}.cd-paper{width:210mm;min-height:297mm;margin:0 auto 14px;background:#fff;box-shadow:0 1px 6px rgba(0,0,0,.25);box-sizing:border-box;padding:12mm;overflow:hidden}.cd-paper.cd-qd{padding:11mm 15mm 8mm 27.5mm}}
+@media print{.cd-paper{padding:0!important;width:auto!important;min-height:0!important;box-shadow:none!important;margin:0!important}}</style>`;
+/* v3.67.18 (Sếp: "mẫu xem trước khi in đang tràn trang"): bọc nội dung trong TỜ A4 cố định (210mm, lề đúng mẫu) + tự thu nhỏ vừa khung xem */
+function _cdPaper(inner){ return `<div class="cd-paper${/class="qd"/.test(inner)?' cd-qd':''}">${inner}</div>
+  <script>(function(){function f(){var p=document.querySelector('.cd-paper');if(!p)return;var w=p.offsetWidth+24;var z=Math.min(1,(window.innerWidth||w)/w);document.body.style.zoom=z;}window.addEventListener('resize',f);f();})();<\/script>`; }
 function _cdHdr(m, title, pg){ return `<table class="h"><tr><td style="width:17%;text-align:center"><img src="${CREW_LOGO}" style="height:62px"></td>
   <td style="text-align:center;font-weight:700;font-size:15px;color:#1c3a5c">SEAHORSE MARINE AND ENERGY JSC<br>INTEGRATED MANAGEMENT SYSTEM<br>DOCUMENT</td>
   <td style="width:25%;font-size:11px;line-height:1.5">${m.code}<br>Rev.: ${m.rev}<br>Date: ${m.date}<br>Page: ${pg||('1/ '+m.pages)}</td></tr>${title?`<tr><td colspan="3" style="text-align:center;font-weight:700;font-size:13px">${title}</td></tr>`:''}</table>`; }
@@ -49337,7 +49404,7 @@ function _cdBriefHtml(d, blank){
 }
 function _cdOpenPrint(inner, title){
   const w=window.open('','_blank'); if(!w){ toast('Trình duyệt chặn cửa sổ in — cho phép popup','bad'); return; }
-  w.document.open(); w.document.write(`<!doctype html><html><head><meta charset="utf-8"><title>${esc(title)}</title>${_CD_CSS}</head><body>${inner}<script>window.onload=function(){setTimeout(function(){window.print();},300);}<\/script></body></html>`); w.document.close();
+  w.document.open(); w.document.write(`<!doctype html><html><head><meta charset="utf-8"><title>${esc(title)}</title>${_CD_CSS}</head><body>${_cdPaper(inner)}<script>window.onload=function(){setTimeout(function(){window.print();},300);}<\/script></body></html>`); w.document.close();
 }
 function _cdPrint(id){
   const d=(S.crewDocs||[]).find(x=>x.id===id); if(!d) return;
@@ -49446,7 +49513,7 @@ function _cdStatusChip(d){ return d.signedAt?`<span style="border:2px solid #b31
 function _cdInner(d){ return d.kind==='QD'?_cdQdHtml(d):_cdBriefHtml(d,false); }
 function _cdView(id){
   const d=(S.crewDocs||[]).find(x=>x.id===id); if(!d) return;
-  const html='<!doctype html><html><head><meta charset="utf-8">'+_CD_CSS+'<style>body{background:#fff;padding:10px}</style></head><body>'+(d.signedAt?_cdStamped(d,_cdInner(d)):_cdInner(d))+'</body></html>';
+  const html='<!doctype html><html><head><meta charset="utf-8">'+_CD_CSS+'</head><body>'+_cdPaper(d.signedAt?_cdStamped(d,_cdInner(d)):_cdInner(d))+'</body></html>';   // v3.67.18: tờ A4
   const canUnlock=d.signedAt&&(isAdmin()||_modCanManageStaff('TAU'));
   openModal('👁 '+(d.kind==='QD'?'Quyết định':'Hướng dẫn')+' — '+esc(d.empName||''), `<div style="margin-bottom:6px">${_cdStatusChip(d)}${d.signedBy?` <span style="font-size:11px;color:var(--muted)">in &amp; xác nhận: ${esc(d.signedBy)}</span>`:''}</div><iframe id="cd-prev" style="width:100%;height:68vh;border:1px solid var(--rule);background:#fff"></iframe>`,
     `<button class="btn-ghost" onclick="openCrewDocs('${d.kind}')">← Danh sách</button>${canUnlock?`<button class="btn-sec" onclick="_cdUnlock('${id}')">🔓 Mở khóa (gỡ dấu)</button>`:''}${!d.signedAt?`<button class="btn-sec" onclick="openCrewDocForm('${d.kind}','${id}')">✎ Sửa</button>`:''}<button class="btn-primary" onclick="_cdPrint('${id}')">🖨 ${d.signedAt?'In lại (bản lưu)':'In PDF'}</button>`);
@@ -49494,7 +49561,7 @@ function _cdOpenOrView(id){ const d=(S.crewDocs||[]).find(x=>x.id===id); if(!d) 
      thuyền viên (NV quản lý tàu tự điền công). BCC đã gửi/chốt → KHÔNG sửa, chỉ cảnh báo. Kỳ lương đã tính/khóa → cảnh báo.
    • Ký lại sau khi mở khóa: cập nhật ĐÚNG đoạn công tác đã tạo, không tạo đoạn mới.
    ════════════════════════════════════════════════════════════════════════════════════════════════ */
-const CREW_NC_CODE='';   // mã công ngày nghỉ ca trên BCC — chờ Sếp chốt (trống = chỉ xóa các ngày sau ngày hiệu lực)
+const CREW_NC_CODE='N1';   // v3.67.21: mã công nghỉ ca = N1 (theo BCC Đội tàu Sếp gửi)
 function _cdBccSheet(vid, eff){ try{ return _vtsFindSheet(vid, eff.slice(0,7)); }catch(e){ return null; } }
 function _cdBccLocked(sh){ return !!(sh && (sh.status==='confirmed'||sh.status==='submitted'||sh.status==='locked')); }
 function _cdBccLeave(vid, empId, eff, warn, nc, qdLabel){
@@ -49545,6 +49612,126 @@ function _cdApplyQD(d){
   d._applied={at:now, by:who, assignId, prevVessel:prevVid, eff};
   try{ const pp=PayrollService.periodByMonth(eff.slice(0,7)); if(pp && pp.status && pp.status!=='draft') warn.push('Kỳ lương '+eff.slice(0,7)+' đã '+(pp.status==='locked'?'khóa':'tính')+' — cần tính lại cho '+(e.fullName||'')); }catch(x){}
   return warn;
+}
+
+/* ════════════════════════════════════════════════════════════════════════════════════════════════
+   v3.67.21 (Sếp 27/9): 📥 CẬP NHẬT THUYỀN VIÊN TỪ BCC TỔNG HỢP (Đội tàu, tháng) — đọc cả sheet "BCC-Đội tàu" và "Đội Nga"
+   (tự nhận cột theo tên). Cập nhật danh sách thuyền viên ĐÚNG theo file: tạo mới (không MSNV → mã tạm, sửa được), cập nhật
+   chức danh / TÀU (đúng tàu) / NPT; ai có trong app mà không có trong file → rời tàu. Tổng ngày công theo mã (B1 B2 B3 B4 D N1 DP)
+   lưu vào hồ sơ làm SỐ ĐẦU KỲ (không tạo đoạn công tác). N1 = mã nghỉ ca.
+   ════════════════════════════════════════════════════════════════════════════════════════════════ */
+let _CBI=null;
+const _CBI_CODES=['B1','B2','B3','B4','D','N1','DP'];
+function _cbiNorm(s){ return String(s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[đĐ]/g,'d').toUpperCase().replace(/[^A-Z0-9]/g,''); }
+function _cbiVessel(unit){
+  const u=_cbiNorm(unit); if(!u) return null;
+  const L=_cdVessels(); const lev=(a,b)=>{ const d=[...Array(b.length+1).keys()]; for(let i=1;i<=a.length;i++){ let p=d[0]; d[0]=i; for(let j=1;j<=b.length;j++){ const t=d[j]; d[j]=Math.min(d[j]+1,d[j-1]+1,p+(a[i-1]===b[j-1]?0:1)); p=t; } } return d[b.length]; };
+  return L.find(v=>_cbiNorm(v.name)===u) || L.find(v=>{ const n=_cbiNorm(v.name); return n.indexOf(u)>=0||u.indexOf(n)>=0; })
+    || L.map(v=>({v, d:lev(_cbiNorm(v.name),u)})).filter(x=>x.d<=2).sort((a,b)=>a.d-b.d).map(x=>x.v)[0] || null;   // lệch chính tả nhẹ (GEOSUPORTER ↔ Geo Supporter)
+}
+function _cbiParseSheet(aoa){
+  let h=-1; for(let r=0;r<Math.min(aoa.length,15);r++){ if((aoa[r]||[]).some(c=>/h[oọ]\s*v[aà]\s*t[eê]n/i.test(String(c)))){ h=r; break; } }
+  if(h<0) return [];
+  const H=(aoa[h]||[]).map(c=>String(c||'').replace(/\s+/g,' ').trim());
+  const col=re=>H.findIndex(x=>re.test(x));
+  const ci={msnv:col(/^MSNV/i), name:col(/h[oọ]\s*v[aà]\s*t[eê]n/i), title:col(/ch[uứ]c\s*danh/i), unit:col(/đ[oơ]n\s*v[iị]|t[aà]u/i), npt:col(/^NPT$/i), total:col(/t[oổ]ng\s*ng[aà]y/i)};
+  const cc={}; H.forEach((x,i)=>{ const m=x.match(/\((B1|B2|B3|B4|D|N1)\)/i); if(m) cc[m[1].toUpperCase()]=i; else if(/c[oô]ng\s*DP|^DP$/i.test(x)) cc.DP=i; });
+  const out=[];
+  for(let r=h+1;r<aoa.length;r++){ const row=aoa[r]||[]; const name=String(row[ci.name]||'').trim(); if(!name) continue;
+    const codes={}; _CBI_CODES.forEach(k=>{ codes[k]=cc[k]!=null?(+row[cc[k]]||0):0; });
+    out.push({msnv:String(ci.msnv>=0?row[ci.msnv]:'').trim(), name, title:String(ci.title>=0?row[ci.title]:'').replace(/\s+/g,' ').trim(), unit:String(ci.unit>=0?row[ci.unit]:'').trim(),
+      npt:ci.npt>=0&&row[ci.npt]!==''?(+row[ci.npt]||0):null, codes, total:ci.total>=0?(+row[ci.total]||0):0}); }
+  return out;
+}
+function openCrewBccImport(){
+  if(!_cdCanUse()){ toast('Chỉ Quản lý thuyền viên / Trưởng bộ phận','bad'); return; }
+  openModal('📥 Cập nhật thuyền viên từ BCC tổng hợp', `<div style="font-size:13px;margin-bottom:10px">Chọn file <b>BCC Đội tàu (tổng hợp tháng)</b>. App đọc mọi sheet có cột "Họ và tên" (kể cả "Đội Nga"), cập nhật danh sách thuyền viên <b>đúng theo file</b>, đúng tàu, và lưu tổng ngày công vào hồ sơ làm <b>số đầu kỳ</b>; đồng thời tạo <b>Bảng chấm công Đội tàu</b> của tháng cho kỳ lương (đã có thì <b>ghi số mới thay số cũ</b>, kể cả tháng cũ).</div>
+    <div style="display:grid;grid-template-columns:160px 1fr;gap:10px;align-items:center"><label>Tháng của file</label><input type="month" id="cbi-period" value="2026-08">
+    <label>File BCC</label><input type="file" id="cbi-file" accept=".xlsx,.xls" onchange="_cbiRead(this)"></div><div id="cbi-st" style="margin-top:8px;font-size:12px;color:var(--muted)"></div>`,
+    `<button class="btn-ghost" onclick="closeModal()">Đóng</button>`);
+}
+async function _cbiRead(inputEl){
+  const file=inputEl.files&&inputEl.files[0]; if(!file) return; const st=document.getElementById('cbi-st'); if(st) st.textContent='⏳ Đang đọc…';
+  try{
+    await _loadScriptOnce('https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js','XLSX');
+    const wb=XLSX.read(new Uint8Array(await file.arrayBuffer()),{type:'array'}); const rows=[];
+    wb.SheetNames.forEach(sn=>{ _cbiParseSheet(XLSX.utils.sheet_to_json(wb.Sheets[sn],{header:1,defval:''})).forEach(r=>{ r.sheet=sn; rows.push(r); }); });
+    if(!rows.length){ if(st) st.textContent='✗ Không đọc được dòng nào — kiểm tra file'; return; }
+    _cbiBuild(rows, (document.getElementById('cbi-period')||{}).value||'', file.name);
+  }catch(e){ if(st) st.textContent='✗ Lỗi đọc file: '+e.message; }
+}
+function _cbiBuild(rows, period, fileName){
+  const emps=(HRService.employees()||[]).filter(e=>e&&!e._deleted);
+  const byId={}; emps.forEach(e=>{ if(e.smartId) byId[_cbiNorm(e.smartId)]=e; });
+  const byName={}; emps.forEach(e=>{ byName[_cbiNorm(e.fullName)]=byName[_cbiNorm(e.fullName)]||e; });
+  const people=new Map();   // gom theo MSNV (hoặc tên nếu không có MSNV)
+  rows.forEach(r=>{ const k=r.msnv?('M:'+_cbiNorm(r.msnv)):('N:'+_cbiNorm(r.name)); if(!people.has(k)) people.set(k,{msnv:r.msnv, name:r.name, rows:[]}); people.get(k).rows.push(r); });
+  const list=[]; const seen=new Set();
+  people.forEach(p=>{
+    const e=(p.msnv&&byId[_cbiNorm(p.msnv)])||byName[_cbiNorm(p.name)]||null;
+    const work=r=>r.codes.B1+r.codes.B2+r.codes.B3+r.codes.B4+r.codes.D;
+    const main=p.rows.slice().sort((a,b)=>work(b)-work(a)||b.total-a.total)[0];
+    const onlyNC=p.rows.every(r=>work(r)===0 && r.codes.N1>0);
+    const v=_cbiVessel(main.unit);
+    const codes={}; _CBI_CODES.forEach(k=>codes[k]=p.rows.reduce((t,r)=>t+(r.codes[k]||0),0));
+    const npt=p.rows.map(r=>r.npt).find(x=>x!=null);
+    const title=main.title||(e&&e.title)||'';
+    if(e) seen.add(e.id);
+    list.push({k:list.length, on:true, empId:e?e.id:'', isNew:!e, msnv:p.msnv||(e&&e.smartId)||('TMP-'+Math.random().toString(36).slice(2,6).toUpperCase()), tmp:!p.msnv&&!e,
+      name:p.name, title, oldTitle:e?(e.title||''):'', vesselId:v?v.id:'', vesselName:v?v.name:main.unit, unit:main.unit, vesselOk:!!v, oldVessel:e?(e.linkVesselId||''):'',
+      nc:onlyNC, npt, codes, byVessel:p.rows.map(r=>({unit:r.unit, codes:r.codes})) });
+  });
+  const leave=emps.filter(e=>e.type==='crew' && e.status!=='inactive' && e.status!=='terminated' && !seen.has(e.id) && e.linkVesselId).map(e=>({empId:e.id, name:e.fullName, msnv:e.smartId||'', vessel:e.linkVesselId, on:true}));
+  _CBI={period, fileName, list, leave}; _cbiRender();
+}
+function _cbiRender(){
+  const C=_CBI, vs=_cdVessels(); const vn=id=>(vs.find(v=>v.id===id)||{}).name||'—';
+  const nNew=C.list.filter(x=>x.isNew).length, nUpd=C.list.filter(x=>!x.isNew).length, nBad=C.list.filter(x=>!x.vesselOk).length;
+  const rows=C.list.map(x=>{ const chg=[]; if(!x.isNew&&x.oldTitle!==x.title) chg.push('CD'); if(!x.isNew&&x.oldVessel!==x.vesselId) chg.push('Tàu');
+    return `<tr style="${x.vesselOk?'':'background:#fde7d9'}"><td><input type="checkbox" ${x.on?'checked':''} onchange="_CBI.list[${x.k}].on=this.checked"></td>
+    <td><input value="${esc(x.msnv)}" oninput="_CBI.list[${x.k}].msnv=this.value" style="width:90px;${x.tmp?'border-color:#d97706':''}" title="${x.tmp?'Mã tạm — sửa được':''}"></td>
+    <td><b>${esc(x.name)}</b>${x.isNew?' <span style="font-size:10px;color:#fff;background:#1d6b3a;border-radius:4px;padding:0 5px">MỚI</span>':''}${x.nc?' <span style="font-size:10px;color:#fff;background:#7a4b00;border-radius:4px;padding:0 5px">NGHỈ CA</span>':''}</td>
+    <td style="font-size:12px">${x.oldTitle&&x.oldTitle!==x.title?'<s style="color:var(--muted)">'+esc(x.oldTitle)+'</s> → ':''}${esc(x.title)}</td>
+    <td><select onchange="_CBI.list[${x.k}].vesselId=this.value;_CBI.list[${x.k}].vesselOk=!!this.value" style="font-size:12px"><option value="">— chọn tàu (file: ${esc(x.unit)}) —</option>${vs.map(v=>`<option value="${v.id}" ${x.vesselId===v.id?'selected':''}>${esc(v.name)}</option>`).join('')}</select>${x.oldVessel&&x.oldVessel!==x.vesselId?`<div style="font-size:10px;color:var(--muted)">cũ: ${esc(vn(x.oldVessel))}</div>`:''}</td>
+    <td class="r">${x.npt!=null?x.npt:'—'}</td>
+    <td style="font-size:11px;white-space:nowrap">${_CBI_CODES.filter(k=>x.codes[k]).map(k=>k+' '+x.codes[k]).join(' · ')||'—'}${x.byVessel.length>1?`<div style="color:var(--muted)">${x.byVessel.length} tàu trong tháng</div>`:''}</td></tr>`; }).join('');
+  const lv=C.leave.map((x,i)=>`<tr><td><input type="checkbox" ${x.on?'checked':''} onchange="_CBI.leave[${i}].on=this.checked"></td><td>${esc(x.msnv)}</td><td>${esc(x.name)}</td><td colspan="4" style="font-size:12px">Không có trong BCC → <b>rời tàu ${esc(vn(x.vessel))}</b> (giữ hồ sơ)</td></tr>`).join('');
+  openModal('📥 BCC '+esc(C.period)+' — xem trước ('+C.list.length+' thuyền viên)', `<div style="font-size:12px;margin-bottom:8px">File <b>${esc(C.fileName)}</b> · <b>${nNew}</b> tạo mới · <b>${nUpd}</b> cập nhật · <b>${C.leave.length}</b> rời tàu${nBad?` · <span style="color:var(--bad);font-weight:700">${nBad} dòng chưa nhận ra tàu — chọn tàu</span>`:''}</div>
+    <div class="tbl-scroll" style="max-height:60vh;overflow:auto"><table class="tbl" style="font-size:12px"><thead><tr><th></th><th>MSNV</th><th>Họ tên</th><th>Chức danh</th><th>Tàu (đúng tàu)</th><th class="r">NPT</th><th>Số đầu kỳ (ngày công)</th></tr></thead><tbody>${rows}${lv}</tbody></table></div>
+    <div style="font-size:11px;color:var(--muted);margin-top:6px">Người có 2 dòng (đổi tàu / nghỉ ca trong tháng): tàu = dòng có nhiều ngày làm việc nhất; chỉ có N1 → trạng thái Nghỉ ca. Không tạo đoạn công tác. Mã tạm (viền cam) sửa được.</div>`,
+    `<button class="btn-ghost" onclick="closeModal()">Hủy</button><button class="btn-primary" onclick="_cbiCommit()">✓ Cập nhật ${C.list.filter(x=>x.on).length} thuyền viên</button>`);
+}
+function _cbiCommit(){
+  const C=_CBI; if(!C) return; const sel=C.list.filter(x=>x.on);
+  const miss=sel.filter(x=>!x.vesselId); if(miss.length && !confirm(miss.length+' thuyền viên chưa chọn tàu — vẫn cập nhật (không gắn tàu)?')) return;
+  const now=new Date().toISOString(), who=actorName(); let nNew=0, nUpd=0, nLeave=0, nNpt=0, attRows=[], replaced=false;
+  const _old=(S.hrAttendance||[]).find(a=>a&&!a._deleted&&a.period===C.period&&a.profile==='BCC_DOITAU');
+  if(_old && !confirm('Đã có Bảng chấm công Đội tàu tháng '+C.period+(_old.status==='locked'?' (ĐÃ KHÓA)':'')+'.\n\nGhi SỐ MỚI thay số cũ theo file này?')) return;
+  const _KMAP={B1:'DB1',B2:'DB2',D:'DOCK',B4:'BO',N1:'NGHICA',B3:'BO2',DP:'DP'};   // mã file → cột BCC Đội tàu của kỳ lương
+  commitMutation(()=>{
+    sel.forEach(x=>{
+      let e=x.empId?(S.hrEmployees||[]).find(y=>y.id===x.empId):null;
+      if(!e){ e={id:'emp_'+Date.now()+'_'+Math.random().toString(36).slice(2,7), smartId:x.msnv, fullName:x.name, type:'crew', status:'active', title:x.title, projectIds:[], appUser:false,
+        createdAt:now, updatedAt:now, createdBy:who, _fromBcc:C.period}; HRService.addEmployee(e); nNew++; try{ hrmLogHistory(e.id,'create','','',x.msnv,'Tạo từ BCC '+C.period); }catch(_){} }
+      else { nUpd++; if(x.msnv && x.msnv!==e.smartId && x.tmp===false && !e.smartId) e.smartId=x.msnv; }
+      if(x.title) e.title=x.title; e.type=e.type||'crew';
+      e.linkVesselId=x.vesselId||''; e.division=x.nc?'Nghỉ ca':((e.division==='Nghỉ ca')?'':e.division);
+      if(x.npt!=null){ e.nptBcc=x.npt; try{ const sp=salaryProfileAt(e.id, C.period); if(sp&&sp.data&&+sp.data.dependents!==x.npt&&!(typeof _spVersionUsedByLockedPeriod==='function'&&_spVersionUsedByLockedPeriod(sp))){ sp.data.dependents=x.npt; sp._nptFromBcc=C.period; nNpt++; try{ touchRecord(sp); }catch(_){} } }catch(_){} }
+      /* v3.67.22 (Sếp): BCC vẫn tạo Bảng chấm công Đội tàu cho kỳ lương tháng — 1 dòng / tàu / người */
+      x.byVessel.forEach(bv=>{ const vv=_cbiVessel(bv.unit); const cols={}; Object.keys(_KMAP).forEach(k=>cols[_KMAP[k]]=+bv.codes[k]||0);
+        attRows.push({msnv:e.smartId||x.msnv, name:e.fullName||x.name, title:x.title, unit:bv.unit, cols, total:['B1','B2','B3','B4','D','N1'].reduce((t,k)=>t+(+bv.codes[k]||0),0),
+          vessel:vv?vv.name:bv.unit, _empId:e.id, _dept:e.dept||'', _title:e.title||x.title}); });
+      e.crewOpening={asOf:C.period, codes:x.codes, workDays:x.codes.B1+x.codes.B2+x.codes.B3+x.codes.B4+x.codes.D, ncDays:x.codes.N1, dpDays:x.codes.DP, byVessel:x.byVessel, source:C.fileName, at:now, by:who};
+      e.updatedAt=now; try{ touchRecord(e); }catch(_){}
+    });
+    C.leave.filter(x=>x.on).forEach(x=>{ const e=(S.hrEmployees||[]).find(y=>y.id===x.empId); if(!e) return; e._leftVesselByBcc={vessel:e.linkVesselId, period:C.period, at:now}; e.linkVesselId=''; e.updatedAt=now; nLeave++; try{ touchRecord(e); }catch(_){} });
+    if(_old){ S.hrAttendance=(S.hrAttendance||[]).filter(a=>a!==_old); try{ markDeleted(_old.id,'hrAttendance'); }catch(_){} replaced=true; }   // số mới thay số cũ (kể cả tháng cũ / đã khóa — Sếp chốt)
+    if(attRows.length) HRService.addAttendance({ id:'att_'+Date.now()+'_'+Math.random().toString(36).slice(2,6), period:C.period, profile:'BCC_DOITAU', sheetName:'BCC tổng hợp', fileName:C.fileName,
+      createdAt:now, updatedAt:now, importedAt:now, importedBy:who, status:'locked', lockedBy:who, lockedAt:now, _fromCrewBcc:true, _replacedId:_old?_old.id:'', rows:attRows });
+  }, {action:'crew_bcc_import', fields:['hrEmployees','salaryProfiles','hrAttendance'], onOk:()=>{ try{ logAuditEvent('crew_bcc_import',{period:C.period, file:C.fileName, nNew, nUpd, nLeave, nNpt}); }catch(e){}
+    _CBI=null; closeModal(); try{ hrmRenderCrew(); }catch(e){}
+    let _pw=''; try{ const pp=(S.payrollPeriods||[]).filter(p=>p&&String(p.period)===C.period&&/crew/i.test(String(p.profile||p.payProfile||''))&&(p.locked||p.status&&p.status!=='draft')); if(pp.length) _pw=' · ⚠ kỳ lương thuyền viên '+C.period+' đã tính/khóa — cần kéo công & tính lại'; }catch(_){}
+    toast('✓ BCC '+C.period+': '+nNew+' tạo mới · '+nUpd+' cập nhật · '+nLeave+' rời tàu · NPT '+nNpt+' · Bảng chấm công Đội tàu '+(replaced?'đã GHI ĐÈ số mới':'đã tạo')+' ('+attRows.length+' dòng)'+_pw,'good'); }});
 }
 
 function _cdPrintBlank(tpl){ _cdOpenPrint(_cdBriefHtml({tpl, ans:{}}, true), (CREW_TPL.meta[tpl]||{}).code+' (blank)'); }
@@ -49745,7 +49932,7 @@ function _vmSidebarApply(){
   const head=_modCanManageStaff('TAU');
   const show=(id,on)=>{ const el=document.getElementById(id); if(el) el.style.display=on?'':'none'; };
   ['vm-si-dash','vm-si-headgrp-hdr','vm-si-staff','vm-si-timesheet','vm-si-opex'].forEach(id=>show(id,head));
-  const ccm=_canSeeCrewMgmt(); ['vm-si-crewmgmt-hdr','vm-si-crewchange','vm-si-crewlist','vm-si-crewsalary','vm-si-crewqd','vm-si-crewbrief'].forEach(id=>show(id,ccm));
+  const ccm=_canSeeCrewMgmt(); ['vm-si-crewmgmt-hdr','vm-si-crewchange','vm-si-crewlist','vm-si-crewsalary','vm-si-crewqd','vm-si-crewbrief','vm-si-crewbcc'].forEach(id=>show(id,ccm));
   try{ _modMyTabShow('vm-mytab'); }catch(e){}
 }
 function renderVmDashboard(){
@@ -70721,6 +70908,10 @@ const _NSNN_OPTS=[
   ['IMPORT_DUTY','📦 Thuế nhập khẩu','TAX_IMPORT_DUTY',true,'Chi cục Hải quan'],
   ['IMPORT_VAT','📦 GTGT hàng nhập khẩu','TAX_IMPORT_VAT',false,'Chi cục Hải quan'],
   ['EXCISE','📦 Thuế tiêu thụ đặc biệt','TAX_EXCISE',true,'Chi cục Hải quan'],
+  ['ENV','🌿 Thuế bảo vệ môi trường (hàng NK)','TAX_NSNN',true,'Chi cục Hải quan'],
+  ['TRADE_REMEDY','⚖ Thuế chống bán phá giá / trợ cấp / tự vệ','TAX_NSNN',true,'Chi cục Hải quan'],
+  ['EXPORT_DUTY','📤 Thuế xuất khẩu','TAX_NSNN',true,'Chi cục Hải quan'],
+  ['CUSTOMS_FEE','📄 Lệ phí hải quan','TAX_NSNN',true,'Chi cục Hải quan'],
   ['FCT','🏢 Thuế nhà thầu (FCT)','TAX_FCT',true,'Kho bạc Nhà nước — Chi cục Thuế'],
   ['CIT','🏛 Thuế TNDN','TAX_CIT',true,'Kho bạc Nhà nước — Chi cục Thuế'],
   ['BUSINESS_LICENSE','📋 Thuế môn bài','TAX_LICENSE',true,'Kho bạc Nhà nước — Chi cục Thuế'],
@@ -70728,7 +70919,7 @@ const _NSNN_OPTS=[
 let _NS=null;
 function _nsnnIsKT(){ return isAdmin() || canCheckAcc() || (typeof canApproveL1==='function'&&canApproveL1()); }
 /* v3.67.05 (Sếp): mở cho người dùng khác — bộ phận mua hàng nộp thuế HẢI QUAN (NK / GTGT NK / TTĐB) và GẮN PO. Kế toán: mọi loại. */
-const _NSNN_CUSTOMS=['IMPORT_DUTY','IMPORT_VAT','EXCISE'];
+const _NSNN_CUSTOMS=['IMPORT_DUTY','IMPORT_VAT','EXCISE','ENV','TRADE_REMEDY','EXPORT_DUTY','CUSTOMS_FEE'];   // v3.67.19
 function _nsnnCanUse(){ return !(typeof whIsVesselSideUser==='function' && whIsVesselSideUser()); }
 function _nsnnOpts(){ return _nsnnIsKT()?_NSNN_OPTS:_NSNN_OPTS.filter(o=>_NSNN_CUSTOMS.indexOf(o[0])>=0); }
 function openNsnnForm(){
@@ -70747,8 +70938,11 @@ function _nsnnRender(){
       <button class="btn-sec" onclick="document.getElementById('ns-imp-file').click()">📎 Nhập tờ khai HQ (PDF / ảnh / Excel / Word)</button>
       <span id="ns-imp-st" style="font-size:12px;color:var(--muted)">Đọc số liệu + tự đính kèm file vào phiếu — không phải làm 2 lần</span>
       ${(N.attachments||[]).length?`<span style="font-size:12px">📎 ${N.attachments.map(a=>esc(a.name)).join(', ')}</span>`:''}</div>
-    ${(N.lines||[]).length>1?`<div style="margin-bottom:12px"><div style="font-size:11px;font-weight:600;text-transform:uppercase;color:var(--muted);margin-bottom:4px">Các sắc thuế đọc từ tờ khai — mỗi dòng tick = 1 phiếu, tạo cùng lúc</div>
-      <table class="tbl"><tbody>${N.lines.map((l,i)=>`<tr><td style="width:30px"><input type="checkbox" ${l.on?'checked':''} onchange="_NS.lines[${i}].on=this.checked"></td><td>${esc((_NSNN_OPTS.find(o=>o[0]===l.type)||[])[1]||l.type)}</td><td class="r"><input type="number" step="any" value="${l.amount}" oninput="_NS.lines[${i}].amount=+this.value||0" style="width:150px;text-align:right"></td></tr>`).join('')}</tbody></table></div>`:''}`;   // v3.67.06
+    ${(N.lines||[]).length>=1?`<div style="margin-bottom:12px"><div style="font-size:11px;font-weight:600;text-transform:uppercase;color:var(--muted);margin-bottom:4px">Đọc từ tờ khai${N.decl?' số '+esc(N.decl):''}${N._tk&&N._tk.kind==='EXPORT'?' (xuất khẩu)':''} — mỗi dòng tick = 1 phiếu, tạo cùng lúc</div>
+      <table class="tbl"><tbody>${N.lines.map((l,i)=>`<tr><td style="width:30px"><input type="checkbox" ${l.on?'checked':''} onchange="_NS.lines[${i}].on=this.checked"></td><td>${esc((_NSNN_OPTS.find(o=>o[0]===l.type)||[])[1]||l.type)}</td><td class="r"><input type="number" step="any" value="${l.amount}" oninput="_NS.lines[${i}].amount=+this.value||0" style="width:150px;text-align:right"></td></tr>`).join('')}
+      <tr style="font-weight:700"><td></td><td>Cộng các sắc thuế</td><td class="r">${N.lines.reduce((a,l)=>a+(+l.amount||0),0).toLocaleString('vi-VN')}</td></tr>
+      ${N._tk&&N._tk.total?`<tr><td></td><td>Tổng tiền thuế phải nộp (trên tờ khai)</td><td class="r">${(+N._tk.total).toLocaleString('vi-VN')}</td></tr>`:''}</tbody></table>
+      ${N._tk&&N._tk.total&&Math.abs(N.lines.reduce((a,l)=>a+(+l.amount||0),0)-N._tk.total)>1?`<div style="margin-top:4px;padding:6px 10px;border-radius:6px;background:#fde7d9;color:#8a3b12;font-size:12px;font-weight:700">⚠ Lệch ${(N._tk.total-N.lines.reduce((a,l)=>a+(+l.amount||0),0)).toLocaleString('vi-VN')} so với tổng trên tờ khai — kiểm tra lại</div>`:''}</div>`:''}`;   // v3.67.19: luôn hiện bảng + đối chiếu tổng
   const body=`<div style="padding:8px 12px;border-left:5px solid #7a1f1f;background:#fbeeee;border-radius:6px;font-weight:700;color:#7a1f1f;margin-bottom:12px">🏛 NỘP NGÂN SÁCH NHÀ NƯỚC</div>${_imp}
     <div style="display:grid;grid-template-columns:1.4fr 1fr 1fr;gap:12px;margin-bottom:12px">
       ${f('① Loại thuế / khoản nộp *',`<select style="width:100%;height:36px" onchange="_NS.type=this.value;_NS.collector='';_nsnnRender()">${_L.map(o=>`<option value="${o[0]}" ${N.type===o[0]?'selected':''}>${o[1]}</option>`).join('')}</select>`)}
@@ -70761,7 +70955,7 @@ function _nsnnRender(){
     <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;margin-bottom:12px">
       ${f('Số tờ khai / thông báo',`<input style="width:100%;height:36px" value="${esc(N.decl)}" oninput="_NS.decl=this.value">`)}
       ${f('Tiểu mục NSNN',`<input style="width:100%;height:36px" value="${esc(N.sub)}" oninput="_NS.sub=this.value">`)}
-      ${f('Gắn PO / tờ khai hải quan <span style="font-weight:400;text-transform:none">(nên gắn)</span>',(isImp||N.type==='EXCISE')?`<select style="width:100%;height:36px" onchange="_NS.po=this.value"><option value="">— Không gắn —</option>${_poCandidates('').map(r=>`<option value="${r.id}" ${N.po===r.id?'selected':''}>${esc(_poLabel(r))}</option>`).join('')}</select>`:`<div style="height:36px;display:flex;align-items:center;color:var(--muted);font-size:12px">— chỉ thuế NK / GTGT NK —</div>`)}</div>
+      ${f('Gắn PO / tờ khai hải quan <span style="font-weight:400;text-transform:none">(nên gắn)</span>'+((N._poSug||[]).length?`<div style="margin-top:4px;display:flex;flex-direction:column;gap:3px">${N._poSug.map(g=>`<a href="javascript:void 0" onclick="_NS.po='${g.id}';_nsnnRender()" style="font-size:11px;font-weight:400;text-transform:none;letter-spacing:0;${N.po===g.id?'color:#1d6b3a;font-weight:700':''}">${N.po===g.id?'✓':'💡'} ${esc(g.label)} — ${esc(g.why.join(' · '))}${g.by?' · do '+esc(g.by)+' lập':''}</a>`).join('')}</div>`:''),(isImp||N.type==='EXCISE')?`<select style="width:100%;height:36px" onchange="_NS.po=this.value"><option value="">— Không gắn —</option>${_poCandidates('').map(r=>`<option value="${r.id}" ${N.po===r.id?'selected':''}>${esc(_poLabel(r))}</option>`).join('')}</select>`:`<div style="height:36px;display:flex;align-items:center;color:var(--muted);font-size:12px">— chỉ thuế NK / GTGT NK —</div>`)}</div>
     ${f('Nội dung thanh toán',`<input style="width:100%;height:36px" value="${esc(N.content||('Nộp '+opt[1].replace(/^\S+\s/,'')+' kỳ '+N.period))}" oninput="_NS.content=this.value">`)}
     <div style="margin-top:12px;padding:10px 12px;border:1px dashed #1c3a5c;border-radius:6px;font-size:12px">Loại chi phí <b>${opt[2]}</b> · ${opt[3]?'<b>vào P/L</b>':'<b>không vào P/L</b>'}${N.type==='CIT'?' (tạm giữ như hiện tại — dòng "Thuế TNDN" riêng sẽ làm cùng báo cáo P/L)':''} · ${_nsnnIsKT()?'Kế toán lập → vào thẳng KTT → L2':'nộp KT → KT kiểm → KTT → L2'} → Bảng kê · phiếu nằm trong bìa hồ sơ của PO đã gắn · tab NSNN cộng "đã nộp" khi CHI qua Bảng kê · chứng từ đính kèm sau khi lưu (mở phiếu).</div>`;
   openModal('🏛 Nộp NSNN', body, `<button class="btn-ghost" onclick="closeModal()">Hủy</button><button class="btn-primary" onclick="_nsnnSave()">Tạo phiếu nộp NSNN</button>`);
@@ -70770,6 +70964,45 @@ function _nsnnRender(){
    Excel (ECUS) → tkhqParse sẵn có; PDF/ảnh → AI (chế độ đọc hóa đơn AP); Word → chỉ đính kèm (nhập tay số liệu).
    Nhiều sắc thuế (NK + GTGT NK + TTĐB…) → mỗi sắc thuế 1 phiếu, tạo cùng lúc, chung tờ khai / PO / file. */
 const _ET2NS={TAX_IMPORT_DUTY:'IMPORT_DUTY', TAX_IMPORT_VAT:'IMPORT_VAT', TAX_EXCISE:'EXCISE'};
+
+/* v3.67.19: PDF có lớp chữ → mảng hàng/ô (gom theo tọa độ y, xếp theo x) để dùng chung bộ đọc dạng bảng */
+async function _pdfToAoa(file){
+  await _loadScriptOnce('https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js','pdfjsLib');
+  try{ pdfjsLib.GlobalWorkerOptions.workerSrc='https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js'; }catch(e){}
+  const pdf=await pdfjsLib.getDocument({data:new Uint8Array(await file.arrayBuffer())}).promise; const rows=[];
+  for(let p=1;p<=Math.min(pdf.numPages,6);p++){ const pg=await pdf.getPage(p); const tc=await pg.getTextContent();
+    const its=tc.items.filter(i=>String(i.str).trim()).map(i=>({x:i.transform[4],y:i.transform[5],s:String(i.str).trim()})).sort((a,b)=>b.y-a.y||a.x-b.x);
+    let cur=null; its.forEach(it=>{ if(!cur||Math.abs(cur.y-it.y)>3){ cur={y:it.y,items:[]}; rows.push(cur); } cur.items.push(it); }); }
+  return rows.map(r=>r.items.sort((a,b)=>a.x-b.x).map(i=>i.s));
+}
+
+
+/* v3.67.20 (Sếp): đọc tờ khai → đối chiếu nhanh các phiếu Phải trả / PO → GỢI Ý PO liên kết (chấm điểm, nêu lý do, người lập) */
+function _tkPoSuggest(d){
+  if(!d) return [];
+  const norm=s=>String(s||'').toUpperCase().replace(/[^A-Z0-9]/g,'');
+  const invToks=String(d.invoiceNo||'').split(/[\/,;\s]+/).map(norm).filter(x=>x.length>=3);
+  const refs=(d.poRefs||[]).map(norm);
+  const rd=(function(){ const m=String(d.regDate||'').match(/(\d{1,2})\/(\d{1,2})\/(\d{4})/); return m?new Date(+m[3],+m[2]-1,+m[1]).getTime():Date.now(); })();
+  const roots=new Map();
+  AccountingService.payables().forEach(r=>{ if(!r||r._deleted||r._payrollPeriodId||r.poLinkId||r._adjOf||r._nsnnV2) return; if(!(r.poNo||r.purchaseKind==='GOODS')) return;
+    const k=r.batchId||r.id; if(!roots.has(k)) roots.set(k,{r, recs:[]}); roots.get(k).recs.push(r); });
+  const out=[];
+  roots.forEach(({r,recs})=>{
+    let sc=0; const why=[];
+    const po=norm(r.poNo); if(po && (refs.some(x=>x.indexOf(po)>=0||po.indexOf(x)>=0) || invToks.some(t=>t===po))){ sc+=100; why.push('trùng số PO'); }
+    const rInv=recs.map(x=>String(x.invoiceNo||'').split(/[\/,;\s]+/)).flat().map(norm).filter(x=>x.length>=3);
+    if(rInv.some(x=>invToks.indexOf(x)>=0)){ sc+=80; why.push('trùng số hóa đơn'); }
+    const sim=(d.partner&&typeof vendorNameSimilarity==='function')?vendorNameSimilarity(d.partner, r.partner||''):0;
+    if(sim>=0.6){ sc+=Math.round(40*sim); why.push('cùng NCC'); }
+    const val=recs.reduce((t,x)=>t+(+x.amountGross||+x.amount||0),0);
+    if(d.invValue>0 && d.invCcy && (r.ccy||'VND')===d.invCcy && Math.abs(val-d.invValue)<=Math.max(1,d.invValue*0.02)){ sc+=40; why.push('trị giá '+d.invValue.toLocaleString('vi-VN')+' '+d.invCcy); }
+    const t=Date.parse(r.issueDate||r.poDate||'')||0; if(t && t<=rd && rd-t<=90*86400000){ sc+=10; }
+    if(sc>=40) out.push({id:r.id, score:sc, why, by:r.createdBy||'', label:_poLabel(r)});
+  });
+  return out.sort((a,b)=>b.score-a.score).slice(0,3);
+}
+
 async function _nsnnImport(inputEl){
   const file=inputEl&&inputEl.files&&inputEl.files[0]; if(!file) return; inputEl.value='';
   const N=_NS; if(!N) return;
@@ -70788,7 +71021,13 @@ async function _nsnnImport(inputEl){
   try{
     if(/\.(xlsx|xls)$/i.test(file.name)){
       const buf=await file.arrayBuffer(); const wb=XLSX.read(buf,{type:'array'}); const d=tkhqParse(wb);
-      decl=d.declNo||''; regDate=d.regDate||''; invNo=d.invoiceNo||''; taxes=(d.taxes||[]).filter(t=>_ET2NS[t.et]).map(t=>({type:_ET2NS[t.et], amount:Math.round(+t.amount||0)}));
+      decl=d.declNo||''; regDate=d.regDate||''; invNo=d.invoiceNo||''; taxes=(d.taxes||[]).map(t=>({type:t.ns||_ET2NS[t.et], amount:Math.round(+t.amount||0)})).filter(t=>t.type);
+      N._tk={total:d.totalTax||0, mismatch:d.totalMismatch||0, kind:d.kind}; N._poSug=_tkPoSuggest(d);
+    } else if(/\.pdf$/i.test(file.name) && await (async()=>{ try{   /* v3.67.19: PDF tờ khai có chữ → dựng bảng theo tọa độ, đọc như Excel (không tốn AI) */
+        const aoa=await _pdfToAoa(file); if(!aoa.length) return false; const d=tkhqParseAoa(aoa, /xu[aấ]t\s*kh[aẩ]u/i.test(aoa.slice(0,6).join(' '))?'TKX':'TKN');
+        if(!d.declNo) return false; decl=d.declNo; regDate=d.regDate||''; invNo=d.invoiceNo||'';
+        taxes=(d.taxes||[]).map(t=>({type:t.ns||_ET2NS[t.et], amount:Math.round(+t.amount||0)})).filter(t=>t.type); N._tk={total:d.totalTax||0, mismatch:d.totalMismatch||0, kind:d.kind}; N._poSug=_tkPoSuggest(d); return true; }catch(e){ return false; } })()){
+      /* đã đọc bằng bộ đọc bảng */
     } else if(/\.(pdf|png|jpe?g|webp)$/i.test(file.name)){
       const d=await aiExtract(file,'ap');
       decl=String(d.invoiceNo||d.declNo||''); regDate=d.issueDate||''; invNo=d.invoiceNo||'';
@@ -70799,9 +71038,11 @@ async function _nsnnImport(inputEl){
   }catch(e){ console.warn('[ns-read]',e); }
   const byT={}; taxes.forEach(t=>{ if(!byT[t.type]||t.amount>byT[t.type]) byT[t.type]=t.amount; });
   N.lines=Object.entries(byT).map(([type,amount])=>({type, amount, on:true}));
+  if(!N.lines.length && N._tk && N._tk.kind==='EXPORT') setTimeout(()=>toast('Tờ khai xuất khẩu không có thuế / lệ phí phải nộp — đã đính kèm file','warn'),50);
   if(decl) N.decl=decl;
   const iso=(typeof _aiDateISO==='function')?_aiDateISO(regDate):''; if(iso) N.period=iso.slice(0,7);
-  if(!N.po && invNo){ const hit=_poCandidates(invNo)[0]; if(hit) N.po=hit.id; }   // gợi ý PO theo số hóa đơn trên tờ khai
+  if(!N.po && N._poSug && N._poSug.length && N._poSug[0].score>=80) N.po=N._poSug[0].id;   // v3.67.20: tự chọn khi trùng số PO / số HĐ
+  else if(!N.po && invNo && !(N._poSug&&N._poSug.length)){ const hit=_poCandidates(invNo)[0]; if(hit) N.po=hit.id; }
   if(N.lines.length){ N.type=N.lines[0].type; N.amount=N.lines[0].amount; }
   _nsnnRender();
   say(N.lines.length?('✓ Đã đọc '+N.lines.length+' sắc thuế + đính kèm "'+file.name+'"'):('✓ Đã đính kèm "'+file.name+'" — không đọc được số liệu, nhập tay'), N.lines.length?'var(--good)':'#9a5a05');
@@ -98706,6 +98947,7 @@ function _nsnnComputeAuto(period, coId){
     vatOut += toDisplay(vat, r.ccy||'USD',r.fxToUsd);
   });
 
+  const _ex={};   // v3.67.20: BVMT / chống bán phá giá / thuế XK / lệ phí HQ
   ap.forEach(r=>{
     // v2.74.3: tính ngay khi CÓ SỐ HÓA ĐƠN — bất kể trạng thái duyệt (từ chối = trả về bổ sung hồ sơ).
     const d = r.issueDate || r.invoiceDate || '';
@@ -98731,6 +98973,7 @@ function _nsnnComputeAuto(period, coId){
       else if(nt==='IMPORT_VAT') importVat += amt;
       else if(nt==='FCT') fct += amt;
     }
+    if(r._nsnnV2 && _NSNN_EXTRA.indexOf(r.nsnnType)>=0) _ex[r.nsnnType]=(_ex[r.nsnnType]||0)+toDisplay(+r.amountGross||+r.amount||0, r.ccy||'VND', r.fxToUsd);   // v3.67.20
   });
 
   // v3.02.80: chi hộ tàu QL hộ (opTransactions) — VAT là chi hộ chủ tàu, KHÔNG khấu trừ đầu vào.
@@ -98747,7 +98990,7 @@ function _nsnnComputeAuto(period, coId){
   if(hasOverride) vatPayable = overrideVal;
 
   return {VAT_OUTPUT:vatOut, VAT_INPUT:vatIn, VAT_PAYABLE:vatPayable, PIT:pit, INSURANCE_SOCIAL:bhxh,
-    IMPORT_DUTY:importDuty, IMPORT_VAT:importVat, FCT:fct, _hasVatOverride:hasOverride};
+    IMPORT_DUTY:importDuty, IMPORT_VAT:importVat, FCT:fct, ENV:_ex.ENV||0, TRADE_REMEDY:_ex.TRADE_REMEDY||0, EXPORT_DUTY:_ex.EXPORT_DUTY||0, CUSTOMS_FEE:_ex.CUSTOMS_FEE||0, _hasVatOverride:hasOverride};
 }
 
 /* === Sum manual tax records for a period ===
@@ -98891,7 +99134,7 @@ function _nsnnRenderOverview(yr){
   const manual = _nsnnSumManual(yearStr);
   const paid = _nsnnSumPaid(yearStr);
 
-  const totalAuto = auto.VAT_PAYABLE + auto.PIT + (auto.IMPORT_DUTY||0) + (auto.IMPORT_VAT||0) + (auto.FCT||0);
+  const totalAuto = auto.VAT_PAYABLE + auto.PIT + (auto.IMPORT_DUTY||0) + (auto.IMPORT_VAT||0) + (auto.FCT||0) + _NSNN_EXTRA.reduce((s,k)=>s+(auto[k]||0),0);
   const totalManual = Object.values(manual).reduce((s,v)=>s+v,0);
   const totalPaid = Object.values(paid).reduce((s,v)=>s+v,0);
   const totalDue = totalAuto + totalManual;
@@ -98902,7 +99145,7 @@ function _nsnnRenderOverview(yr){
   const thisMonth=`${yr}-${String(now.getMonth()+1).padStart(2,'0')}`;
   const monthAuto=_nsnnComputeAuto(thisMonth, _coF);
   const monthManual=_nsnnSumManual(thisMonth);
-  const monthTotal = monthAuto.VAT_PAYABLE + monthAuto.PIT + (monthAuto.IMPORT_DUTY||0) + (monthAuto.IMPORT_VAT||0) + (monthAuto.FCT||0) + Object.values(monthManual).reduce((s,v)=>s+v,0);
+  const monthTotal = monthAuto.VAT_PAYABLE + monthAuto.PIT + (monthAuto.IMPORT_DUTY||0) + (monthAuto.IMPORT_VAT||0) + (monthAuto.FCT||0) + _NSNN_EXTRA.reduce((s,k)=>s+(monthAuto[k]||0),0) + Object.values(monthManual).reduce((s,v)=>s+v,0);
 
   const kpiEl=document.getElementById('nsnn-kpi');
   if(kpiEl) kpiEl.style.display=_finKpiVisible()?'':'none';
@@ -104566,7 +104809,13 @@ function _hsItems(){
      thuế tự sinh, điều chỉnh Kế toán lập cho phiếu của người khác). */
   const _procAp=r=>!!(r.autoSource||r._autoCreated||r._fromLoan||(r._adjOf&&((AccountingService.payables().find(x=>x.id===r._adjOf)||{}).createdBy||r.createdBy)!==r.createdBy));
   const apG=new Map(); AccountingService.payables().forEach(r=>{ if(!r||r._deleted||!_ok(r.createdBy)||r._payrollPeriodId||_procAp(r)) return; const k=r.batchId||r.id; if(!apG.has(k)) apG.set(k,[]); apG.get(k).push(r); });
-  apG.forEach(recs=>{ const r=recs[0]; out.push({kind:'ap', id:r.id, recs, no:r.dnttNo||'', inv:Array.from(new Set(recs.map(x=>String(x.invoiceNo||'').trim()).filter(Boolean))).join(', '), who:r.partner||'', loai:r.poNo?'Đợt '+((r.payments||[]).filter(p=>p&&!p._feeOnly&&(+p.amount||0)>0).length+1):((r._isProvisional||r._isBudget)?'Dự kiến':'Đề xuất TT'),
+  /* v3.67.20 (Sếp): phiếu thuế / chi phí đi kèm / điều chỉnh do NGƯỜI KHÁC lập nhưng gắn vào PO của mình → hiện trong bìa PO (chỉ xem) */
+  const _mineRoots=new Set(); apG.forEach(recs=>recs.forEach(x=>{ if(x.poNo||x.purchaseKind==='GOODS') _mineRoots.add(x.id); }));
+  const _foreign=new Map(); AccountingService.payables().forEach(r=>{ if(!r||r._deleted||_ok(r.createdBy)) return; const lk=r.poLinkId||r._adjOf; if(!lk) return;
+    const root=_poRootOf(lk); if(!root) return; const rootIds=root.batchId?AccountingService.payables().filter(x=>x.batchId===root.batchId).map(x=>x.id):[root.id];
+    if(!rootIds.some(id=>_mineRoots.has(id))) return; const k=r.batchId||r.id; if(!_foreign.has(k)) _foreign.set(k,[]); _foreign.get(k).push(r); });
+  _foreign.forEach((recs,k)=>{ apG.set('F:'+k, recs); recs._foreignBy=recs[0].createdBy||''; });
+  apG.forEach(recs=>{ const r=recs[0]; out.push({kind:'ap', id:r.id, recs, foreignBy:recs._foreignBy||'', no:r.dnttNo||'', inv:Array.from(new Set(recs.map(x=>String(x.invoiceNo||'').trim()).filter(Boolean))).join(', '), who:r.partner||'', loai:r.poNo?'Đợt '+((r.payments||[]).filter(p=>p&&!p._feeOnly&&(+p.amount||0)>0).length+1):((r._isProvisional||r._isBudget)?'Dự kiến':'Đề xuất TT'),
     amt:recs.reduce((t,x)=>t+(+x.amountGross||+x.amount||0),0), ccy:r.ccy||'VND', st:_hsStatusAp(recs), po:r.poNo||'', dk:!!((r._isProvisional||r._isBudget)&&!r.poNo), date:r.issueDate||'', note:r.rejectReason||'' }); });
   const opG=new Map(); VesselService.opTransactions().forEach(t=>{ if(!t||t._deleted||t.type!=='OUT'||t._fromAp||t._autoCreated||!(_ok(t.createdBy)||(_plIsTau()&&(!_by||t.createdBy===_by)))||t.khoanRole==='doi'||t._mgmtFeeId) return; const k=t.opBatchId||t.id; if(!opG.has(k)) opG.set(k,[]); opG.get(k).push(t); });
   opG.forEach(recs=>{ const t=recs[0]; const v=VesselService.opVessels().find(x=>x.id===t.vesselId);
@@ -104678,7 +104927,7 @@ function _plOpenHoSo(){
     }
     const others=f.items.filter(it=>it!==f.root);
     if(f.root && others.length) tree+=line(0,'📂','<b>Chi phí đi kèm</b>');
-    others.forEach(it=>{ const _lab=f.root?`<b>${esc(it.no||'')}</b> · ${esc(it.who)}`:`<b>${esc(it.who)}</b>${it.inv?(' · HĐ '+esc(it.inv)):''}`;   // v3.66.98: không PO → NCC · số HĐ
+    others.forEach(it=>{ const _lab=(f.root?`<b>${esc(it.no||'')}</b> · ${esc(it.who)}`:`<b>${esc(it.who)}</b>${it.inv?(' · HĐ '+esc(it.inv)):''}`)+(it.foreignBy?` <span style="font-size:10px;padding:1px 6px;border-radius:999px;background:#eee;color:#555">do ${esc(it.foreignBy)} lập · chỉ xem</span>`:'');   // v3.66.98 / v3.67.20
       const _tg=_hsFlowTag(it);   // v3.66.99: tag Công ty / Chi hộ
       tree+=line(f.root?1:0,'📂',`${_tg.html} ${_lab} · ${fmtOrig(it.amt,it.ccy)} · ${_hsChip(it.st)}`,'',false,`_hsDetail('${it.kind}','${it.id}')`).replace('display:flex;gap:8px','display:flex;gap:8px;box-shadow:inset 3px 0 0 '+_tg.color)+fileLines(f.root?2:1,it.recs);
       if(it.st==='BS') tree+=line(f.root?2:1,'⚠','Cần bổ sung: '+esc(it.note||''),'',true); });
