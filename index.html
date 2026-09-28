@@ -4743,7 +4743,7 @@ const WH_TYPES = {
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.67.56';
+const APP_VERSION='3.67.61';
 /* HOTFIX 3.12.17-email: CHẶN TRIỆT ĐỂ gửi email TỰ ĐỘNG (mất kiểm soát — spam quota Google).
    Email phải do NV được phân quyền CHỦ ĐỘNG chọn gửi. Cờ này:
    (1) chặn auto-SCAN tạo email (hrmScanExpiries/vesselCertScanExpiries);
@@ -8750,6 +8750,7 @@ function openSettings(){
           ${cfg.lastCfgSync?'<br><br><b>Lần đồng bộ auth gần nhất:</b> '+new Date(cfg.lastCfgSync).toLocaleString('vi-VN')+' ('+timeAgo(cfg.lastCfgSync)+')':'<br><br><span style="color:var(--warn)">⚠ Chưa từng sync auth — máy khác chưa truy cập được</span>'}
         </div>
         <button class="btn-sec" onclick="openCfgSyncDialog()" style="font-size:11px">🔐 Đẩy auth lên cloud</button>
+        <button class="btn-sec" onclick="openPerfLog()" style="font-size:11px" title="Đo thời gian vẽ trang / tác vụ chậm trên máy này">⏱ Hiệu năng</button>
       </div>
       <div class="field">
         <label>Lần sync data gần nhất</label>
@@ -21724,7 +21725,8 @@ function expTreeRemove(code){
 }
 
 /* Lookup helper: get expense type by code from live S.expenseTypes (fallback DEFAULT) */
-function getExpenseType(code){
+function getExpenseType(code){ if(!code) return null; const c=_tk(); const m=c.get||(c.get=new Map()); if(m.has(code)) return m.get(code); const v=_getExpenseTypeRaw(code); m.set(code,v); return v; }
+function _getExpenseTypeRaw(code){
   if(!code) return null;
   const list = (S && S.expenseTypes) ? S.expenseTypes : DEFAULT_EXPENSE_TYPES;
   const hit=list.find(t=>t.code===code) || DEFAULT_EXPENSE_TYPES.find(t=>t.code===code);
@@ -21772,7 +21774,13 @@ function _expTreeSyntheticTypes(){
   });
   return out;
 }
-function activeExpenseTypes(){
+/* v3.67.58 (Bước 3 — nhớ kết quả trong 1 lượt xử lý): các hàm tính lại nhiều lần trên toàn dữ liệu trả kết quả đã tính
+   trong CÙNG lượt (bộ nhớ tự xóa khi lượt kết thúc + khi bắt đầu renderAll / lưu dữ liệu) — không đổi kết quả. */
+let _TK=null;
+function _tk(){ if(!_TK){ _TK={}; setTimeout(()=>{ _TK=null; },0); } return _TK; }
+function _tkReset(){ _TK=null; }
+function activeExpenseTypes(){ const c=_tk(); if(!c.aet) c.aet=_activeExpenseTypesRaw(); return c.aet.slice(); }
+function _activeExpenseTypesRaw(){
   const list = (S && S.expenseTypes && S.expenseTypes.length) ? S.expenseTypes : DEFAULT_EXPENSE_TYPES;
   const adm=(typeof isAdmin==='function')?isAdmin():false;
   // v3.65.75 (Sếp: "Mở phân quyền cho NV ví dụ: A - chi phí tài chính... mở toàn bộ cho NV, chỉ giữ
@@ -38075,6 +38083,8 @@ async function _commitTransactionInner(mutateFn, opts){
    gọi onOk() CHỈ khi verify PASS (chứa render/toast/close riêng từng hàm),
    báo lỗi rõ + KHÔNG chạy onOk khi fail (chống "UI báo thành công nhưng chưa lưu"). */
 function commitMutation(mutateFn, opts){
+  try{ _tkReset(); }catch(e){}   // v3.67.58: dữ liệu sắp đổi → bỏ kết quả nhớ tạm
+  if(typeof mutateFn==='function'){ const _mf=mutateFn; mutateFn=function(){ try{ return _mf.apply(this,arguments); } finally { try{ _tkReset(); }catch(e){} } }; }
   opts=opts||{};
   const onOk=typeof opts.onOk==='function'?opts.onOk:function(){};
   const onFail=typeof opts.onFail==='function'?opts.onFail:null;
@@ -44317,7 +44327,8 @@ function _apPlVnd(r){
   return {amount:cost*eff, ccy:'VND', _fxEff:eff};
 }
 
-function approvedTx(includeAll){
+function approvedTx(includeAll){ const c=_tk(); const k='atx'+(includeAll?1:0); if(!c[k]) c[k]=_approvedTxRaw(includeAll); return c[k].slice(); }
+function _approvedTxRaw(includeAll){
   // v3.01.35: includeAll=true → gồm CẢ chưa duyệt (mọi trạng thái trừ rejected), cho các báo cáo
   //           theo nguyên tắc "AP/AR gồm cả chưa duyệt/chưa thanh toán". Mặc định: chỉ approved.
   const out=[];
@@ -56941,6 +56952,7 @@ function _apprTabsRender(defs, cnt, cur){
     +`<span class="lg-tab${lib?' on':''}" onclick="_apprGo('library')">🗂 Bảng kê đã lập</span>`;
 }
 function _apprGo(v){
+  try{ _apPg().page=0; }catch(e){}   // v3.67.61
   if(v==='library'){ apprSwitchTab('library'); try{ _apprTabsRender(window._APPR_DEFS||[], window._APPR_CNT||(()=>0), ''); }catch(e){} return; }
   const tab=Object.keys(APPR_TAB_VALS).find(k=>APPR_TAB_VALS[k].indexOf(v)>=0)||'pending';
   const sel=document.getElementById('appr-level'); if(sel) sel.value=v;
@@ -56970,8 +56982,9 @@ function _apprRenderLevelChips(filterVals){
      thành undefined → thanh chip RỖNG, mất bộ chọn cấp (ảnh Sếp). return cùng dòng + test render THẬT. */
   /* v3.67.53 (Sếp duyệt mẫu): 1 thanh TAB cho mọi hàng đợi (có số đếm) + Bảng kê đã lập; bỏ KPI. Bấm = đặt đúng appr-level cũ. */
   try{ const k=document.getElementById('appr-kpi'); if(k) k.style.display='none'; }catch(e){}
-  try{ _apprTabsRender(defs, _cnt, cur); box.style.display='none'; const fh=box.closest('.section'); if(fh){ const t=fh.querySelector('.section-title'); if(t) t.style.display='none'; } }catch(e){ console.warn('[apprTabs]',e); }
-  box.innerHTML=defs.map(([v,label])=>{ const c=_cnt(v); label=c>0?(label+' ('+c+')'):label;
+  const _cc={}; const _cntC=v=>(v in _cc)?_cc[v]:(_cc[v]=_cnt(v));   /* v3.67.57: đếm 1 lần */
+  try{ if(_pgOn('page-approval')) _apprTabsRender(defs, _cntC, cur); box.style.display='none'; const fh=box.closest('.section'); if(fh){ const t=fh.querySelector('.section-title'); if(t) t.style.display='none'; } }catch(e){ console.warn('[apprTabs]',e); }
+  box.innerHTML=defs.map(([v,label])=>{ const c=_cntC(v); label=c>0?(label+' ('+c+')'):label;
     return `<button class="btn-sec" onclick="_apprSetLevel('${v}')" style="font-size:12px;padding:6px 12px;border-radius:16px;${v===cur?'background:var(--ink);color:var(--paper);border-color:var(--ink);font-weight:700':''}">${label}</button>`;
   }).join('');
   box.innerHTML+=`<span style="margin-left:auto;align-self:center;font-size:9.5px;color:var(--muted);font-family:var(--font-mono)" title="Bản đang chạy trên máy này">v${APP_VERSION}</span>`;   /* v3.17.80: tem xác minh bản */
@@ -56996,6 +57009,18 @@ function apprSwitchTab(tab){
   const sel=document.getElementById('appr-level');
   if(sel && !vals.includes(sel.value)) sel.value=vals[0];
   renderApprovalList();
+}
+
+function _apPg(){ return window._APPG||(window._APPG={size:20, page:0, sort:'prio'}); }
+function _apPgSet(k,v){ const P=_apPg(); if(k==='page') P.page=Math.max(0,P.page+v); else { P[k]=v; P.page=0; } renderApprovalList(); }
+function _apPagerHtml(from,to,tot,pages,bottom){
+  const P=_apPg(), f=n=>(+n).toLocaleString('vi-VN');
+  const sel=(k,opts)=>`<select style="font-size:11.5px;padding:2px 4px" onchange="_apPgSet('${k}',${k==='size'?'+this.value':'this.value'})">${opts.map(o=>`<option value="${o[0]}" ${String(P[k])===String(o[0])?'selected':''}>${o[1]}</option>`).join('')}</select>`;
+  return `<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;justify-content:flex-end;font-size:12px;padding:5px 8px;margin:${bottom?'8px 0 0':'0 0 8px'};background:#f7f8fa;border-radius:6px">
+    ${bottom?'':`<span style="color:var(--muted)">Sắp xếp</span>${sel('sort',[['prio','Cần xử lý trước'],['new','Mới nhất'],['old','Cũ nhất']])}<span style="color:var(--muted)">Hiển thị</span>${sel('size',[[20,'20 phiếu'],[50,'50 phiếu'],[100,'100 phiếu'],[1e9,'Tất cả']])}<span style="flex:1"></span>`}
+    <span style="color:var(--muted)"><b style="color:var(--ink)">${tot?f(from+1):0}–${f(to)}</b> / ${f(tot)}</span>
+    <button class="btn-ghost" style="font-size:14px;padding:0 8px" ${P.page<=0?'disabled':''} onclick="_apPgSet('page',-1)" title="Trang trước">‹</button>
+    <button class="btn-ghost" style="font-size:14px;padding:0 8px" ${P.page>=pages-1?'disabled':''} onclick="_apPgSet('page',1)" title="Trang sau">›</button></div>`;
 }
 function renderApprovalList(){
   _apprRenderLevelChips(APPR_TAB_VALS[_apprActiveTab]||null);
@@ -57132,14 +57157,23 @@ function renderApprovalList(){
   _candRecs.forEach(r=>{ if(r.batchId) _batchCount[r.batchId]=(_batchCount[r.batchId]||0)+1; });
   const _seenB={};
   let cards='';
-  candidates.forEach(c=>{
+  const _grpMap={}; candidates.forEach(x=>{ const bb=x.record&&x.record.batchId; if(bb) (_grpMap[bb]=_grpMap[bb]||[]).push(x); });   /* v3.67.59: gom 1 lượt (trước O(n²)) */
+  /* v3.67.61 (Sếp: kiểu Gmail): trang 20 phiếu, ‹ › lật trang, sắp xếp Cần xử lý trước / Mới nhất / Cũ nhất */
+  const _AP=_apPg(); let _cand=candidates;
+  if(_AP.sort==='new'||_AP.sort==='old'){ const _d=c=>String((c.record&&(c.record.issueDate||c.record.createdAt))||''); _cand=candidates.slice().sort((a,b)=>_AP.sort==='new'?_d(b).localeCompare(_d(a)):_d(a).localeCompare(_d(b))); }
+  let _utot=0; { const _sb={}; _cand.forEach(c=>{ const bb=c.record&&c.record.batchId; if(bb&&_batchCount[bb]>=2){ if(_sb[bb]) return; _sb[bb]=1; } _utot++; }); }
+  const _asz=_AP.size>=1e9?(_utot||1):_AP.size, _apages=Math.max(1,Math.ceil(_utot/_asz)); if(_AP.page>=_apages) _AP.page=_apages-1; if(_AP.page<0) _AP.page=0;
+  const _afrom=_AP.page*_asz, _ato=Math.min(_utot,_afrom+_asz); let _cardN=0;
+  cards+=_apPagerHtml(_afrom,_ato,_utot,_apages,false);
+  _cand.forEach(c=>{
     const r=c.record;
     const b=r.batchId;
+    { const _isB=b&&_batchCount[b]>=2; if(_isB&&_seenB[b]) return; _cardN++; if(_cardN<=_afrom||_cardN>_ato){ if(_isB) _seenB[b]=true; return; } }
     // === CARD TỔNG PHIẾU (batch ≥2) ===
     if(b && _batchCount[b]>=2){
       if(_seenB[b]) return;
       _seenB[b]=true;
-      const grp=candidates.filter(x=>x.record.batchId===b);
+      const grp=_grpMap[b]||[];
       const ids=grp.map(x=>x.id);
       const agg=_aggBatch(grp.map(x=>x.record));
       const allChecked=ids.every(id=>APPROVAL_SELECTED.has(id));
@@ -57213,6 +57247,7 @@ function renderApprovalList(){
       <button class="icon-btn" title="Xem chi tiết" onclick="approvalOpenDetail('${c.kind}','${c.id}')" style="flex-shrink:0">👁</button>
     </div>`;
   });
+  if(_utot>_asz) cards+=_apPagerHtml(_afrom,_ato,_utot,_apages,true);   // v3.67.61
   /* v3.17.51: thẻ CHI HỘ (tàu QL hộ) hòa chung danh sách — checkbox riêng + nút duyệt lô riêng
      gọi ĐÚNG máy trạng thái op (không trộn id vào APPROVAL_SELECTED của AP). */
   let opBatch='';
@@ -62325,6 +62360,7 @@ function loanDueThisMonthByTerm(){
 function _bankSec(id){ const el=document.getElementById(id); return el?el.closest('.section'):null; }
 function _bankUi(){
   const page=document.getElementById('page-banking'); if(!page) return;
+  if(!page.classList.contains('active')) return;   // v3.67.57
   const view=window._BANK_VIEW||'ledger';
   const kpi=document.getElementById('bank-kpi'); if(kpi) kpi.style.display='none';
   const A=_bankSec('bank-accounts-list'), B=_bankSec('credit-facilities-list'), C=_bankSec('loans-list');
@@ -66900,16 +66936,16 @@ function renderAR(){
    { kind:'single', r }  hoặc  { kind:'batch', batchId, recs, agg{...} }
    Giữ nguyên thứ tự: vị trí của batch = vị trí bản ghi ĐẦU TIÊN của batch trong list. */
 function _groupByBatch(records){
-  const batchCount={};
-  records.forEach(r=>{ if(r.batchId) batchCount[r.batchId]=(batchCount[r.batchId]||0)+1; });
+  const byBatch={};   // v3.67.58: gom 1 lượt (trước: lọc lại toàn danh sách cho MỖI phiếu → O(n²))
+  records.forEach(r=>{ if(r.batchId) (byBatch[r.batchId]=byBatch[r.batchId]||[]).push(r); });
   const seen={};
   const units=[];
   records.forEach(r=>{
     const b=r.batchId;
-    if(b && batchCount[b]>=2){
+    if(b && byBatch[b].length>=2){
       if(seen[b]) return;            // batch đã đẩy 1 dòng tổng rồi → bỏ qua dòng sau
       seen[b]=true;
-      const recs=records.filter(x=>x.batchId===b);
+      const recs=byBatch[b];
       units.push({kind:'batch', batchId:b, recs, agg:_aggBatch(recs)});
     } else {
       units.push({kind:'single', r});
@@ -67565,12 +67601,14 @@ function _lgMatch(r, isAp, st){   /* đúng khuôn điều kiện trạng thái 
   if(isAp && (st==='ap_pending_pay'||st==='ap_paid')){ if(wfStatus(r)!=='approved') return false; const pe=arRemaining(r)<=0.001; return st==='ap_paid'?pe:!pe; }
   return wfStatus(r)===st;
 }
-function _lgSetStatus(kind, v){ const el=document.getElementById(kind==='ap'?'ap-filter-status':'ar-filter-status'); if(el){ el.value=v; } renderAR(); }
+function _lgSetStatus(kind, v){ const el=document.getElementById(kind==='ap'?'ap-filter-status':'ar-filter-status'); if(el){ el.value=v; } try{ _lgPg(kind).page=0; }catch(e){} renderAR(); }
 function _lgToggleFilters(kind){ const p=document.getElementById(kind+'-lg-flt'); if(p) p.style.display=p.style.display==='none'?'flex':'none'; }
 function _lgMenu(btn){ const m=btn.nextElementSibling; const open=m.style.display==='block'; document.querySelectorAll('.lg-menu').forEach(x=>x.style.display='none'); if(!open){ m.style.display='block'; } event&&event.stopPropagation&&event.stopPropagation(); }
 document.addEventListener('click',()=>{ try{ document.querySelectorAll('.lg-menu').forEach(x=>x.style.display='none'); }catch(e){} });
+function _pgOn(id){ const el=document.getElementById(id); return !!(el && el.classList.contains('active')); }   /* v3.67.57 HOTFIX: chỉ dựng giao diện mới khi trang đang mở */
 function _ledgerUi(kind){
   const isAp=kind==='ap', page=document.getElementById(isAp?'page-payables':'page-receivables'); if(!page) return;
+  if(!page.classList.contains('active')) return;
   const tbl=document.getElementById(isAp?'ap-table':'ar-table'); if(!tbl) return;
   const kpi=document.getElementById(isAp?'ap-kpi':'ar-kpi'); if(kpi) kpi.style.display='none';
   const stSel=document.getElementById(isAp?'ap-filter-status':'ar-filter-status');
@@ -67600,6 +67638,7 @@ function _ledgerUi(kind){
   const QK=isAp?[[/Trình ký|Đã kiểm chứng từ/,'Trình ký L1'],[/Trả về|Thiếu chứng từ/,'Trả về'],[/Ghi nhận trả|Ghi chi dòng/,'Xác nhận TT']]
                :[[/Ghi nhận đã thu/,'Thu tiền'],[/Phát hóa đơn/,'Xuất HĐ']];
   tbl.querySelectorAll('tbody tr').forEach(tr=>{
+    if(tr.classList.contains('lg-pager')) return;
     const td=tr.lastElementChild; if(!td||td.dataset.lg) return; td.dataset.lg='1';
     const btns=Array.from(td.querySelectorAll('button')); if(!btns.length) return;
     let openJs='';
@@ -67620,6 +67659,19 @@ function _ledgerUi(kind){
     td.appendChild(wrap);
     if(openJs){ tr.style.cursor='pointer'; tr.title='Bấm để mở phiếu'; tr.addEventListener('click', function(e){ if(e.target.closest('button,a,input,select,label,textarea,.lg-menu')) return; try{ (new Function(openJs))(); }catch(err){ console.warn(err); } }); }
   });
+}
+
+/* v3.67.61: trạng thái phân trang + thanh lật trang kiểu Gmail cho Sổ Phải thu / Phải trả */
+function _lgPg(kind){ window._LGP=window._LGP||{}; return window._LGP[kind]||(window._LGP[kind]={size:20, page:0, sort:'prio'}); }
+function _lgPgSet(kind, k, v){ const P=_lgPg(kind); if(k==='page') P.page=Math.max(0,P.page+v); else { P[k]=v; P.page=0; } renderAR(); }
+function _lgPagerRow(kind, cols, from, to, tot, pages, bottom){
+  const P=_lgPg(kind), f=n=>(+n).toLocaleString('vi-VN');
+  const sel=(k,opts)=>`<select style="font-size:11.5px;padding:2px 4px" onchange="_lgPgSet('${kind}','${k}',${k==='size'?'+this.value':'this.value'})">${opts.map(o=>`<option value="${o[0]}" ${String(P[k])===String(o[0])?'selected':''}>${o[1]}</option>`).join('')}</select>`;
+  return `<tr class="lg-pager"><td colspan="${cols}" style="padding:5px 8px;background:#f7f8fa;${bottom?'border-top:1px solid var(--rule)':''}"><div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;justify-content:flex-end;font-size:12px">
+    ${bottom?'':`<span style="color:var(--muted)">Sắp xếp</span>${sel('sort',[['prio','Cần xử lý trước'],['new','Mới nhất'],['old','Cũ nhất']])}<span style="color:var(--muted)">Hiển thị</span>${sel('size',[[20,'20 dòng'],[50,'50 dòng'],[100,'100 dòng'],[1e9,'Tất cả']])}<span style="flex:1"></span>`}
+    <span style="color:var(--muted)"><b style="color:var(--ink)">${tot?f(from+1):0}–${f(to)}</b> / ${f(tot)}</span>
+    <button class="btn-ghost" style="font-size:14px;padding:0 8px" ${P.page<=0?'disabled':''} onclick="_lgPgSet('${kind}','page',-1)" title="Trang trước">‹</button>
+    <button class="btn-ghost" style="font-size:14px;padding:0 8px" ${P.page>=pages-1?'disabled':''} onclick="_lgPgSet('${kind}','page',1)" title="Trang sau">›</button></div></td></tr>`;
 }
 function renderArAp(kind){
   const isAp=kind==='ap';
@@ -67796,6 +67848,7 @@ function renderArAp(kind){
     if(sa!==sb) return sa-sb;
     return (b.issueDate||'').localeCompare(a.issueDate||'');
   });
+  { const _st=_lgPg(kind).sort; if(_st==='new'||_st==='old'){ const _d=r=>String(r.issueDate||r.createdAt||''); rows=[...rows].sort((a,b)=>_st==='new'?_d(b).localeCompare(_d(a)):_d(a).localeCompare(_d(b))); } }   // v3.67.61: Mới nhất / Cũ nhất
 
   let h = isAp ? `<thead><tr>
     <th style="width:30%">Nhà cung cấp / Diễn giải</th>
@@ -67832,7 +67885,12 @@ function renderArAp(kind){
   });
   // v3.01.30: RENDER — gộp phiếu nhiều dòng (batchId ≥2 dòng) thành 1 dòng tổng.
   const _units=isAp?_groupByBatch(rows):rows.map(r=>({kind:'single', r}));   // v3.67.49 (Sếp): Phải thu theo HÓA ĐƠN; Phải trả gom theo phiếu
-  _units.forEach(u=>{
+  /* v3.67.61 (Sếp: "20 dòng gần nhất, kiểu Gmail"): trang 20 dòng (đổi 20/50/100/Tất cả), ‹ › lật trang, sắp xếp Cần xử lý trước /
+     Mới nhất / Cũ nhất — tổng / lọc / tìm vẫn trên TOÀN BỘ dữ liệu. */
+  const _P=_lgPg(kind), _tot=_units.length, _sz=_P.size>=1e9?_tot||1:_P.size; const _pages=Math.max(1,Math.ceil(_tot/_sz)); if(_P.page>=_pages) _P.page=_pages-1; if(_P.page<0) _P.page=0;
+  const _from=_P.page*_sz, _to=Math.min(_tot,_from+_sz);
+  h+=_lgPagerRow(kind, isAp?6:8, _from, _to, _tot, _pages);
+  _units.slice(_from,_to).forEach(u=>{
     if(u.kind==='batch'){ h+=_renderBatchRow(u, isAp, kind); return; }
     const r=u.r;
     const rem=arRemaining(r);
@@ -68053,6 +68111,7 @@ function renderArAp(kind){
     </tr>`;
     }
   });
+  if(_tot>_sz) h+=_lgPagerRow(kind, isAp?6:8, _from, _to, _tot, _pages, true);   // v3.67.61: thanh lật trang cuối bảng
   const colSpan=(isAp?8:7)-(HIDE_COMPANY_COL?1:0);
   // v2.99.3: helper hiển thị tổng VND (chỉ cho AR — luôn VND, không phụ thuộc displayCcy)
   const fmtVndTotal = (v) => {
@@ -79207,6 +79266,7 @@ function _opsBar(){
 }
 function _opsUi(){
   const page=document.getElementById('page-operations'); if(!page) return;
+  if(!page.classList.contains('active')) return;   // v3.67.57
   if(!document.getElementById('ops-ui-bar')){ const bar=document.createElement('div'); bar.id='ops-ui-bar'; const anchor=document.getElementById('vessel-acct-ops-bar'); if(anchor&&anchor.parentNode) anchor.parentNode.insertBefore(bar, anchor.nextSibling); else page.insertBefore(bar, page.firstChild);
     /* khối "Ghi nhận thu hộ / chi hộ" (chỉ là lối tắt) → thay bằng nút đầu trang */
     try{ const h=document.getElementById('op-redirect-hint'); const sec=h&&h.closest('.section'); if(sec) sec.style.display='none'; }catch(e){}
@@ -120663,15 +120723,103 @@ function maOpen(id){
   if(typeof openPayableModal==='function') openPayableModal(id);
   else if(typeof toast==='function') toast('Không mở được phiếu','bad');
 }
+
+/* ════════════════════════════════════════════════════════════════════════════════════════════════
+   v3.67.58 (Sếp duyệt — KHẮC PHỤC TẬN GỐC treo "Page Unresponsive"):
+   ① renderAll chỉ vẽ TRANG ĐANG MỞ; các trang còn lại vẽ NỀN từng trang một, cách nhau, khi máy rảnh
+     (hủy & xếp lại khi có lượt vẽ mới) → không còn 1 khối tính toán dài chặn trình duyệt.
+   ② việc dọn dẹp / tự dựng dữ liệu tách khỏi lượt vẽ (≤ 1 lần / 60 giây, lúc rảnh).
+   ⑤ ĐỒNG HỒ HIỆU NĂNG: đo thời gian vẽ từng trang + bắt tác vụ dài (long task) — ghi lại các lần > 300 ms
+     (máy này), Admin xem ở ⚙ Cài đặt → ⏱ Hiệu năng.
+   ════════════════════════════════════════════════════════════════════════════════════════════════ */
+const _RD_TABS=['dashboard','vm_dashboard','hrm','plan','projects','vessels','receivables','vessel_expense','hr_expense','qn_expense','banking','cashfund','salary_fund','approval','mobile_approval','fixed_assets','tools','operations','op_input','advances','inventory','inv_analytics','catalog','project_data','co_dashboard','thuong_mai','timesheet','reports','rates','nsnn','library','staff','cashflow'];
+let _rdBgToken=0, _rdHkLast=0, _rdHkTimer=null;
+const _rdIdle=(fn,ms)=>{ if(window.requestIdleCallback) return requestIdleCallback(fn,{timeout:ms||1500}); return setTimeout(fn, 60); };
+function _rdLog(part, ms, page, kind){
+  if(!(ms>300)) return;
+  try{ const L=JSON.parse(localStorage.getItem('sme_perf_log')||'[]'); L.push({at:new Date().toISOString(), part, ms:Math.round(ms), page:page||'', kind:kind||'render', ver:(typeof APP_VERSION!=='undefined'?APP_VERSION:''), user:(typeof actorName==='function'?actorName():'')});
+    while(L.length>200) L.shift(); localStorage.setItem('sme_perf_log', JSON.stringify(L)); }catch(e){}
+  if(ms>1000) console.warn('[perf] '+part+' '+Math.round(ms)+' ms'+(page?(' @'+page):''));
+}
+function _rdTime(tab, fn){ const t=performance.now(); try{ fn(); } finally { _rdLog('page:'+tab, performance.now()-t, tab); } }
+function _rdRenderOne(tab){
+  /* vẽ ĐÚNG 1 trang (không đụng trang đang mở, không khôi phục cuộn / focus) — cùng các hàm như renderAll */
+  const t=performance.now();
+  try{
+    const has=x=>(typeof canAccessTab==='function'&&canAccessTab(x));
+    const R={dashboard:()=>renderDashboard(), vm_dashboard:()=>renderVmDashboard(), hrm:()=>renderHRM(),
+      plan:()=>{ renderPlanList(); renderDockPlanList(); _dockAssetFill(); }, projects:()=>renderProjects(),
+      vessels:()=>{ renderVessels(); renderFleet(); renderEvents(); renderDailyReports(); },
+      receivables:()=>renderAR(), vessel_expense:()=>{ fillVesselExpensePickers(); renderVesselExpense(); },
+      hr_expense:()=>{ fillHrExpensePickers(); renderHrExpense(); }, qn_expense:()=>{ fillQnExpensePickers(); renderQnExpense(); },
+      banking:()=>renderBanking(), cashfund:()=>renderCashFunds(), salary_fund:()=>{ if(isAdmin()) renderSalaryFund(); },
+      approval:()=>renderApprovalList(), mobile_approval:()=>renderMobileApproval(), fixed_assets:()=>renderFixedAssets(), tools:()=>renderTools(),
+      operations:()=>{ const vs=(typeof whIsVesselSideUser==='function'&&whIsVesselSideUser()); if(vs){ renderVesselAcctOpsBar(); } else { renderOpVessels(); renderOpTxList(); try{ renderVesselAcctOpsBar(); }catch(e){} try{ renderSeahorseOpex(); }catch(e){} try{ renderNccDebt(); }catch(e){} try{ renderOpKhoanRecon(); }catch(e){} } },
+      op_input:()=>{ try{ fillOpInputFilterVessel(); }catch(e){} try{ renderOpInputRecent(); }catch(e){} }, advances:()=>renderAdvances(),
+      inventory:()=>renderInventory(), inv_analytics:()=>renderInvAnalytics(), catalog:()=>renderCatalog(), project_data:()=>renderProjectData(),
+      co_dashboard:()=>renderCoDashboard(), thuong_mai:()=>tmSwitchView(window._tmCurView||'dash'), timesheet:()=>renderTimesheetPage(),
+      reports:()=>renderReports(), rates:()=>renderRates(), nsnn:()=>renderNSNN(), library:()=>renderLibrary(), staff:()=>renderStaff(), cashflow:()=>renderCashflow()};
+    const acc = tab==='receivables' ? (has('receivables')||has('payables')) : (tab==='salary_fund' ? true : has(tab));
+    if(acc && R[tab]) R[tab]();
+  }catch(e){ console.warn('[rd bg '+tab+']', e); }
+  _rdLog('bg:'+tab, performance.now()-t, tab, 'background');
+}
+function _rdBgQueue(activeId){
+  const tok=++_rdBgToken;
+  const list=_RD_TABS.filter(t=>t!==activeId && !(activeId==='payables'&&t==='receivables'));
+  let i=0;
+  const step=()=>{ if(tok!==_rdBgToken) return;   // có lượt vẽ mới → bỏ hàng đợi cũ
+    if(i>=list.length) return;
+    if(typeof _userInteracting!=='undefined' && _userInteracting && (step._w=(step._w||0)+1)<=3){ setTimeout(step, 250); return; }   // đang gõ → chờ tối đa ~0,75 giây
+    const t=list[i++]; _rdRenderOne(t); setTimeout(step, 0); };   /* v3.67.60: nối tiếp ngay (chỉ nhường 1 nhịp giữa 2 trang để màn hình không bị khóa) */
+  setTimeout(step, 0);
+}
+function _rdHousekeepNow(){
+  const t=performance.now();
+  try{ _acctEmpAuditNudge(); }catch(e){}
+  try{ _bccAutoCreateMonthly(); }catch(e){}
+  try{ _opHealMgmtFees(); }catch(e){}
+  try{ _apPayRoundMigrate(); }catch(e){}
+  try{ _adjAutoApply(); }catch(e){}
+  _rdLog('housekeeping', performance.now()-t, '', 'housekeeping');
+}
+function _rdHousekeepSoon(force){
+  if(_rdHkTimer) return;
+  const due=force || (Date.now()-_rdHkLast>60000);
+  if(!due) return;
+  _rdHkTimer=setTimeout(()=>_rdIdle(()=>{ _rdHkTimer=null; _rdHkLast=Date.now(); const t=performance.now();
+    try{ _acctEmpAuditNudge(); }catch(e){}
+    try{ _bccAutoCreateMonthly(); }catch(e){}
+    try{ _opHealMgmtFees(); }catch(e){}
+    try{ _apPayRoundMigrate(); }catch(e){}
+    try{ _adjAutoApply(); }catch(e){}
+    _rdLog('housekeeping', performance.now()-t, '', 'housekeeping'); }, 3000), 800);
+}
+try{ if(window.PerformanceObserver && PerformanceObserver.supportedEntryTypes && PerformanceObserver.supportedEntryTypes.indexOf('longtask')>=0){
+  new PerformanceObserver(list=>{ list.getEntries().forEach(en=>{ if(en.duration>=1000){ const ap=document.querySelector('.page.active'); _rdLog('long-task', en.duration, ap?ap.id.replace('page-',''):'', 'longtask'); } }); }).observe({entryTypes:['longtask']}); } }catch(e){}
+function openPerfLog(){
+  let L=[]; try{ L=JSON.parse(localStorage.getItem('sme_perf_log')||'[]'); }catch(e){}
+  L=L.slice().reverse();
+  const agg={}; L.forEach(x=>{ const k=x.part; (agg[k]=agg[k]||{n:0,max:0,sum:0}); agg[k].n++; agg[k].sum+=x.ms; agg[k].max=Math.max(agg[k].max,x.ms); });
+  const top=Object.keys(agg).map(k=>({k, ...agg[k]})).sort((a,b)=>b.max-a.max).slice(0,15);
+  const col=ms=>ms>=3000?'var(--bad)':(ms>=1000?'#b8730a':'inherit');
+  openModal('⏱ Hiệu năng — máy này', `<div style="font-size:12px;color:var(--muted);margin-bottom:8px">Ghi lại các lần vẽ trang / tác vụ trên máy này chậm hơn 0,3 giây (tối đa 200 dòng gần nhất). Tác vụ ≥ 1 giây = trình duyệt bị khóa trong thời gian đó. Trình duyệt: ${esc((navigator.userAgent||'').replace(/\\(.*?\\)/,'').slice(0,80))} · ${navigator.hardwareConcurrency||'?'} nhân CPU${navigator.deviceMemory?' · '+navigator.deviceMemory+' GB RAM':''}</div>
+    <div style="font-size:11px;font-weight:700;color:var(--muted);margin:6px 0 4px">CHẬM NHẤT THEO PHẦN</div>
+    <div class="tbl-scroll"><table class="tbl" style="font-size:12px"><thead><tr><th>Phần</th><th class="r">Số lần</th><th class="r">Trung bình (ms)</th><th class="r">Lâu nhất (ms)</th></tr></thead><tbody>${top.map(x=>`<tr><td>${esc(x.k)}</td><td class="r">${x.n}</td><td class="r">${Math.round(x.sum/x.n)}</td><td class="r" style="color:${col(x.max)};font-weight:700">${x.max}</td></tr>`).join('')||'<tr><td colspan="4" style="text-align:center;color:var(--muted)">Chưa có ghi nhận chậm nào ✓</td></tr>'}</tbody></table></div>
+    <div style="font-size:11px;font-weight:700;color:var(--muted);margin:10px 0 4px">NHẬT KÝ</div>
+    <div class="tbl-scroll" style="max-height:40vh;overflow:auto"><table class="tbl" style="font-size:11.5px"><thead><tr><th>Lúc</th><th>Phần</th><th>Trang</th><th>Loại</th><th class="r">ms</th><th>Bản</th></tr></thead><tbody>${L.slice(0,120).map(x=>`<tr><td class="mono">${esc(String(x.at).slice(5,19).replace('T',' '))}</td><td>${esc(x.part)}</td><td>${esc(x.page||'')}</td><td>${esc(x.kind||'')}</td><td class="r" style="color:${col(x.ms)};font-weight:600">${x.ms}</td><td class="mono">${esc(x.ver||'')}</td></tr>`).join('')}</tbody></table></div>`,
+    `<button class="btn-ghost" onclick="closeModal()">Đóng</button><button class="btn-sec" onclick="localStorage.removeItem('sme_perf_log');openPerfLog()">🗑 Xóa nhật ký</button>`);
+  try{ setModalWide(true); }catch(e){}
+}
 function renderAll(opts){
+  try{ _tkReset(); }catch(e){}   // v3.67.58
   try{ _modMyTabsRefresh(); }catch(e){}   // v3.67.11: khung "Của tôi" hiện ngay khi mở app
   try{ if(!window._cdDueChecked){ window._cdDueChecked=1; setTimeout(()=>{ try{ _cdApplyDue(); }catch(_){} },3000); } }catch(e){}   // v3.67.24
   try{ if(typeof _darMailCan==='function'&&_darMailCan()) _dmBoot(); }catch(e){}   // v3.67.29: DAR email tự đọc mỗi 10 phút
-  try{ _acctEmpAuditNudge(); }catch(e){}   // v3.66.54
-  try{ _bccAutoCreateMonthly(); }catch(e){}   // v3.66.41 tạo sẵn BCC bộ phận tháng hiện tại
-  try{ _opHealMgmtFees(); }catch(e){}   // v3.66.37 tự dựng hồ sơ phí QL thiếu
-  try{ _apPayRoundMigrate(); }catch(e){}
-  try{ _adjAutoApply(); }catch(e){}   // v3.66.94: điều chỉnh giảm đã duyệt → cấn trừ phiếu gốc   // v3.66.75 lệnh chi dở → vòng thanh toán của phiếu (1 lần, Admin)
+  opts = opts || {};
+  if(opts.onlyTab) return _rdRenderOne(opts.onlyTab);   // v3.67.58: lượt vẽ nền 1 trang
+  _rdHousekeepNow();   /* v3.67.60 (Sếp: "NV phải được cập nhật ngay"): các việc tự động (cấn trừ điều chỉnh, BCC tháng, phí QL…)
+     chạy LẠI NGAY mỗi lần vẽ như trước — đo thực tế chỉ ~6 ms / 20.000 phiếu nên không gây chậm; vẫn đo & ghi nếu > 0,3 giây. */
   try{ _applyOpTabLabel(); }catch(e){}  // v3.06.00 nhãn tab Thu-Chi hộ động
   try{ if(document.getElementById('page-periodic') && document.getElementById('page-periodic').classList.contains('active')) renderPeriodic(); }catch(e){}
   try{ if(document.getElementById('page-fin_accounting') && document.getElementById('page-fin_accounting').classList.contains('active')) renderFinAccounting(); }catch(e){}
@@ -120690,6 +120838,7 @@ function renderAll(opts){
 
   // GUARD 2: If sync triggered but data hasn't changed → SKIP
   if(opts.fromSync){
+    try{ _rdHousekeepNow(); }catch(e){}   // v3.67.60: sau đồng bộ chạy ngay
     const fp = _stateFingerprint();
     if(fp === _lastRenderFingerprint){
       dlog('[render] Skipped — no data change (fromSync)');
@@ -120737,11 +120886,13 @@ function renderAll(opts){
   // (other tabs will re-render when user navigates to them)
   const activePageEl = document.querySelector('.page.active');
   const activePageId = activePageEl ? activePageEl.id.replace('page-','') : null;
-  const renderAllTabs = !opts.fromSync && !opts.navOnly;  // v3.06.00: navOnly → chỉ render tab đang mở (chuyển tab mượt)
+  const renderAllTabs = !!opts.full;   /* v3.67.58: mặc định CHỈ vẽ trang đang mở (trước: vẽ mọi trang mỗi lần) — các trang
+     khác được vẽ NỀN từng trang một khi máy rảnh (_rdBgQueue), mở trang nào thì trang đó vẽ ngay (navOnly). */
+  const _rdT0=performance.now();
 
   function maybe(tab, fn){
     if(!canAccessTab(tab)) return;
-    if(renderAllTabs || activePageId===tab) fn();
+    if(renderAllTabs || activePageId===tab) _rdTime(tab, fn);
   }
 
   maybe('dashboard', renderDashboard);
@@ -120819,6 +120970,8 @@ function renderAll(opts){
   // Clear forbidden tabs' content (defense in depth)
   clearForbiddenPages();
   upgradeNumericInputs();
+  try{ _rdLog('renderAll', performance.now()-_rdT0, activePageId); }catch(e){}
+  if(!opts.fromSync && !opts.navOnly && !renderAllTabs){ try{ _rdBgQueue(activePageId); }catch(e){} }   // v3.67.58
 
   // RESTORE SCROLL position after DOM rebuild
   requestAnimationFrame(()=>{
