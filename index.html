@@ -4700,7 +4700,7 @@ const WH_TYPES = {
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.67.96';
+const APP_VERSION='3.67.100';
 /* HOTFIX 3.12.17-email: CHẶN TRIỆT ĐỂ gửi email TỰ ĐỘNG (mất kiểm soát — spam quota Google).
    Email phải do NV được phân quyền CHỦ ĐỘNG chọn gửi. Cờ này:
    (1) chặn auto-SCAN tạo email (hrmScanExpiries/vesselCertScanExpiries);
@@ -20593,12 +20593,12 @@ function _bccAutoCreateMonthly(){
     if(!(window._syncSignal && window._syncSignal.status==='ok')) return;
     window._bccAutoDone=true;
     if(typeof bccMyEffectiveScopes!=='function') return;
-    const scopes=bccMyEffectiveScopes()||[]; if(!scopes.length) return;
+    const scopes=isAdmin()?[]:(bccMyOwnScopes()||[]); if(!scopes.length) return;   // v3.67.99: chỉ tự tạo cho bộ phận của mình — HR không tự tạo hộ
     const now=new Date(); const year=now.getFullYear(), month=now.getMonth()+1;
     const period=year+'-'+String(month).padStart(2,'0');
     let made=0;
     scopes.forEach(scope=>{
-      if((S.bccSheets||[]).some(s=>s&&!s._deleted&&s.period===period&&s.scope&&s.scope.type===scope.type&&s.scope.value===scope.value&&(s.scope.companyId||'')===(scope.companyId||''))) return;
+      if(_bccFindSame(period, scope)) return;   // v3.67.99: 1 bảng / bộ phận / tháng (chuẩn hóa phòng ban + công ty)
       const roster=bccRosterForScope(scope); if(!roster.length) return;
       const numDays=bccDaysInMonth(year,month);
       const tmp={scope, year, month};
@@ -20782,6 +20782,75 @@ function bccUpdateScopeHint(){
   const n=bccRosterForScope(scope).length;
   el.textContent = n?('→ '+n+' nhân viên thuộc phạm vi này'):'⚠ Không tìm thấy nhân viên nào thuộc phạm vi này';
 }
+/* ════════════════════════════════════════════════════════════════════════════════════════════════
+   v3.67.99 (Sếp: "BCC chỉ tạo 1 lần — lần sau ghi đè; chỉ tạo tại bộ phận, không tạo tại HR; dọn toàn bộ
+   BCC tự tạo tại HR — chỉ để lại bộ phận").
+   · KHÓA BCC = kỳ + loại phạm vi + phòng ban (chuẩn hóa) + công ty (trống = công ty mẹ) → 1 bảng / bộ phận / tháng.
+   · Tạo: chỉ phạm vi CỦA MÌNH (phòng ban của mình + phạm vi được giao chấm công); HR không tạo hộ; Admin vẫn tạo.
+   · Tạo lại = mở đúng bảng cũ, cập nhật danh sách người (giữ công đã chấm) — không sinh bảng mới.
+   · 🧹 Dọn BCC tạo tại HR (Admin): bảng phòng ban do người NGOÀI bộ phận đó tạo (HR / tự tạo theo quyền HR) →
+     có bảng bộ phận cùng kỳ: gộp công vào bảng bộ phận rồi xóa · không có: bảng trống → xóa; đã có công → giữ lại
+     làm bảng của bộ phận (bỏ dấu "tạo tại HR"). Bảng đã xác nhận / đã kéo lương: không đụng.
+   ════════════════════════════════════════════════════════════════════════════════════════════════ */
+function _bccNorm(x){ return String(x==null?'':x).normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/đ/gi,'d').toLowerCase().replace(/[^a-z0-9]+/g,' ').trim(); }
+function _bccParentCoId(){ const p=(S.companies||[]).find(c=>c&&c.isParent); return p?p.id:''; }
+function _bccDeptKey(v){ const d=(S.departments||[]).find(x=>x&&(x.id===v||_bccNorm(x.name)===_bccNorm(v)||_bccNorm(x.code)===_bccNorm(v))); return d?('D:'+d.id):('N:'+_bccNorm(v)); }
+function _bccKey(s){ const sc=s.scope||{}; const co=sc.companyId||_bccParentCoId();
+  if(sc.type==='dept') return s.period+'|dept|'+_bccDeptKey(sc.value)+'|'+co; return s.period+'|'+sc.type+'|'+_bccNorm(sc.value)+'|'+(sc.type==='vessel'?'':co); }
+function _bccFindSame(period, scope, exceptId){ const k=_bccKey({period, scope}); return (S.bccSheets||[]).find(x=>x&&!x._deleted&&x.id!==exceptId&&_bccKey(x)===k)||null; }
+function _bccUserRec(sheet){ const L=(S.staff||S.users||[]); const id=sheet.createdByUserId, nm=String(sheet.createdBy||'');
+  return L.find(u=>u&&((id&&u.id===id)||(nm&&(u.name===nm||u.username===nm||u.displayName===nm||u.email===nm))))||null; }
+function _bccUserDeptKeys(u){ const out=new Set(); if(!u) return out; try{ if(u.departmentId) out.add(_bccDeptKey(u.departmentId)); if(u.dept) out.add(_bccDeptKey(u.dept));
+  const e=u.empId?hrmEmpById(u.empId):(HRService.employees()||[]).find(x=>x&&(x.email&&u.email&&x.email===u.email)); if(e&&e.dept) out.add(_bccDeptKey(e.dept));
+  (Array.isArray(u.bccScopes)?u.bccScopes:[]).forEach(sc=>{ if(sc&&sc.type==='dept') out.add(_bccDeptKey(sc.value)); }); }catch(_){} return out; }
+function _bccIsHrMade(s){ if(!s||!s.scope||s.scope.type!=='dept') return false; const u=_bccUserRec(s);
+  const mine=_bccUserDeptKeys(u); if(mine.has(_bccDeptKey(s.scope.value))) return false;
+  const hr=u && ((Array.isArray(u.funcGroups)&&u.funcGroups.includes('HR')) || u.isHrStaff || /hr|nhân sự|nhan su/i.test(String(u.role||'')));
+  return !!(hr || s._autoCreated); }
+function _bccHasRealData(s){ return (s.rows||[]).some(r=>r && (r.selfSubmittedAt || Object.keys(r.days||{}).some(d=>r.days[d] && !(r.auto&&r.auto[d])) || Object.keys(r.ot||{}).some(d=>+r.ot[d]) || Object.keys(r.sums||{}).some(k=>+r.sums[k]))); }
+/* phạm vi được TẠO BCC: phòng ban của chính mình + phạm vi được giao chấm công (bccScopes) — không lấy quyền xem của HR */
+function bccMyOwnScopes(){ if(isAdmin()) return bccAllPossibleScopes(); const out=[]; const seen=new Set();
+  const push=sc=>{ if(!sc) return; const k=sc.type+'|'+(sc.type==='dept'?_bccDeptKey(sc.value):sc.value)+'|'+(sc.companyId||''); if(seen.has(k)) return; seen.add(k); out.push(sc); };
+  (Array.isArray(CURRENT_USER&&CURRENT_USER.bccScopes)?CURRENT_USER.bccScopes:[]).forEach(push);
+  try{ const mine=_bccUserDeptKeys(CURRENT_USER); bccAllPossibleScopes().forEach(sc=>{ if(sc.type==='dept' && mine.has(_bccDeptKey(sc.value))) push(sc); if(sc.type==='vessel' && typeof _crewTsCanManage==='function' && _crewTsCanManage()) push(sc); }); }catch(_){}
+  return out; }
+/* tạo lại = ghi đè lên bảng cũ: cập nhật danh sách người, giữ công đã chấm */
+function _bccRefreshRoster(sh){ const roster=bccRosterForScope(sh.scope)||[]; const ids=new Set(roster.map(e=>e.id)); const now=new Date().toISOString();
+  let add=0; const gone=[]; roster.forEach(e=>{ if(!(sh.rows||[]).some(r=>r.empId===e.id)){ sh.rows.push(sh.mode==='summary'?{empId:e.id, sums:{}}:{empId:e.id, days:{}, ot:{}}); add++; } });
+  (sh.rows||[]).forEach(r=>{ if(!ids.has(r.empId)) gone.push(r); });
+  let drop=gone.filter(r=>!(Object.keys(r.days||{}).length||Object.keys(r.sums||{}).length));
+  const withData=gone.filter(r=>drop.indexOf(r)<0);
+  if(withData.length){ const nm=withData.map(r=>((hrmEmpById(r.empId)||{}).fullName||r.empId)); if(confirm(withData.length+' người không còn thuộc phạm vi nhưng ĐÃ CÓ CÔNG:\n\n• '+nm.join('\n• ')+'\n\nBỏ các dòng này khỏi bảng?')) drop=drop.concat(withData); }
+  sh.rows=(sh.rows||[]).filter(r=>drop.indexOf(r)<0); sh.updatedAt=now; sh.rosterRefreshedAt=now; sh.rosterRefreshedBy=actorName(); try{ _bccTouch(sh); }catch(_){}
+  return {add, drop:drop.length}; }
+/* 🧹 Dọn BCC tạo tại HR */
+function openBccHrCleanup(){ if(!isAdmin()){ toast('Chỉ Admin','bad'); return; }
+  const L=(S.bccSheets||[]).filter(s=>s&&!s._deleted&&_bccIsHrMade(s)); const plan=[];
+  L.forEach(s=>{ const locked=s.status==='confirmed'||s.payLocked; const same=(S.bccSheets||[]).find(x=>x&&!x._deleted&&x.id!==s.id&&_bccKey(x)===_bccKey(s)&&!_bccIsHrMade(x));
+    const data=_bccHasRealData(s);
+    plan.push({s, act: locked?'skip':(same?'merge':(data?'keep':'delete')), same}); });
+  const lab={merge:'Gộp công vào bảng bộ phận → xóa', delete:'Xóa (bảng trống / chỉ tự điền)', keep:'Giữ lại làm bảng bộ phận (đã có công)', skip:'Không đụng (đã xác nhận / đã kéo lương)'};
+  const col={merge:'#0b3d91', delete:'#C62828', keep:'#188038', skip:'#6B7280'};
+  window._BCL=plan;
+  const rows=plan.map(x=>`<tr><td style="white-space:nowrap">${esc(x.s.period)}</td><td>${esc(bccScopeLabel(x.s.scope))}</td><td style="font-size:11.5px">${esc(x.s.createdBy||'')}${x.s._autoCreated?' · tự tạo':''}</td><td class="r">${(x.s.rows||[]).length}</td><td style="font-size:11.5px">${esc(x.s.status)}</td><td style="color:${col[x.act]};font-weight:700;font-size:12px">${lab[x.act]}${x.same?`<div style="font-weight:400;color:var(--muted)">→ ${esc(bccScopeLabel(x.same.scope))} (${esc(x.same.createdBy||'')})</div>`:''}</td></tr>`).join('');
+  const cnt=k=>plan.filter(x=>x.act===k).length;
+  openModal('🧹 Dọn BCC tạo tại HR — chỉ giữ bảng của bộ phận', `<div style="font-size:12.5px;margin-bottom:8px">Tìm thấy <b>${plan.length}</b> bảng phòng ban do người ngoài bộ phận (HR / tự tạo theo quyền HR) tạo: <b style="color:#0b3d91">${cnt('merge')} gộp</b> · <b style="color:#C62828">${cnt('delete')} xóa</b> · <b style="color:#188038">${cnt('keep')} giữ lại</b> · ${cnt('skip')} không đụng.</div>
+    <div class="tbl-scroll" style="max-height:55vh;overflow:auto"><table class="tbl" style="font-size:12.5px"><thead><tr><th>Kỳ</th><th>Bảng</th><th>Người tạo</th><th class="r">NV</th><th>TT</th><th>Xử lý</th></tr></thead><tbody>${rows||'<tr><td colspan="6" style="text-align:center;color:#188038;padding:14px">✓ Không có BCC nào tạo tại HR</td></tr>'}</tbody></table></div>
+    <div style="font-size:11px;color:var(--muted);margin-top:6px">Gộp: ô trống trên bảng bộ phận được điền từ bảng HR; ô hai bên khác nhau → giữ bảng bộ phận, ghi vào nhật ký. Xóa = xóa mềm (còn nhật ký).</div>`,
+    `<button class="btn-ghost" onclick="closeModal()">Đóng</button>${plan.some(x=>x.act!=='skip')?'<button class="btn-primary" onclick="_bccHrCleanupRun()">🧹 Thực hiện</button>':''}`);
+  try{ setModalWide(true); }catch(_){} }
+function _bccHrCleanupRun(){ const plan=window._BCL||[]; if(!confirm('Thực hiện dọn '+plan.filter(x=>x.act!=='skip').length+' bảng?')) return; const now=new Date().toISOString(), me=actorName(); const log={merge:0,delete:0,keep:0,conflicts:[]};
+  commitMutation(()=>{ plan.forEach(x=>{ const s=x.s;
+    if(x.act==='merge'){ const t=x.same; (s.rows||[]).forEach(r=>{ let tr=(t.rows||[]).find(y=>y.empId===r.empId); if(!tr){ tr=JSON.parse(JSON.stringify(r)); t.rows.push(tr); return; }
+        tr.days=tr.days||{}; Object.keys(r.days||{}).forEach(d=>{ const v=r.days[d]; if(!v||(r.auto&&r.auto[d])) return; if(tr.days[d]==null||tr.days[d]===''||(tr.auto&&tr.auto[d])){ tr.days[d]=v; if(tr.auto) delete tr.auto[d]; } else if(tr.days[d]!==v) log.conflicts.push(s.period+' '+((hrmEmpById(r.empId)||{}).fullName||r.empId)+' ngày '+d+': bộ phận '+tr.days[d]+' ≠ HR '+v); });
+        tr.ot=tr.ot||{}; Object.keys(r.ot||{}).forEach(d=>{ if(+r.ot[d] && !(+tr.ot[d])) tr.ot[d]=r.ot[d]; }); if(r.selfSubmittedAt && !tr.selfSubmittedAt) tr.selfSubmittedAt=r.selfSubmittedAt; });
+      (t.cleanLog=t.cleanLog||[]).push({at:now, by:me, mergedFrom:s.id, createdBy:s.createdBy}); try{ _bccTouch(t); }catch(_){}
+      s._deleted=true; s.deletedAt=now; s.deletedBy=me; s.deleteReason='Dọn BCC tạo tại HR — đã gộp vào '+t.id; try{ _bccTouch(s); }catch(_){} log.merge++; }
+    else if(x.act==='delete'){ s._deleted=true; s.deletedAt=now; s.deletedBy=me; s.deleteReason='Dọn BCC tạo tại HR — bảng trống'; try{ _bccTouch(s); }catch(_){} log.delete++; }
+    else if(x.act==='keep'){ delete s._autoCreated; s.ownedByDept=true; (s.cleanLog=s.cleanLog||[]).push({at:now, by:me, note:'Giữ lại làm bảng của bộ phận (tạo tại HR, đã có công)'}); try{ _bccTouch(s); }catch(_){} log.keep++; } }); },
+  {action:'bcc_hr_cleanup', fields:['bccSheets'], onOk:()=>{ try{ logAuditEvent('bcc_hr_cleanup',{merge:log.merge, delete:log.delete, keep:log.keep, conflicts:log.conflicts.length}); }catch(_){}
+    toast('✓ Đã dọn: gộp '+log.merge+' · xóa '+log.delete+' · giữ '+log.keep,'good'); if(log.conflicts.length) setTimeout(()=>alert(log.conflicts.length+' ô khác nhau giữa bảng HR và bảng bộ phận (đã giữ bảng bộ phận):\n\n• '+log.conflicts.slice(0,30).join('\n• ')),200); closeModal(); try{ hrmAttRender(); }catch(_){} }}); }
+
 function bccCreateSheet(){
   // v3.20.360 (Sếp bug lệch theo sau v3.20.359 — "chọn phạm vi không xảy ra gì" hé lộ thêm): TRƯỚC ĐÂY
   // gọi lại bccMyEffectiveScopes() ở đây — với ADMIN hàm này luôn RỖNG (admin không tick bccScopes/
@@ -20799,9 +20868,11 @@ function bccCreateSheet(){
   // lấy ĐÚNG theo tháng NV chọn ở đây, không suy theo ngày tạo bản ghi — cho phép lập trễ vẫn đúng tháng.
   // v3.63.51: so trùng thêm companyId — 2 bảng CÙNG phòng ban nhưng KHÁC công ty không còn bị coi
   // là trùng (trước đây chỉ so type+value, chặn nhầm không cho tạo bảng cho công ty thứ 2).
-  if((S.bccSheets||[]).some(s=>s&&!s._deleted&&s.period===period&&s.scope&&s.scope.type===scope.type&&s.scope.value===scope.value&&(s.scope.companyId||'')===(scope.companyId||''))){
-    toast('Đã có BCC kỳ '+period+' cho phạm vi này — mở lại để sửa','bad'); return;
-  }
+  if(!isAdmin() && !bccMyOwnScopes().some(sc=>_bccKey({period, scope:sc})===_bccKey({period, scope}))){ toast('BCC do BỘ PHẬN tạo — HR không tạo hộ bộ phận khác','bad'); return; }   // v3.67.99
+  { const ex=_bccFindSame(period, scope); if(ex){   // v3.67.99: tạo lại = GHI ĐÈ lên bảng cũ (giữ công đã chấm, cập nhật danh sách người)
+      if(ex.status!=='draft'){ toast('BCC kỳ '+period+' của bộ phận này đã gửi / xác nhận — mở lại để xem','bad'); return; }
+      if(!confirm('Đã có BCC kỳ '+period+' cho '+bccScopeLabel(ex.scope)+'.\n\nMở bảng đó và cập nhật lại danh sách người (công đã chấm giữ nguyên)?')) return;
+      const rr=_bccRefreshRoster(ex); saveState(); closeModal(); window._bccEditingId=ex.id; toast('✓ Đã cập nhật: +'+rr.add+' người'+(rr.drop?' · bỏ '+rr.drop:''),'good'); renderBccGridEditor(ex.id); return; } }
   const roster=bccRosterForScope(scope);
   if(!roster.length){ toast('Không tìm thấy nhân viên nào thuộc phạm vi này','bad'); return; }
   const numDays=bccDaysInMonth(year,month);
@@ -20946,7 +21017,7 @@ function bccPushToHrAttendance(sheet){
       // đúng nhóm (Văn phòng/Thuyền viên/O&M/Expat/GEO), KHÔNG dùng nhánh BCC_SUMMARY_COLS cũ (chỉ
       // đúng Văn phòng, xem nhánh else ngay dưới — vẫn giữ nguyên cho bảng đời cũ, không đụng).
       cols=_bccDailyRowToCols(row, sheet, _schema);
-      total=(typeof _schema.total==='function')?_schema.total(cols):Object.values(cols).reduce((s,v)=>s+(+v||0),0);
+      total=((typeof _schema.total==='function')?_schema.total(cols):Object.values(cols).reduce((s,v)=>s+(+v||0),0))-(row&&row.dpExtra?Object.keys(row.dpExtra).length:0);   // v3.67.98: DP kiêm nhiệm không cộng vào tổng ngày công
     } else {
       const sums=bccRowRecalc(row, sheet.numDays);
       cols={}; BCC_SUMMARY_COLS.forEach(c=>cols[c]=sums[c]);
@@ -21201,7 +21272,7 @@ function renderBccGridEditor(id){
   const bodyRows=emps.map(({r,e},idx)=>{
     r.days=r.days||{}; r.ot=r.ot||{};
     const cols=_schema?_bccDailyRowToCols(r, s, _schema):{};
-    const total=_schema&&typeof _schema.total==='function'?_schema.total(cols):Object.values(cols).reduce((a,b)=>a+(+b||0),0);
+    const total=(_schema&&typeof _schema.total==='function'?_schema.total(cols):Object.values(cols).reduce((a,b)=>a+(+b||0),0))-(r&&r.dpExtra?Object.keys(r.dpExtra).length:0);   // v3.67.98
     const _bg=idx%2===1?' style="background:var(--paper-3)"':'';
     const sumCells=sumCols.map(c=>`<td class="r" style="font-family:var(--font-mono);font-size:12px">${(+cols[c[0]]||0)}</td>`).join('');
     const codeCells=Array.from({length:s.numDays},(_,i)=>i+1).map(d=>{
@@ -21375,8 +21446,8 @@ function bccExportExcel(sheetId){
   // công ty theo scope.companyId, KHÔNG công ty con nào có tên tiếng Anh riêng (chỉ .name) → dòng dưới
   // lặp lại tên đó, không còn cố định "SEAHORSE MARINE AND ENERGY JSC" nữa.
   const _bccCo=s.scope&&s.scope.companyId?(S.companies||[]).find(x=>x.id===s.scope.companyId):null;
-  const _bccCoNameVi=_bccCo?(_bccCo.name||''):((S.companyInfo&&S.companyInfo.name)||'CÔNG TY CP HÀNG HẢI VÀ NĂNG LƯỢNG HẢI MÃ');
-  const _bccCoNameEn=_bccCo?(_bccCo.nameEn||_bccCo.name||''):((S.companyInfo&&S.companyInfo.nameEn)||'SEAHORSE MARINE AND ENERGY JSC');
+  const _parX=(S.companies||[]).find(c=>c.isParent)||{}; const _bccCoNameVi=_bccCo?(_bccCo.nameVi||_bccCo.legalNameVi||_bccCo.legalName||_bccCo.name||''):(_parX.nameVi||'CÔNG TY CỔ PHẦN HÀNG HẢI VÀ NĂNG LƯỢNG HẢI MÃ');   // v3.67.97
+  const _bccCoNameEn0=_bccCo?(_bccCo.nameEn||''):((S.companyInfo&&S.companyInfo.nameEn)||_parX.nameEn||'SEAHORSE MARINE AND ENERGY JSC'); const _bccCoNameEn=(String(_bccCoNameEn0).trim().toUpperCase()===String(_bccCoNameVi).trim().toUpperCase())?'':_bccCoNameEn0;
   R(EE.dataCell('SME-HR-PR02-FM01'));
   R(EE.dataCell('Rev: 02'),'','','',EE.title(_bccCoNameVi));
   R(EE.dataCell('Eff.Date: 01.03.2023'),'','','',EE.title(_bccCoNameEn));
@@ -21480,13 +21551,17 @@ function bccPrintPdf(sheetId, onlyEmpId){
   const _esc=x=>(typeof esc==='function')?esc(x):String(x==null?'':x);
   // v3.63.53: cùng lỗi tên công ty với bccExportExcel (v3.63.52) — sửa đồng bộ ở đây.
   const _bccCo=s.scope&&s.scope.companyId?(S.companies||[]).find(x=>x.id===s.scope.companyId):null;
-  const _bccCoNameVi=_bccCo?(_bccCo.name||''):(((S.companies||[]).find(c=>c.isParent)||{}).name||'CÔNG TY CP HÀNG HẢI VÀ NĂNG LƯỢNG HẢI MÃ');
-  const _bccCoNameEn=_bccCo?(_bccCo.nameEn||_bccCo.name||''):((S.companyInfo&&S.companyInfo.nameEn)||'SEAHORSE MARINE AND ENERGY JSC');
+  /* v3.67.97 (Sếp: "2 dòng tên công ty trong ô đầu"): dòng 1 = tên TIẾNG VIỆT, dòng 2 = tên TIẾNG ANH (đúng mẫu FRM);
+     công ty mẹ: tên chuẩn cố định; công ty con: nameVi/legalName + nameEn — 2 tên trùng nhau thì chỉ in 1 dòng. */
+  const _par=(S.companies||[]).find(c=>c.isParent)||{};
+  const _bccCoNameVi=_bccCo?(_bccCo.nameVi||_bccCo.legalNameVi||_bccCo.legalName||_bccCo.name||''):(_par.nameVi||'CÔNG TY CỔ PHẦN HÀNG HẢI VÀ NĂNG LƯỢNG HẢI MÃ');
+  const _bccCoNameEn0=_bccCo?(_bccCo.nameEn||''):((S.companyInfo&&S.companyInfo.nameEn)||_par.nameEn||'SEAHORSE MARINE AND ENERGY JSC');
+  const _bccCoNameEn=(String(_bccCoNameEn0).trim().toUpperCase()===String(_bccCoNameVi).trim().toUpperCase())?'':_bccCoNameEn0;
   /* v3.67.76 (Sếp duyệt): khung đầu theo mẫu mới hiệu lực 14/09/2026 — văn phòng SME-HR-PR-001-FRM-002 Rev 00, tàu SME-HR-PR-001-FRM-001 Rev 05 */
   const _isV=!!(s.scope&&s.scope.type==='vessel');
   const _frm=_isV?'SME-HR-PR-001-FRM-001<br>Rev: 05<br>Eff.Date: 14/09/2026<br>Page: 01':'SME-HR-PR-001-FRM-002<br>Rev: 00<br>Eff.Date: 14/09/2026<br>Page: 01';
   const _headBlock=`<table class="bcc-h"><tr><td style="width:14%;text-align:center"><img src="${typeof CREW_LOGO!=='undefined'?CREW_LOGO:''}" style="height:44px"></td>
-    <td style="text-align:center;font-weight:700;font-size:12px;line-height:1.35">${_esc(String(_bccCoNameVi).toUpperCase())}<br>${_esc(String(_bccCoNameEn).toUpperCase())}<br>${_isV?'ĐƠN VỊ/ VESSEL':'ĐƠN VỊ/ DEPARTMENT'}: ${_esc(bccScopeLabel(s.scope))}</td>
+    <td style="text-align:center;font-weight:700;font-size:12px;line-height:1.35">${_esc(String(_bccCoNameVi).toUpperCase())}<br>${_bccCoNameEn?_esc(String(_bccCoNameEn).toUpperCase())+'<br>':''}${_isV?'ĐƠN VỊ/ VESSEL':'ĐƠN VỊ/ DEPARTMENT'}: ${_esc(bccScopeLabel(s.scope))}</td>
     <td style="width:17%;font-size:9px;line-height:1.45">${_frm}</td></tr></table>
     <div style="text-align:center;margin:4px 0 6px"><div style="font-weight:700;font-size:13px">BẢNG CHẤM CÔNG THÁNG ${s.month} NĂM ${s.year}</div><div style="font-style:italic;font-weight:700;font-size:11px">TIMESHEET IN MONTH ${s.month} YEAR ${s.year}</div></div>`;
   const _sg=(t)=>`<div style="text-align:center;flex:1"><b>${t}</b><div style="height:46px"></div><div style="font-size:9px">Full name</div></div>`;
@@ -21556,7 +21631,7 @@ function bccPrintPdf(sheetId, onlyEmpId){
       const e=(HRService.employees()||[]).find(x=>x.id===row.empId)||{};
       row.days=row.days||{}; row.ot=row.ot||{};
       const cols=_bccDailyRowToCols(row, s, _psc);
-      const tot=typeof _psc.total==='function'?_psc.total(cols):Object.values(cols).reduce((a,b)=>a+(+b||0),0);
+      const tot=(typeof _psc.total==='function'?_psc.total(cols):Object.values(cols).reduce((a,b)=>a+(+b||0),0))-(row&&row.dpExtra?Object.keys(row.dpExtra).length:0);   // v3.67.98
       const dC=daysArr.map(d=>{ const code=row.days[d]||(_off&&_bccIsWeekend(s,d)?'Nghỉ':''); const ot=+row.ot[d]||0;
         return `<td style="font-size:7px;text-align:center;padding:2px 1px${_off&&_bccIsWeekend(s,d)?';background:#eef2f6':''}">${_esc(code)}${ot?`<div style="font-size:6px;color:#9a5b12">+${ot}h</div>`:''}</td>`; }).join('');
       const sC=_pscU.map(c=>`<td style="font-size:8px;text-align:center">${+cols[c[0]]||0}</td>`).join('');
@@ -39554,7 +39629,9 @@ function openPrintWindow(features){
     try{
       const dp=new DOMParser().parseFromString(buf,'text/html');
       dp.querySelectorAll('script').forEach(x=>x.remove());
-      styles=Array.from(dp.querySelectorAll('style')).map(x=>'<style>'+x.textContent+'</style>').join('');
+      /* v3.67.100: CSS của bản in chỉ áp khi IN (@media print) — trước đây nhét thẳng vào trang, các luật chung như
+         table{table-layout:fixed} của bản in BCC "rò" ra mọi bảng trên màn hình (vd Hồ sơ thuyền viên bị chia cột đều) tới khi tải lại. */
+      styles=Array.from(dp.querySelectorAll('style')).map(x=>'<style>@media print{'+x.textContent+'}</style>').join('');
       dp.querySelectorAll('style').forEach(x=>x.remove());
       body=dp.body?dp.body.innerHTML:buf;
     }catch(e){}
@@ -123058,7 +123135,7 @@ function hrmAttRender(){
         <td colspan="5" style="padding:9px 12px;font-weight:700"><span style="display:inline-block;width:14px">${open?'▾':'▸'}</span>${_esc(m)} <span style="font-weight:400;color:var(--muted);font-size:12px">— ${items.length} bảng · ${totalEmp} NV · ${nConfirmed}/${items.length} đã xác nhận</span></td>
       </tr>${open?detail:''}`;
   }).join('');
-  box.innerHTML=`<h3 style="font-size:13px;margin:0 0 8px">Các kỳ chấm công đã lưu</h3>
+  box.innerHTML=`<h3 style="font-size:13px;margin:0 0 8px;display:flex;align-items:center;gap:10px">Các kỳ chấm công đã lưu${isAdmin()?'<button class="btn-sec" style="font-size:11px;padding:3px 10px;margin-left:auto" onclick="openBccHrCleanup()" title="Dọn BCC phòng ban do HR / quyền HR tự tạo — chỉ giữ bảng của bộ phận">🧹 Dọn BCC tạo tại HR</button>':''}</h3>
     <div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:13px">
       <thead><tr style="background:var(--rule);text-align:left"><th style="padding:8px">Phòng ban / Loại</th><th style="padding:8px">Số NV</th><th style="padding:8px">Người lập</th><th style="padding:8px">TT</th><th style="padding:8px;text-align:right">Thao tác</th></tr></thead>
       <tbody>${monthRows}</tbody></table></div>`;
