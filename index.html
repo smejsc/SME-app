@@ -4705,7 +4705,7 @@ const WH_TYPES = {
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.68.31';
+const APP_VERSION='3.68.35';
 /* HOTFIX 3.12.17-email: CHẶN TRIỆT ĐỂ gửi email TỰ ĐỘNG (mất kiểm soát — spam quota Google).
    Email phải do NV được phân quyền CHỦ ĐỘNG chọn gửi. Cờ này:
    (1) chặn auto-SCAN tạo email (hrmScanExpiries/vesselCertScanExpiries);
@@ -13115,6 +13115,13 @@ function bkPendingRows(){
      AP = o.approvedL2At, phiếu-không-lệnh = r.approvedL2At, chi hộ = _ncHist to:'approved' mới nhất).
      Cùng mốc → nhóm theo NCC để KT gom bảng kê. Gắn nhãn 'L2 dd/MM HH:mm' vào diễn giải để đối chiếu. */
   rows.forEach(x=>{ const d=x.l2At?new Date(x.l2At):null; if(d&&!isNaN(d)) x.desc=(x.desc||'')+' · L2 '+String(d.getDate()).padStart(2,'0')+'/'+String(d.getMonth()+1).padStart(2,'0')+' '+String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0'); });
+  /* v3.68.33 (Sếp): gom các dòng 'duyệt theo phiếu' của CÙNG 1 PHIẾU ĐỀ XUẤT (≥2 dòng) thành 1 dòng — số đợt này cho cả phiếu */
+  try{ const M=_propIndex(); const grp={}; rows.forEach(x=>{ if(x.kind==='apr'&&!x.cn&&x.r&&x.r.batchId&&M[x.r.batchId]) (grp[x.r.batchId+'|'+(x.ccy||'VND')]=grp[x.r.batchId+'|'+(x.ccy||'VND')]||[]).push(x); });
+    Object.keys(grp).forEach(k=>{ const mem=grp[k]; const P=M[mem[0].r.batchId]; const set=new Set(mem);
+      const due=mem.reduce((t,x)=>t+(+x.amt||0),0); const max=mem.reduce((t,x)=>t+Math.max(0,(typeof apRemainingEff==='function')?apRemainingEff(x.r):0),0);
+      const px={kind:'prop', batchId:P.batchId, P, members:mem, r:P.head, id:'prop:'+k, label:mem[0].label, l2At:mem.map(x=>x.l2At||'').sort().pop(),
+        desc:propLabel(P)+' · '+String(P.head.payContent||P.head.desc||'').slice(0,80)+' · '+P.lines.length+' dòng', amt:Math.min(due,max), max, remProp:P.rem, ccy:mem[0].ccy||'VND', defMethod:mem[0].defMethod, defBank:mem[0].defBank};
+      const ix=rows.findIndex(x=>set.has(x)); for(let i=rows.length-1;i>=0;i--){ if(set.has(rows[i])) rows.splice(i,1); } rows.splice(Math.max(0,ix),0,px); }); }catch(e){ console.warn('[prop rows]',e); }
   rows.sort((a,b)=>{ const ta=a.l2At||'', tb=b.l2At||''; if(ta!==tb) return ta<tb?1:-1; return (a.label||'').localeCompare(b.label||'','vi'); });
   return rows;
 }
@@ -13145,16 +13152,18 @@ function renderBkPayList(tEl){
      1 dòng đầu = tên NCC · n khoản · 1 ô Nguồn tiền áp cho CẢ khối · tổng; các khoản con thụt vào, gập mặc
      định, bung ra tick/sửa số đợt từng dòng như cũ. id bk-src-ix/bk-amt-ix giữ nguyên → bkSummary/bkConfirm
      không đổi. Thứ tự khối theo mốc L2 mới nhất (v3.17.92) của khoản đầu tiên. */
-  const _gk=(x)=>_bkPropKey(x);   /* v3.68.31: gom theo PHIẾU ĐỀ XUẤT (trước: theo NCC) */
+  const _gk=(x)=>String(x.label||'').trim().toLowerCase();   /* v3.68.33 (Sếp): cấp 1 = NCC · cấp 2 = PHIẾU ĐỀ XUẤT · cấp 3 = dòng (chỉ xem) */
   const _grpN={}; rows.forEach(x=>{ const k=_gk(x); _grpN[k]=(_grpN[k]||0)+1; });
   const _rowHtml=(x,ix,inGrp)=>`<div class="${inGrp?('bk-child bk-g-'+_grpIdOf(x)):''}" style="display:grid;grid-template-columns:${_gridCols};gap:6px;align-items:center;padding:6px 4px${inGrp?' 6px 18px;background:rgba(28,122,77,.03)':''};border-bottom:1px dotted var(--rule);font-size:12px${inGrp?';display:none':''}">
       <input type="checkbox" data-bk="${esc(x.id)}" onchange="bkSummary()">
       <span class="ds-need" style="${x.kind==='op'?'color:#1c4e7c':(x.kind==='adv'?'color:#8a5a00':'')}">${x.kind==='op'?'CHI HỘ':(x.kind==='adv'?'TẠM ỨNG':'AP')}${x.lock?' 🔒':''}</span>
-      <span style="min-width:0"><b style="display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(x.label)}">${esc(x.label)}</b><span style="display:block;color:var(--muted);font-size:10.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(x.desc)}">${esc(x.desc)}</span></span>
+      <span style="min-width:0"><b style="display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(x.label)}">${x.kind==='prop'?'📄 ':''}${esc(x.kind==='prop'?propLabel(x.P):x.label)}</b><span style="display:block;color:var(--muted);font-size:10.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(x.desc)}">${esc(x.kind==='prop'?(String(x.P.head.payContent||x.P.head.desc||'').slice(0,90)+' · tổng phiếu '+fmtOrig(x.P.base,x.ccy)+' · đã TT '+fmtOrig(x.P.paid,x.ccy)):x.desc)}</span>${x.kind==='prop'?`<a href="javascript:void(0)" style="font-size:10.5px;color:#1c7a4d" onclick="event.stopPropagation();const d=document.getElementById('bk-lines-${ix}');d.style.display=d.style.display==='none'?'block':'none'">▸ ${x.P.lines.length} dòng — xem (chỉ xem)</a><div id="bk-lines-${ix}" style="display:none;font-size:10.5px;color:var(--muted);max-height:160px;overflow:auto;border-left:2px solid #cfe0f5;padding-left:6px;margin-top:3px">${x.P.lines.map(l=>esc(String(l.desc||l.payContent||'').slice(0,70)+(l.invoiceNo?' · HĐ '+l.invoiceNo:'')+' · '+fmtOrig(_propBase(l),l.ccy||x.ccy))).join('<br>')}</div>`:''}</span>
       <span style="white-space:nowrap;display:flex;gap:6px;align-items:center">
         <select id="bk-src-${ix}" data-bksrc="${esc(x.id)}" onchange="bkSummary()" style="width:100%;font-size:11px">${bkOpt(x.defMethod==='CASH'?'CASH':x.defBank, true)}${x.kind==='op'?`<option value="OFFSET">⚖ Cấn trừ công nợ chủ tàu</option>`:''}</select></span>   <!-- v3.18.62 (Sếp): chi hộ cũng GIẢI NGÂN như AP — tiền đi từ TK/hạn mức công ty -->
       <span style="text-align:right;white-space:nowrap">
-        ${x.kind==='op'
+        ${x.kind==='prop'
+          ?`<span style="display:inline-flex;flex-direction:column;align-items:flex-end"><input id="bk-amt-${ix}" value="${_bkAmtFill(+x.amt||0, x.ccy)}" onchange="bkSummary()" onclick="event.stopPropagation()" title="Thanh toán đợt này — CHO CẢ PHIẾU (≤ còn lại ${fmtOrig(+x.max||0,x.ccy)})" style="width:120px;text-align:right;font-family:var(--font-mono);font-size:11px;border-color:#1c7a4d"><span id="bk-rem-${ix}" style="font-size:10px;color:var(--muted)">còn lại phiếu: ${fmtOrig(Math.max(0,(+x.max||0)-(+x.amt||0)),x.ccy)}</span></span> <span style="font-size:10px">${esc(x.ccy)}</span>`
+          :x.kind==='op'
           ?`<input id="bk-amt-${ix}" value="${_bkAmtFill(+x.amt||0, x.ccy)}" onchange="bkSummary()" title="Chi hộ: L2 duyệt CẢ PHIẾU — KT sửa số ĐỢT này, kẹp ≤ còn nợ ${(+x.amt||0).toLocaleString('vi-VN')} (v3.17.85)" style="width:110px;text-align:right;font-family:var(--font-mono);font-size:11px"> <span style="font-size:10px">${esc(x.ccy)}</span>`
           :`<b style="font-family:var(--font-mono);font-size:11px" title="AP: số theo LỆNH đã duyệt L2 — KT đổi nguồn, không đổi số">${(+x.amt||0).toLocaleString('vi-VN')} ${esc(x.ccy)}</b>`}
         <button class="icon-btn" title="Trả về Kế toán — khoản sai/thừa, đẩy ngược về chưa duyệt để sửa lại từ đầu" onclick="bkReturnToAccounting('${esc(x.id)}')" style="margin-left:4px;font-size:11px">↩</button></span></div>`;
@@ -13177,7 +13186,7 @@ function renderBkPayList(tEl){
       body+=`<div class="bk-ghead" style="display:grid;grid-template-columns:${_gridCols};gap:6px;align-items:center;padding:7px 4px;border-bottom:1px solid var(--rule);background:rgba(28,122,77,.07);font-size:12px">
       <input type="checkbox" data-bkg="${g}" onchange="document.querySelectorAll('.bk-g-${g} [data-bk]').forEach(c=>c.checked=this.checked); bkSummary()" title="Tick/bỏ tick cả khối">
       <span class="ds-need" title="${nAp} AP · ${nOp} chi hộ">${nAp&&nOp?'AP+CH':(nOp?'CHI HỘ':'AP')} <span style="font-size:10px;color:var(--muted)">×${members.length}</span></span>
-      <span style="min-width:0">${(()=>{ const pi=_bkPropInfo(members.map(o=>o.y)); return `<b style="display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(x.label)}">📄 ${esc(x.label)}</b><span style="display:block;font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(pi.content)}">Phiếu ĐX <b>${esc(pi.no||'(chưa số)')}</b> · ${esc(pi.content.slice(0,90))}${pi.inv.length?(' · '+pi.inv.length+' HĐ'):''}</span>`; })()}<span style="display:block;color:var(--muted);font-size:10.5px"><a href="javascript:void(0)" onclick="bkGrpToggle(${g},this)" style="color:#1c7a4d">▸ ${members.length} dòng — xem chi tiết</a>${ccys.length>1?' · <span style="color:var(--warn)">⚠ nhiều tiền tệ ('+esc(ccys.join('/'))+')</span>':''}</span></span>
+      <span style="min-width:0"><b style="display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(x.label)}">🏢 ${esc(x.label)}</b><span style="display:block;color:var(--muted);font-size:10.5px"><a href="javascript:void(0)" onclick="bkGrpToggle(${g},this)" style="color:#1c7a4d">▸ ${members.length} phiếu đề xuất — mở</a>${ccys.length>1?' · <span style="color:var(--warn)">⚠ nhiều tiền tệ ('+esc(ccys.join('/'))+')</span>':''}</span></span>
       <span style="white-space:nowrap;display:flex;gap:6px;align-items:center">
         <select data-bkgsrc="${g}" onchange="document.querySelectorAll('.bk-g-${g} select[data-bksrc]').forEach(s=>{ s.value=this.value; }); bkSummary()" title="Nguồn tiền áp cho CẢ ${members.length} khoản của ${esc(x.label)}" style="width:100%;font-size:11px;font-weight:600">${bkOpt(sameDef?defSel:'', true)}</select></span>
       <span style="text-align:right;white-space:nowrap"><b style="font-family:var(--font-mono);font-size:11.5px" title="Tổng khối (mọi khoản)">${tot.toLocaleString('vi-VN')} ${ccys.length===1?esc(ccys[0]):''}</b><span id="bk-gsel-${g}" data-bkgsel="${g}" style="display:block;font-family:var(--font-mono);font-size:10.5px;color:#1c7a4d;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;text-align:right"></span></span></div>`;
@@ -13186,11 +13195,12 @@ function renderBkPayList(tEl){
   });
   tEl.innerHTML=`<div style="border:1.5px solid #1c7a4d;border-radius:10px;padding:10px 12px">
     <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:6px">
-      <b style="font-size:13px">💸 CHỜ THANH TOÁN (${new Set(rows.map(_gk)).size} phiếu · ${rows.length} dòng)</b>
+      <b style="font-size:13px">💸 CHỜ THANH TOÁN (${new Set(rows.map(_gk)).size} NCC · ${rows.length} phiếu)</b>
       <span style="display:flex;gap:8px;align-items:center;font-size:11px;flex-wrap:wrap">
         <label><input type="checkbox" onclick="document.querySelectorAll('[data-bk]').forEach(c=>c.checked=this.checked); bkSummary()"> tick hết</label>
         Ngày chi <input type="date" id="bk-date" value="${todayISO()}" style="font-size:11px">
         <button class="btn-ghost" style="font-size:11px" onclick="bkLibraryOpen()">🗂 Thư viện bảng kê</button>
+        <button class="btn-ghost" style="font-size:11px" onclick="propLedgerOpen()" title="Công nợ theo phiếu đề xuất (phiếu nhiều dòng) — tổng · đã TT · còn lại">📑 Công nợ theo phiếu</button>
         <button class="btn-ghost" style="font-size:11px" onclick="bkStaleOrdersOpen()" title="Lệnh đã duyệt nhưng phiếu đã hết nợ (chi tay bản cũ không đóng dấu lệnh) — KT rà và đóng thủ công (v3.17.83)">🧹 Rà lệnh treo${(typeof bkStaleOrders==='function'&&bkStaleOrders().length)?(' ('+bkStaleOrders().length+')'):''}</button>
       </span></div>
     ${_hidN>0?('<div style="font-size:10.5px;color:var(--warn);padding:2px 4px 6px">⚠ '+_hidN+' khoản đang bị ẨN bởi bộ lọc NCC/số tiền phía trên — tick đã chọn vẫn giữ (v3.17.87)</div>'):''}
@@ -13233,16 +13243,17 @@ function bkSummary(){
     /* v3.18.62 (Sếp): TỔNG RIÊNG các dòng ĐÃ TICK trong khối — đối chiếu UNC đi ngân hàng */
     const out=document.getElementById('bk-gsel-'+g);
     if(out){ let sum=0; ks.forEach(c=>{ if(!c.checked) return; const x=rows.find(r=>r.id===c.getAttribute('data-bk')); if(!x) return; const ix=rows.indexOf(x); let v=+x.amt||0;
-        if(x.kind==='op'){ const inp=document.getElementById('bk-amt-'+ix); if(inp){ const u=_bkAmtParse(inp.value||'', x.ccy); if(u>0) v=Math.min(u,+x.amt||0); } } sum+=v; });
+        if(x.kind==='op'||x.kind==='prop'){ const inp=document.getElementById('bk-amt-'+ix); if(inp){ const u=_bkAmtParse(inp.value||'', x.ccy); if(u>0) v=Math.min(u,+(x.kind==='prop'?x.max:x.amt)||0); } } sum+=v; });
       out.textContent=n?('✓ '+n+'/'+ks.length+' = '+sum.toLocaleString('vi-VN')):''; out.title='Tổng các khoản đã tick trong khối — đối chiếu UNC'; } }); }catch(e){}
+  try{ rows.forEach((x,ix)=>{ if(x.kind!=='prop') return; const inp=document.getElementById('bk-amt-'+ix), out=document.getElementById('bk-rem-'+ix); if(!inp||!out) return; const u=_unformatNumber(inp.value||'')||0; const left=(+x.max||0)-Math.min(u,+x.max||0); out.textContent='còn lại phiếu: '+fmtOrig(Math.max(0,left),x.ccy)+(u>(+x.max||0)+0.001?' — vượt, kẹp theo còn lại':''); out.style.color=u>(+x.max||0)+0.001?'#C62828':''; }); }catch(_){}   /* v3.68.33 */
   let n=0, tBank=0, tCash=0, tGn=0, tOff=0;
   document.querySelectorAll('[data-bk]:checked').forEach(c=>{
     const x=rows.find(r=>r.id===c.getAttribute('data-bk')); if(!x) return;
     const ix=rows.indexOf(x); const src=((document.getElementById('bk-src-'+ix)||{}).value||'');
     n++;
     let v=+x.amt||0;
-    if(x.kind==='op'){ const inp=document.getElementById('bk-amt-'+ix);
-      if(inp){ const u=_unformatNumber(inp.value||''); if(u>0) v=Math.min(u, +x.amt||0); } }   /* v3.17.85 */
+    if(x.kind==='op'||x.kind==='prop'){ const inp=document.getElementById('bk-amt-'+ix);
+      if(inp){ const u=_unformatNumber(inp.value||''); if(u>0) v=Math.min(u, +(x.kind==='prop'?x.max:x.amt)||0); } }   /* v3.17.85 · v3.68.33 phiếu đề xuất */
     if(src==='CASH') tCash+=v; else if(src==='OFFSET') tOff+=v; else if(src.indexOf('LOAN:')===0) tGn+=v; else tBank+=v;
   });
   /* v3.18.62: khoản đã tick nhưng đang bị lọc ẩn — vẫn đếm, vẫn cho xác nhận */
@@ -13307,6 +13318,7 @@ function bkConfirm(){
     const src=st.src||'';
     if(!src){ toast('Chọn nguồn tiền (TK ngân hàng / 💵 Tiền mặt) cho TỪNG khoản đã tick — KT là người cuối cùng chuỗi thanh toán ('+String(x.label||'').slice(0,30)+')','bad'); return; }
     let payAmt=+x.amt||0;   /* v3.17.85: chi hộ — số ĐỢT KT nhập, kẹp ≤ còn nợ; AP — số lệnh L2, không sửa */
+    if(x.kind==='prop'){ const u=_bkAmtParse(st.amt||'', x.ccy); if(st.amt!=null&&st.amt!==''){ if(!(u>0)){ toast('Thanh toán đợt này của phiếu phải > 0','bad'); return; } if(u>(+x.max||0)+0.001){ toast('Thanh toán đợt này ('+u.toLocaleString('vi-VN')+') vượt CÒN LẠI của phiếu ('+(+x.max||0).toLocaleString('vi-VN')+')','bad'); return; } payAmt=u; } }   /* v3.68.33: số cho CẢ PHIẾU */
     if(x.kind==='op'){ const u=_bkAmtParse(st.amt||'', x.ccy);   /* v3.18.74: theo tiền tệ dòng */
       if(st.amt!=null&&st.amt!==''){
         if(!(u>0)){ toast('Số chi đợt của phiếu chi hộ phải > 0','bad'); return; }
@@ -13390,7 +13402,7 @@ function _bkConfirmCommit(pickRefs, date, bkId, _groupList, _fx){
   const picks=pickRefs.map(pr=>({x:byId[pr.id], src:pr.src, payAmt:pr.payAmt})).filter(pk=>pk.x);
   if(picks.length!==pickRefs.length){ toast('⚠ Một số khoản không còn hợp lệ (đã xử lý ở nơi khác) — mở lại Bảng kê để chọn lại','bad'); closeModal(); return; }
   /* v3.68.21: dòng ÂM (phiếu giảm) phải đi cùng dòng DƯƠNG của CÙNG NCC, cùng tệ — tổng theo NCC không được âm */
-  { const _sum={}; picks.forEach(pk=>{ const x=pk.x; const k=String(x.label||'').trim().toUpperCase()+'|'+(x.ccy||'VND'); _sum[k]=(_sum[k]||0)+(+(x.kind==='op'?pk.payAmt:x.amt)||0); });
+  { const _sum={}; picks.forEach(pk=>{ const x=pk.x; const k=String(x.label||'').trim().toUpperCase()+'|'+(x.ccy||'VND'); _sum[k]=(_sum[k]||0)+(+((x.kind==='op'||x.kind==='prop')?pk.payAmt:x.amt)||0); });
     const _bad=Object.keys(_sum).filter(k=>_sum[k]<-0.001); if(_bad.length){ toast('Phiếu giảm của '+_bad.map(k=>k.split('|')[0]).join(', ')+' lớn hơn số chi cùng bảng kê — chọn thêm hóa đơn của NCC đó để đối trừ, hoặc bỏ dòng giảm','bad'); return; } }
   const _coOf=pk=>{ const x=pk.x; const co=x.r?x.r.companyId:(x.t?x.t.companyId:''); return co||getParentCompanyId(); };
   const _nBk=_groupList.length;
@@ -13426,6 +13438,12 @@ function _bkConfirmCommit(pickRefs, date, bkId, _groupList, _fx){
         }
       } else if(x.kind==='adv'){   /* v3.66.90: chi tạm ứng qua bảng kê */
         _advPayCore(x.r, {date, amt:x.amt, method, bankId:(method==='cash')?'':srcBank, bkId, fxRate:(+_fx.USD||0)});
+      } else if(x.kind==='prop'){   /* v3.68.33: 1 đợt chi cho CẢ PHIẾU — 1 giao dịch trên dòng đầu phiếu, không phân theo dòng */
+        const head=x.P.head; const amt=+pk.payAmt||0;
+        const pay=_apPayCore(head, {date, amt, method, bankId:(method==='cash')?'':srcBank, bkId, fxRate:(+_fx.USD||0), note:'Thanh toán theo phiếu — Bảng kê '+bkId});
+        if(pay){ pay._prop=x.batchId; pay._propLines=x.P.lines.length; } else { const lp=(head.payments||[]).slice(-1)[0]; if(lp&&lp._bkId===bkId){ lp._prop=x.batchId; lp._propLines=x.P.lines.length; } }
+        window._PROP_V=(window._PROP_V||0)+1;
+        window._PROPC=null; const P2=_propIndex()[x.batchId]; x.P.lines.forEach(l=>{ l.dueAmount=0; if(P2&&P2.rem>0.5&&apRemainingEff(l)>0.5){ try{ _apPayRoundAfter(l, amt); }catch(_){} } try{ touchRecord(l); }catch(_){} });   /* còn lại phiếu > 0 → cả phiếu về Chờ KT kiểm đợt sau */
       } else if(x.kind==='apr'){
         if(x.cn){ try{ _cnNormalize(x.r); }catch(_){} }   /* v3.68.21: phiếu giảm lưu dương → chuẩn hóa âm trước khi đối trừ */
         _apPayCore(x.r, {date, amt:x.amt, method, bankId:(method==='cash')?'':srcBank, bkId, fxRate:(+_fx.USD||0), note:x.cn?('Đối trừ phiếu giảm — Bảng kê '+bkId):undefined});   /* v3.17.86 · v3.66.83 fx */
@@ -13435,10 +13453,10 @@ function _bkConfirmCommit(pickRefs, date, bkId, _groupList, _fx){
       }
       try{ _bkStampFx(x.kind==='op'?x.t:x.r, bkId, x.ccy, _fx, x.kind==='op'); }catch(e){ console.warn('[bk-fx]',e); }   /* v3.66.83 */
       nOk++;
-      sheetRows.push({propKey:_bkPropKey(x), propNo:((x.r||x.t||{}).dnttNo)||'', propContent:String(((x.r||x.t||{}).payContent)||'').slice(0,120), refType:x.kind, refId:(x.kind==='op'?x.t.id:x.r.id), orderId:(x.kind==='ap'&&x.o?x.o.id:undefined),   /* v3.18.62: 'apr' (duyệt theo phiếu) có r không có t → trước đọc x.t.id nổ 'reading id' (ảnh Sếp) */
-        label:x.label, desc:x.desc, group:(method==='cash')?'cash':(method==='loan'?'gn':(method==='offset'?'offset':'bank')), bankId:(method==='cash'||method==='offset')?'':srcBank,
-        amount:(x.kind==='op'?pk.payAmt:x.amt), ccy:x.ccy, lock:!!x.lock, proposed, changed});
-      const _v=(x.kind==='op'?pk.payAmt:x.amt)||0;
+      sheetRows.push({propKey:(x.kind==='prop'?('b:'+x.batchId):_bkPropKey(x)), propNo:((x.r||x.t||{}).dnttNo)||(x.kind==='prop'?propLabel(x.P).replace(/^Phiếu ĐX /,''):''), propContent:String(((x.r||x.t||{}).payContent)||'').slice(0,120), refType:(x.kind==='prop'?'apr':x.kind), _prop:(x.kind==='prop'?x.batchId:undefined), refId:(x.kind==='op'?x.t.id:x.r.id), orderId:(x.kind==='ap'&&x.o?x.o.id:undefined),   /* v3.18.62: 'apr' (duyệt theo phiếu) có r không có t → trước đọc x.t.id nổ 'reading id' (ảnh Sếp) */
+        label:x.label, desc:(x.kind==='prop'?(String(x.P.head.payContent||x.P.head.desc||'').slice(0,90)+' · '+x.P.lines.length+' dòng'):x.desc), group:(method==='cash')?'cash':(method==='loan'?'gn':(method==='offset'?'offset':'bank')), bankId:(method==='cash'||method==='offset')?'':srcBank,
+        amount:((x.kind==='op'||x.kind==='prop')?pk.payAmt:x.amt), ccy:x.ccy, lock:!!x.lock, proposed, changed});
+      const _v=((x.kind==='op'||x.kind==='prop')?pk.payAmt:x.amt)||0;
       grand+=_v;
       if(method==='cash') totals.cash+=_v;
       else if(method==='offset') totals.offset=(totals.offset||0)+_v;   /* v3.18.62 */
@@ -13477,7 +13495,7 @@ function bkGroupRows(rows){
   });
   out.forEach(g=>{ if(!g.items) return;
     const x0=g.items[0]; const no=x0.propNo||''; const ct=x0.propContent||'';
-    if(g.n===1){ g.desc=(no?('Phiếu ĐX '+no+' · '):'')+(x0.desc||''); g.refType=x0.refType; return; }
+    if(g.n===1){ g.desc=(no&&String(x0.desc||'').indexOf(no)<0?('Phiếu ĐX '+no+' · '):'')+(x0.desc||''); g.refType=x0.refType; return; }
     const inv=[...new Set(g.items.map(x=>{ const m=/HĐ\s*([^·]+)/.exec(x.desc||''); return m?m[1].trim():''; }).filter(Boolean))];
     g.desc=(no?('Phiếu ĐX '+no):'Phiếu đề xuất')+(ct?(' · '+ct):'')+' · '+g.n+' dòng'+(inv.length?(' · '+inv.length+' HĐ'):'');
   });
@@ -21415,6 +21433,7 @@ function renderBccSummaryEditor(id){
   openModal('📋 BCC tổng hợp '+_esc(s.period)+' — '+_esc(bccScopeLabel(s.scope)), body,
     `<button class="btn-ghost" onclick="bccBackToList()">Đóng</button>
      <button class="btn-sec" onclick="bccExportExcel('${s.id}')">📊 Xem Excel</button>
+     <button class="btn-sec" onclick="bccPreview('${s.id}')">👁 Xem trước (đúng mẫu)</button>
      <button class="btn-sec" onclick="bccPrintPdf('${s.id}')">🖨 In / PDF</button>
      ${_bccFooterActions(s)}`);
   try{ if(typeof setModalWide==='function') setModalWide(true); }catch(e){}
@@ -21541,6 +21560,7 @@ function renderBccGridEditor(id){
   openModal('📋 BCC (chi tiết theo ngày) '+_esc(s.period)+' — '+_esc(bccScopeLabel(s.scope)), body,
     `<button class="btn-ghost" onclick="bccBackToList()">Đóng</button>${_isVslG?`<button class="btn-sec" onclick="bccCheckQd('${s.id}')" title="So BCC tàu gửi về với các quyết định đã ký">🔎 Kiểm tra theo QĐ${(s._pendingFix||[]).length?' ⚠'+s._pendingFix.length:''}</button>`:''}
      <button class="btn-sec" onclick="bccExportExcel('${s.id}')">📊 Xem Excel</button>
+     <button class="btn-sec" onclick="bccPreview('${s.id}')">👁 Xem trước (đúng mẫu)</button>
      <button class="btn-sec" onclick="bccPrintPdf('${s.id}')">🖨 In / PDF</button>
      ${_bccFooterActions(s)}`);
   try{ if(typeof setModalWide==='function') setModalWide(true); }catch(e){}
@@ -21763,6 +21783,17 @@ function bccExportExcel(sheetId){
 // v3.20.314 (Sếp: "NV chấm công tải bản pdf in. BCC luôn in ngang"): dùng lại openPrintWindow() có
 // sẵn trong app (ghi vào #print-area ẩn, tránh popup blocker) — @page landscape, bấm "In / Lưu PDF"
 // trong hộp thoại in của trình duyệt là ra file PDF, đúng cách các chứng từ khác trong app đang làm.
+/* v3.68.35 (Sếp): BẢN XEM TRƯỚC TRÊN APP phải ĐÚNG MẪU IN — dựng từ CHÍNH bộ in (cùng HTML / CSS), hiện như trang A4 ngang. */
+function bccPreview(sheetId, onlyEmpId){
+  window._BCC_PREVIEW=(html)=>{
+    const doc='<!doctype html><html><head><meta charset="utf-8"><style>html{background:#e9ecef}body{margin:0;padding:18px 0}.pv-page{width:297mm;min-height:210mm;box-sizing:border-box;padding:10mm 12mm;margin:0 auto;background:#fff;box-shadow:0 1px 6px rgba(0,0,0,.25)}</style></head><body><div class="pv-page">'+html.replace(/@page\s*\{[^}]*\}/g,'')+'</div></body></html>';
+    window._BCC_PV={sheetId, onlyEmpId};
+    openModal('👁 Xem trước — đúng mẫu in', `<div style="font-size:11.5px;color:var(--muted);margin-bottom:6px">Hiển thị đúng như bản in (A4 ngang, lề 10 × 12 mm). Muốn sửa số liệu: đóng xem trước, sửa trên bảng nhập.</div><iframe id="bcc-pv-frame" style="width:100%;height:72vh;border:1px solid var(--rule);border-radius:6px;background:#e9ecef"></iframe>`,
+      `<button class="btn-ghost" onclick="closeModal()">Đóng</button><button class="btn-primary" onclick="closeModal();bccPrintPdf(window._BCC_PV.sheetId, window._BCC_PV.onlyEmpId||undefined)">🖨 In / PDF</button>`);
+    try{ setModalWide(true); }catch(_){}
+    setTimeout(()=>{ const f=document.getElementById('bcc-pv-frame'); if(f){ f.srcdoc=doc; } },30); };
+  try{ bccPrintPdf(sheetId, onlyEmpId); }catch(e){ window._BCC_PREVIEW=null; toast('Không dựng được bản xem trước: '+(e&&e.message||e),'bad'); }
+  if(window._BCC_PREVIEW){ window._BCC_PREVIEW=null; } }
 function bccPrintPdf(sheetId, onlyEmpId){
   try{ const _s0=(S.bccSheets||[]).find(x=>x.id===sheetId); if(_s0 && _bccAutoFillSheet(_s0)) saveState(); }catch(_){}   // v3.67.86: in = đúng dữ liệu đã tự điền
   const s0=(S.bccSheets||[]).find(x=>x.id===sheetId); if(!s0){ toast('Không tìm thấy','bad'); return; }
@@ -21781,10 +21812,11 @@ function bccPrintPdf(sheetId, onlyEmpId){
   const _isV=!!(s.scope&&s.scope.type==='vessel');
   const _frm=_isV?'SME-HR-PR-001-FRM-001<br>Rev: 05<br>Eff.Date: 14/09/2026<br>Page: 01':'SME-HR-PR-001-FRM-002<br>Rev: 00<br>Eff.Date: 14/09/2026<br>Page: 01';
   const _headBlock=`<table class="bcc-h"><tr><td style="width:14%;text-align:center"><img src="${typeof CREW_LOGO!=='undefined'?CREW_LOGO:''}" style="height:44px"></td>
-    <td style="text-align:center;font-weight:700;font-size:12px;line-height:1.35">${_esc(String(_bccCoNameVi).toUpperCase())}<br>${_bccCoNameEn?_esc(String(_bccCoNameEn).toUpperCase())+'<br>':''}${_isV?'ĐƠN VỊ/ VESSEL':'ĐƠN VỊ/ DEPARTMENT'}: ${_esc(bccScopeLabel(s.scope))}</td>
+    <td style="text-align:center;font-weight:700;font-size:12px;line-height:1.35">${_esc(String(_bccCoNameVi).toUpperCase())}<br>${_bccCoNameEn?_esc(String(_bccCoNameEn).toUpperCase())+'<br>':''}${_isV?'ĐƠN VỊ/ VESSEL':'ĐƠN VỊ/ DEPARTMENT'}: ${_esc(String(bccScopeLabel(s.scope)||'').replace(/[\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}\u{FE0F}]/gu,'').replace(/\s+/g,' ').trim())}</td>
     <td style="width:17%;font-size:9px;line-height:1.45">${_frm}</td></tr></table>
     <div style="text-align:center;margin:4px 0 6px"><div style="font-weight:700;font-size:13px">BẢNG CHẤM CÔNG THÁNG ${s.month} NĂM ${s.year}</div><div style="font-style:italic;font-weight:700;font-size:11px">TIMESHEET IN MONTH ${s.month} YEAR ${s.year}</div></div>`;
-  const _sg=(t)=>`<div style="text-align:center;flex:1"><b>${t}</b><div style="height:46px"></div><div style="font-size:9px">Full name</div></div>`;
+  /* v3.68.34 (Sếp): chữ ký — tiếng Việt dòng trên, tiếng Anh dòng dưới; cỡ chữ nhỏ lại */
+  const _sg=(t)=>{ const p=String(t).split(/\s*\/\s*/); return `<div style="text-align:center;flex:1"><div style="font-weight:700;font-size:10px;line-height:1.3">${p[0]}</div>${p[1]?`<div style="font-style:italic;font-size:9px;line-height:1.3">${p.slice(1).join(' / ')}</div>`:''}<div style="height:44px"></div><div style="font-size:8.5px">Full name</div></div>`; };
   const _footBlock=`<div class="bcc-f" style="display:flex;gap:10px;margin-top:14px;page-break-inside:avoid">${_isV?(_sg('Lập bởi/ Prepared by')+_sg('Thuyền trưởng/ Master')+_sg('Quản lý thuyền viên/ Crewing Supervisor')+_sg('Giám đốc phụ trách/ Director')):(_sg('NGƯỜI LẬP/ PREPARED BY')+'<div style="flex:1"></div>'+_sg("XÁC NHẬN CỦA TRƯỞNG BỘ PHẬN/ DEPT HEAD'S APPROVAL"))}</div>`;
   /* v3.67.95 (Sếp): ghi chú cuối bản in theo MẪU CHUẨN BCC — khối ký bên trái, bên phải "Ghi chú : Phải điền đúng các ký hiệu sau vào bảng chấm công" + mỗi ký hiệu 1 dòng */
   /* v3.67.96 (Sếp): ghi chú ký hiệu PHÂN ĐỀU ra chân trang (nhiều cột ngang hết khổ giấy) như mẫu chuẩn — dưới khối ký */
@@ -21794,8 +21826,8 @@ function bccPrintPdf(sheetId, onlyEmpId){
   /* v3.67.76 (Sếp: "BCC căn lề - in chuẩn trong trang"): A4 ngang lề 8mm · bảng cố định bề rộng = vừa khổ ngang (31 ngày + cột mã + OT + ký luôn trong trang) ·
      lặp dòng tiêu đề khi sang trang · không cắt đôi dòng NV · khối ký không tách khỏi bảng */
   const _style=`<style>
-    @page{size:A4 landscape;margin:8mm}
-    body{font-family:"Times New Roman",serif;font-size:10px;color:#000}
+    @page{size:A4 landscape;margin:10mm 12mm}   /* v3.68.34: chừa lề giấy (trước 8mm — sát mép) */
+    body,.pr-doc{font-family:"Times New Roman",serif;font-size:10px;color:#000}
     table.bcc-h{width:100%;border-collapse:collapse;margin-bottom:4px}table.bcc-h td{border:1px solid #000;padding:3px 5px;background:#fff!important;color:#000!important}
     table{border-collapse:collapse;width:100%;table-layout:fixed}
     th,td{border:1px solid #555;padding:1px 2px;overflow:hidden;word-wrap:break-word;font-size:8px;line-height:1.15}
@@ -21805,6 +21837,7 @@ function bccPrintPdf(sheetId, onlyEmpId){
   </style>`;
   const _cg=(fx,n,sign)=>'<colgroup>'+fx.map(c=>`<col class="${c}">`).join('')+'<col>'.repeat(n)+(sign?'<col class="c-sign">':'')+'</colgroup>';
   const _print=(html)=>{
+    if(window._BCC_PREVIEW){ const cb=window._BCC_PREVIEW; window._BCC_PREVIEW=null; cb(html); return; }   /* v3.68.35: xem trước ĐÚNG MẪU IN */
     const w=openPrintWindow();
     if(!w){ toast('Không mở được cửa sổ in','bad'); return; }
     w.document.write('<html><head><title>BCC '+_esc(s.period)+'</title></head><body>'+html+'</body></html>');
@@ -35354,7 +35387,7 @@ function _paySpBuildDiff(p){
          v3.14.38 (Sếp 06/8 — đối chiếu T01: nhóm bảo vệ/tạp vụ có cờ Làm-cả-T7 mà app vẫn chia 22):
          _sdAuto CŨNG bị chính luật này chặn → cờ trên thẻ (3.14.01) chưa từng chảy vào kỳ, dispatch
          không kích hoạt chuẩn riêng (T01=27). Whitelist thêm _sdAuto. */
-      if(F.startsWith('_') && ['_bhxhBase','_sdAuto','_restM','_dockR','_vnR','_fnR','_restR','_fx'].indexOf(F)<0) return;   // v3.68.07: mức riêng / nghỉ ca tháng / tỷ giá quy đổi phải vào kỳ (trước đây bị chặn)
+      if(F.startsWith('_') && ['_bhxhBase','_sdAuto','_restM','_dockR','_vnR','_fnR','_restR','_fx','_dpUsd','_cardUsd'].indexOf(F)<0) return;   // v3.68.07: mức riêng / nghỉ ca tháng / tỷ giá quy đổi phải vào kỳ (trước đây bị chặn)
       const to=+inp[F]||0, from=(row.inputs||{})[F];
       const manual=Array.isArray(row._manualFields)&&row._manualFields.indexOf(F)>=0;
       if((+from||0)!==to){ changes[F]={from:(from==null?null:+from), to:to, manual:manual}; n++; }   /* v3.14.46: null→0 = KHỚP (engine coi trống = 0) — hết nhiễu 'ĐỔI …:0' cả bảng */
@@ -52600,7 +52633,7 @@ function _crewTsRanges(list){ const a=Array.from(new Set(list)).sort((x,y)=>x-y)
    ════════════════════════════════════════════════════════════════════════════════════════════════ */
 const VES_FLAGS=[['VN','Việt Nam'],['PANAMA','Panama'],['LIBERIA','Liberia'],['FOREIGN','Nước ngoài khác']];
 /* v3.68.12 (Sếp xác nhận): điền Quốc tịch tàu cho 6 tàu đang có — chỉ điền khi ô còn TRỐNG, không ghi đè */
-function _migrateVesselFlags(){ const MAP=[[/geo\s*mariner/i,'Việt Nam'],[/seahorse[\s-]*synergy/i,'Việt Nam'],[/geo\s*supporter/i,'Panama'],[/seahorse[\s-]*keystone/i,'Panama'],[/katran/i,'Liberia'],[/afalina/i,'Liberia']];
+function _migrateVesselFlags(){ const MAP=[[/geo[\s\-_]*marin/i,'Việt Nam'],[/seahorse[\s\-_]*synergy/i,'Việt Nam'],[/geo[\s\-_]*sup+ort/i,'Panama'],[/seahorse[\s\-_]*keystone/i,'Panama'],[/katran/i,'Liberia'],[/afalina/i,'Liberia']];   /* v3.68.32: khớp nới — GEOMARINE / GEOSUPORTER */
   let n=0; (S.vessels||[]).forEach(v=>{ if(!v||v._deleted) return; if(String(v.flagState||v.flag||'').trim()) return;
     const hit=MAP.find(m=>m[0].test(String(v.name||''))); if(hit){ v.flagState=hit[1]; try{ touchRecord(v); }catch(_){} n++; } });
   return n; }
@@ -52668,15 +52701,19 @@ function crewPayAudit(sh){
   const push=(t,detail,lvl)=>{ R.items.push({t, detail:detail||'', lvl:lvl||'ok'}); if(lvl==='block') R.nBlock++; else if(lvl==='warn') R.nWarn++; };
   if(!sh||!sh.scope||sh.scope.type!=='vessel'){ push('Bảng chấm công tàu','Không phải BCC tàu','block'); return R; }
   const vid=sh.scope.value, p=sh.period, pS=p+'-01', nd=+sh.numDays||31, pE=p+'-'+String(nd).padStart(2,'0');
-  const rows=sh.rows||[], emps=(HRService.employees()||[]); const eById={}; emps.forEach(e=>eById[e.id]=e);
+  const emps=(HRService.employees()||[]); const eById={}; emps.forEach(e=>eById[e.id]=e);
+  const _hasC=r=>Object.values(r.days||{}).some(v=>String(v||'').trim())||Object.keys(r.dpExtra||{}).length;
+  const rows=(sh.rows||[]).filter(r=>{ const e=eById[r.empId]; return !(e && !_isCrewType(e) && !_hasC(r)); });   /* v3.68.32: bỏ NV không phải thuyền viên không có công */
+  const _hist=(p<=HB_CUTOFF);   /* v3.68.32 (Sếp): tháng ≤ 09/2026 — BCC là nguồn: thiếu / lệch đoạn công tác chỉ CẢNH BÁO, ghi theo BCC */
   const nm=id=>((eById[id]||{}).fullName)||id;
-  const iss=_crewTsIssues(sh)||[]; const pick=re=>{ const L=[]; iss.forEach(g=>g.msgs.forEach(m=>{ if(re.test(m.msg)) L.push(nm(g.empId)+' — '+m.msg); })); return L; };
+  const iss=(_crewTsIssues(sh)||[]).filter(g=>{ const e=eById[g.empId]; return !(e && !_isCrewType(e)); }); const pick=re=>{ const L=[]; iss.forEach(g=>g.msgs.forEach(m=>{ if(re.test(m.msg)) L.push(nm(g.empId)+' — '+m.msg); })); return L; };
   const j=L=>L.slice(0,6).join(' · ')+(L.length>6?' …':'');
   let L;
-  L=pick(/ngoài đoạn công tác/); push('Công ngoài thời gian ở tàu theo QĐ', L.length?j(L):'0 người', L.length?'block':'ok');
-  L=pick(/KHÔNG có dòng trên BCC|Không có đoạn công tác tại tàu này/); push('Thiếu người đang ở tàu theo QĐ / có công mà không có QĐ', L.length?j(L):'0 người', L.length?'block':'ok');
+  const _hn=_hist?'Tháng ≤ 09/2026 — BCC là nguồn → bấm 🧭 Ghi đoạn công tác theo BCC. ':'';
+  L=pick(/ngoài đoạn công tác/); push('Công ngoài thời gian ở tàu theo QĐ', L.length?_hn+j(L):'0 người', L.length?(_hist?'warn':'block'):'ok');
+  L=pick(/KHÔNG có dòng trên BCC|Không có đoạn công tác tại tàu này/); push('Thiếu người đang ở tàu theo QĐ / có công mà không có QĐ', L.length?_hn+j(L):'0 người', L.length?(_hist?'warn':'block'):'ok');
   L=pick(/Trùng ngày công với tàu/); push('Một người có công ở 2 tàu cùng ngày', L.length?j(L):'0', L.length?'block':'ok');
-  L=pick(/Thiếu công trong đoạn công tác/); push('Ngày trống trong thời gian ở tàu', L.length?j(L):'0', L.length?'block':'ok');
+  L=pick(/Thiếu công trong đoạn công tác/); push('Ngày trống trong thời gian ở tàu', L.length?_hn+j(L):'0', L.length?(_hist?'warn':'block'):'ok');
   L=pick(/Mã lạ/); push('Mã chưa có trong app', L.length?j(L):'0 ô', L.length?'block':'ok');
   /* thẻ lương */
   const noCard=[], wrongEng=[], rankDiff=[], dpNo=[], dpNoUse=[], segMulti=[], usd=[], quit=[], quitNoDate=[];
@@ -52783,16 +52820,52 @@ function payRuleHtml(p, forPrint){
 function _payRuleToggle(){ const b=document.getElementById('pay-rule-body'); if(!b) return; const open=(window._PAYRULE_OPEN!==false); b.style.display=open?'block':'none';
   try{ const a=b.parentNode.querySelector('a'); if(a){ a.textContent=open?'▾ thu gọn':'▸ mở'; a.setAttribute('onclick','window._PAYRULE_OPEN='+(open?'false':'true')+';_payRuleToggle()'); } }catch(_){} }
 
+/* ════════════════════════════════════════════════════════════════════════════════════════════════
+   v3.68.32 (Sếp chốt): TỶ GIÁ LƯƠNG = tỷ giá thanh toán ngân hàng ngày gần nhất (≤ ngày bấm Tính lương),
+   hiển thị USD ($, 2 số lẻ) trong bảng lương, VND không số lẻ; mức DP có thể bằng USD.
+   ════════════════════════════════════════════════════════════════════════════════════════════════ */
+function payFxBank(asOf){ const d=String(asOf||todayISO()).slice(0,10); let best=null;
+  (S.paymentSheets||[]).forEach(b=>{ if(!b||b._voided||b._deleted) return; const v=+((b.fx||{}).USD)||0; const bd=String(b.date||'').slice(0,10); if(v>0&&bd&&bd<=d&&(!best||bd>best.date||(bd===best.date&&String(b.id)>String(best.bkId)))) best={rate:v, date:bd, bkId:b.id, src:'bank'}; });
+  return best||{rate:fxRate(), date:'', bkId:'', src:'app'}; }
+function payFxNow(){ return (window._PAYFX_OVERRIDE&&+window._PAYFX_OVERRIDE.rate>0)?window._PAYFX_OVERRIDE:payFxBank(todayISO()); }
+function fmtUsd(v){ return '$'+(+v||0).toLocaleString('en-US',{minimumFractionDigits:2, maximumFractionDigits:2}); }
+function fmtVnd(v){ return Math.round(+v||0).toLocaleString('vi-VN'); }
+function payFxNote(p){ const fi=(p&&p._fxInfo)||null; const fx=(fi&&+fi.rate)||(typeof _cpFx==='function'?_cpFx(p):fxRate());
+  return 'Tỷ giá quy đổi: 1 USD = '+fmtVnd(fx)+' VND — '+((fi&&fi.src==='bank')?('tỷ giá thanh toán tại ngân hàng ngày '+_cdD(fi.date)+(fi.bkId?(' (bảng kê '+fi.bkId+')'):'')):'tỷ giá cài trong app (chưa có bảng kê ngân hàng nào có tỷ giá USD)')+(fi&&fi.at?(' · áp dụng khi tính lương ngày '+_cdD(String(fi.at).slice(0,10))):''); }
+/* ── Kéo lại file BCC từ hộp thư sau khi đã phân loại (Excel → BCC tàu; PDF → bản ký của BCC tàu) ── */
+async function dmFileToBcc(idx){ const r=(window._DM_ROWS||[])[idx]; if(!r) return;
+  if(/\.pdf$/i.test(String(r.fileName||''))||String(r.ext||'').toLowerCase()==='pdf') return dmPdfToBcc(idx);
+  return _dmToBcc(idx); }
+function dmPdfToBcc(idx){ const r=(window._DM_ROWS||[])[idx]; if(!r) return; const vs=(fleetVessels()||[]).filter(v=>v&&!v._deleted&&!v.isShoreUnit);
+  const v0=_dmVessel(String(r.vessel||'')); const pm=/(\d{2})[.\-_ ](20\d{2})|T\s*(\d{2})[.\-](\d{2,4})/.exec(String(r.fileName||'')); let per=(typeof _CREWTS_P!=='undefined'&&_CREWTS_P)||todayISO().slice(0,7);
+  if(pm){ if(pm[1]&&pm[2]) per=pm[2]+'-'+pm[1]; else if(pm[3]&&pm[4]) per=(pm[4].length===2?'20'+pm[4]:pm[4])+'-'+pm[3]; }
+  window._DMPDF={idx};
+  openModal('📎 Gắn bản ký BCC (PDF) vào BCC tàu', `<div style="font-size:12.5px;margin-bottom:6px">File <b>${esc(r.fileName||'')}</b> là PDF — app không đọc số công từ PDF; PDF được <b>gắn làm bản ký</b> vào BCC tàu của tháng.</div>
+    <div style="display:flex;gap:10px"><div class="field" style="margin:0"><label>Tàu</label><select id="dmpdf-v">${vs.map(v=>`<option value="${v.id}" ${v0&&v0.id===v.id?'selected':''}>${esc(v.name)}</option>`).join('')}</select></div><div class="field" style="margin:0"><label>Tháng</label><input type="month" id="dmpdf-p" value="${esc(per)}"></div></div>`,
+    `<button class="btn-ghost" onclick="closeModal()">Hủy</button><button class="btn-primary" onclick="dmPdfToBccSave()">Gắn vào BCC tàu</button>`); }
+function dmPdfToBccSave(){ const C=window._DMPDF; const r=C&&(window._DM_ROWS||[])[C.idx]; if(!r) return; const vid=(document.getElementById('dmpdf-v')||{}).value, p=(document.getElementById('dmpdf-p')||{}).value;
+  if(!vid||!/^\d{4}-\d{2}$/.test(p||'')){ toast('Chọn tàu và tháng','bad'); return; } const now=new Date().toISOString(), me=actorName(); let sh=_vtsFindSheet(vid,p);
+  commitMutation(()=>{ if(!sh){ const [Y,M]=p.split('-').map(Number); sh={id:_vtsSheetId(vid,p), period:p, scope:{type:'vessel', value:vid}, month:M, year:Y, numDays:bccDaysInMonth(Y,M), workDays:0, status:'draft', mode:'daily', rows:[], createdBy:me, createdAt:now}; S.bccSheets=S.bccSheets||[]; S.bccSheets.push(sh); }
+    sh.sources=sh.sources||[]; sh.sources.push({from:'email-pdf', fileId:r.fileId, fileName:r.fileName, url:r.url||'', signedPdf:r.fileId, signedPdfName:r.fileName, at:now, by:me}); try{ _bccTouch(sh); }catch(_){} },
+    {action:'bcc_pdf_attach', fields:['bccSheets'], onOk:async()=>{ try{ await _dmMark(r,'POSTED','Bản ký BCC '+p+' — đính kèm', sh.id); }catch(_){} closeModal(); toast('✓ Đã gắn bản ký PDF vào BCC tàu '+(anyVesselName(vid)||'')+' '+p,'good'); }}); }
+
 function _cpN(v,ccy){ if(v==null||v==='') return ''; if(!+v) return (+v===0?'0':''); return String(ccy||'VND').toUpperCase()==='USD'?(+v).toLocaleString('en-US',{maximumFractionDigits:2}):Math.round(+v).toLocaleString('vi-VN'); }
 function _cpFx(p){ let fx=0; (p&&p.rows||[]).forEach(r=>{ const v=+((r.inputs||{})._fx)||0; if(v>fx) fx=v; }); return fx||fxRate(); }   /* v3.68.18: tỷ giá ĐÃ dùng khi kéo thẻ (nếu kỳ có thẻ USD) */
 function _cpProf(p){ return (PayrollService.profileByKey&&PayrollService.profileByKey(p.profile))||(defaultPayProfiles()[p.profile])||defaultPayProfiles().crew; }
 /* Dòng hiển thị: 1 người = 1 dòng, hoặc nhiều dòng nếu đổi thẻ (chức danh/mức) giữa tháng */
+/* v3.68.32: ô MỨC của người có thẻ USD / DP USD hiện bằng $ (2 số lẻ); tiền luôn VND không số lẻ */
+function _cpTxt(c, r, v){ const nm=c[0]; if(c[2]!=='n') return (v==null?'':String(v));
+  if(/^Mức/.test(nm) && nm!=='Mức lương cơ bản'){ if(nm==='Mức DP / ngày' && r._dpUsd) return fmtUsd(r._dpUsd); if(!(+v)) return '';
+    if(nm==='Mức nghỉ ca / ngày' && !r._restUsd) return _cpN(v);   /* nghỉ ca tính từ lương cơ bản (VND) → hiện VND */
+    if(r._usd && r._fx>0) return fmtUsd((+v||0)/r._fx); }
+  return _cpN(v); }
 function crewPayRows(p){
   const out=[]; const prof=_cpProf(p);
   (p.rows||[]).forEach(row=>{
     const e=hrmEmpById(row.empId)||{}; const inp=row.inputs||{}; const res=row.result||{};
     let segs=[]; try{ segs=_payCrewSegments(row.empId, p.period, p.profile, inp)||[]; }catch(_){}
-    const base={empId:row.empId, msnv:e.smartId||'', name:row.name||e.fullName||'', npt:+inp.F||0, res, row};
+    const _cv=(()=>{ try{ return _cdCardAt(row.empId, p.period+'-15'); }catch(_){ return null; } })(); const _cd=(_cv&&_cv.data)||{};
+    const base={empId:row.empId, msnv:e.smartId||'', name:row.name||e.fullName||'', npt:+inp.F||0, res, row, _fx:+inp._fx||0, _restUsd:(String(_cd.ccy||'').toUpperCase()==='USD'&&+_cd.crewRestRate>0), _usd:!!inp._cardUsd||(()=>{ try{ const v=_cdCardAt(row.empId, p.period+'-15'); return String(((v&&v.data)||{}).ccy||'').toUpperCase()==='USD'; }catch(_){ return false; } })(), _dpUsd:+inp._dpUsd||0};
     const mk=(rank,g,h,i,j,k,l,m,N,O,dock,vn,fn,rest,dp)=>({...base, rank, G:g,H:h,I:i,J:j,K:k,L:l,M:m, N,O, rDock:dock,rVn:vn,rFn:fn,rRest:rest,rDp:dp});
     if(segs.length>1){
       segs.forEach(sg=>{ const o=+sg.O||0, nb=+sg.N||0;
@@ -52836,13 +52909,14 @@ function crewPayBoardOpen(periodId){
   const fnote=p._fromVessel?vesFlagNote(p._fromVessel).text:'';
   const th=CREW_PAY_COLS.map(c=>`<th style="font-size:10px;white-space:nowrap">${esc(c[0])}</th>`).join('');
   const body=rows.map(r=>`<tr>${CREW_PAY_COLS.map(c=>{ const v=c[1](r); const cls=(c[2]==='n'||c[2]==='n0'||c[2]==='c')?' class="r"':'';
-      const txt=(c[2]==='n')?_cpN(v):(v==null?'':String(v));
+      const txt=(c[2]==='n')?_cpTxt(c,r,v):(v==null?'':String(v));
       return `<td${cls} style="white-space:nowrap${c[3]&&r.first?';cursor:pointer':''}"${c[3]&&r.first?` onclick="crewPayExplain('${p.id}','${r.empId}','${c[3]}')"`:''}>${c[3]&&r.first&&txt?`<span style="color:#0b3d91;text-decoration:underline;font-weight:700">${esc(txt)}</span>`:esc(txt)}</td>`; }).join('')}</tr>`).join('');
   const trTot=`<tr style="background:#e2efda;font-weight:800">${CREW_PAY_COLS.map((c,i)=>i===2?'<td>TỔNG</td>':((c[2]==='n'||c[2]==='n0')?`<td class="r">${esc(c[2]==='n'?_cpN(tot[i]):(tot[i]||''))}</td>`:'<td></td>')).join('')}</tr>`;
   openModal('💰 Bảng lương tàu — '+esc(p._vesselName||'')+' · '+esc(p.period),
     `<div style="font-size:12.5px;margin-bottom:6px">Tàu <b>${esc(p._vesselName||'')}</b>${flag?` <span style="background:#eef4ff;color:#0b3d91;border-radius:9px;padding:0 6px;font-size:11px;font-weight:700">${esc(flag==='VN'?'VN':(flag==='PANAMA'?'PN':(flag==='LIBERIA'?'LB':'NN')))}</span>`:''} · kỳ <b>${esc(p.period)}</b> · ${(p.rows||[]).length} thuyền viên · ${payStatusChip(p.status)}<div style="color:var(--muted);font-size:11.5px">${esc(fnote)} · Hệ số ngày công: ${esc(String(_cpProf(p).standardDays||31))} · Tỉ giá USD: ${_cpFx(p).toLocaleString('vi-VN')}${_cpFx(p)!==fxRate()?' <span style="color:#9a5a05">(tỷ giá đã dùng khi kéo thẻ · app hiện '+fxRate().toLocaleString('vi-VN')+' — kéo thẻ lại để cập nhật)</span>':''}</div></div>
      ${payRuleHtml(p,false)}
      <div class="tbl-scroll" style="max-height:58vh;overflow:auto"><table class="tbl" style="font-size:11.5px"><thead><tr>${th}</tr></thead><tbody>${body}${trTot}</tbody></table></div>
+     <div style="font-size:11.5px;margin-top:6px;padding:4px 8px;border-left:3px solid #0b3d91;background:#f6f9ff">💱 ${esc(payFxNote(p))}. Mức bằng USD ghi <b>$</b> (2 số lẻ); tiền quy đổi VND không số lẻ.</div>
      <div style="font-size:11px;color:var(--muted);margin-top:6px">Bấm số <b>NET · Thuế TNCN · BHXH · Thực lĩnh</b> để xem cách tính. Người đổi chức danh / mức giữa tháng được tách thành nhiều dòng; các cột tiền tổng đặt ở dòng đầu.</div>`,
     `<button class="btn-ghost" onclick="closeModal()">Đóng</button><button class="btn-sec" onclick="crewPayExcel('${p.id}')">⬇ Excel</button><button class="btn-sec" onclick="crewPayPrint('${p.id}')">🖨 In PDF (A4 ngang)</button><button class="btn-sec" onclick="closeModal();openPayPeriodDetail('${p.id}')">Kỳ lương</button><button class="btn-primary" onclick="crewPaySubmitToAcc('${p.id}')">💵 Tạo Đề xuất thanh toán</button>`);
   try{ setModalWide(true); }catch(_){}
@@ -52857,7 +52931,8 @@ function crewPayExplain(periodId, empId, kind){
   if(kind==='AB'||kind==='AS'){
     ttl=(kind==='AS'?'💵 Thực lĩnh — ':'💵 Tổng lương NET — ')+nm+' · '+p.period;
     const tr=rows.map(r=>[['Đi biển (B1+B2)',r.G+r.H,r.O,r.tBien],['Tàu đi dock (D)',r.I,r.rDock,r.tDock],['Chờ HĐ trong nước (B4)',r.J,r.rVn,r.tVn],['Nghỉ ca (N1)',r.K,r.rRest,r.tRest],['Chờ HĐ nước ngoài (B3)',r.L,r.rFn,r.tFn],['Công DP',r.M,r.rDp,r.tDp]]
-        .filter(x=>+x[1]||+x[3]).map(x=>`<tr><td>${x[0]}${rows.length>1?' <span style="color:var(--muted)">('+esc(r.rank)+')</span>':''}</td><td class="r">${x[1]||''}</td><td class="r">${_cpN(x[2])}</td><td class="r">${_cpN(x[3])}</td></tr>`).join('')).join('');
+        .filter(x=>+x[1]||+x[3]).map(x=>{ const isDp=x[0]==='Công DP'; const usd=(isDp&&r._dpUsd)?r._dpUsd:((r._usd&&r._fx>0)?(+x[2]||0)/r._fx:0);
+          return `<tr><td>${x[0]}${rows.length>1?' <span style="color:var(--muted)">('+esc(r.rank)+')</span>':''}</td><td class="r">${x[1]||''}</td><td class="r">${usd?(fmtUsd(usd)+' × '+fmtVnd(r._fx||_cpFx(p))):_cpN(x[2])}</td><td class="r">${_cpN(x[3])}</td></tr>`; }).join('')).join('');
     html=`<table class="tbl" style="font-size:12px"><thead><tr><th>Khoản</th><th class="r">Công</th><th class="r">Mức / ngày</th><th class="r">Thành tiền</th></tr></thead><tbody>${tr}
       <tr><td colspan="3">Điều chỉnh</td><td class="r">${_cpN(+inp.AA||0)}</td></tr>
       <tr style="font-weight:800"><td colspan="3">Tổng tiền lương / tháng (NET)</td><td class="r">${_cpN(res.AB)}</td></tr>
@@ -52868,6 +52943,7 @@ function crewPayExplain(periodId, empId, kind){
       <tr><td colspan="3">− BHXH, BHYT, BHTN 10,5%</td><td class="r">${_cpN(res.AO)}</td></tr>
       <tr><td colspan="3">− Phải thu khác</td><td class="r">${_cpN(+inp.AR||0)}</td></tr>
       <tr style="font-weight:900;background:#eef4ff"><td colspan="3">= THỰC LĨNH</td><td class="r">${_cpN(res.AS)}</td></tr></tbody></table>
+      ${rows.some(r=>r._usd||r._dpUsd)?`<div style="font-size:11px;margin-top:4px;color:#0b3d91">💱 ${esc(payFxNote(p))}</div>`:''}
       <div style="font-size:11px;color:var(--muted);margin-top:4px">Mức / ngày theo thẻ lương hiệu lực trong kỳ${rows.length>1?' (đổi giữa tháng — tính theo từng đoạn)':''}. Công theo BCC tàu ${esc(p._vesselName||'')} ${esc(p.period)} (đã khóa).</div>`;
   } else if(kind==='PIT'){
     ttl='🧾 Thuế TNCN — '+nm+' · '+p.period;
@@ -52904,7 +52980,7 @@ function crewPayPrint(periodId){
   const tot=_cpTotals(rows); const co=(S.companyInfo&&S.companyInfo.name)||'CÔNG TY CỔ PHẦN HÀNG HẢI VÀ NĂNG LƯỢNG HẢI MÃ';
   const mo=+String(p.period).slice(5,7), yr=String(p.period).slice(0,4);
   const th=CREW_PAY_COLS.map((c,i)=>i<=4?`<th>${esc(c[0])}</th>`:`<th class="v"><div>${esc(c[0])}</div></th>`).join('');
-  const tds=r=>CREW_PAY_COLS.map(c=>{ const v=c[1](r); const t=(c[2]==='n')?_cpN(v):(v==null?'':String(v));
+  const tds=r=>CREW_PAY_COLS.map(c=>{ const v=c[1](r); const t=(c[2]==='n')?_cpTxt(c,r,v):(v==null?'':String(v));
     return `<td class="${c[2]==='t'?'tx':((c[2]==='n'||c[2]==='n0'||c[2]==='c')?'r':'')}">${esc(t)}</td>`; }).join('');
   const body=rows.map(r=>`<tr>${tds(r)}</tr>`).join('')
     +`<tr class="t">${CREW_PAY_COLS.map((c,i)=>i===2?'<td class="tx">TỔNG</td>':((c[2]==='n'||c[2]==='n0')?`<td class="r">${esc(c[2]==='n'?_cpN(tot[i]):(tot[i]||''))}</td>`:'<td></td>')).join('')}</tr>`;
@@ -52928,6 +53004,7 @@ function crewPayPrint(periodId){
     ${payRuleHtml(p,true)}
     <table class="pay"><thead><tr>${th}</tr></thead><tbody>${body}</tbody></table>
     <table class="sig"><tr><td><b>Người lập</b><br>(Quản lý thuyền viên)</td><td><b>Kiểm tra bởi</b><br>(Nhân sự)</td><td><b>Giám đốc BP</b></td><td><b>Phê duyệt bởi</b><br>(Kế toán / Giám đốc)</td></tr></table>
+    <div class="note"><b>Tỷ giá quy đổi:</b> ${esc(payFxNote(p).replace(/^Tỷ giá quy đổi: /,''))}. Mức bằng USD ghi $; tiền VND không số lẻ.</div>
     <div class="note"><b>Ghi chú:</b> ${notes.length?esc(notes.join(' · ')):''}${p.payNote?(notes.length?' · ':'')+esc(p.payNote):''}${sc?((notes.length||p.payNote)?' · ':'')+'Thang lương áp dụng: QĐ '+esc(sc.no):''}</div>
   </body></html>`;
   const w=window.open('','_blank'); if(!w){ toast('Trình duyệt chặn cửa sổ in','bad'); return; }
@@ -52941,8 +53018,8 @@ function crewPayExcel(periodId){
     ['BẢNG THANH TOÁN TIỀN LƯƠNG THÁNG '+(+String(p.period).slice(5,7))+' NĂM '+String(p.period).slice(0,4)+' — TÀU '+String(p._vesselName||'').toUpperCase()],
     ['Hệ số ngày công', _cpProf(p).standardDays||31, 'Tỉ giá USD', _cpFx(p)], [],
     CREW_PAY_COLS.map(c=>c[0])];
-  rows.forEach(r=>aoa.push(CREW_PAY_COLS.map(c=>{ const v=c[1](r); return (c[2]==='n'||c[2]==='n0')?(+v||''):(v==null?'':v); })));
-  aoa.push(CREW_PAY_COLS.map((c,i)=>i===2?'TỔNG':((c[2]==='n'||c[2]==='n0')?(tot[i]||''):'')));
+  rows.forEach(r=>aoa.push(CREW_PAY_COLS.map(c=>{ const v=c[1](r); if(c[2]==='n'){ const t=_cpTxt(c,r,v); if(/^\$/.test(t)) return t; return Math.round(+v||0)||''; } return (c[2]==='n0')?(+v||''):(v==null?'':v); })));
+  aoa.push(CREW_PAY_COLS.map((c,i)=>i===2?'TỔNG':((c[2]==='n'||c[2]==='n0')?(Math.round(tot[i]||0)||''):''))); aoa.push([]); aoa.push([payFxNote(p)]);
   const ws=XLSX.utils.aoa_to_sheet(aoa); ws['!cols']=CREW_PAY_COLS.map((c,i)=>({wch:i===2?24:(i<=4?12:16)}));
   const wb=XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, ws, String(p._vesselName||'Bang luong').slice(0,28));
   XLSX.writeFile(wb, 'Bang_luong_'+String(p._vesselName||'tau').replace(/\W+/g,'_')+'_'+p.period+'.xlsx');
@@ -52986,13 +53063,17 @@ const HP_DAYS_CREW=[['G',/\(B1\)/],['H',/\(B2\)/],['I',/\(D\)$|DOCK \(D\)/],['J'
 function _hpDetectRates(){ const H=window._HP; if(!H||!H.cols) return; H.rmap={}; H.dmap={}; H.rankCol=H.cols.findIndex(t=>/^CHUC DANH/.test(_hpN(t)));
   if(!/^crew/.test(H.profile||'')) return;
   HP_RATE_CREW.forEach(([k,,re])=>{ const i=H.cols.findIndex(t=>t.split(' / ').map(_hpN).some(x=>re.test(x))); if(i>=0) H.rmap[k]=i; });
-  HP_DAYS_CREW.forEach(([k,re])=>{ const i=H.cols.findIndex(t=>t.split(' / ').map(_hpN).some(x=>re.test(x))); if(i>=0) H.dmap[k]=i; }); }
+  HP_DAYS_CREW.forEach(([k,re])=>{ const i=H.cols.findIndex(t=>t.split(' / ').map(_hpN).some(x=>re.test(x))); if(i>=0) H.dmap[k]=i; });
+  { const i=H.cols.findIndex(t=>t.split(' / ').map(_hpN).some(x=>/^LUONG DP$|^TIEN (LUONG )?DP$/.test(x))); if(i>=0) H.dmap.tDp=i; }   /* v3.68.32: tiền DP — nhận biết mức DP bằng USD */
+  { const A=H.sheets[H.si].A; H.fxFile=0; for(let r=0;r<Math.min(8,A.length)&&!H.fxFile;r++){ const row=A[r]||[]; for(let c=0;c<row.length;c++){ if(/TI GIA|TY GIA|EXCHANGE/.test(_hpN(row[c]))){ for(let k=c+1;k<Math.min(row.length,c+4);k++){ const v=_hpNum(row[k]); if(v>1000){ H.fxFile=v; break; } } } } } } }
 function _hpLines(){ const H=window._HP; const A=H.sheets[H.si].A; const M=H.map; const L={};
   for(let i=H.d0;i<A.length;i++){ const r=A[i]; const nm=String(r[M.name]||'').replace(/\s+/g,' ').trim(); const ms=M.msnv!=null?String(r[M.msnv]||'').trim().toUpperCase():'';
     if(!nm||/^TONG|CONG TY|NGUOI LAP|GIAM DOC|KE TOAN/.test(_hpN(nm))) continue; if(!ms&&M.msnv!=null&&!(+r[0]>0)) continue;
     const k=ms||('N:'+_hpN(nm)); const rates={}; Object.keys(H.rmap||{}).forEach(f=>{ rates[f]=Math.round(_hpNum(r[H.rmap[f]])*100)/100; });
     const days={}; Object.keys(H.dmap||{}).forEach(f=>{ days[f]=_hpNum(r[H.dmap[f]]); });
-    (L[k]=L[k]||[]).push({rank:H.rankCol>=0?String(r[H.rankCol]||'').trim():'', rates, days, npt:M.npt!=null?_hpNum(r[M.npt]):null}); }
+    /* mức DP bằng USD khi: tiền DP = công DP × mức × tỷ giá ghi trên file (không đoán theo độ lớn con số) */
+    let dpUsd=false; { const M=+days.M||0, U=+rates.crewDpRate||0, T=+days.tDp||0, fx=+H.fxFile||0; if(M>0&&U>0&&T>0&&fx>0){ dpUsd=Math.abs(T-M*U*fx)<Math.abs(T-M*U) && Math.abs(T-M*U*fx)<=Math.max(1000, T*0.001); } }
+    (L[k]=L[k]||[]).push({rank:H.rankCol>=0?String(r[H.rankCol]||'').trim():'', rates, days, dpUsd, npt:M.npt!=null?_hpNum(r[M.npt]):null}); }
   return L; }
 /* v3.68.26: gộp các dòng KHÔNG xung đột (vd dòng kiêm DP chỉ có mức DP) thành 1 bộ mức; chỉ coi là "đổi mức giữa tháng" khi cùng 1 mức có 2 giá trị khác nhau */
 function _hpMergeLines(lines){
@@ -53004,9 +53085,11 @@ function _hpMergeLines(lines){
     if(last&&!clash){ Object.assign(last.rates, nz); if(ln.npt!=null&&last.npt==null) last.npt=ln.npt; } else out.push({rank:ln.rank, rates:nz, npt:ln.npt, days:ln.days}); });
   if(!out.length && dps.length) out.push({rank:dps[0].rank, rates:{}, npt:dps[0].npt, days:dps[0].days});
   out.conflicts=[];
-  dps.forEach(ln=>{ const v=+ln.rates.crewDpRate||0; if(!(v>0)) return; const tgt=out[0]; const cur=+tgt.rates.crewDpRate||0;
-    if(!cur) tgt.rates.crewDpRate=v; else if(Math.round(cur)!==Math.round(v)) out.conflicts.push('Mức DP khác nhau: dòng '+(ln.rank||'kiêm DP')+' '+Math.round(v).toLocaleString('vi-VN')+' ≠ '+Math.round(cur).toLocaleString('vi-VN')+' — kiểm tra file, app KHÔNG cập nhật mức DP'); });
-  if(out.conflicts.length) out.forEach(o=>{ if(dps.some(ln=>+ln.rates.crewDpRate>0&&Math.round(+ln.rates.crewDpRate)!==Math.round(+o.rates.crewDpRate||0))) delete o.rates.crewDpRate; });
+  dps.forEach(ln=>{ const v=+ln.rates.crewDpRate||0; if(!(v>0)) return; const tgt=out[0]; const cur=+tgt.rates.crewDpRate||0; const tgtHasDp=(+((tgt.days||{}).M)||0)>0;
+    /* v3.68.32: dòng có CÔNG DP quyết định mức DP (dòng chức danh chính không có công DP thì mức DP ở đó không dùng) */
+    if(!cur || !tgtHasDp){ tgt.rates.crewDpRate=v; tgt.dpUsd=!!ln.dpUsd; }
+    else if(Math.round(cur)!==Math.round(v) || !!ln.dpUsd!==!!tgt.dpUsd) out.conflicts.push('Mức DP khác nhau giữa 2 dòng có công DP: '+(ln.dpUsd?fmtUsd(v):fmtVnd(v))+' ≠ '+(tgt.dpUsd?fmtUsd(cur):fmtVnd(cur))+' — kiểm tra file, app KHÔNG cập nhật mức DP'); });
+  if(out.conflicts.length) out.forEach(o=>{ delete o.rates.crewDpRate; });
   return out; }
 /* mức HIỆU LỰC của thẻ (ô trống = app tự tính theo tỷ lệ thang) — để so với bảng lương không báo lệch giả */
 function _hpEffRates(cd, profile){ const prof=(PayrollService.profileByKey&&PayrollService.profileByKey(profile))||defaultPayProfiles().crew; const o=+cd.crewSeaRate||0, nb=+cd.netBase||0;
@@ -53019,7 +53102,9 @@ function _hpCardCheck(){ const H=window._HP; H.cards=[]; if(!/^crew/.test(H.prof
     /* mức dẫn xuất (dock, chờ HĐ, nghỉ ca) so theo mức đi biển / lương cơ bản MỚI của bảng lương — không báo lệch giả khi chỉ đổi mức đi biển */
     const cmp=ln=>{ const eff2=_hpEffRates(Object.assign({}, cd, {crewSeaRate:ln.rates.crewSeaRate||cd.crewSeaRate, netBase:ln.rates.netBase||cd.netBase}), H.profile);
       return Object.keys(ln.rates).filter(f=>(+ln.rates[f]||0)>0&&Math.abs(Math.round(+ln.rates[f])-Math.round(+(['crewSeaRate','netBase'].indexOf(f)>=0?eff:eff2)[f]||0))>=1).map(f=>({f, card:Math.round(+eff[f]||0), pay:+ln.rates[f]})); };
-    const diff=cmp(lines[0]); const nptDiff=(lines[0].npt!=null&&cur&&+cd.dependents!==+lines[0].npt)?{card:+cd.dependents||0, pay:+lines[0].npt}:null;
+    const diff=cmp(lines[0]).map(d=>(d.f==='crewDpRate'&&lines[0].dpUsd)?Object.assign(d,{usd:true}):d).filter(d=>!(d.f==='crewDpRate'&&lines[0].dpUsd&&String(cd.crewDpCcy||'').toUpperCase()==='USD'&&Math.round(+cd.crewDpRate||0)===Math.round(d.pay)));
+    if(lines[0].dpUsd && String(cd.crewDpCcy||'').toUpperCase()!=='USD' && !diff.some(d=>d.f==='crewDpRate')) diff.push({f:'crewDpRate', card:+cd.crewDpRate||0, pay:+lines[0].rates.crewDpRate||0, usd:true});
+    const nptDiff=(lines[0].npt!=null&&cur&&+cd.dependents!==+lines[0].npt)?{card:+cd.dependents||0, pay:+lines[0].npt}:null;
     const multi=lines.length>1;
     const status=!cur?'none':((diff.length||nptDiff||multi)?'diff':'ok');
     const conflicts=lines.conflicts||[]; H.cards.push({key:k, emp:e, name:o.name, lines, cur, diff, nptDiff, multi, conflicts, status:(status==='ok'&&conflicts.length)?'diff':status, on:status!=='ok', dates:lines.map(()=>'')}); }); }
@@ -53028,7 +53113,7 @@ function _hpCardsHtml(){ const H=window._HP; if(!H.cards||!H.cards.length) retur
   const n={ok:0,none:0,diff:0}; H.cards.forEach(c=>n[c.status]++);
   const rows=H.cards.filter(c=>c.status!=='ok').map((c,i)=>{ const ix=H.cards.indexOf(c);
     const what=c.status==='none'?('Chưa có thẻ — bảng lương: '+Object.keys(c.lines[0].rates).filter(f=>c.lines[0].rates[f]>0).map(f=>lbl[f]+' '+fm(c.lines[0].rates[f])).join(' · '))
-      :(c.diff.map(d=>lbl[d.f]+': thẻ '+fm(d.card)+' → bảng lương '+fm(d.pay)).join(' · ')+(c.nptDiff?(' · NPT: thẻ '+c.nptDiff.card+' → '+c.nptDiff.pay):''));
+      :(c.diff.map(d=>lbl[d.f]+': thẻ '+fm(d.card)+' → bảng lương '+(d.usd?fmtUsd(d.pay):fm(d.pay))).join(' · ')+(c.nptDiff?(' · NPT: thẻ '+c.nptDiff.card+' → '+c.nptDiff.pay):''));
     return `<tr><td><input type="checkbox" ${c.on?'checked':''} onchange="_HP.cards[${ix}].on=this.checked"></td><td><b>${esc(c.name)}</b>${c.emp?'':' <span style="color:var(--bad);font-size:10.5px">(hồ sơ mới)</span>'}</td><td style="font-size:11px">${esc(c.lines.map(l=>l.rank).filter(Boolean).join(' → '))}</td>
       <td style="font-size:11px">${esc(what)}${(c.conflicts||[]).map(x=>`<div style="color:#C62828;font-weight:700">⚠ ${esc(x)}</div>`).join('')}${c.multi?c.lines.slice(1).map((ln,j)=>`<div style="margin-top:3px;color:#0b3d91">Đổi mức giữa tháng — dòng ${j+2} (${esc(ln.rank||'')} · đi biển ${fm(ln.rates.crewSeaRate)}) áp dụng từ ngày <input type="date" value="${esc(c.dates[j+1]||'')}" min="${esc(H.period)}-02" max="${esc(H.period)}-31" onchange="_HP.cards[${ix}].dates[${j+1}]=this.value" style="font-size:11px"></div>`).join('')+'<div style="font-size:10.5px;color:var(--muted)">Trống = chỉ cập nhật dòng 1 từ ngày 01.</div>':''}</td></tr>`; }).join('');
   return `<div style="margin:10px 0 4px;font-weight:700">🪪 Đối chiếu thẻ lương với bảng lương đã chi — ${n.ok} khớp · <span style="color:#9a5a05">${n.diff} khác</span> · <span style="color:var(--bad)">${n.none} chưa có thẻ</span></div>
@@ -53040,7 +53125,8 @@ function _hpPutCard(e, date, engine, rank, rates, npt, reason, now, who){
   const base=Object.assign({}, (prev&&prev.data)||{}); const put={};
   ['netBase','crewSeaRate'].forEach(f=>{ const v=+rates[f]||0; if(v>0 && Math.round(v)!==Math.round(+base[f]||0)) put[f]=v; });
   const eff=_hpEffRates(Object.assign({}, base, put), engine||'crew');   /* dẫn xuất theo mức đi biển mới — chỉ ghi ô thật sự khác */
-  Object.keys(rates).forEach(f=>{ if(f==='netBase'||f==='crewSeaRate') return; const v=+rates[f]||0; if(v>0 && Math.abs(Math.round(v)-Math.round(+eff[f]||0))>=1) put[f]=v; });
+  const _dpC=rates._dpCcy; Object.keys(rates).forEach(f=>{ if(f==='netBase'||f==='crewSeaRate'||f==='_dpCcy') return; const v=+rates[f]||0; if(v>0 && (Math.abs(Math.round(v)-Math.round(+eff[f]||0))>=1 || (f==='crewDpRate'&&_dpC&&String(base.crewDpCcy||'')!==_dpC))) put[f]=v; });
+  if(_dpC && put.crewDpRate!=null) put.crewDpCcy=_dpC;
   const data=Object.assign(base, put); if(npt!=null) data.dependents=npt; if(!data.ccy) data.ccy='VND'; rates=put;
   if(!data.bhxhBase && data.netBase) data.bhxhBase=data.netBase;
   const before=prev?JSON.stringify(Object.fromEntries(Object.keys(rates).map(k=>[k,(prev.data||{})[k]||0]))):'(chưa có thẻ)'; const after=JSON.stringify(rates);
@@ -53052,7 +53138,7 @@ function _hpPutCard(e, date, engine, rank, rates, npt, reason, now, who){
 function _hpApplyCards(now, who){ const H=window._HP; let n=0; if(!H.cards||H.period>HB_CUTOFF) return 0;
   H.cards.filter(c=>c.on&&c.status!=='ok').forEach(c=>{ const e=c.emp||(H.rows.find(o=>(o.msnv||('N:'+_hpN(o.name)))===c.key)||{}).emp; if(!e) return;
     const reason='Theo bảng lương đã chi tháng '+H.period+' ('+H.fileName+')';
-    _hpPutCard(e, H.period+'-01', H.profile, c.lines[0].rank, c.lines[0].rates, c.lines[0].npt, reason, now, who); n++;
+    _hpPutCard(e, H.period+'-01', H.profile, c.lines[0].rank, Object.assign({}, c.lines[0].rates, c.lines[0].dpUsd?{_dpCcy:'USD'}:{}), c.lines[0].npt, reason, now, who); n++;
     if(c.multi) c.lines.slice(1).forEach((ln,j)=>{ const dt=c.dates[j+1]; if(/^\d{4}-\d{2}-\d{2}$/.test(dt||'') && dt.slice(0,7)===H.period) _hpPutCard(e, dt, H.profile, ln.rank, ln.rates, null, reason+' — dòng '+(j+2), now, who); }); });
   return n; }
 /* ── ĐỐI CHIẾU: app tính thử từ BCC + thẻ lương so với số đã chi ── */
@@ -53301,7 +53387,7 @@ function crewPayAuditOpen(sheetId){
     ${A.nWarn?`<div style="margin-top:4px;font-size:12px">Ghi chú cảnh báo <span style="color:var(--bad)">*</span>: <input id="qp-note" value="${esc(sh.payNote||'')}" style="width:60%"></div>`:''}`;
   const can=_crewTsCanManage()&&sh.status!=='confirmed';
   openModal('🔎 Kiểm tra BCC — '+esc(vn)+' '+esc(sh.period), body,
-    `<button class="btn-ghost" onclick="closeModal();renderVmCrewTs()">Đóng</button><button class="btn-sec" onclick="closeModal();openVesselTimesheet('${esc(sh.scope.value)}','${esc(sh.period)}')">Mở bảng</button>${can&&sh.shipSentAt?`<button class="btn-sec" style="color:var(--bad)" onclick="_crewTsReturn('${sh.id}')">↩ Trả về tàu</button>`:''}${can?`<button class="btn-primary" ${A.nBlock?'disabled title="Còn '+A.nBlock+' lỗi chặn"':''} onclick="crewPayRun('${sh.id}')">✔ Đúng — Tính lương</button>`:''}`);
+    `<button class="btn-ghost" onclick="closeModal();renderVmCrewTs()">Đóng</button><button class="btn-sec" onclick="closeModal();openVesselTimesheet('${esc(sh.scope.value)}','${esc(sh.period)}')">Mở bảng</button>${can&&sh.shipSentAt?`<button class="btn-sec" style="color:var(--bad)" onclick="_crewTsReturn('${sh.id}')">↩ Trả về tàu</button>`:''}${(sh.period<=HB_CUTOFF&&can)?`<button class="btn-sec" onclick="hbFromSheets('${esc(sh.period)}')" title="Tháng ≤ 09/2026: ghi / đóng / tách đoạn công tác theo BCC các tàu của tháng — xem bảng đối chiếu trước khi ghi">🧭 Ghi đoạn công tác theo BCC</button>`:''}${can?`<button class="btn-primary" ${A.nBlock?'disabled title="Còn '+A.nBlock+' lỗi chặn"':''} onclick="crewPayRun('${sh.id}')">✔ Đúng — Tính lương</button>`:''}`);
   try{ setModalWide(true); }catch(_){}
 }
 /* ── ✔ Tính lương ── */
@@ -53323,10 +53409,10 @@ function crewPayRun(sheetId){
         createdAt:new Date().toISOString(), createdBy:actorName()};
       S.payrollPeriods=S.payrollPeriods||[]; S.payrollPeriods.push(per); }
     else { per._flag=vesFlagCode(vid); per._fromBcc=sh.id; if(payStatusIdx(per.status)>=payStatusIdx('submitted')) per.status='draft'; }
-    per.payNote=note||per.payNote||'';
+    per.payNote=note||per.payNote||''; per._fxInfo=Object.assign({}, payFxNow(), {at:new Date().toISOString()});   /* v3.68.32 */
     /* dòng theo BCC */
     const have=new Set((per.rows||[]).map(r=>r.empId));
-    (sh.rows||[]).forEach(r=>{ const e=emps[r.empId]; if(!e) return; if(have.has(r.empId)) return;
+    (sh.rows||[]).forEach(r=>{ const e=emps[r.empId]; if(!e) return; if(have.has(r.empId)) return; if(!_isCrewType(e)) return;   /* v3.68.32 */
       per.rows.push({empId:r.empId, name:e.fullName||'', smartId:e.smartId||'', inputs:{}, result:{}}); });
     per.rows=(per.rows||[]).filter(r=>(sh.rows||[]).some(x=>x.empId===r.empId));
     try{ touchRecord(per); }catch(_){}
@@ -53485,13 +53571,26 @@ function _ctsVesselHtml(p, v){
   const iss=A?A.items.filter(x=>x.lvl==='block'||x.lvl==='warn'):[];
   const _ncHere=_ncAssignments().filter(x=>x.a.vesselId===v.id&&String(x.a.onboardDate||'').slice(0,10)<=p+'-31'&&(!x.a.actualSignoffDate||String(x.a.actualSignoffDate).slice(0,10)>=p+'-01'));
   const _ncHtml=_ncHere.length?`<div style="margin:6px 0;padding:6px 10px;border:1px solid #e6d3a3;background:#fffaf1;border-radius:6px;font-size:12px;color:#9a5a05">⚠ ${_ncHere.map(x=>esc((x.e.smartId||'')+' '+(x.e.fullName||'')+' ('+(PAY_PROFILE_LABEL[x.e.type]||x.e.type||'')+')')).join(', ')} có đoạn công tác ở tàu này nhưng <b>không phải thuyền viên</b> — không đưa vào BCC. ${isAdmin()?'<button class="btn-sec" style="font-size:11px;padding:2px 8px" onclick="ncCleanupOpen()">Rà &amp; xóa</button>':'Báo Admin kiểm tra.'}</div>`:'';
-  const acts=`<button class="btn-sec" style="font-size:12px" onclick="crewPayAuditOpen('${sh.id}')">🔎 Kiểm tra</button>${sh.status!=='confirmed'?` <button class="btn-sec" style="font-size:12px" onclick="openVesselTimesheet('${esc(v.id)}','${p}')">✎ Sửa BCC</button> <button class="btn-sec" style="font-size:12px;color:var(--bad)" onclick="ctsReturnToShip('${sh.id}')">↩ Trả về tàu</button> <button class="btn-primary" style="font-size:12px" ${A&&A.nBlock?'disabled title="Còn lỗi chặn"':''} onclick="crewPayAuditOpen('${sh.id}')">✔ Tính lương</button>`:''}${per?` <button class="btn-primary" style="font-size:12px" onclick="crewPayBoardOpen('${per.id}')">💰 Bảng lương tàu</button>`:''}`;
+  const acts=`<button class="btn-sec" style="font-size:12px" onclick="bccPreview('${sh.id}')">👁 Xem mẫu BCC</button> <button class="btn-sec" style="font-size:12px" onclick="crewPayAuditOpen('${sh.id}')">🔎 Kiểm tra</button>${sh.status!=='confirmed'?` <button class="btn-sec" style="font-size:12px" onclick="openVesselTimesheet('${esc(v.id)}','${p}')">✎ Sửa BCC</button> <button class="btn-sec" style="font-size:12px;color:var(--bad)" onclick="ctsReturnToShip('${sh.id}')">↩ Trả về tàu</button> <button class="btn-primary" style="font-size:12px" ${A&&A.nBlock?'disabled title="Còn lỗi chặn"':''} onclick="crewPayAuditOpen('${sh.id}')">✔ Tính lương</button>`:''}${per?` <button class="btn-primary" style="font-size:12px" onclick="crewPayBoardOpen('${per.id}')">💰 Bảng lương tàu</button>`:''}`;
   return `<div style="display:flex;justify-content:space-between;align-items:center;margin:8px 0;flex-wrap:wrap;gap:6px"><div><b style="font-size:14px">${esc(v.name)}</b> ${vesFlagShort(v.id)?`<span style="background:#eef4ff;color:#0b3d91;border-radius:8px;padding:0 5px;font-size:10px;font-weight:700">${esc(vesFlagShort(v.id))}</span>`:''} · ${esc(p)} · nguồn: ${esc(_ctsSrc(sh)||'—')} · ${(sh.rows||[]).length} thuyền viên</div>${_ctsFlow(sh,per,A)}</div>
     ${_ncHtml}<div class="tbl-scroll" style="overflow:auto;max-height:56vh"><table class="tbl" style="font-size:11px">${head}${body}</table></div>
     <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:6px;font-size:11px">${CTS_CODES.map(c=>`<span style="background:${c[2]};padding:0 6px;border-radius:4px">${c[1]}</span>`).join('')}<span style="background:#fecaca;color:#C62828;padding:0 6px;border-radius:4px;font-weight:700">mã lạ</span><span style="flex:1"></span>${acts}</div>
     ${iss.length?`<div style="margin-top:8px"><b>🔎 Lỗi và cảnh báo</b><table class="tbl" style="font-size:12px;margin-top:4px"><thead><tr><th>Mức</th><th>Nội dung</th><th>Chi tiết</th></tr></thead><tbody>${iss.map(x=>`<tr><td><span style="border-radius:9px;padding:0 6px;font-size:11px;font-weight:700;${x.lvl==='block'?'background:#fdecec;color:#C62828':'background:#fff7e0;color:#9a5a05'}">${x.lvl==='block'?'Chặn':'Cảnh báo'}</span></td><td>${esc(x.t)}</td><td style="font-size:11.5px">${esc(x.detail)}</td></tr>`).join('')}</tbody></table></div>`:''}`;
 }
-function ctsRender(box, p, header){
+/* v3.68.32: dựng bảng đối chiếu "Ghi đoạn công tác theo BCC" từ BCC tàu ĐÃ CÓ trong app (tháng ≤ 09/2026) */
+function hbFromSheets(p){ const back={DB1:'B1',DB2:'B2',BO2:'B3',BO:'B4',DOCK:'D',NGHICA:'N1',DP:'DP'};
+  const sheets=(S.bccSheets||[]).filter(sh=>sh&&!sh._deleted&&sh.period===p&&sh.scope&&sh.scope.type==='vessel'&&(sh.rows||[]).length);
+  if(!sheets.length){ toast('Tháng '+p+' chưa có BCC tàu nào','warn'); return; }
+  const files=sheets.map(sh=>{ const rows=[]; (sh.rows||[]).forEach(r=>{ const e=hrmEmpById(r.empId); if(!e||!_isCrewType(e)) return; const days={}; Object.keys(r.days||{}).forEach(d=>{ const c=back[r.days[d]]; if(c) days[d]=c; });
+      rows.push({name:e.fullName||'', rank:r.rank||e.title||'', days, tot:{}}); if(Object.keys(r.dpExtra||{}).length){ const dd={}; Object.keys(r.dpExtra).forEach(d=>dd[d]='DP'); rows.push({name:e.fullName||'', rank:'kiêm DP', days:dd, tot:{}}); } });
+    return {fileName:'BCC tàu '+(anyVesselName(sh.scope.value)||'')+' (trong app)', ok:true, P:{period:p, vesselName:anyVesselName(sh.scope.value)||'', rows}, vid:sh.scope.value, vname:anyVesselName(sh.scope.value)||'', bad:0}; });
+  window._HB={period:p, files, choice:{}, closeChoice:{}, fromSheets:true}; closeModal(); hbBuild(); hbRender(); }
+/* chạy 1 lần / phiên SAU khi dữ liệu đã tải: điền cờ tàu còn trống + gỡ NV không phải thuyền viên không có công khỏi BCC tàu */
+function _v32AutoFix(){ if(window._V32_FIX) return; window._V32_FIX=1; let nf=0, np=0;
+  try{ const needF=(S.vessels||[]).some(v=>v&&!v._deleted&&!String(v.flagState||v.flag||'').trim()); const needP=(S.bccSheets||[]).some(sh=>sh&&sh.scope&&sh.scope.type==='vessel'&&sh.status!=='confirmed'&&(sh.rows||[]).some(r=>{ const e=hrmEmpById(r.empId); return e&&!_isCrewType(e)&&!Object.values(r.days||{}).some(v=>String(v||'').trim()); }));
+    if(!needF&&!needP) return;
+    commitMutation(()=>{ nf=_migrateVesselFlags(); np=_ncPurgeSheets(); }, {action:'v32_autofix', fields:['vessels','bccSheets'], onOk:()=>{ if(nf||np) try{ logAuditEvent('v32_autofix',{flags:nf, purged:np}); }catch(_){} }}); }catch(e){ console.warn('[v32 autofix]',e); } }
+function ctsRender(box, p, header){ try{ _v32AutoFix(); }catch(_){}
   const vs=(typeof fleetVessels==='function'?fleetVessels():[]).filter(v=>v&&!v._deleted&&!v.isShoreUnit);
   const tab=window._CTS_TAB; const cur=vs.find(v=>v.id===tab);
   const tb=(k,l)=>`<button class="${(tab===k||(!cur&&k==='sum'))?'btn-primary':'btn-sec'}" style="font-size:12px;border-radius:6px 6px 0 0" onclick="window._CTS_TAB='${k}';renderVmCrewTs()">${l}</button>`;
@@ -55014,6 +55113,7 @@ async function _dmClsSave(opts){
   try{ logAuditEvent('vr_classify',{file:row.fileName, n:recs.length}); }catch(e){}
   toast('✓ Đã phân loại'+(recs.length?' — '+recs.length+' mục vào Vessel Requests':''),'good'); _dmRefreshBadge(); try{ _vrBadge(); }catch(e){}
   if(opts.noNav) return recs;
+  { const ts=recs.find(x=>x.type==='TIMESHEET'); if(ts){ const _ix=(window._DM_ROWS||[]).indexOf(row); if(_ix>=0){ closeModal(); toast('Bảng chấm công → chuyển vào BCC tàu','good'); dmFileToBcc(_ix); return recs; } } }   /* v3.68.32 (Sếp): phân loại "Bảng chấm công" → đi thẳng vào BCC tàu */
   const fuel=recs.find(x=>x.type==='FUEL');
   if(fuel){ const d=(S.darReports||[]).filter(r=>r&&!r._deleted&&r.vesselId===fuel.vesselId&&r.date===fuel.date&&!darIsSuperseded(r))[0];
     if(d){ closeModal(); darForm(fuel.vesselId, d.id); toast('⛽ DAR ngày '+_cdD(fuel.date)+' — kiểm tra / chọn nguồn cấp dầu','warn'); return recs; }
@@ -55700,7 +55800,10 @@ function _dmInboxPaint(tab, L, stale){
     const act0=tab==='REVIEW'||tab==='INBOX'?`<button class="btn-sec" style="font-size:11px" onclick="_dmReview(${idx})">🔎 Xem &amp; xử lý</button>`
       :(r.ref&&(S.darReports||[]).find(x=>x&&x.id===r.ref)?`<a href="javascript:void 0" onclick="closeModal();darForm('${esc((S.darReports.find(x=>x.id===r.ref)||{}).vesselId||'')}','${esc(r.ref)}')">Mở DAR</a>`:'');
     const _bccSh=(r.ref&&(S.bccSheets||[]).find(x=>x&&x.id===r.ref))||null;   /* v3.68.25: dòng đã ghi → mở BCC tàu, tránh chuyển trùng */
-    const _toBcc=(_sbIsTimesheet(r)&&_sbXls(r)&&tab!=='REJECTED'&&tab!=='DUPLICATE')?(_bccSh?`<button class="btn-sec" style="font-size:11px;color:#188038;border-color:#188038" onclick="closeModal();_CREWTS_P='${esc(_bccSh.period)}';window._CTS_TAB='${esc(_bccSh.scope.value)}';vmModSwitchView('crewts')">✓ Đã ghi — Mở BCC tàu</button> <button class="btn-ghost" style="font-size:10.5px" onclick="_dmToBcc(${idx})" title="Ghi lại từ file này — app đối chiếu với BCC đang có">Ghi lại</button>`:`<button class="btn-primary" style="font-size:11px" onclick="_dmToBcc(${idx})" title="Đọc BCC tàu (Excel) → ghi vào BCC tàu trong app → kiểm tra theo QĐ">📥 Chuyển thành BCC tàu</button>`):'';   // v3.67.93
+    const _isXP=(_sbXls(r)||/\.pdf$/i.test(String(r.fileName||''))||String(r.ext||'').toLowerCase()==='pdf'), _isTs=_sbIsTimesheet(r);   /* v3.68.32 (Sếp): đã phân loại vẫn kéo lại được vào BCC — mọi file Excel / PDF */
+    const _toBcc=(_isXP&&tab!=='REJECTED'&&tab!=='DUPLICATE')?(_bccSh?`<button class="btn-sec" style="font-size:11px;color:#188038;border-color:#188038" onclick="closeModal();_CREWTS_P='${esc(_bccSh.period)}';window._CTS_TAB='${esc(_bccSh.scope.value)}';vmModSwitchView('crewts')">✓ Đã ghi — Mở BCC tàu</button> <button class="btn-ghost" style="font-size:10.5px" onclick="dmFileToBcc(${idx})" title="Ghi lại từ file này — app đối chiếu với BCC đang có">Ghi lại</button>`
+      :(_sbXls(r)?`<button class="${_isTs?'btn-primary':'btn-sec'}" style="font-size:11px" onclick="dmFileToBcc(${idx})" title="Đọc BCC tàu (Excel) → ghi vào BCC tàu trong app">📥 ${_isTs?'Chuyển thành BCC tàu':'→ BCC tàu'}</button>`
+        :`<button class="btn-sec" style="font-size:11px" onclick="dmFileToBcc(${idx})" title="PDF: gắn làm bản ký vào BCC tàu tháng đó">📎 ${_isTs?'Gắn bản ký vào BCC':'→ BCC (bản ký)'}</button>`)):'';
     return `<tr><td class="mono" style="font-size:11px;white-space:nowrap">${esc(String(r.receivedAt||'').slice(0,16).replace('T',' '))}</td><td><b>${esc(r.vessel||'?')}</b></td>
       <td style="font-size:11.5px"><a href="${esc(r.url||'#')}" target="_blank" rel="noopener">${esc(r.fileName||'')}</a></td>
       <td style="font-size:11px;color:${tab==='REVIEW'?'var(--bad)':'var(--muted)'}">${esc(r.note||'').split(' | ').map(x=>'• '+x).join('<br>')}${r.doneBy?`<div style="color:var(--muted)">${esc(r.doneBy)} ${esc(String(r.doneAt||'').slice(0,16).replace('T',' '))}</div>`:''}</td><td style="white-space:nowrap">${_toBcc} ${act0} ${tab!=='REJECTED'&&tab!=='DUPLICATE'?_cls:''}</td></tr>`; }).join('');
@@ -59110,6 +59213,7 @@ function apResidualSnap(rem, ccy){
   return (Math.abs(+rem||0)<tol)?0:(+rem||0);
 }
 function arRemaining(r){
+  { const _pv=_propLineRem(r); if(_pv!=null) return apResidualSnap(_pv, r.ccy); }   /* v3.68.33 */
   const paid=(r.payments||[]).reduce((s,p)=>s+(+p.amount||0),0);
   return apResidualSnap((+r.amount||0)-paid, r.ccy);   /* v3.18.72 */
 }
@@ -59128,8 +59232,45 @@ function arPaidTotal(r){return (+r.amount||0)-arRemaining(r);}
    Gốc hiệu lực: có settleValue (đã chốt quyết toán) → dùng nó; chưa chốt nhưng đã nhập GIÁ TRỊ THỰC HIỆN
    (actualValue) → dùng nó; còn lại → giá dự kiến (amount). KHÔNG ghi đè amount — giữ vết + P&L điều chỉnh
    chênh như hiện hành. Giá "giảm theo mỗi đợt" là số CÒN PHẢI TRẢ hiển thị, đúng xác nhận của Sếp. */
+/* ════════════════════════════════════════════════════════════════════════════════════════════════
+   v3.68.33 (Sếp chốt): THANH TOÁN THEO PHIẾU ĐỀ XUẤT — một ô "Thanh toán đợt này" cho CẢ PHIẾU, "Còn lại" của
+   CẢ PHIẾU; không tick / không phân theo dòng. Công nợ theo phiếu / NCC.
+   · Đợt chi theo phiếu lưu 1 lần (pay._prop = batchId) trên dòng đầu phiếu → sổ ngân hàng / bảng kê đúng 1 giao dịch.
+   · Số còn lại từng dòng (dùng nội bộ cho các màn cũ) được suy ra từ số của phiếu — KHÔNG hiện theo dòng.
+   ════════════════════════════════════════════════════════════════════════════════════════════════ */
+window._PROP_V=window._PROP_V||0;
+function _propBase(r){ return (r.settleValue!=null&&r.settleValue!=='')?(+r.settleValue||0):((r.actualValue!=null&&r.actualValue!=='')?(+r.actualValue||0):(+r.amount||0)); }
+function _propIndex(){ const L=S.payables||[]; const key=L.length+':'+window._PROP_V; const c=window._PROPC;
+  if(c&&c.key===key&&Date.now()-c.t<400) return c.map; const map={};
+  L.forEach(r=>{ if(!r||r._deleted||r._cashClear||!r.batchId||r._isCreditNote) return; (map[r.batchId]=map[r.batchId]||[]).push(r); });
+  Object.keys(map).forEach(k=>{ const lines=map[k].sort((a,b)=>String(a.createdAt||'').localeCompare(String(b.createdAt||''))||String(a.id).localeCompare(String(b.id)));
+    if(lines.length<2){ delete map[k]; return; } const hasProp=lines.some(r=>(r.payments||[]).some(p=>p&&p._prop));
+    const base=lines.reduce((t,r)=>t+_propBase(r),0); const own=r=>(r.payments||[]).filter(p=>p&&!p._prop).reduce((t,p)=>t+(+p.amount||0),0);
+    const propPaid=lines.reduce((t,r)=>t+(r.payments||[]).filter(p=>p&&p._prop).reduce((a,p)=>a+(+p.amount||0),0),0);
+    const allPaid=lines.reduce((t,r)=>t+(r.payments||[]).reduce((a,p)=>a+(+(p&&p.amount)||0),0),0);
+    let left=propPaid; const rem={}; lines.forEach(r=>{ const r0=_propBase(r)-own(r); const take=Math.max(0,Math.min(r0,left)); left-=take; rem[r.id]=r0-take; });
+    if(left>0.001) rem[lines[lines.length-1].id]-=left;   /* trả dư → dòng cuối âm */
+    map[k]={batchId:k, lines, head:lines[0], hasProp, base, paid:allPaid, rem:base-allPaid, lineRem:rem, ccy:lines[0].ccy||'VND'}; });
+  window._PROPC={key, t:Date.now(), map}; return map; }
+function propOf(r){ if(!r||!r.batchId) return null; return _propIndex()[r.batchId]||null; }
+function _propLineRem(r){ const P=propOf(r); if(!P||!P.hasProp) return null; const v=P.lineRem[r.id]; return (v==null)?null:v; }
+function propPayments(P){ const out=[]; P.lines.forEach(r=>(r.payments||[]).forEach(p=>{ if(p&&!p._feeOnly&&(+p.amount||0)) out.push(Object.assign({_line:r.id}, p)); })); return out.sort((a,b)=>String(a.date||'').localeCompare(String(b.date||''))); }
+function propLabel(P){ const h=P.head||{}; const no=h.dnttNo||((h.dnttNoByDot||{})['1'])||''; return no?('Phiếu ĐX '+no):('Phiếu ĐX lập '+_cdD(String(h.createdAt||h.issueDate||'').slice(0,10))+(h.createdBy?(' · '+h.createdBy):'')); }
+/* ── Công nợ theo phiếu đề xuất ── */
+function propLedgerOpen(){ const M=_propIndex(); const byV={}; Object.values(M).forEach(P=>{ const k=String(P.head.partner||'').trim(); (byV[k]=byV[k]||[]).push(P); });
+  const fm=(v,c)=>fmtOrig(v,c||'VND'); const F=window._PLF=window._PLF||{q:'', open:''};
+  const vend=Object.keys(byV).filter(k=>!F.q||_hbKey(k).indexOf(_hbKey(F.q))>=0).sort((a,b)=>a.localeCompare(b,'vi'));
+  const rows=vend.map(k=>{ const L=byV[k]; const byC={}; L.forEach(P=>{ const c=P.ccy; const o=byC[c]=byC[c]||{base:0,paid:0,rem:0}; o.base+=P.base; o.paid+=P.paid; o.rem+=P.rem; });
+    const open=F.open===k; const sub=open?L.sort((a,b)=>String(b.head.createdAt||'').localeCompare(String(a.head.createdAt||''))).map(P=>{ const pays=propPayments(P);
+      return `<tr style="background:#f8fafc"><td></td><td style="font-size:12px"><b>${esc(propLabel(P))}</b><div style="font-size:11px;color:var(--muted)">${esc(String(P.head.payContent||P.head.desc||'').slice(0,90))} · ${P.lines.length} dòng</div>${pays.length?`<div style="font-size:10.5px;color:#188038">${pays.map(p=>esc(_cdD(String(p.date||'').slice(0,10))+' '+fm(p.amount,P.ccy)+(p._bkId?(' ('+p._bkId+')'):''))).join(' · ')}</div>`:''}</td><td class="r">${fm(P.base,P.ccy)}</td><td class="r">${fm(P.paid,P.ccy)}</td><td class="r" style="font-weight:700;color:${P.rem>0.5?'#C62828':'#188038'}">${fm(P.rem,P.ccy)}</td></tr>`; }).join(''):'';
+    return `<tr style="cursor:pointer" onclick="window._PLF.open=(window._PLF.open===${JSON.stringify(k).replace(/"/g,'&quot;')}?'':${JSON.stringify(k).replace(/"/g,'&quot;')});propLedgerOpen()"><td>${open?'▾':'▸'}</td><td><b>${esc(k)}</b> <span style="color:var(--muted);font-size:11px">${L.length} phiếu</span></td>${['base','paid','rem'].map(f=>`<td class="r">${Object.keys(byC).map(c=>fm(byC[c][f],c)).join('<br>')}</td>`).join('')}</tr>${sub}`; }).join('');
+  openModal('📑 Công nợ theo phiếu đề xuất (phiếu nhiều dòng)', `<div style="display:flex;gap:8px;align-items:center;margin-bottom:6px;font-size:12.5px"><input placeholder="Tìm NCC" value="${esc(F.q)}" onchange="window._PLF.q=this.value;propLedgerOpen()" style="padding:4px 8px;min-width:240px"><span style="color:var(--muted)">Mỗi phiếu: tổng · đã thanh toán · còn lại — không theo từng hóa đơn</span></div>
+    <div class="tbl-scroll" style="max-height:60vh;overflow:auto"><table class="tbl" style="font-size:12.5px"><thead><tr><th style="width:18px"></th><th>NCC / phiếu đề xuất</th><th class="r">Tổng phiếu</th><th class="r">Đã thanh toán</th><th class="r">Còn lại</th></tr></thead><tbody>${rows||'<tr><td colspan="5" style="text-align:center;color:var(--muted);padding:12px">Không có phiếu nhiều dòng</td></tr>'}</tbody></table></div>`,
+    `<button class="btn-ghost" onclick="closeModal()">Đóng</button>`); try{ setModalWide(true); }catch(_){} }
+
 function apRemainingEff(r){
   if(!r) return 0;
+  { const _pv=_propLineRem(r); if(_pv!=null) return apResidualSnap(_pv, r.ccy); }   /* v3.68.33: phiếu trả theo PHIẾU → số của dòng suy từ phiếu */
   const base=(r.settleValue!=null && r.settleValue!=='')?(+r.settleValue||0)
            :((r.actualValue!=null && r.actualValue!=='')?(+r.actualValue||0):(+r.amount||0));
   const paid=(r.payments||[]).reduce((t,x)=>t+(+x.amount||0),0);
@@ -119421,7 +119562,7 @@ function _modMyBccDetailOpen(periodArg){
     ${_sent&&sheet.status==='draft'?`<div style="background:rgba(24,128,56,.08);border:1px solid var(--good);border-radius:8px;padding:8px 12px;margin-bottom:10px;font-size:12px">✅ ${en?'Sent to HR':'Đã gửi HR'} ${esc(String(row.selfSubmittedAt).slice(0,16).replace('T',' '))} — ${en?'to change, ask your manager / HR to return it':'muốn sửa: Trưởng bộ phận / HR trả lại'}</div>`:''}<div style="font-size:11px;color:var(--muted);margin-bottom:6px">${en?'Light grey = auto-filled (normal working day) · bold blue = your change':'Chữ mờ = app tự điền công thường · chữ đậm xanh = bạn đã sửa'}</div><div id="mybcc-list" style="${(sheet.status!=='draft'||_sent)?'pointer-events:none;opacity:.6':''}">${rowsHtml}</div>
     ${hasOt?`<div style="margin-top:8px;font-size:11px;color:var(--muted)">✨ = ${en?'auto-suggested working day, change only for exceptions':'tự gợi ý công thường, chỉ đổi khi có ngoại lệ'}</div>`:''}
   `;
-  const _pb=`<button class="btn-sec" onclick="bccPrintPdf('${esc(sheet.id)}','${esc(empId)}')">🖨 ${en?'Print PDF':'In PDF'}</button>`;
+  const _pb=`<button class="btn-sec" onclick="bccPreview('${esc(sheet.id)}','${esc(empId)}')">👁 ${en?'Preview':'Xem trước'}</button> <button class="btn-sec" onclick="bccPrintPdf('${esc(sheet.id)}','${esc(empId)}')">🖨 ${en?'Print PDF':'In PDF'}</button>`;
   openModal((en?'📅 My timesheet — ':'📅 BCC chi tiết — ')+period, body,
     (sheet.status==='draft' && !_sent)
       ? `<button class="btn-ghost" onclick="closeModal()">${en?'Cancel':'Hủy'}</button>${_pb}<button class="btn-sec" onclick="_modMyBccSubmit('${esc(sheet.id)}','${esc(empId)}',false)">💾 ${en?'Save':'Lưu'}</button><button class="btn-primary" onclick="_modMyBccSubmit('${esc(sheet.id)}','${esc(empId)}',true)">📤 ${en?'Send to HR':'Gửi HR'}</button>`
@@ -122044,9 +122185,9 @@ function salaryProfileBuildInp(empId, period, _vForce){
   if(v.engine==='crew'||v.engine==='crew_khoan')
     /* v3.19.32 (Sếp chốt 27/8): nền BHXH thuyền viên TỰ theo nguyên tắc = LCB khi thẻ để trống; thẻ ghi nền khác (sửa tay) thì giữ số tay.
        Không cần bấm nút điền — kéo thẻ/tính lại là áp. */
-  { const _usd=String(d.ccy||'VND').toUpperCase()==='USD'; const fx=_usd?fxRate():1; const Q=k=>Math.round(R(k)*fx);   /* v3.68.07 (Sếp): thẻ bằng USD → kỳ lương VND quy đổi theo TỶ GIÁ TẠM TÍNH = tỷ giá app; lương cơ bản (nền BHXH) theo QĐ luôn VND */
-    return {N:R('netBase'), O:Q('crewSeaRate'), T:Q('crewDpRate'), F:F, _restM:R('crewRestSalary'), _dockR:Q('crewDockRate'), _vnR:Q('crewStbVnRate'), _fnR:Q('crewStbFnRate'), _restR:Q('crewRestRate'),   // v3.68.03: mức riêng / ngày
-            _bhxhBase:(R('bhxhBase')>0?R('bhxhBase'):R('netBase')), _bhxhAuto:!(R('bhxhBase')>0), _fx:(_usd?fx:0), _v:v}; }
+  { const _usd=String(d.ccy||'VND').toUpperCase()==='USD'; const _dpUsd=!_usd&&String(d.crewDpCcy||'').toUpperCase()==='USD'; const _fxN=(_usd||_dpUsd)?(+payFxNow().rate||fxRate()):1; const fx=_usd?_fxN:1; const Q=k=>Math.round(R(k)*fx);   /* v3.68.32: tỷ giá = tỷ giá thanh toán NH ngày gần nhất (≤ ngày tính lương); mức DP có thể bằng USD */   /* v3.68.07 (Sếp): thẻ bằng USD → kỳ lương VND quy đổi theo TỶ GIÁ TẠM TÍNH = tỷ giá app; lương cơ bản (nền BHXH) theo QĐ luôn VND */
+    return {N:R('netBase'), O:Q('crewSeaRate'), T:(_dpUsd?Math.round(R('crewDpRate')*_fxN):Q('crewDpRate')), _dpUsd:(_dpUsd?R('crewDpRate'):0), F:F, _restM:R('crewRestSalary'), _dockR:Q('crewDockRate'), _vnR:Q('crewStbVnRate'), _fnR:Q('crewStbFnRate'), _restR:Q('crewRestRate'),   // v3.68.03: mức riêng / ngày
+            _bhxhBase:(R('bhxhBase')>0?R('bhxhBase'):R('netBase')), _bhxhAuto:!(R('bhxhBase')>0), _fx:((_usd||_dpUsd)?_fxN:0), _cardUsd:_usd, _v:v}; }
 
   /* KỸ THUẬT — engine payComputeTech ĐÃ CÓ SẴN Office/Sea/Dock Day:
        H = mức biển/ngày · I = mức VP/ngày · J = mức dock/ngày (trống → engine tự I×1.5)
