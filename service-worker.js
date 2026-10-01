@@ -17,7 +17,7 @@
    ⚠ QUAN TRỌNG: tăng SW_VERSION mỗi khi release bản mới của index.html để buộc trình duyệt bỏ cache cũ.
 */
 
-const SW_VERSION = 'v3.68.72';
+const SW_VERSION = 'v3.68.77';
 const CACHE_NAME = `seahorse-${SW_VERSION}`;
 
 // Pre-cache critical files on install
@@ -100,7 +100,7 @@ self.addEventListener('fetch', event => {
     //   lúc reload cache đã được fetch nền cập nhật → lên bản mới nhanh. SW_VERSION bump
     //   khi release vẫn xóa cache cũ + precache bản mới như trước.
     event.respondWith((async () => {
-      const cached = await caches.match(req);
+      const cached = (await caches.match(req)) || (await caches.match(req, {ignoreSearch:true}));   /* v3.68.74: ?v=…/?full=… vẫn dùng được bản đã lưu */
       const networkUpdate = fetch(req, {cache:'no-store'}).then(res => {
         if (res.ok) {
           const clone = res.clone();
@@ -115,10 +115,11 @@ self.addEventListener('fetch', event => {
         if (quick && quick.ok) return quick;
         return cached;
       }
-      // Chưa có cache (lần cài đầu) → chờ mạng; fail → thử cache index chung
-      const net = await networkUpdate;
+      // Chưa có cache (lần cài đầu) → chờ mạng tối đa 15s; quá hạn / lỗi → thử cache index chung
+      const net = await Promise.race([networkUpdate, new Promise(r => setTimeout(() => r(null), 15000))]);
       if (net) return net;
-      return caches.match('./index.html');
+      const any = await caches.match('./index.html', {ignoreSearch:true});
+      return any || networkUpdate.then(r => r || new Response('Không kết nối được máy chủ ERP — kiểm tra mạng rồi tải lại trang.', {status:503, headers:{'Content-Type':'text/plain; charset=utf-8'}}));
     })());
   } else {
     // Cache-first for assets

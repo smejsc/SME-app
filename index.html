@@ -1995,6 +1995,7 @@ input[list="usi-codes"][placeholder^="Chưa khớp"]{ border:2px solid #c0392b !
           <input type="checkbox" id="staff-filter-unreviewed" onchange="renderStaff()"> ⚠ Chỉ NV chưa rà soát
         </label>
         <input type="text" id="staff-search" placeholder="🔍 Tìm tên/email…" oninput="renderStaff()" style="padding:7px 12px;border:1px solid var(--rule);border-radius:8px;font-size:13px;width:180px">
+        <button class="btn-sec" onclick="cfgRolesImportPick()" title="Phục hồi Vai trò / Module / Công ty cho các tài khoản từ file backup JSON (phần auth.users không mã hóa)">Nhập vai trò từ file backup</button>
         <button class="btn-sec" onclick="openAcctEmpAudit()" title="Đối chiếu email tài khoản ↔ email hồ sơ nhân viên — phát hiện gắn nhầm hồ sơ">🔗 Đối chiếu hồ sơ</button>
         <button class="btn-primary" onclick="staffAddUser()">+ Thêm nhân viên</button>
       </div>
@@ -4608,7 +4609,7 @@ input[list="usi-codes"][placeholder^="Chưa khớp"]{ border:2px solid #c0392b !
         <input type="file" id="hrm-att-file" accept=".xlsx,.xls" style="display:none" onchange="hrmAttImportExcel(this)">
         <button class="btn-ghost v57-hide" id="hrm-att-btn-xls" style="padding:6px 14px;font-size:13px;display:none" onclick="hrmAttPickFile()">📥 Import BCC (Excel đã ký)</button>
         <!-- v3.20.357 (Sếp: "gộp H1 vào H2"): nút tạo BCC web ĐÚNG vị trí cuối cùng — ngay tại đây. -->
-        <button class="btn-primary v57-hide" style="padding:6px 14px;font-size:13px" onclick="bccOpenCreateModal()" title="Mở luồng tạo BCC web theo phòng ban/tàu được cấp — nạp sẵn danh sách NV, không cần Excel">➕ Tạo bảng chấm công</button>
+        <button class="btn-primary" id="hrm-att-btn-create" style="padding:6px 14px;font-size:13px;display:none" onclick="bccOpenCreateModal()" title="NV Nhân sự chấm công thay mọi bộ phận (v3.68.75) — nạp sẵn danh sách NV">➕ Tạo bảng chấm công</button>
         <input type="file" id="hrm-att-pdf" accept="application/pdf" multiple style="display:none" onchange="hrmAttImportBsrPdf(this)">
         <button class="btn-ghost v57-hide" id="hrm-att-btn-pdf" style="padding:6px 14px;font-size:13px;display:none" onclick="document.getElementById('hrm-att-pdf').click()">📥 Import Timesheet BSR (PDF — nhiều file)</button>
         <span id="hrm-att-status" style="font-size:13px;color:var(--muted)"></span>
@@ -4701,7 +4702,7 @@ const WH_TYPES = {
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.68.72';
+const APP_VERSION='3.68.77';
 /* HOTFIX 3.12.17-email: CHẶN TRIỆT ĐỂ gửi email TỰ ĐỘNG (mất kiểm soát — spam quota Google).
    Email phải do NV được phân quyền CHỦ ĐỘNG chọn gửi. Cờ này:
    (1) chặn auto-SCAN tạo email (hrmScanExpiries/vesselCertScanExpiries);
@@ -7149,6 +7150,7 @@ async function _doCfgSyncPush(){
 
   try{
     const result=await pushCfgToCloud(pw, extraUserPasswords);
+    try{ const _c=getAuthConfig(); if(_c){ delete _c._cfgDirtyAt; setAuthConfig(_c); } }catch(_){}   /* v3.68.75 */
     closeModal();
     const msg=nvProvidedCount>0
       ? `Đã đẩy auth lên cloud — admin + ${nvProvidedCount} NV có thể pull về ngay`
@@ -11865,6 +11867,7 @@ function deleteUser(idx){
         window._deletedUserNames=Array.isArray(window._deletedUserNames)?window._deletedUserNames:[];
         window._deletedUserNames.push(_delName);
       }catch(e){}
+      cfg._cfgDirtyAt=new Date().toISOString();   /* v3.68.76: xóa tài khoản cũng là thay đổi phân quyền chưa đẩy cloud */
       setAuthConfig(cfg);
       toast('Đã xóa '+_delName);
       closeModal();
@@ -20815,6 +20818,22 @@ function renderTimesheetPage(){
     </div>
     ${aggHtml}`;
 }
+/* ════ v3.68.77 (Sếp: "Các module tự động mở BCC nối tiếp theo tháng — không cần NV chấm công tạo bảng"):
+   Mỗi phạm vi (phòng ban / Expat / GEO / O&M — không gồm tàu) đã có BCC tháng trước → app tự tạo BCC tháng hiện tại, danh sách người =
+   NV đang thuộc phạm vi (nối tiếp + người mới), công trống, Nháp. Id cố định theo phạm vi+tháng → nhiều máy cùng tạo cũng chỉ 1 bảng. ════ */
+function _bccAutoId(period, scope){ return 'BCC-AUTO-'+String(_bccKey({period, scope})).replace(/[^A-Za-z0-9]+/g,'_'); }
+function bccAutoRollover(onlyScopes){ if(!CURRENT_USER&&!isAdmin()) return 0; const period=todayISO().slice(0,7); const [Y,M]=period.split('-').map(Number);
+  let scopes=onlyScopes||(isAdmin()||_hrTimesheetAll(CURRENT_USER)?bccAllPossibleScopes():bccMyOwnScopes()); scopes=(scopes||[]).filter(sc=>sc&&sc.type!=='vessel');
+  if(!scopes.length) return 0; const key=period+'|'+scopes.map(sc=>_bccKey({period,scope:sc})).join(','); window._BCC_AUTO_DONE=window._BCC_AUTO_DONE||{}; if(window._BCC_AUTO_DONE[key]) return 0; window._BCC_AUTO_DONE[key]=1;
+  let made=0; const now=new Date().toISOString();
+  scopes.forEach(sc=>{ try{ if(_bccFindSame(period, sc)) return; const kNoP=_bccKey({period:'X',scope:sc}).slice(2);
+      const prev=(S.bccSheets||[]).filter(x=>x&&!x._deleted&&x.scope&&x.period<period&&_bccKey(x).slice(x.period.length+1)===kNoP).sort((a,b)=>String(b.period).localeCompare(String(a.period)))[0]; if(!prev) return;
+      const roster=bccRosterForScope(sc)||[]; if(!roster.length) return; const isSummary=!!bccSchemaForScope(sc); const mode=prev.mode||(isSummary?'summary':'daily');
+      const sheet={id:_bccAutoId(period, sc), period, scope:sc, month:M, year:Y, numDays:bccDaysInMonth(Y,M), workDays:+prev.workDays||0, status:'draft', mode,
+        rows:roster.map(e=>mode==='summary'?({empId:e.id, sums:{}}):({empId:e.id, days:{}, ot:{}})), createdBy:'auto · nối tiếp '+prev.period, createdByUserId:null, createdAt:now, updatedAt:now, _autoFrom:prev.id};
+      (S.bccSheets=S.bccSheets||[]).push(sheet); made++; }catch(e){ console.warn('[bcc auto]',sc,e); } });
+  if(made){ try{ saveState(); }catch(_){} try{ toast('✓ Đã tự mở '+made+' BCC tháng '+period.slice(5)+'/'+period.slice(0,4)+' (nối tiếp tháng trước)','good'); }catch(_){} }
+  return made; }
 function bccOpenCreateModal(forcedScope){
   // v3.63.33 (Sếp: "Có." — Đợt 3, tab Timesheet cho 5 module): thêm tham số forcedScope — khi có,
   // ép đúng 1 phạm vi (module gọi vào từ tab riêng của nó), ẩn hẳn ô chọn phạm vi (đã có sẵn cơ chế
@@ -20926,7 +20945,7 @@ function _bccHasRealData(s){ return (s.rows||[]).some(r=>r && (r.selfSubmittedAt
 /* v3.68.45: phòng ban thuộc module (Danh mục Phòng ban → dashboardModule; chưa gắn → mặc định như màn Timesheet của module) */
 function _modDeptCodes(mod){ const a=(HRService.departments()||[]).filter(d=>d&&d.dashboardModule===mod).map(d=>d.code);
   if(a.length) return a; return ({TM:['TMHD'], TECH:['BDA','DRILL','LABTECH'], TCKT:['KT'], HR:['HCNS'], VPQN:['CN-QN'], TAU:['QLT']})[mod]||[]; }
-function bccMyOwnScopes(){ if(isAdmin()) return bccAllPossibleScopes(); const out=[]; const seen=new Set();
+function bccMyOwnScopes(){ if(isAdmin()) return bccAllPossibleScopes(); if(_hrTimesheetAll(CURRENT_USER)) return bccAllPossibleScopes().filter(sc=>sc.type!=='vessel');   /* v3.68.75: Nhân sự chấm công mọi bộ phận (BCC tàu vẫn do QLTV) */ const out=[]; const seen=new Set();
   const push=sc=>{ if(!sc) return; const k=sc.type+'|'+(sc.type==='dept'?_bccDeptKey(sc.value):sc.value)+'|'+(sc.companyId||''); if(seen.has(k)) return; seen.add(k); out.push(sc); };
   (Array.isArray(CURRENT_USER&&CURRENT_USER.bccScopes)?CURRENT_USER.bccScopes:[]).forEach(push);
   try{ const mine=_bccUserDeptKeys(CURRENT_USER); bccAllPossibleScopes().forEach(sc=>{ if(sc.type==='dept' && mine.has(_bccDeptKey(sc.value))) push(sc); if(sc.type==='vessel' && typeof _crewTsCanManage==='function' && _crewTsCanManage()) push(sc); }); }catch(_){}
@@ -45427,7 +45446,7 @@ function _apPlVnd(r){
   return {amount:cost*eff, ccy:'VND', _fxEff:eff};
 }
 
-function approvedTx(includeAll){ const c=_tk(); const k='atx'+(includeAll?1:0); if(!c[k]){ const _t0=performance.now(); c[k]=_approvedTxRaw(includeAll); _v72t('approvedTx('+(includeAll?1:0)+') '+c[k].length+' dòng', _t0); } return c[k].slice(); }
+function approvedTx(includeAll){ const c=_tk(); const k='atx'+(includeAll?1:0); if(!c[k]){ const _t0=performance.now(); _v72s('approvedTx('+(includeAll?1:0)+') — '+((S.payables||[]).length)+' phiếu AP'); c[k]=_approvedTxRaw(includeAll); _v72t('approvedTx('+(includeAll?1:0)+') '+c[k].length+' dòng', _t0); } return c[k].slice(); }
 function _approvedTxRaw(includeAll){
   // v3.01.35: includeAll=true → gồm CẢ chưa duyệt (mọi trạng thái trừ rejected), cho các báo cáo
   //           theo nguyên tắc "AP/AR gồm cả chưa duyệt/chưa thanh toán". Mặc định: chỉ approved.
@@ -62763,7 +62782,7 @@ function fuelSave(){ const g=id=>(document.getElementById(id)||{}).value||''; if
   (S.fuelLogs=S.fuelLogs||[]).push({id:uid(), assetId:g('fu-a'), date:g('fu-d'), km:+g('fu-km')||0, liters:+g('fu-l')||0, amount:+g('fu-t')||0, note:g('fu-n').trim(), by:actorName(), at:new Date().toISOString()}); saveState(); toast('✓ Đã ghi','good'); fuelLogOpen(g('fu-a'), g('fu-d').slice(0,7)); }
 function fuelDel(id){ const x=(S.fuelLogs||[]).find(y=>y.id===id); if(!x||!confirm('Xóa dòng này?')) return; x._deleted=true; try{ touchRecord(x); }catch(_){} saveState(); fuelLogOpen(); }
 (function(){ try{
-  const _hd=hrmRenderDash; hrmRenderDash=function(){ const r=_hd.apply(this,arguments); if(window.__V72SAFE) return r; try{ const g=document.getElementById('hrm-dash-grid'); const h=mmtbAlertPanelHtml(); if(g&&h&&!g.querySelector('.mmtb-alert')) g.insertAdjacentHTML('afterbegin','<div class="mmtb-alert">'+h+'</div>'); }catch(_){} return r; };
+  const _hd=hrmRenderDash; hrmRenderDash=function(){ const r=_hd.apply(this,arguments); if(window.__V72SAFE) return r; _v72s('MMTB panel (Nhân sự)'); try{ const g=document.getElementById('hrm-dash-grid'); const h=mmtbAlertPanelHtml(); if(g&&h&&!g.querySelector('.mmtb-alert')) g.insertAdjacentHTML('afterbegin','<div class="mmtb-alert">'+h+'</div>'); }catch(_){} return r; };
   const _rk=renderKhoModule; renderKhoModule=function(){ const r=_rk.apply(this,arguments); if(window.__V72SAFE) return r; try{ if(_khoModView==='dash'){ const b=document.getElementById('kho-mod-body'); const h=mmtbAlertPanelHtml(); if(b&&h&&!b.querySelector('.mmtb-alert')) b.insertAdjacentHTML('afterbegin','<div class="mmtb-alert">'+h+'</div>'); } }catch(_){} return r; };
 }catch(e){ console.warn('[mmtb dash hook]',e); } })();
 /* ════ v3.68.70 (Sếp): THIẾT BỊ CỦA TÔI (MY SECTION) — NV tự khai; 1 bản lưu tại Kho tổng (S.tools) gắn người dùng + bộ phận
@@ -93927,6 +93946,7 @@ const _EV_LABEL={onhire:'On-hire',transit:'Transit',standby:'Standby',dock:'Dock
    (dự án tự động theo ngày HĐ trong P&L, gộp phiếu NXT tháng vào chi phí tàu/dự án, khung cảnh báo MMTB trên dashboard) → app chạy như 3.68.67.
    Bật thử đầy đủ: thêm ?full=1 vào địa chỉ (lưu cho máy đó) · tắt lại: ?full=0. Có ghi thời gian từng bước vào Console để tìm điểm nặng. */
 window.__V72SAFE=(function(){ try{ const q=location.search; if(/[?&]full=1/.test(q)) localStorage.setItem('v72full','1'); if(/[?&]full=0/.test(q)) localStorage.removeItem('v72full'); return localStorage.getItem('v72full')!=='1'; }catch(_){ return true; } })();
+function _v72s(label){ try{ if(!window.__V72SAFE) console.info('[v72] ▶ '+label+' …'); }catch(_){} }
 function _v72t(label, t0){ try{ const ms=performance.now()-t0; if(ms>150) console.warn('[v72] '+label+' '+Math.round(ms)+' ms'+(window.__V72SAFE?' (an toàn)':' (đầy đủ)')); }catch(_){} }
 function _pwIndex(){ const c=_tk(); if(c.pwi) return c.pwi; const byProj={}, byVes={}, projByVes={};
   ((typeof VesselService!=='undefined'?VesselService.events():(S.events||[]))||[]).forEach(e=>{ if(!e||e._deleted||!e.startAt) return; if(e.vesselId) (byVes[e.vesselId]=byVes[e.vesselId]||[]).push(e);
@@ -93951,7 +93971,7 @@ function _vesselEvOn(vid, iso){ const d0=new Date(iso+'T00:00:00'), d1=new Date(
 /* v3.68.68 (Sếp chốt): MỌI CHI PHÍ gắn tàu — dự án theo NGÀY HÓA ĐƠN + TÀU (cùng quy tắc ngày dự án). Phiếu đã chọn dự án tay → GIỮ;
    chỉ áp cho phiếu chưa chọn (sửa được bằng cách chọn tay trên phiếu). Áp dụng P&L dự án, OPEX tàu (lọc dự án), Kỹ thuật (nhóm T). */
 function _apDateOf(r){ return String(r.invoiceDate||r.issueDate||r.date||r.createdAt||'').slice(0,10); }
-function _apAutoProject(r){ if(window.__V72SAFE) return ''; if(!r||r.projectId||!r.vesselId) return ''; const d=_apDateOf(r); if(!d) return ''; const I=_pwIndex(); if(!(I.projByVes[r.vesselId]||[]).length) return ''; const key=r.vesselId+'|'+d; if(key in I.auto) return I.auto[key];
+function _apAutoProject(r){ if(window.__V72SAFE) return ''; try{ const I0=_pwIndex(); if(!I0._logged){ I0._logged=1; console.info('[v72] chỉ mục dự án: '+Object.keys(I0.projByVes).length+' tàu có dự án · '+Object.values(I0.projByVes).reduce((a,x)=>a+x.length,0)+' dự án · '+Object.values(I0.byVes).reduce((a,x)=>a+x.length,0)+' đoạn lịch tàu'); } }catch(_){} if(!r||r.projectId||!r.vesselId) return ''; const d=_apDateOf(r); if(!d) return ''; const I=_pwIndex(); if(!(I.projByVes[r.vesselId]||[]).length) return ''; const key=r.vesselId+'|'+d; if(key in I.auto) return I.auto[key];
   let v=''; try{ const w=_projOfVesselOn(r.vesselId, d); v=w?w.p.id:''; }catch(_){ v=''; } I.auto[key]=v; return v; }
 function _apProjectOf(r){ return (r&&r.projectId)||_apAutoProject(r)||''; }
 function _opexProjOk(p){ const f=window._opexProj||''; if(!f) return true; const pj=_apProjectOf(p); return f==='__idle__'?!pj:pj===f; }
@@ -93963,7 +93983,7 @@ function _projOfVesselOn(vid, iso){ let win=null; if(!vid||!iso) return null; _v
 function _vesselProjectAtDate(vesselId, dateISO){
   const w=_projOfVesselOn(vesselId, String(dateISO||'').slice(0,10)); return w?w.p.id:'';   /* v3.68.64: theo Dự án (thực tế → dự kiến) */
 }
-function whIssueCostsByCostObject(fromM, toM){ const _t0=performance.now(); try{ return _whIssueCostsByCostObjectCore.apply(this, arguments); } finally { _v72t('whIssueCostsByCostObject', _t0); } }
+function whIssueCostsByCostObject(fromM, toM){ const _t0=performance.now(); _v72s('whIssueCostsByCostObject'); try{ return _whIssueCostsByCostObjectCore.apply(this, arguments); } finally { _v72t('whIssueCostsByCostObject', _t0); } }
 function _whIssueCostsByCostObjectCore(fromM, toM){
   const out={vessel:{}, project:{}, dept:{}, employee:{}, liquidation:{}, other:{}, unassigned:0};
   const whList=(S.warehouses||[]).filter(w=>w && w.isActive!==false);
@@ -94003,11 +94023,11 @@ function whIssueCostOfProject(projectId, fromM, toM){
 }
 /* v3.68.69 (Sếp chốt): CHI PHÍ XUẤT KHO tàu theo dự án — phiếu xuất theo NGÀY: theo ngày phiếu + tàu → dự án.
    Phiếu XK tổng hợp tháng (1 phiếu/tháng nạp từ file Excel NXT): tháng có dự án → TOÀN BỘ vào dự án; nhiều dự án → chia theo số ngày từng dự án. */
-function _whProjShares(vid, fromISO, toISO){ const cnt={}; let tot=0; const a=new Date(fromISO+'T00:00:00'), b=new Date(toISO+'T00:00:00');
-  for(let d=new Date(a); d<=b; d.setDate(d.getDate()+1)){ const iso=d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0'); const w=_projOfVesselOn(vid, iso); if(w){ cnt[w.p.id]=(cnt[w.p.id]||0)+1; tot++; } }
+function _whProjShares(vid, fromISO, toISO){ const cnt={}; let tot=0; const a=new Date(fromISO+'T00:00:00'), b=new Date(toISO+'T00:00:00'); let _g=0;
+  for(let d=new Date(a); d<=b && _g<400; d.setDate(d.getDate()+1), _g++){ const iso=d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0'); const w=_projOfVesselOn(vid, iso); if(w){ cnt[w.p.id]=(cnt[w.p.id]||0)+1; tot++; } }
   const shares={}; Object.keys(cnt).forEach(k=>shares[k]=cnt[k]/tot); return {shares, idle: tot?0:1, days:cnt}; }
 function _whMonthRange(m){ const [Y,M]=m.split('-').map(Number); return [m+'-01', m+'-'+String(new Date(Y,M,0).getDate()).padStart(2,'0')]; }
-function whVesselIssueCosts(fromM, toM, vid){ const _t0=performance.now(); try{ return _whVesselIssueCostsCore.apply(this, arguments); } finally { _v72t('whVesselIssueCosts', _t0); } }
+function whVesselIssueCosts(fromM, toM, vid){ const _t0=performance.now(); _v72s('whVesselIssueCosts'); try{ return _whVesselIssueCostsCore.apply(this, arguments); } finally { _v72t('whVesselIssueCosts', _t0); } }
 function _whVesselIssueCostsCore(fromM, toM, vid){
   /* v3.19.90: đổi nguồn từ S.invMovements (sổ tháng nhập tay, đã bỏ, đứng yên) sang whFifoRun
      trực tiếp trên stockDocs thật — quét MỌI kho (không chỉ kho loại VESSEL, để không bỏ sót xuất
@@ -109344,7 +109364,8 @@ async function exportJSON(){
       admin:cfg.admin,
       users:cfg.users||[],
       scriptUrl:cfg.scriptUrl||'',
-      version:cfg.version||3
+      version:cfg.version||3,
+      _deletedUserNames:Array.isArray(cfg._deletedUserNames)?cfg._deletedUserNames:[]   /* v3.68.76 */
     },
     payload,
     exportedAt:new Date().toISOString(),
@@ -109972,6 +109993,9 @@ function saveUserRow(idx, btnEl){
   }
   if(fgOpened) u.funcGroups=fgVals;   // v3.65.76: chưa mở khối Module → giữ nguyên u.funcGroups cũ
   if(coTouched) u.companyId=coSel?coSel.value:(u.companyId||'');   // v3.65.77: chưa đổi → giữ nguyên
+  /* v3.68.75 GỐC RỄ (Sếp: "phân quyền quay về cờ cũ" trên máy khác): Lưu dòng KHÔNG đóng dấu updatedAt → khi đẩy / kéo cloud, hàm gộp
+     (mergeCfgUsers, chọn bản có updatedAt mới hơn) coi bản có Vai trò là CŨ → bản cloud chưa có Vai trò đè lên. Nay đóng dấu + đánh dấu chưa đẩy. */
+  u.updatedAt=new Date().toISOString(); u.updatedBy=actorName(); cfg._cfgDirtyAt=u.updatedAt;
   // v3.66.30 (Sếp: "đóng băng cờ cũ - chuyển sang phân quyền mới"): KHÔNG còn ghi cờ cũ nữa (bỏ
   // _syncRoleTierFlagsToUser của v3.66.29) — Vai trò là nguồn duy nhất khi đã gán. Thay vào đó, hiện
   // RÕ NGAY trong màn xem lại sau khi Lưu đúng những quyền Vai trò+Module này thật sự cho — Admin thấy
@@ -110262,8 +110286,29 @@ function applyPermSuggestion(idx, btnEl){
   }
   toast('Đã điền gợi ý — kiểm tra lại rồi bấm 💾 Lưu để xác nhận','good');
 }
+function _cfgDirtyBanner(){ try{ const c=getAuthConfig()||{}; if(!c._cfgDirtyAt) return ''; const n=(c.users||[]).filter(u=>u&&u.updatedAt&&(!c.lastCfgSync||u.updatedAt>c.lastCfgSync)).length;
+    return `<div style="border:1.5px solid #d98324;background:#fff8f0;border-radius:8px;padding:8px 12px;margin-bottom:10px;font-size:12.5px;display:flex;gap:10px;align-items:center"><b style="color:#9a5b12">⚠ Phân quyền đã sửa trên máy này (${n} tài khoản, lúc ${esc(String(c._cfgDirtyAt).slice(11,16))} ngày ${esc(_cdD(String(c._cfgDirtyAt).slice(0,10)))}) nhưng CHƯA đẩy lên cloud.</b><span>Máy khác vẫn dùng phân quyền cũ.</span><span style="flex:1"></span><button class="btn-primary" style="font-size:12px" onclick="openCfgSyncDialog()">Đẩy cấu hình lên cloud</button></div>`; }catch(_){ return ''; } }
+/* v3.68.75: PHỤC HỒI VAI TRÒ từ file backup JSON — đọc phần auth.users (không mã hóa), áp Vai trò / Vai trò kiêm / Module / Công ty theo tên tài khoản.
+   Vai trò 12 cũ (nv_ns_tv_cc) → 10 + 2. Xem trước rồi mới ghi; sau khi ghi phải Đẩy cấu hình lên cloud. */
+function cfgRolesImportPick(){ if(!isAdmin()){ toast('Chỉ Admin','bad'); return; } const inp=document.createElement('input'); inp.type='file'; inp.accept='.json';
+  inp.onchange=()=>{ const f=inp.files&&inp.files[0]; if(!f) return; const rd=new FileReader(); rd.onload=ev=>{ try{ const j=JSON.parse(ev.target.result); const U=(j.auth&&j.auth.users)||j.users||[]; if(!U.length){ toast('File không có auth.users','bad'); return; } _cfgRolesPreview(U, f.name, (j.auth&&j.auth._deletedUserNames)||[]); }catch(e){ toast('Không đọc được file: '+e.message,'bad'); } }; rd.readAsText(f); }; inp.click(); }
+function _cfgRolesPreview(U, fname, delNames){ const cfg=getAuthConfig()||{}; const byName={}; (cfg.users||[]).forEach(u=>{ if(u&&u.name) byName[String(u.name).toLowerCase()]=u; }); window._CFGRP_DEL=(Array.isArray(delNames)?delNames:[]).filter(n=>byName[String(n).toLowerCase()]);
+  const plan=[]; U.forEach(bu=>{ if(!bu||!bu.name) return; const lu=byName[String(bu.name).toLowerCase()]; if(!lu) return; let t1=bu.roleTier||'', t2=bu.roleTier2||''; if(t1==='nv_ns_tv_cc'){ t1='nv_ns_thuyenvien'; t2=t2||'nv_chamcong'; }
+    const fg=Array.isArray(bu.funcGroups)?bu.funcGroups:null; const ch=[]; if(t1&&t1!==(lu.roleTier||'')) ch.push('Vai trò: '+(_tierLabel({roleTier:lu.roleTier})||'—')+' → '+_tierLabel({roleTier:t1})); if((t2||'')!==(lu.roleTier2||'')&&(t2||lu.roleTier2)) ch.push('Kiêm: '+(lu.roleTier2||'—')+' → '+(t2||'—'));
+    if(fg&&JSON.stringify(fg)!==JSON.stringify(lu.funcGroups||[])) ch.push('Module: '+(lu.funcGroups||[]).join(',')+' → '+fg.join(',')); if(bu.companyId!==undefined&&(bu.companyId||'')!==(lu.companyId||'')) ch.push('Công ty');
+    if(ch.length) plan.push({lu, t1, t2, fg, co:bu.companyId, ch}); });
+  window._CFGRP=plan;
+  const _dl=(window._CFGRP_DEL||[]); const _dlHtml=_dl.length?`<div style="margin-top:8px;color:#C62828;font-size:12px"><b>${_dl.length} tài khoản đã xóa trong file</b> nhưng còn trên máy này (sẽ xóa khi Ghi): ${_dl.map(esc).join(', ')}</div>`:'';
+  openModal('Nhập vai trò từ '+esc(fname), (plan.length?`<div style="font-size:12.5px;margin-bottom:6px">${plan.length} tài khoản sẽ được cập nhật (chỉ Vai trò / Kiêm / Module / Công ty — không đụng mật khẩu, cờ khác).</div><table class="tbl" style="font-size:12px"><thead><tr><th>Tài khoản</th><th>Thay đổi</th></tr></thead><tbody>${plan.map(p=>`<tr><td><b>${esc(p.lu.name)}</b></td><td>${p.ch.map(esc).join('<br>')}</td></tr>`).join('')}</tbody></table>`:'<div style="color:#188038">✓ Không có khác biệt — vai trò trên máy này đã khớp file.</div>')+_dlHtml,
+    `<button class="btn-ghost" onclick="closeModal()">Hủy</button>${(plan.length||_dl.length)?`<button class="btn-primary" onclick="_cfgRolesApply()">Ghi${plan.length?' '+plan.length+' tài khoản':''}${_dl.length?' · xóa '+_dl.length:''}</button>`:''}`); }
+function _cfgRolesApply(){ const plan=window._CFGRP||[]; const dl=window._CFGRP_DEL||[]; if(!plan.length&&!dl.length) return; const cfg=getAuthConfig(); const now=new Date().toISOString(), who=actorName();
+  if(dl.length){ const low=new Set(dl.map(x=>String(x).toLowerCase())); cfg.users=(cfg.users||[]).filter(u=>!(u&&low.has(String(u.name||'').toLowerCase()))); cfg._deletedUserNames=Array.from(new Set((cfg._deletedUserNames||[]).concat(dl))); }
+  plan.forEach(p=>{ const u=(cfg.users||[]).find(x=>x&&x.name===p.lu.name); if(!u) return; if(p.t1) u.roleTier=p.t1; u.roleTier2=p.t2||''; if(u.roleTier2===u.roleTier) u.roleTier2=''; if(p.fg) u.funcGroups=p.fg; if(p.co!==undefined) u.companyId=p.co||'';
+    u.isDeptHead=_hasTier(u,'truong_bp'); if(_hasTier(u,'ceo')) u.isCEO=true; u.isDeptWarehouse=_hasTier(u,'thu_kho_module'); u.updatedAt=now; u.updatedBy=who; });
+  cfg._cfgDirtyAt=now; setAuthConfig(cfg); window._CFGRP=null; try{ logAuditEvent('cfg_roles_import',{n:plan.length}); }catch(_){} closeModal(); toast('✓ Đã phục hồi vai trò '+plan.length+' tài khoản — nhớ ĐẨY CẤU HÌNH LÊN CLOUD','good'); try{ renderStaff(); }catch(_){} }
 function renderStaff(){
   const host=document.getElementById('staff-by-dept'); if(!host) return;
+  try{ const _bn=document.getElementById('cfg-dirty-banner'); if(_bn) _bn.innerHTML=_cfgDirtyBanner(); else { const _h=document.getElementById('staff-by-dept'); if(_h&&_h.parentElement){ const d=document.createElement('div'); d.id='cfg-dirty-banner'; d.innerHTML=_cfgDirtyBanner(); _h.parentElement.insertBefore(d,_h); } } }catch(_){}   /* v3.68.75 */
   const cfg=getAuthConfig();
   const users=(cfg.users||[]);
   const q=(document.getElementById('staff-search')?.value||'').trim().toLowerCase();
@@ -114235,6 +114280,7 @@ function modStaffModalOpen(deptCode, title, moduleKey){
 // đúng phạm vi đó (bccOpenCreateModal(forcedScope)) — dùng lại TOÀN BỘ hạ tầng BCC có sẵn (bccRowRecalc/
 // renderBccGridEditor/bccExportExcel...), không viết lại "bảng đầy đủ"/"bảng tổng hợp" nào mới.
 function _modBccSheetsFor(matchFn){
+  try{ bccAutoRollover((isAdmin()||_hrTimesheetAll(CURRENT_USER)?bccAllPossibleScopes():bccMyOwnScopes()).filter(sc=>sc&&sc.type!=='vessel'&&matchFn(sc))); }catch(e){ console.warn('[bcc auto]',e); }   /* v3.68.77 */
   return (S.bccSheets||[]).filter(s=>s&&!s._deleted&&s.scope&&matchFn(s.scope))
     .sort((a,b)=>String(b.period||'').localeCompare(String(a.period||'')));
 }
@@ -121217,7 +121263,8 @@ function _tiersOf(u){ if(!u) return []; const a=[]; const add=t=>{ if(!t) return
 function _hasTier(u,t){ return _tiersOf(u).indexOf(t)>=0; }
 function _isQltvTier(u){ return _hasTier(u,'nv_ns_thuyenvien'); }
 /* v3.68.43 (Sếp): quyền CHẤM CÔNG NV văn phòng của module = Trưởng BP / BOD / CEO / Admin  +  NV chấm công (Vai trò 2) có Module đó  +  Vai trò 12 (module Quản lý tàu) */
-function _modCanTimesheet(moduleKey){ if(_modCanManageStaff(moduleKey)) return true; const u=CURRENT_USER; if(!u) return false;
+function _hrTimesheetAll(u){ u=u||CURRENT_USER; if(!u) return false; const fg=Array.isArray(u.funcGroups)?u.funcGroups:[]; return fg.includes('HR') && (_hasTier(u,'nv_ns_luong')||_hasTier(u,'truong_bp')||_hasTier(u,'nv_chamcong')||!!u.isNVNS||!!u.canSignHr); }   /* v3.68.75 (Sếp): NV Nhân sự chấm công toàn công ty */
+function _modCanTimesheet(moduleKey){ if(_modCanManageStaff(moduleKey)) return true; const u=CURRENT_USER; if(!u) return false; if(_hrTimesheetAll(u)) return true;
   const fg=Array.isArray(u.funcGroups)?u.funcGroups:[];
   if(_hasTier(u,'nv_chamcong')) return fg.includes(moduleKey) || (moduleKey==='TAU' && u.roleTier==='nv_ns_tv_cc');
   return false; }
@@ -126246,7 +126293,7 @@ function hrmAttSave(){
 }
 
 /* render tab chấm công: danh sách kỳ đã lưu */
-function hrmAttRender(){
+function hrmAttRender(){ try{ const _b=document.getElementById('hrm-att-btn-create'); if(_b) _b.style.display=(isAdmin()||_hrTimesheetAll(CURRENT_USER))?'':'none'; }catch(_){} try{ bccAutoRollover(); }catch(e){ console.warn('[bcc auto]',e); }   /* v3.68.77 */
   hrmAttRenderPreview();
   const box=document.getElementById('hrm-att-saved'); if(!box) return;
   try{ let ib=document.getElementById('hrm-att-intake'); if(!ib){ ib=document.createElement('div'); ib.id='hrm-att-intake'; box.parentNode.insertBefore(ib, box); } ib.innerHTML=_hrBccIntakeHtml(); }catch(e){ console.warn('[intake]',e); }   // v3.67.28
