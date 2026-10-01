@@ -17,7 +17,7 @@
    ⚠ QUAN TRỌNG: tăng SW_VERSION mỗi khi release bản mới của index.html để buộc trình duyệt bỏ cache cũ.
 */
 
-const SW_VERSION = 'v3.68.71';
+const SW_VERSION = 'v3.68.72';
 const CACHE_NAME = `seahorse-${SW_VERSION}`;
 
 // Pre-cache critical files on install
@@ -108,8 +108,11 @@ self.addEventListener('fetch', event => {
         }
         return res;
       }).catch(() => null);
+      /* v3.68.72: có mạng → ƯU TIÊN bản mới (chờ tối đa 4 giây), quá 4s / mất mạng mới dùng bản đã lưu —
+         để bản lỗi không kẹt lại trên máy NV như sự cố 3.68.68–70. */
       if (cached) {
-        // Có cache → trả ngay; mạng chạy nền cập nhật (không await)
+        const quick = await Promise.race([networkUpdate, new Promise(r => setTimeout(() => r(null), 4000))]);
+        if (quick && quick.ok) return quick;
         return cached;
       }
       // Chưa có cache (lần cài đầu) → chờ mạng; fail → thử cache index chung
