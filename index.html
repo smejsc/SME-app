@@ -4702,7 +4702,7 @@ const WH_TYPES = {
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.69.59';
+const APP_VERSION='3.69.62';
 /* HOTFIX 3.12.17-email: CHẶN TRIỆT ĐỂ gửi email TỰ ĐỘNG (mất kiểm soát — spam quota Google).
    Email phải do NV được phân quyền CHỦ ĐỘNG chọn gửi. Cờ này:
    (1) chặn auto-SCAN tạo email (hrmScanExpiries/vesselCertScanExpiries);
@@ -15407,7 +15407,7 @@ function openVesselCrewList(vidArg){
       <td style="padding:6px 8px;font-size:11px;font-family:monospace">${hrmEsc((a.onboardDate||'').slice(0,10)||'—')}</td>
       <td style="padding:6px 8px;font-size:12px;text-align:right" title="Tổng số ngày trên tàu ${hrmEsc(vName)} (mọi đoạn, tính cả ngày xuống và ngày rời; đoạn đang đi tính đến hôm nay)"><b>${_crewDaysOnVessel(a.empId,vid)}</b></td>
       <td style="padding:6px 8px">${_crewQdCell(a,vid)}</td>
-      <td style="padding:6px 8px;white-space:nowrap">${e?crewProfileBtns(a.empId,{edit:false}):''}${(typeof canManageCrewChange==='function'&&canManageCrewChange()&&!(typeof whIsVesselSideUser==='function'&&whIsVesselSideUser())&&a.src==='assign')?` <button class="btn-sec" style="font-size:11px;padding:2px 7px" title="Đổi ca nhanh — như Quản lý thuyền viên" onclick="openCrewPlanModal('','${esc(a.empId)}','${esc(vid)}')">⇄ Đổi ca</button>`:''}</td>
+      <td style="padding:6px 8px;white-space:nowrap">${e?crewProfileBtns(a.empId,{edit:false}):''}${(typeof canManageCrewChange==='function'&&canManageCrewChange()&&!(typeof whIsVesselSideUser==='function'&&whIsVesselSideUser())&&a.src==='assign')?` <button class="btn-sec" style="font-size:11px;padding:2px 7px" title="Đổi ca nhanh — đầy đủ như Quản lý thuyền viên (Chuyển tàu · Nghỉ ca · Thôi việc · Hướng dẫn nhận ca · Hồ sơ)" onclick="event.stopPropagation();ccRowMenu(event,'${esc(a.empId)}',1)">⇄ Đổi ca ▾</button>`:''}</td>
     </tr>` };   /* v3.69.25 (Sếp): 4 nút như Quản lý thuyền viên — tàu chỉ xem */
   }).sort((a,b)=>a.sort.localeCompare(b.sort,'vi')).map(x=>x.html).join('');
   const nHr=list.filter(a=>a.src==='hr').length;
@@ -56476,22 +56476,55 @@ async function _dmProcessRow(row){
   return 'err';
 }
 let _DM_RUNNING=false;
-async function darMailRun(manual){
+async function darMailRun(manual, opts){   /* v3.69.61 (Sếp duyệt): nhanh hơn — tải 3 file song song · ghi + đẩy cloud 1 LẦN cuối lượt · đánh dấu 1 lần · BDN cùng lượt · lọc đúng tàu · hiện tiến độ */
+  opts=opts||{};
   if(!_darMailCan()){ if(manual) toast('Chỉ NV / Trưởng bộ phận Quản lý tàu hoặc Admin','bad'); return; }
   if(_DM_RUNNING){ if(manual) toast('Đang đọc DAR…','warn'); return; }
   _DM_RUNNING=true; const st={posted:0, review:0, dup:0, khac:0, err:0};
   try{
-    /* v3.67.30: cũ nhất trước (nối đúng chuỗi ROB ngày trước → ngày sau khi lấy lại DAR cũ); tồn nhiều → mỗi lượt 50 file */
     const L=await _dmApi({action:'dar_inbox_list', statuses:['INBOX'], limit:60, order:'asc'});
     if(!L||!L.ok){ if(manual) toast('Không lấy được DAR_INBOX: '+((L&&L.error)||'lỗi'),'bad'); return; }
-    const _rows=(L.rows||[]).slice().sort((a,b)=>String(a.receivedAt).localeCompare(String(b.receivedAt)));
-    for(const row of _rows.slice(0,(+L.total||_rows.length)>20?50:20)){ try{ st[await _dmProcessRow(row)]++; }catch(e){ st.err++; console.warn('[DAR mail]',row&&row.fileName,e); } }
-    try{ await _dmAutoBdn(); }catch(_){}   /* v3.69.34: tự gắn BDN từ email */
+    let rows=(L.rows||[]).slice().sort((a,b)=>String(a.receivedAt).localeCompare(String(b.receivedAt)));
+    if(opts.vid) rows=rows.filter(r=>{ const v=r&&r.vessel&&r.vessel!=='?'?_dmVessel(r.vessel):null; return !!(v&&v.id===opts.vid); });
+    rows=rows.slice(0,(+L.total||rows.length)>20?50:20);
+    const N=rows.length; const res=new Array(N); let done=0, next=0; _dmProg(0,N);
+    const work=async i=>{ const row=rows[i]; try{
+        if(!row||!row.fileId){ res[i]={row,out:'err'}; return; }
+        const prev=(S.darReports||[]).find(r=>r&&!r._deleted&&r.sourceFile&&r.sourceFile.id===row.fileId);
+        if(prev){ res[i]={row,out:'posted',mark:['POSTED','Đã ghi trước đó',prev.id]}; return; }
+        if(String(row.ext||'').toLowerCase()!=='pdf'){ res[i]={row,out:'review',mark:['REVIEW','File '+row.ext+' — chưa tự đọc được, xử lý tay']}; return; }
+        const g=await _dmApi({action:'dar_inbox_get', fileId:row.fileId}); if(!g||!g.ok||!g.file||!g.file.base64) throw new Error((g&&g.error)||'không tải được file');
+        let p; try{ p=_dmParse(await _dmPdfItems(g.file.base64)); }catch(e){ res[i]={row,out:'review',mark:['REVIEW','Không đọc được PDF: '+e.message]}; return; }
+        if(!p.rob.length&&!p.acts.length){ res[i]={row,out:'khac',mark:['KHAC','Không phải DAR (không có bảng ROB / hoạt động)']}; return; }
+        res[i]={row,p};
+      }catch(e){ res[i]={row,out:'err'}; console.warn('[DAR mail]',row&&row.fileName,e); } finally{ done++; _dmProg(done,N); } };
+    await Promise.all([0,1,2].map(async()=>{ while(next<N){ const i=next++; await work(i); } }));
+    /* ghi theo đúng thứ tự ngày nhận (nối chuỗi ROB) — 1 lần commit + đẩy cloud */
+    const toBuild=res.filter(x=>x&&x.p); const posts=[];
+    if(toBuild.length){
+      const r=await commitMutation(()=>{ S.darReports=S.darReports||[]; toBuild.forEach(x=>{ try{ const b=_dmBuild(x.p,x.row);
+            if(b.dupSame){ x.out='dup'; x.mark=['DUPLICATE','Trùng DAR #'+b.dupOf.reportNo+' đã có',b.dupOf.id]; return; }
+            if(b.reasons.length){ x.out='review'; x.mark=['REVIEW',b.reasons.join(' | ')]; return; }
+            const rep=b.rep; rep.sentBy='DAR email · '+actorName(); rep.sentAt=new Date().toISOString(); S.darReports.push(rep); try{ touchRecord(rep); }catch(_){} _dmUpsertDaily(rep);
+            x.out='posted'; x.mark=['POSTED','Tự ghi DAR #'+rep.reportNo+(rep.rev>1?' Rev '+rep.rev:''),rep.id]; posts.push(rep);
+          }catch(e){ x.out='err'; x.mark=null; console.warn('[DAR build]',e); } }); },
+        {action:'dar_mail_post', fields:['darReports','dailyReports']});
+      if(!(r&&r.success)) toBuild.forEach(x=>{ if(x.out==='posted'){ x.out='err'; x.mark=null; } });
+      else posts.forEach(rep=>{ try{ logAuditEvent('dar_mail_post',{id:rep.id, vesselId:rep.vesselId, date:rep.date, no:rep.reportNo, rev:rep.rev, file:rep.sourceFile&&rep.sourceFile.name}); }catch(_){} });
+    }
+    await _dmMarkMany(res.filter(x=>x&&x.mark).map(x=>({row:x.row, status:x.mark[0], note:x.mark[1], ref:x.mark[2]||''})));
+    res.forEach(x=>{ if(x&&x.out) st[x.out]=(st[x.out]||0)+1; });
+    try{ await _dmAutoBdn(res.filter(x=>x&&x.out==='khac').map(x=>x.row)); }catch(_){}   /* BDN cùng lượt — không tải lại danh sách */
     await _dmRefreshBadge();
     if(manual||st.posted||st.review) toast('📨 DAR email: '+st.posted+' đã ghi · '+st.review+' cần xem lại'+(st.dup?' · '+st.dup+' trùng':'')+(st.err?' · '+st.err+' lỗi':''), st.review||st.err?'warn':'good');
   } catch(e){ if(manual) toast('Lỗi đọc DAR: '+e.message,'bad'); }
-  finally{ _DM_RUNNING=false; if(manual&&document.getElementById('dm-box')) openDarMailInbox(window._DM_TAB||'REVIEW'); }
+  finally{ _DM_RUNNING=false; _dmProg(-1); if(manual&&document.getElementById('dm-box')) openDarMailInbox(window._DM_TAB||'REVIEW'); }
 }
+async function _dmMarkMany(list){ if(!list||!list.length) return; window._DM_CACHE={}; const items=list.map(x=>({row:x.row.row, fileId:x.row.fileId, status:x.status, note:String(x.note||'').slice(0,900), ref:x.ref||'', by:actorName()}));
+  for(let k=0;k<items.length;k+=40){ try{ await _dmApi({action:'dar_inbox_mark', items:items.slice(k,k+40)}); }catch(e){ console.warn('[dm mark]',e); } } }
+function _dmProg(done,N){ try{ let el=document.getElementById('dm-prog'); if(done<0||!N){ if(el) setTimeout(()=>{ try{ el.remove(); }catch(_){} },1200); return; }
+  if(!el){ el=document.createElement('div'); el.id='dm-prog'; el.style.cssText='position:fixed;right:14px;bottom:14px;z-index:99999;background:#123a5c;color:#fff;border-radius:8px;padding:8px 12px;font-size:12.5px;box-shadow:0 4px 14px rgba(0,0,0,.25)'; document.body.appendChild(el); }
+  el.innerHTML='📨 Đang đọc DAR email <b>'+done+' / '+N+'</b> <div style="height:4px;background:rgba(255,255,255,.25);border-radius:3px;margin-top:5px;overflow:hidden"><div style="height:100%;width:'+Math.round(done/N*100)+'%;background:#7fd8a0"></div></div><div style="font-size:10.5px;opacity:.75;margin-top:3px">Vẫn dùng app bình thường trong lúc đọc</div>'; }catch(_){} }
 
 /* ════════════════════════════════════════════════════════════════════════════════════════════════
    v3.67.37 (Sếp): PHÂN LOẠI THỦ CÔNG file tàu gửi → 📋 VESSEL REQUESTS. NV Quản lý tàu mở file → chọn loại
@@ -124460,14 +124493,19 @@ function _darLoadNear(vid, date){ const t=Date.parse(String(date||'').slice(0,10
 function _bdnAttachTo(rep, row, how){ const url=row.url||(row.fileId?('https://drive.google.com/file/d/'+row.fileId+'/view'):''); if(!url) return false; rep.bdnFiles=rep.bdnFiles||[]; if(rep.bdnFiles.some(f=>f&&(f.fileId===row.fileId||f.url===url))) return true;
   rep.bdnFiles.push({name:row.fileName||'BDN', url, fileId:row.fileId||'', from:'email', how, at:new Date().toISOString()}); try{ touchRecord(rep); }catch(_){} return true; }
 const _BDN_RE=/(^|[^A-Za-z])BDN([^A-Za-z]|$)|bunker\s*delivery|delivery\s*note|bi[eê]n\s*b[aả]n\s*giao\s*nh[aậ]n|bien\s*ban\s*giao\s*nhan|giao\s*nh[aậ]n\s*(d[aầ]u|nhi[eê]n\s*li[eệ]u)/i;
-async function _dmAutoBdn(){ let L; try{ L=await _dmApi({action:'dar_inbox_list', statuses:['KHAC'], limit:60}); }catch(_){ return 0; } if(!L||!L.ok) return 0; window._DM_BDNCHK=window._DM_BDNCHK||{}; let n=0, deep=0;
-  for(const row of (L.rows||[])){ if(!row||window._DM_BDNCHK[row.fileId]) continue; window._DM_BDNCHK[row.fileId]=1;
+async function _dmAutoBdn(rowsOpt){ let rows;   /* v3.69.61: nhận danh sách của lượt đọc (không tải lại) · gắn + đánh dấu 1 lần */
+  if(Array.isArray(rowsOpt)) rows=rowsOpt; else { let L; try{ L=await _dmApi({action:'dar_inbox_list', statuses:['KHAC'], limit:60}); }catch(_){ return 0; } if(!L||!L.ok) return 0; rows=L.rows||[]; }
+  window._DM_BDNCHK=window._DM_BDNCHK||{}; let deep=0; const hits=[];
+  for(const row of rows){ if(!row||window._DM_BDNCHK[row.fileId]) continue; window._DM_BDNCHK[row.fileId]=1;
     const v=row.vessel&&row.vessel!=='?'?_dmVessel(row.vessel):null; if(!v) continue;
     let hit=_BDN_RE.test(String(row.fileName||'')+' '+String(row.subject||''));
     if(!hit && String(row.ext||'').toLowerCase()==='pdf' && deep<5 && typeof ctlExtractFileText==='function'){ deep++; try{ const g=await _dmApi({action:'dar_inbox_get', fileId:row.fileId}); if(g&&g.ok&&g.file&&g.file.base64){ const b=new Blob([Uint8Array.from(atob(g.file.base64),c=>c.charCodeAt(0))],{type:'application/pdf'}); const tx=await ctlExtractFileText(new File([b], row.fileName||'f.pdf',{type:'application/pdf'})); hit=_BDN_RE.test(String(tx||'').slice(0,4000)); } }catch(_){} }
-    if(!hit) continue; const rep=_darLoadNear(v.id, row.receivedAt); if(!rep) continue;
-    const r=await commitMutation(()=>{ _bdnAttachTo(rep,row,'auto'); }, {action:'dar_bdn_auto', fields:['darReports']}); if(r&&r.success){ await _dmMark(row,'POSTED','BDN tự gắn → DAR #'+rep.reportNo+' ('+rep.date+')', rep.id); n++; } }
-  if(n) toast('📎 Tự gắn '+n+' BDN từ email vào DAR','good'); return n; }
+    if(!hit) continue; const rep=_darLoadNear(v.id, row.receivedAt); if(rep) hits.push({row,rep}); }
+  if(!hits.length) return 0;
+  const r=await commitMutation(()=>{ hits.forEach(h=>_bdnAttachTo(h.rep,h.row,'auto')); }, {action:'dar_bdn_auto', fields:['darReports']});
+  if(!(r&&r.success)) return 0;
+  await _dmMarkMany(hits.map(h=>({row:h.row, status:'POSTED', note:'BDN tự gắn → DAR #'+h.rep.reportNo+' ('+h.rep.date+')', ref:h.rep.id})));
+  toast('📎 Tự gắn '+hits.length+' BDN từ email vào DAR','good'); return hits.length; }
 
 /* ════════════════════════════════════════════════════════════════════════════════════════════════
    v3.69.35 (Sếp duyệt mẫu): SỔ PHẢI TRẢ (theo NCC · gồm Công ty + Chi hộ chủ tàu) và SỔ PHẢI THU — giao diện mới
@@ -124768,7 +124806,7 @@ async function _vfAutoBcc(row, vid){ window._DM_ROWS=(window._DM_ROWS||[]); let 
 async function vfEmailFetch(vid){ const v=_vrVessels().find(x=>x.id===vid); if(!v) return; if(typeof _vrCan==='function'&&!_vrCan()&&!(typeof whIsVesselSideUser==='function'&&whIsVesselSideUser())){ toast('Chỉ NV Quản lý tàu / tài khoản tàu','bad'); return; }
   toast('📨 Đang lấy email của '+v.name+'…','info'); const out={DAR:0,BDN:0,MR:0,TIMESHEET:0,FUND:0,KHAC:[],BCCOK:[],BCCREV:[]};
   const darBefore=(S.darReports||[]).filter(r=>r&&r.vesselId===vid).length;
-  try{ if(typeof darMailRun==='function') await darMailRun(true); }catch(e){ console.warn('[vf mail]',e); }
+  try{ if(typeof darMailRun==='function') await darMailRun(true,{vid}); }catch(e){ console.warn('[vf mail]',e); }   /* v3.69.61: chỉ file của đúng tàu */
   out.DAR=Math.max(0,(S.darReports||[]).filter(r=>r&&r.vesselId===vid).length-darBefore);
   let L=null; try{ L=await _dmApi({action:'dar_inbox_list', statuses:['KHAC'], limit:120}); }catch(_){}
   const rows=((L&&L.rows)||[]).filter(r=>{ const vv=r&&r.vessel&&r.vessel!=='?'?_dmVessel(r.vessel):null; return vv&&vv.id===vid; });
@@ -124927,18 +124965,17 @@ function _apRoundPaid(r){ return (r._payRounds||[]).reduce((t,x)=>t+(+x.paid||0)
 function _apRoundStep(r){ const st=(typeof wfStatus==='function')?wfStatus(r):r.status; return ({pending_acc:'KT nhập số lần '+((r._payRounds||[]).length+1)+' & trình ký', pending_l1:'② chờ KTT ký lần '+((r._payRounds||[]).length+1), pending_l2:'③ chờ GĐ ký lần '+((r._payRounds||[]).length+1), approved:'④ chờ chi lần '+((r._payRounds||[]).length+1)})[st]||st; }
 function _apMultiNote(r){ if(!_apIsRound(r)) return ''; const R=r._payRounds||[]; const c=r.ccy||'VND'; const F=n=>(+n||0).toLocaleString('vi-VN');
   return '💸 TT nhiều lần: đã trả '+F(_apRoundPaid(r))+' '+c+' ('+R.length+' lần · lần cuối '+_cdD(String((R[R.length-1]||{}).at||'').slice(0,10))+') · còn '+F(apRemainingEff(r))+' '+c+' · '+_apRoundStep(r); }
-function renderTtMultiList(tEl){ const L=(AccountingService.payables()||[]).filter(_apIsRound).sort((a,b)=>String(a.partner||'').localeCompare(String(b.partner||''),'vi')); const F=n=>(+n||0).toLocaleString('vi-VN',{maximumFractionDigits:2});
+function renderTtMultiList(tEl){ const L=(AccountingService.payables()||[]).filter(_apIsRound).sort((a,b)=>String(a.partner||'').localeCompare(String(b.partner||''),'vi')); let _cc='VND'; const F=(n,c)=>{ const dp=String(c||_cc).toUpperCase()==='VND'?0:2; return (+n||0).toLocaleString('vi-VN',{minimumFractionDigits:0,maximumFractionDigits:dp}); };   /* v3.69.60: VND không số thập phân */
   const canKT=isAdmin()||(typeof canCheckAcc==='function'&&canCheckAcc());
-  const rows=L.map(r=>{ const rem=apRemainingEff(r), tot=+r.amountGross||+r.amount||0, R=r._payRounds||[], c=r.ccy||'VND'; const st=wfStatus(r);
+  const rows=L.map(r=>{ const rem=apRemainingEff(r), tot=+r.amountGross||+r.amount||0, R=r._payRounds||[], c=r.ccy||'VND'; _cc=c; const st=wfStatus(r); const _isV=String(c).toUpperCase()==='VND'; const _rnd=v=>_isV?Math.round(+v||0):Math.round((+v||0)*100)/100; const _nx=_rnd(+r.dueAmount>0?Math.min(+r.dueAmount,rem):rem);
     return `<tr><td><b>${esc(r.partner||'—')}</b></td><td>${esc(String(r.payContent||r.desc||'').slice(0,90))}${(r.invoiceNo||r.dnttNo)?`<div class="mono" style="font-size:10.5px;color:#0f5aa8">${esc([r.dnttNo?'ĐX '+r.dnttNo:'', r.invoiceNo?'HĐ '+r.invoiceNo:''].filter(Boolean).join(' · '))}</div>`:''}</td>
-      <td style="text-align:right;white-space:nowrap">${F(tot)} <span style="font-size:10px;color:var(--muted)">${esc(c)}</span></td>
-      <td style="font-size:11px">${R.map(x=>`Lần ${x.n}: ${_cdD(String(x.at||'').slice(0,10))} · <b>${F(x.paid)}</b>`).join('<br>')}</td>
-      <td style="text-align:right;white-space:nowrap"><b>${F(rem)}</b> <span style="font-size:10px;color:var(--muted)">${esc(c)}</span></td>
-      <td style="white-space:nowrap">${(st==='pending_acc'&&canKT)?`<input id="ttm-a-${esc(r.id)}" type="number" value="${+r.dueAmount>0?Math.min(+r.dueAmount,rem):rem}" style="width:110px;padding:3px"> <button class="btn-primary" style="font-size:11px" onclick="ttMultiSubmit('${esc(r.id)}')">📝 Trình ký lần ${R.length+1}</button>`:`<span style="font-size:11px;color:#0f6e7a">${esc(_apRoundStep(r))}${st!=='pending_acc'&&+r.dueAmount>0?' · '+F(Math.min(+r.dueAmount,rem)):''}</span>`}
-        <button class="btn-ghost" style="font-size:10.5px" onclick="openPayableModal('${esc(r.id)}')">👁</button></td></tr>`; }).join('');
+      <td style="text-align:right;white-space:nowrap">${F(tot,c)} <span style="font-size:10px;color:var(--muted)">${esc(c)}</span></td>
+      <td style="font-size:11px">${R.map(x=>`Lần ${x.n}: ${_cdD(String(x.at||'').slice(0,10))} · <b>${F(x.paid,c)}</b>`).join('<br>')}</td>
+      <td style="text-align:right;white-space:nowrap"><b>${F(rem,c)}</b> <span style="font-size:10px;color:var(--muted)">${esc(c)}</span></td>
+      <td style="min-width:170px">${(st==='pending_acc'&&canKT)?`<div style="display:flex;flex-direction:column;gap:4px;align-items:stretch"><div style="display:flex;gap:4px;align-items:center"><input id="ttm-a-${esc(r.id)}" type="text" inputmode="decimal" value="${F(_nx,c)}" onfocus="this.select()" onblur="const v=_unformatNumber(this.value); if(!isNaN(v)) this.value=(+v).toLocaleString('vi-VN',{maximumFractionDigits:${_isV?0:2}})" style="width:100%;min-width:0;padding:4px 6px;text-align:right;font-weight:700"><span style="font-size:10px;color:var(--muted)">${esc(c)}</span></div><div style="display:flex;gap:4px"><button class="btn-primary" style="font-size:11px;flex:1;white-space:nowrap" onclick="ttMultiSubmit('${esc(r.id)}')">📝 Trình ký lần ${R.length+1}</button><button class="btn-ghost" style="font-size:10.5px" title="Xem phiếu" onclick="openPayableModal('${esc(r.id)}')">👁</button></div></div>`:`<span style="font-size:11px;color:#0f6e7a">${esc(_apRoundStep(r))}${st!=='pending_acc'&&+r.dueAmount>0?' · '+F(Math.min(+r.dueAmount,rem),c):''}</span> <button class="btn-ghost" style="font-size:10.5px" onclick="openPayableModal('${esc(r.id)}')">👁</button>`}</td></tr>`; }).join('');   /* v3.69.60: nút xuống dòng dưới ô số (không tràn) · ô số định dạng như Còn lại */
   tEl.innerHTML=`<div style="font-weight:700;color:#123a5c;margin-bottom:4px">⇢ TT nhiều lần — ${L.length} phiếu</div><div style="font-size:11px;color:var(--muted);margin-bottom:6px">Phiếu đã duyệt, Kế toán trả nhiều lần. Mỗi lần: KT nhập số tiền lần này → <b>trình ký lại KTT L1 → GĐ L2</b> → ④ Chờ thanh toán. Không quay lại người tạo — người tạo chỉ xem đã trả / ngày / còn lại.</div>
-    <table class="tbl" style="font-size:12px"><thead><tr><th>NCC</th><th>Nội dung (ĐX / HĐ)</th><th style="text-align:right">Tổng phiếu</th><th>Đã trả</th><th style="text-align:right">Còn lại</th><th>Lần tiếp</th></tr></thead><tbody>${rows||'<tr><td colspan="6" style="padding:14px;text-align:center;color:var(--muted)">Không có phiếu trả nhiều lần</td></tr>'}</tbody></table>`; }
-function ttMultiSubmit(id){ const r=AccountingService.payableById(id); if(!r) return; const a=+((document.getElementById('ttm-a-'+id)||{}).value||0); const rem=apRemainingEff(r);
+    <div class="tbl-scroll"><table class="tbl" style="font-size:12px;table-layout:fixed;width:100%"><colgroup><col style="width:16%"><col style="width:26%"><col style="width:12%"><col style="width:14%"><col style="width:12%"><col style="width:20%"></colgroup><thead><tr><th>NCC</th><th>Nội dung (ĐX / HĐ)</th><th style="text-align:right">Tổng phiếu</th><th>Đã trả</th><th style="text-align:right">Còn lại</th><th>Lần tiếp</th></tr></thead><tbody>${rows||'<tr><td colspan="6" style="padding:14px;text-align:center;color:var(--muted)">Không có phiếu trả nhiều lần</td></tr>'}</tbody></table></div>`; }
+function ttMultiSubmit(id){ const r=AccountingService.payableById(id); if(!r) return; const a=+(_unformatNumber((document.getElementById('ttm-a-'+id)||{}).value||'0'))||0; const rem=apRemainingEff(r);
   if(!(a>0)) return toast('Nhập số tiền lần này','bad'); if(a>rem+0.01) return toast('Số lần này lớn hơn còn lại','bad'); const now=new Date().toISOString();
   commitMutation(()=>{ r.dueAmount=+a.toFixed(2); (r.log=r.log||[]).push({at:now, by:actorName(), text:'TT nhiều lần — trình ký lần '+((r._payRounds||[]).length+1)+': '+a.toLocaleString('vi-VN')+' '+(r.ccy||'VND')}); wfCheckAcc(r); },{action:'check_acc',fields:['payables'],onOk:()=>{ toast('✓ Đã trình ký KTT lần '+((r._payRounds||[]).length+1),'good'); renderApprovalList(); try{ _apHubRender(); }catch(_){} }}); }
 
