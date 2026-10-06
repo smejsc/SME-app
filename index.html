@@ -4698,7 +4698,7 @@ const WH_TYPES = {
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.69.68';
+const APP_VERSION='3.69.73';
 /* HOTFIX 3.12.17-email: CHẶN TRIỆT ĐỂ gửi email TỰ ĐỘNG (mất kiểm soát — spam quota Google).
    Email phải do NV được phân quyền CHỦ ĐỘNG chọn gửi. Cờ này:
    (1) chặn auto-SCAN tạo email (hrmScanExpiries/vesselCertScanExpiries);
@@ -7619,7 +7619,7 @@ async function authAction(){
     if(CURRENT_ROLE==='admin'){
       // Auto-migrate: vendors from AR/AP (one-time, safe to re-run)
       try{
-        const n=migrateVendorsFromAR();
+        const n=(window._fullPullDone===true)?migrateVendorsFromAR():0;   /* v3.69.73 (F1): chỉ sau khi đã tải đủ từ cloud */
         if(n>0) setTimeout(()=>toast(`📦 Đã tự động tạo ${n} NCC từ AR/AP cũ`,'good'),1500);
       }catch(e){console.warn('[migrate] failed:',e);}
       // Auto-migrate: add BOD + KT departments if missing
@@ -7725,6 +7725,7 @@ async function authAction(){
             // Bản ghi cũ chưa có liên kết Danh mục → tạo
             const linked = a.vesselId && VesselService.vessels().some(v=>v.id===a.vesselId);
             if(!linked){
+              if(window._fullPullDone!==true||!isAdmin()) return;   /* v3.69.73 (F1): chỉ máy Admin, sau khi tải đủ cloud */
               if(!a.vesselType) a.vesselType='SERVICE';  // mặc định DV, admin sửa lại sau
               syncVesselFromAsset(a);
               synced++;
@@ -7819,7 +7820,7 @@ async function authAction(){
       // v3.65.65: nhập 1 lần dữ liệu khởi tạo Equipment Register (module Kỹ thuật) từ file kiểm định Geo Mariner.
       /* v3.68.81: GỠ — cùng lỗi, sinh thiết bị trùng */ if(false) try{ const _re=_ktEquipImportSeed(); if(_re>0){ saveState(); dlog('[seed v3.65.65] nhập '+_re+' thiết bị Equipment Register'); } }catch(e){console.warn('[seed v3.65.65 equip] failed:',e);}
       // v3.65.66: nhập 1 lần PM checklist (KHBD 2026) + Running Hour (T12/2025→T09/2026).
-      try{ const _rp=_ktPmImportSeed(); if((_rp.tasks||_rp.rh)>0){ saveState(); dlog('[seed v3.65.66] nhập '+_rp.tasks+' đầu việc PM + '+_rp.rh+' tháng Running Hour'); } }catch(e){console.warn('[seed v3.65.66 pm] failed:',e);}
+      /* v3.69.73 (F1): GỠ — dữ liệu PM / Running Hours đã có trên cloud; nạp lại trên máy chưa tải xong là sinh bộ trùng */ if(false) try{ const _rp=_ktPmImportSeed(); if((_rp.tasks||_rp.rh)>0){ saveState(); } }catch(e){}
       // v3.07.60: gắn lô duyệt chi (_payBatchId) cho phiếu AP đã duyệt CŨ (trước 3.07.54) để hiện ở Thư viện hồ sơ chờ chi.
       try{ const _rb=_migratePayBatch(); if(_rb>0){ saveState(); dlog('[migrate v3.07.60] gắn lô duyệt chi cho '+_rb+' phiếu approved cũ'); } }catch(e){console.warn('[migrate v3.07.60 payBatch] failed:',e);}
       // v3.15.18: vá schedule cho khoản vay có trả trước 1 phần cũ (dư nợ đang phồng) — xem _migrateLoanPrepayPartial.
@@ -39082,6 +39083,7 @@ function mergeStateByFields(cloudFull, localFull, fields){
       merged[f]=localFull[f];
     }
   });
+  try{ if(fields&&fields.length>=5) window._fullPullDone=true; }catch(_){}   /* v3.69.73 (F1): đã gộp đủ từ cloud */
   return {merged, conflictReport};
 }
 
@@ -45401,7 +45403,7 @@ function migrateVendorsFromAR(){
   seen.forEach((rawName, norm)=>{
     if(existingNorms.has(norm)) return;
     S.vendors.push({
-      id:'V-'+uid(),
+      id:'V-'+norm.replace(/[^a-z0-9]/gi,'').slice(0,40),   /* v3.69.73 (F2): mã cố định theo tên chuẩn hóa — 2 máy cùng tạo = cùng 1 bản */
       code:norm.slice(0,20),
       name:rawName.trim(),
       normalized:norm,
@@ -47313,13 +47315,17 @@ function projectStatusChip(st){
   const s=PROJECT_STATUS[st]; if(!s) return '';
   return `<span style="display:inline-block;padding:1px 7px;border-radius:9px;font-size:10px;font-weight:600;color:#fff;background:${s.color}">${s.label}</span>`;
 }
-function projectRev(pid){return allTx().filter(t=>t.projectId===pid&&t.type==='REV').reduce((s,t)=>s+txAmt(t),0);}
-function projectCost(pid){return allTx().filter(t=>t.projectId===pid&&t.type==='COST'&&t.inPL!==false).reduce((s,t)=>s+txAmt(t),0);}
+/* v3.69.73 (E): chỉ mục doanh thu / chi phí theo dự án & tàu lập 1 lần mỗi lượt (trước: mỗi dự án duyệt lại toàn bộ AR/AP) — cùng công thức, cùng kết quả */
+function _plIdx(){ const c=_tk(); if(!c.plIdx){ const P=new Map(), V=new Map(); const add=(M,k,isRev,a)=>{ let x=M.get(k); if(!x){ x={rev:0,cost:0}; M.set(k,x); } if(isRev) x.rev+=a; else x.cost+=a; };
+    allTx().forEach(t=>{ if(t.type==='REV'){ const a=txAmt(t); add(P,t.projectId,true,a); add(V,t.vesselId,true,a); } else if(t.type==='COST'&&t.inPL!==false){ const a=txAmt(t); add(P,t.projectId,false,a); add(V,t.vesselId,false,a); } });
+    c.plIdx={P,V}; } return c.plIdx; }
+function projectRev(pid){ const x=_plIdx().P.get(pid); return x?x.rev:0; }
+function projectCost(pid){ const x=_plIdx().P.get(pid); return x?x.cost:0; }
 // v3.63.11 (Sếp: "P&L theo từng tàu/dự án trên dashboard" — bấm tàu mở chi tiết tập hợp theo dự án,
 // bấm tiếp xem chi tiết dự án): allTx() đã gắn sẵn vesselId TRỰC TIẾP trên từng dòng AR/AP (không
 // cần đi vòng qua project) — cùng field, cùng cách lọc BOD/viewer/CapEx như projectRev/projectCost.
-function vesselRev(vid){return allTx().filter(t=>t.vesselId===vid&&t.type==='REV').reduce((s,t)=>s+txAmt(t),0);}
-function vesselCost(vid){return allTx().filter(t=>t.vesselId===vid&&t.type==='COST'&&t.inPL!==false).reduce((s,t)=>s+txAmt(t),0);}
+function vesselRev(vid){ const x=_plIdx().V.get(vid); return x?x.rev:0; }
+function vesselCost(vid){ const x=_plIdx().V.get(vid); return x?x.cost:0; }
 /* v3.06.54 — Giá trị HĐ THỰC HIỆN (đã phát hóa đơn) của 1 dự án = tổng AR đã DUYỆT (approved =
    đã xuất HĐ) gắn projectId đó. Trả về số ở displayCcy (quy đổi như KPI). */
 function _projectIssuedValue(projectId){
@@ -54536,15 +54542,18 @@ function _dupPlan(){ const plan={emp:[], empHold:[], equip:[], equipHold:[]};
 function dupSeedCleanupOpen(){ if(!isAdmin()){ toast('Chỉ Admin','bad'); return; } const P=_dupPlan();
   const er=P.emp.map(x=>`<tr><td><b>${esc(x.code)}</b></td><td>${esc(x.del.fullName||'')}</td><td style="color:var(--bad)">xóa bản thừa (nhập tự động, chưa có dữ liệu) + thẻ lương tự tạo</td><td style="font-size:11px">giữ: ${esc(x.keep.fullName||'')}</td></tr>`).join('');
   const eh=P.empHold.map(x=>`<tr><td><b>${esc(x.code)}</b></td><td>${esc(x.e.fullName||'')}</td><td style="color:#8a5a00">GIỮ — đã có: ${esc(x.refs.join(', ')||'dữ liệu nhập tay')}</td><td><button class="btn-ghost" style="font-size:11px" onclick="hrmViewEmployee('${esc(x.e.id)}')">Mở hồ sơ</button></td></tr>`).join('');
-  const qr=P.equip.map(x=>`<tr><td><b>${esc(x.code)}</b></td><td>${esc(x.del.name||'')}</td><td style="color:var(--bad)">xóa bản thừa (nhập tự động, chưa dùng)</td><td></td></tr>`).join('');
+  const qr=P.equip.map(x=>`<tr><td><b>${esc(x.code)}</b> <span class="mono" style="font-size:10.5px;color:var(--muted)">${x.del.createdAt?_cdD(String(x.del.createdAt).slice(0,10)):''}</span></td><td>${esc(x.del.name||'')}</td><td style="color:var(--bad)">xóa bản thừa (nhập tự động, chưa dùng)</td><td></td></tr>`).join('');
   const qh=P.equipHold.map(x=>`<tr><td><b>${esc(x.code)}</b></td><td>${esc(x.r.name||'')}</td><td style="color:#8a5a00">GIỮ — đã có dữ liệu sử dụng</td><td></td></tr>`).join('');
-  const n=P.emp.length+P.equip.length;
+  const n=P.emp.length+P.equip.length+_dupPlanExtra().del.length;
   openModal('Dọn bản trùng do nhập tự động', `<div style="font-size:12.5px;margin-bottom:8px">Bản trùng sinh ra do đoạn nhập dữ liệu ban đầu (đội khoan GEOMARINE · Equipment Register) chạy lại trên trình duyệt mới. Từ v3.68.81 các đoạn này đã gỡ — không sinh thêm. Mỗi nhóm giữ <b>1 bản gốc</b> (bản có dữ liệu thật / cũ nhất); bản thừa chưa có dữ liệu → xóa (có dấu chống hồi sinh); bản thừa đã có dữ liệu → giữ, Sếp xử lý tay.</div>
     <div style="font-weight:700;margin:6px 0 3px">Nhân viên — xóa ${P.emp.length} · giữ lại để xem ${P.empHold.length}</div>
     <div class="tbl-scroll" style="max-height:30vh;overflow:auto"><table class="tbl" style="font-size:12px"><thead><tr><th>MSNV</th><th>Họ tên</th><th>Xử lý</th><th></th></tr></thead><tbody>${er+eh||'<tr><td colspan="4" style="text-align:center;color:var(--muted)">Không có</td></tr>'}</tbody></table></div>
+    ${(()=>{ const X=_dupPlanExtra(); const fd=d=>d?_cdD(String(d).slice(0,10)):'—'; const tr=(it,act,c)=>`<tr><td><b>${esc(it.label)}</b> · <span class="mono" style="font-size:10.5px">${esc(String(it.key).slice(0,50))}</span></td><td>${esc(it.name||'')}</td><td class="mono" style="font-size:11px">${fd(it.createdAt)}</td><td style="color:${c}">${act}</td></tr>`;
+      return `<div style="font-weight:700;margin:8px 0 3px">PM Checklist · Running Hours · NCC tự tạo · Tàu từ tài sản — xóa ${X.del.length} · giữ để xem ${X.hold.length}</div>
+      <div class="tbl-scroll" style="max-height:22vh;overflow:auto"><table class="tbl" style="font-size:12px"><thead><tr><th>Loại · khóa</th><th>Tên</th><th>Ngày tạo</th><th>Xử lý</th></tr></thead><tbody>${X.del.map(it=>tr(it,'xóa bản thừa (tự tạo, chưa dùng)','var(--bad)')).join('')+X.hold.map(it=>tr(it,'GIỮ — đã có dữ liệu / cần gộp tay','#8a5a00')).join('')||'<tr><td colspan="4" style="text-align:center;color:var(--muted)">Không có</td></tr>'}</tbody></table></div>`; })()}
     <div style="font-weight:700;margin:8px 0 3px">Thiết bị — xóa ${P.equip.length} · giữ ${P.equipHold.length}</div>
     <div class="tbl-scroll" style="max-height:22vh;overflow:auto"><table class="tbl" style="font-size:12px"><thead><tr><th>Mã</th><th>Tên</th><th>Xử lý</th><th></th></tr></thead><tbody>${qr+qh||'<tr><td colspan="4" style="text-align:center;color:var(--muted)">Không có</td></tr>'}</tbody></table></div>`,
-    `<button class="btn-ghost" onclick="closeModal()">Đóng</button>${n?`<button class="btn-primary" onclick="dupSeedCleanupRun()">Xóa ${n} bản thừa</button>`:''}`); try{ setModalWide(true); }catch(_){} }
+    `<button class="btn-ghost" onclick="closeModal()">Đóng</button>${n?`<button class="btn-primary" onclick="_dedupeAutoRecords(true);dupSeedCleanupRun()">Xóa ${n} bản thừa</button>`:''}`); try{ setModalWide(true); }catch(_){} }
 function dupSeedCleanupRun(){ if(!isAdmin()) return; const P=_dupPlan(); const n=P.emp.length+P.equip.length; if(!n) return;
   if(!confirm('Xóa '+P.emp.length+' hồ sơ NV thừa + '+P.equip.length+' thiết bị thừa (đều do nhập tự động, chưa có dữ liệu)?\n\nBản gốc giữ nguyên. Có dấu chống hồi sinh khi đồng bộ.')) return;
   const now=new Date().toISOString(), who=actorName(); const eIds=new Set(P.emp.map(x=>x.del.id)), qIds=new Set(P.equip.map(x=>x.del.id));
@@ -63196,8 +63205,8 @@ function syncVesselFromAsset(asset){
   if(!asset || asset.group!=='VESSEL') return;
   let v = asset.vesselId ? VesselService.vessels().find(x=>x.id===asset.vesselId) : null;
   if(!v){
-    v={id:uid(), fromAssetId:asset.id};
-    VesselService.addVessel(v);
+    v=VesselService.vessels().find(x=>x&&x.fromAssetId===asset.id)||null;   /* v3.69.73 (F2): đã có tàu sinh từ tài sản này → dùng lại */
+    if(!v){ v={id:'VA-'+String(asset.id), fromAssetId:asset.id}; VesselService.addVessel(v); }
     asset.vesselId=v.id;
   }
   v.name=asset.name;
@@ -66675,7 +66684,9 @@ function viewCashLedger(fundId){
   if(!txns.length){
     rows='<tr><td colspan="6" style="text-align:center;color:var(--muted);padding:24px">Chưa có giao dịch — bấm <b>▲ Ứng quỹ</b> hoặc <b>▼ Hoàn ứng</b> bên dưới</td></tr>';
   } else {
-    txns.forEach(t=>{
+    const _cN=Math.max(100,+(window._LIM['cash'])||200), _cSkip=Math.max(0,txns.length-_cN);   /* v3.69.72: chỉ vẽ N dòng gần nhất, số dư lũy kế vẫn tính đủ */
+    if(_cSkip) rows+=`<tr class="ldg-foot"><td colspan="6" style="text-align:center;padding:8px;background:var(--paper-2);font-size:12px">Đã gọn <b>${_cSkip}</b> dòng cũ (số dư lũy kế vẫn tính đủ) — <a href="javascript:void 0" onclick="window._LIM['cash']=${_cN+300};viewCashLedger('${fundId}')">📥 Xem thêm 300</a> · hoặc lọc theo tháng</td></tr>`;
+    txns.forEach((t,_ti)=>{
       const amt=+t.amount||0;
       const isIn = t.direction==='IN';
       const isPending = !!t._pending;  // v3.03.74: hoàn ứng chờ Manager duyệt — không tính số dư
@@ -66712,6 +66723,7 @@ function viewCashLedger(fundId){
         ? '<span class="ds-need" style="background:var(--paper-3);color:var(--teal);font-size:10px;font-weight:600;padding:2px 8px;border-radius:10px">▲ Ứng</span>'
         : '<span class="ds-need" style=",.12);color:var(--accent,#414141);font-size:10px;font-weight:600;padding:2px 8px;border-radius:10px">▼ Hoàn/Chi</span>');
       const _hasDetails = Array.isArray(t._cashDetails) && t._cashDetails.length>0;
+      if(_ti<_cSkip) return;
       rows+=`<tr style="border-bottom:1px solid var(--rule);${isPending?'background:var(--paper-3)':''}${_hasDetails?';cursor:pointer':''}" ${_hasDetails?`onclick="cashTxnDetail('${fundId}','${t.id}')" title="Bấm xem ${t._cashDetails.length} khoản chi tiết"`:''}>
         <td style="font-family:var(--font-mono);font-size:11px;color:var(--muted);padding:8px 10px;white-space:nowrap">${esc(t.date||'')}</td>
         <td style="padding:8px 10px">${badge}</td>
@@ -87592,7 +87604,7 @@ function renderAdvances(){
   list.sort((a,b)=>(b.date||'').localeCompare(a.date||''));
   try{ _apTabsRefresh(); }catch(_){} const _infl=(typeof _advInflowHtml==='function')?_advInflowHtml():'';
   if(!list.length){ block.innerHTML=_infl+'<div class="empty" style="padding:18px;text-align:center;color:var(--muted)">Không có tạm ứng nào'+(stF==='open'?' đang mở':'')+'</div>'; return; }
-  const rows=list.map(a=>{
+  const _cp=_capList('adv', list, 12, 'renderAdvances()'); const rows=_cp.rows.map(a=>{
     const bal=advBalance(a);
     const spent=(+a.amount||0)-bal;
     const settled = a.status==='approved' && bal<=0.001;
@@ -87630,7 +87642,7 @@ function renderAdvances(){
   }).join('');
   block.innerHTML=_infl+`<div class="tbl-scroll"><table class="tbl" style="font-size:13px">
     <thead><tr><th>Nhân viên</th><th>Diễn giải</th><th class="r">Tạm ứng</th><th class="r">Đã hoàn</th><th class="r">Số dư</th><th class="c">Trạng thái</th><th></th></tr></thead>
-    <tbody>${rows}</tbody></table></div>`;
+    <tbody>${rows}${_cp.foot}</tbody></table></div>`;
 }
 function openAdvanceModal(editId){
   /* v3.68.86: tạm ứng chỉ lập từ Phiếu đề xuất thanh toán */
@@ -90232,7 +90244,8 @@ function renderOpTxList(){
         html+=`<tr><td colspan="${type==='OUT'?'8':'6'}" class="empty">Không có bút toán ${type==='IN'?'thu hộ':'chi hộ'} ${fM?'trong tháng '+fM:''} ${fV?'của tàu này':''}</td></tr>`;
       }
     } else {
-      rows.forEach(t=>{
+      const _cp=_capList('optx_'+type, rows, 14, 'renderOpTxList()');   /* v3.69.72: vẽ tối đa 200 dòng mới nhất; tổng cộng tính đủ ở trên */
+      _cp.rows.forEach(t=>{
         const v=VesselService.opVessels().find(x=>x.id===t.vesselId);
         const ccy=t.ccy||(v?v.ccy:'VND')||'VND';
         const isUsd=ccy==='USD';
@@ -90353,6 +90366,7 @@ function renderOpTxList(){
           <td><div class="row-actions">${actCell}</div></td>
         </tr>`;
       });
+      html+=_cp.foot;
       // v3.09.87: TỔNG CHI HỘ và TỔNG PHÍ để RIÊNG theo cột (KHÔNG cộng chung) — dễ đối chiếu báo cáo.
       const grandTot = totAll;  // chỉ số tiền chi (net+VAT quy USD), KHÔNG gồm phí
       html+=`<tr class="total">
@@ -96907,6 +96921,7 @@ function openStockDocs(){
       <div style="margin-top:4px;font-size:11px">Giữ phiếu ở kho ĐÚNG, ĐẢO phiếu ở kho sai bằng nút ↩ trên dòng phiếu — tồn sẽ trả về đúng.</div>
     </div>`:'';
   const whOpts=['<option value="">— Mọi kho —</option>'].concat(allowed.map(w=>`<option value="${w.id}" ${_stockFilter.wh===w.id?'selected':''}>${esc(w.name)}</option>`)).join('');
+  const _sdAll=list.length, _sdLim=Math.max(100,+(_stockFilter&&_stockFilter.lim)||300); const _sdMore=_sdAll>_sdLim; list=list.slice(0,_sdLim);   /* v3.69.70: hiện tối đa 300 phiếu mới nhất (Xem thêm) — chống treo máy */
   const rows=list.length? list.map(d=>{
     const nLines=(d.lines||[]).length, totQty=(d.lines||[]).reduce((s,l)=>s+(+l.qty||0),0);
     /* v3.15.82 (Sếp: bỏ ghi tình trạng đảo — phức tạp/khó hiểu): chỉ còn nhãn theo loại phiếu.
@@ -96945,7 +96960,7 @@ function openStockDocs(){
         <button class="btn-ghost" style="font-size:11px" onclick="_stockPrintById('${d.id}','pdf')" title="In phiếu PDF ngay tại đây — khỏi phải mở Sửa">🖨</button>
         <button class="btn-ghost" style="font-size:11px" onclick="_stockPrintById('${d.id}','xlsx')" title="Xuất Excel ngay tại đây — khỏi phải mở Sửa">⬇</button>
       </td></tr>`;
-  }).join('')
+  }).join('')+(_sdMore?`<tr class="ldg-foot"><td colspan="30" style="text-align:center;padding:10px;background:var(--paper-2)">Đang hiện <b>${_sdLim}</b> / ${_sdAll} phiếu mới nhất — <a href="javascript:void 0" onclick="_stockFilter.lim=${_sdLim+300};closeModal();openStockDocs()">📥 Xem thêm 300</a> · hoặc lọc theo <b>kho / loại / NCC</b> để thu gọn</td></tr>`:'')
     : `<tr><td colspan="7" style="padding:14px;text-align:center;color:var(--muted)">Chưa có chứng từ kho.</td></tr>`;
   const sel='padding:6px 8px;border:1px solid var(--rule);border-radius:6px;font-size:13px';
   const _sdTab=(v,l)=>`<span class="lg-tab${(_stockFilter.type||'')===v?' on':''}" onclick="(function(){ const e=document.getElementById('sd-ftype'); if(e){ e.value='${v}'; } _stockApply(); })()">${l}</span>`;   // v3.67.69 K4
@@ -97094,9 +97109,10 @@ function whDocStatusLabel(d){
 }
 
 /* Số lượng: cắt rác số thực (làm tròn 3 chữ số) rồi định dạng kiểu Việt */
+const _WH_NF=(()=>{ try{ return new Intl.NumberFormat('vi-VN',{maximumFractionDigits:3}); }catch(_){ return null; } })();   /* v3.69.70: dùng chung 1 bộ định dạng (trước tạo mới mỗi lần → treo máy khi nhiều phiếu) */
 function whFmtQty(n){
   const v=Math.round((+n||0)*1000)/1000;
-  return v.toLocaleString('vi-VN',{maximumFractionDigits:3});
+  return _WH_NF?_WH_NF.format(v):v.toLocaleString('vi-VN',{maximumFractionDigits:3});
 }
 /* ============================================================================
  * v3.15.82 (Sếp 15/8): NẠP TỒN THEO CHÊNH LỆCH.
@@ -103805,7 +103821,7 @@ function _khoUi(){
   const chip=(id,label,on)=>`<span onclick="window._KHO.wh='${id}';window._KHO.pg=0;_khoUi()" style="display:inline-block;padding:4px 12px;border-radius:14px;margin:0 5px 5px 0;cursor:pointer;font-size:12px;border:1px solid ${on?C:'#c9d0d8'};background:${on?C:'#fff'};color:${on?'#fff':'#1f2933'};${on?'font-weight:700':''}">${label}</span>`;
   const chips=ws.map(w=>chip(w.id,(_khoIsTech(w)?'🔧 ':(w.vesselId?'🚢 ':'🏢 '))+esc(w.name||w.code||w.id)+' · '+nCodes(w.id),K.wh===w.id)).join('')+chip('ALL','Tất cả kho',K.wh==='ALL');
   const tab=(label,n,on,fn,warn)=>`<span class="lg-tab${on?' on':''}${warn&&n?' warn':''}" onclick="${fn}">${label}${n!=null?`<span class="c">${n}</span>`:''}</span>`;
-  const tabs=`<div class="lg-tabs">${tab('📦 Tồn kho',null,true,'')}${tab('⏳ Chờ nhận hàng',nPend,false,'openPendingInbound()',1)}${tab('⏳ Chờ nhập kho',nRecv,false,'openReceivedInboundQueue()',1)}${tab('🔄 Yêu cầu điều chuyển',nXfer||null,false,'openTransferReqQueue()')}${tab('🗂 Chứng từ kho',null,false,'openStockDocs()')}${tab('📋 Kiểm kê',null,false,'openStockCount()')}${tab('🗃 Danh mục vật tư',null,false,'openMaterialMaster()')}</div>`;
+  const tabs=`<div class="lg-tabs">${tab('📦 Tồn kho',null,true,'')}${tab('⏳ Chờ nhận hàng',nPend,false,'openPendingInbound()',1)}${tab('⏳ Chờ nhập kho',nRecv,false,'openReceivedInboundQueue()',1)}${tab('🔄 Yêu cầu điều chuyển',nXfer||null,false,'openTransferReqQueue()')}${tab('🗂 Chứng từ kho',null,false,`_stockFilter=Object.assign({},_stockFilter||{},{wh:'${esc((K.wh&&K.wh!=='ALL')?K.wh:'')}',lim:0});openStockDocs()`)}${tab('📋 Kiểm kê',null,false,'openStockCount()')}${tab('🗃 Danh mục vật tư',null,false,'openMaterialMaster()')}</div>`;
   /* bảng tồn */
   const showVal=_khoCanValue(), sel=K.wh==='ALL'?ws.map(w=>w.id):[K.wh];
   let rows=[]; sel.forEach(id=>{ const w=ws.find(x=>x.id===id)||{}; let vmap={}; if(showVal){ try{ const cb=whCostBasisMap(InventoryService.costBasis(), id); (whWarehouseValueRows(docs,id,cb)||[]).forEach(r=>{ vmap[String(r.code)]=r.value; }); }catch(e){} }   /* giá trị = đúng engine FIFO của màn Danh sách kho */
@@ -113487,7 +113503,7 @@ function _plOpenAdvances(){
   const _mine=!!(window._PL&&window._PL.mine), _cr=_plScopeCreators();   // v3.66.96
   const list=AccountingService.advances().filter(a=>a && !a._deleted && (a.createdBy===me || (a.employee && (a.employee===me || (myFull && a.employee===myFull))) || (!_mine && _advInModule(a, _cr))) && (!window._TU_BY||(window._TU_BY==='__me'?(a.createdBy===me||a.employee===me||(myFull&&a.employee===myFull)):a.createdBy===window._TU_BY)))
     .sort((a,b)=>String(b.date||'').localeCompare(String(a.date||'')));
-  const rows=list.map(a=>{
+  const _cp=_capList('pladv', list, 10, '_plOpenAdvances()'); const rows=_cp.rows.map(a=>{
     const aps=AccountingService.payables().filter(p=>p && !p._deleted && p._fromAdvance===a.id);
     const spent=aps.reduce((s,p)=>s+(+p._advAmount||+p.amountGross||+p.amount||0),0);
     const bal=spent-(+a.amount||0), rem=(typeof advBalance==='function')?advBalance(a):0;
@@ -113500,7 +113516,7 @@ function _plOpenAdvances(){
   }).join('');
   const _byTU=(!_mine)?`<div style="margin-bottom:8px"><select onchange="window._TU_BY=this.value;_plOpenAdvances()" style="font-size:12px"><option value="__me" ${window._TU_BY==='__me'?'selected':''}>— Của tôi —</option><option value="" ${!window._TU_BY?'selected':''}>— Tất cả người lập —</option>${Array.from(_cr).sort().map(n=>`<option value="${esc(n)}" ${window._TU_BY===n?'selected':''}>${esc((typeof _fullNameOf==='function'?_fullNameOf(n):n)||n)}</option>`).join('')}</select></div>`:'';   // v3.66.96
   const body=_byTU+`<div class="tbl-scroll"><table class="tbl"><thead><tr><th>Ngày ứng</th><th>Nội dung</th><th class="r">Số đã ứng</th><th class="r">Đã hoàn (chứng từ)</th><th class="r">Cân đối</th><th>Trạng thái</th><th></th></tr></thead>
-    <tbody>${rows||'<tr><td class="empty" colspan="7">Chưa có tạm ứng nào</td></tr>'}</tbody></table></div>
+    <tbody>${rows||'<tr><td class="empty" colspan="7">Chưa có tạm ứng nào</td></tr>'}${_cp.foot}</tbody></table></div>
     <div style="font-size:11px;color:var(--muted);margin-top:6px">Cân đối âm = NV hoàn lại · dương = công ty trả thêm.</div>`;
   openModal('📒 Sổ theo dõi thanh toán — '+esc((window._PL||{}).label||''), _plTabsHtml()+body, `<button class="btn-sec" onclick="closeModal()">Đóng</button>`);
 }
@@ -114320,8 +114336,16 @@ function ktRunHourCellEdit(recId, dayIdx, val){
   touchRecord(rec); saveState();
 }
 
+/* v3.69.71 (Sếp: "MMTB KT bấm vào bị treo"): trước đây MỖI thiết bị lọc lại TOÀN BỘ nhật ký bảo dưỡng / kiểm định (n × m) —
+   nhiều thiết bị (kể cả bản trùng) là treo máy. Nay lập chỉ mục 1 lần cho cả lượt vẽ (tự làm mới sau 1,5 giây hoặc khi số dòng đổi). */
+let _ktMIdx=null, _ktMIdxAt=0, _ktMIdxArr=null, _ktMIdxLen=-1;
+function _ktMaintIndex(){ const A=S.equipMaint||[]; const now=Date.now();
+  if(_ktMIdx&&_ktMIdxArr===A&&_ktMIdxLen===A.length&&now-_ktMIdxAt<1500) return _ktMIdx;
+  const M=new Map(); for(const x of A){ if(!x||x._deleted) continue; const k=x.equipmentId+'|'+x.kind; let L=M.get(k); if(!L){ L=[]; M.set(k,L); } L.push(x); }
+  M.forEach(L=>L.sort((a,b)=>String(b.date||'').localeCompare(String(a.date||''))));
+  _ktMIdx=M; _ktMIdxAt=now; _ktMIdxArr=A; _ktMIdxLen=A.length; return M; }
 function _ktMaintList(equipmentId, kind){
-  return (S.equipMaint||[]).filter(x=>x&&!x._deleted&&x.equipmentId===equipmentId&&x.kind===kind).sort((a,b)=>String(b.date||'').localeCompare(String(a.date||'')));
+  return (_ktMaintIndex().get(equipmentId+'|'+kind)||[]).slice();
 }
 // v3.65.65 (Sếp: "đề xuất/xây module Kho vật tư Kỹ thuật — nhập danh mục thiết bị + lịch kiểm định"):
 // Calibration Certificate — KHÔNG lưu ngày kiểm tra riêng, dùng lại chính Inspection log đã có sẵn
@@ -114778,7 +114802,9 @@ function _renderKyThuatModuleCore(){
     const isDeploy=_ktModView==='equipdeploy';
     const list=(S.equipment||[]).filter(e=>e&&!e._deleted).sort((a,b)=>String(a.code||'').localeCompare(String(b.code||'')));
     const statusColor={Available:'var(--good)',Deployed:'var(--accent)',Maintenance:'var(--warn)','Out of Service':'var(--bad)'};
-    const rows=list.map(e=>`<tr>
+    const _eqAll=list.length, _eqLim=Math.max(100,+window._KT_EQ_LIM||200); const _eqDup=(()=>{ const c={}; list.forEach(e=>{ if(e.code) c[e.code]=(c[e.code]||0)+1; }); return Object.values(c).reduce((t,n)=>t+(n>1?n-1:0),0); })();
+    const _eqFoot=(_eqAll>_eqLim?`<tr class="ldg-foot"><td colspan="10" style="text-align:center;padding:10px;background:var(--paper-2)">Đang hiện <b>${_eqLim}</b> / ${_eqAll} thiết bị — <a href="javascript:void 0" onclick="window._KT_EQ_LIM=${_eqLim+200};renderKyThuatModule()">📥 Xem thêm 200</a></td></tr>`:'')+(_eqDup?`<tr class="ldg-foot"><td colspan="10" style="padding:8px 10px;background:#fff4e5;color:#8a5a00;font-size:12px">⚠ Có <b>${_eqDup}</b> thiết bị <b>trùng mã</b> (bản nhân đôi do nhập dữ liệu ban đầu chạy lại) — Admin: menu công cụ → <b>Dọn bản trùng do nhập tự động</b>.</td></tr>`:'');   /* v3.69.71: chống treo */
+    const rows=list.slice(0,_eqLim).map(e=>`<tr>
         <td style="font-family:var(--font-mono);font-size:11px">${esc(e.code||'')}</td>
         <td><b>${esc(e.name||'')}</b>${e.serial?'<br><span style="color:var(--muted);font-size:11px">S/N: '+esc(e.serial)+'</span>':''}</td>
         <td>${esc(e.category||'')}</td>
@@ -114799,7 +114825,7 @@ function _renderKyThuatModuleCore(){
       </div>
       <div class="tbl-scroll"><table class="tbl">
         <thead><tr><th>Mã</th><th style="min-width:160px">Tên thiết bị</th><th>Category</th><th>Status</th><th>Đang gắn với</th><th></th></tr></thead>
-        <tbody>${rows||'<tr><td class="empty" colspan="6">Chưa có thiết bị</td></tr>'}</tbody>
+        <tbody>${rows||'<tr><td class="empty" colspan="6">Chưa có thiết bị</td></tr>'}${_eqFoot}</tbody>
       </table></div>`;
     return;
   }
@@ -114853,7 +114879,8 @@ function _renderKyThuatModuleCore(){
       });
     const overdue=withCalib.filter(x=>x.info.daysLeft!=null && x.info.daysLeft<0).length;
     const soon=withCalib.filter(x=>x.info.daysLeft!=null && x.info.daysLeft>=0 && x.info.daysLeft<=90).length;
-    const rows=withCalib.map(({eq,info})=>`<tr>
+    const _cAll=withCalib.length, _cLim=Math.max(100,+window._KT_EQ_LIM||200); const _cFoot=_cAll>_cLim?`<tr class="ldg-foot"><td colspan="10" style="text-align:center;padding:10px;background:var(--paper-2)">Đang hiện <b>${_cLim}</b> / ${_cAll} thiết bị (quá hạn / sắp đến hạn trước) — <a href="javascript:void 0" onclick="window._KT_EQ_LIM=${_cLim+200};renderKyThuatModule()">📥 Xem thêm 200</a></td></tr>`:'';   /* v3.69.71 */
+    const rows=withCalib.slice(0,_cLim).map(({eq,info})=>`<tr>
         <td><b>${esc(eq.name||'')}</b><div style="font-size:10px;color:var(--muted)">${esc(eq.code||'')} · ${esc(eq.category||'')}</div></td>
         <td style="font-size:11px">${esc(eq.calibMethod||'—')}</td>
         <td class="c">${info.interval} tháng</td>
@@ -114870,7 +114897,7 @@ function _renderKyThuatModuleCore(){
       <div style="font-size:11px;color:var(--muted);margin-bottom:10px">Ngày kiểm tra lần tới = Inspection gần nhất (ở Equipment Register) + chu kỳ kiểm tra khai trên hồ sơ thiết bị. Thêm Inspection mới ở nút 🛠 để tự dời hạn. Thiết bị chưa khai chu kỳ không hiện ở đây.</div>
       <div class="tbl-scroll"><table class="tbl">
         <thead><tr><th>Thiết bị</th><th>Phương pháp kiểm tra</th><th>Chu kỳ</th><th>Kiểm tra gần nhất</th><th>Đến hạn lần tới</th><th>Trạng thái</th><th></th></tr></thead>
-        <tbody>${rows||'<tr><td class="empty" colspan="7">Chưa có thiết bị nào khai chu kỳ kiểm tra</td></tr>'}</tbody>
+        <tbody>${rows||'<tr><td class="empty" colspan="7">Chưa có thiết bị nào khai chu kỳ kiểm tra</td></tr>'}${_cFoot}</tbody>
       </table></div>`;
     return;
   }
@@ -121768,7 +121795,7 @@ function _modMyBccSubmit(sheetId, empId, send){   // v3.67.86: send=false → L�
 /* v3.67.11 (Sếp: "mọi NV không thấy thông tin của tôi ngay khi mở app — phải bấm Employees mới hiện"): khung "Của tôi"
    trước chỉ bật trong các hàm chuyển mục (tmSwitchView/ktModSwitchView…), KHÔNG chạy khi mở app. Nay bật cho CẢ 7 module
    ở mỗi lần renderAll (mở app, sau đồng bộ) và mỗi lần chuyển trang. Liên kết hồ sơ = email trong hồ sơ nhân viên. */
-function _modMyTabsRefresh(){ ['tm-mytab','vm-mytab','kt-mytab','kho-mytab','vpqn-mytab','hrm-mytab','fin-mytab','qhse-mytab'].forEach(id=>{ try{ _modMyTabShow(id); }catch(e){} }); }
+function _modMyTabsRefresh(){ const sh={ids:(()=>{ try{ return hrmMyEmpIds(); }catch(_){ return []; } })()}; _modMyToolsLabel(); ['tm-mytab','vm-mytab','kt-mytab','kho-mytab','vpqn-mytab','hrm-mytab','fin-mytab','qhse-mytab'].forEach(id=>{ try{ _modMyTabShow(id, sh); }catch(e){} }); if(sh.ids.length) try{ _myTabBadges(); }catch(e){} }   /* v3.69.72: dò trang + huy hiệu 1 lần thay vì 8 lần */
 /* ════════════════════════════════════════════════════════════════════════════════════════════════
    v3.67.71 (Sếp duyệt mẫu): MY SECTION thống nhất 7 module + 🌴 PHÉP NĂM + ĐƠN XIN NGHỈ PHÉP
    • Được cấp: 12 + 1 ngày/5 năm thâm niên (chưa đủ 12 tháng: 1 ngày/tháng) — công thức cũ hrmAnnualLeave.
@@ -122781,7 +122808,7 @@ function _ktTechRecvOpen(){ const n1=(InventoryService.stockDocs()||[]).filter(d
     <div style="font-size:11px;color:var(--muted);margin-top:8px">Phiếu do NV module Kỹ thuật mua. Đủ mã mới nhập kho.</div>`, `<button class="btn-ghost" onclick="closeModal()">Đóng</button>`); }
 function _ktTechDocsOpen(){ openModal('🧾 Chứng từ — Kho Kỹ thuật', `<div style="display:grid;gap:10px">
     <button class="btn-sec" style="padding:12px;font-size:14px;text-align:left" onclick="closeModal();finOpenInboundFor('Kỹ thuật', ['TECH'])">⏳ Theo dõi nhập kho (đã xong)</button>
-    <button class="btn-sec" style="padding:12px;font-size:14px;text-align:left" onclick="closeModal();openStockDocs()">🧾 Sổ chứng từ kho (nhập · xuất · điều chuyển)</button></div>`, `<button class="btn-ghost" onclick="closeModal()">Đóng</button>`); }
+    <button class="btn-sec" style="padding:12px;font-size:14px;text-align:left" onclick="closeModal();(()=>{ const w=_ktTechWarehouse(); _stockFilter=Object.assign({},_stockFilter||{},{wh:w?w.id:'',lim:0}); openStockDocs(); })()">🧾 Sổ chứng từ kho (nhập · xuất · điều chuyển)</button></div>`, `<button class="btn-ghost" onclick="closeModal()">Đóng</button>`); }
 
 /* ════════════════════════════════════════════════════════════════════════════════════════════════
    v3.68.99 (Sếp duyệt): ĐƠN TỪ TẠI MY SECTION — Đơn xin nghỉ phép (SME-HR-PR-001-FRM-005 Rev 05) · Đề nghị làm ngoài giờ (FRM-003 Rev 05)
@@ -123900,11 +123927,11 @@ function openMyTasks(tab, ty){ tab=tab||window._MYT_TAB||'open'; window._MYT_TAB
   const hasPay=L.some(x=>x.ty==='pay1'||x.ty==='pay2');
   const _payOnly=L.length&&L.every(x=>x.f&&(x.ty==='pay1'||x.ty==='pay2'));   /* v3.69.56 (Sếp): duyệt chi L1 / L2 — bỏ Loại · Xử lý, tách NCC · Nội dung · Số HĐ / PO · Số tiền */
   const _F=(n,c)=>(+n||0).toLocaleString('vi-VN',{maximumFractionDigits:2});
-  const _payRows=_payOnly?L.map(x=>`<tr style="cursor:pointer" onclick="${x.open}"><td onclick="event.stopPropagation()"><input type="checkbox" data-myt="${esc(x.key)}" ${window._MYT_SEL.has(x.key)?'checked':''} onchange="_mytSel(this.getAttribute('data-myt'),this.checked)"></td><td class="mono" style="white-space:nowrap;color:var(--muted)">${x.due?esc(_cdD(x.due)):'—'}</td><td><b>${esc(x.f.ncc||'—')}</b></td><td>${esc(x.f.desc||'')}${x.f.trail?`<div style="font-size:10.5px;color:#188038">${esc(x.f.trail)}</div>`:''}${x.f.adj?`<div style="font-size:10.5px;color:#9a5a05">${esc(x.f.adj)}</div>`:''}</td><td class="mono" style="font-size:11.5px">${x.f.ref?esc(x.f.ref):'<span style="color:var(--muted)">— chưa có HĐ</span>'}</td><td style="text-align:right;white-space:nowrap"><b>${_F(x.f.amt)}</b> <span style="font-size:10.5px;color:var(--muted)">${esc(x.f.ccy)}</span></td><td style="font-size:12px">${esc(x.who||'')}</td></tr>`).join(''):'';
+  const _payRows=_payOnly?_capList('mytask', L, 8, "openMyTasks(undefined,'"+String(ty||'')+"')").rows.map(x=>`<tr style="cursor:pointer" onclick="${x.open}"><td onclick="event.stopPropagation()"><input type="checkbox" data-myt="${esc(x.key)}" ${window._MYT_SEL.has(x.key)?'checked':''} onchange="_mytSel(this.getAttribute('data-myt'),this.checked)"></td><td class="mono" style="white-space:nowrap;color:var(--muted)">${x.due?esc(_cdD(x.due)):'—'}</td><td><b>${esc(x.f.ncc||'—')}</b></td><td>${esc(x.f.desc||'')}${x.f.trail?`<div style="font-size:10.5px;color:#188038">${esc(x.f.trail)}</div>`:''}${x.f.adj?`<div style="font-size:10.5px;color:#9a5a05">${esc(x.f.adj)}</div>`:''}</td><td class="mono" style="font-size:11.5px">${x.f.ref?esc(x.f.ref):'<span style="color:var(--muted)">— chưa có HĐ</span>'}</td><td style="text-align:right;white-space:nowrap"><b>${_F(x.f.amt)}</b> <span style="font-size:10.5px;color:var(--muted)">${esc(x.f.ccy)}</span></td><td style="font-size:12px">${esc(x.who||'')}</td></tr>`).join(''):'';
   const _payTot=(()=>{ if(!_payOnly) return ''; const m={}; L.forEach(x=>{ m[x.f.ccy]=(m[x.f.ccy]||0)+(+x.f.amt||0); }); return `<tr style="background:var(--paper-2)"><td colspan="5" style="text-align:right"><b>Tổng ${L.length} phiếu</b></td><td style="text-align:right;white-space:nowrap">${Object.keys(m).map(c=>`<b>${_F(m[c])}</b> <span style="font-size:10.5px">${esc(c)}</span>`).join('<br>')}</td><td></td></tr>`; })();
-  const rows=L.map(x=>`<tr style="cursor:pointer;${x.late?'background:#fdecec':''}" onclick="${x.open}">${hasPay?`<td onclick="event.stopPropagation()">${(x.ty==='pay1'||x.ty==='pay2')?`<input type="checkbox" data-myt="${esc(x.key)}" ${window._MYT_SEL.has(x.key)?'checked':''} onchange="_mytSel(this.getAttribute('data-myt'),this.checked)">`:''}</td>`:''}<td class="mono" style="white-space:nowrap">${x.due?esc(_cdD(x.due)):'—'}${x.late?'<div style="font-size:10px;color:var(--bad);font-weight:700">quá hạn</div>':''}</td><td style="white-space:nowrap">${_MYT_TYPES[x.ty]}</td><td>${x.title}</td><td>${esc(x.who||'')}</td><td style="white-space:nowrap"><b>${esc(x.st||'')}</b>${x.done2?` <button class="btn-sec" style="font-size:11px" onclick="event.stopPropagation();${x.done2}">↪ Gửi lại</button>`:''}</td></tr>`).join('');
+  const _cpM=_capList('mytask', L, 8, "openMyTasks(undefined,'"+String(ty||'')+"')"); const rows=_cpM.rows.map(x=>`<tr style="cursor:pointer;${x.late?'background:#fdecec':''}" onclick="${x.open}">${hasPay?`<td onclick="event.stopPropagation()">${(x.ty==='pay1'||x.ty==='pay2')?`<input type="checkbox" data-myt="${esc(x.key)}" ${window._MYT_SEL.has(x.key)?'checked':''} onchange="_mytSel(this.getAttribute('data-myt'),this.checked)">`:''}</td>`:''}<td class="mono" style="white-space:nowrap">${x.due?esc(_cdD(x.due)):'—'}${x.late?'<div style="font-size:10px;color:var(--bad);font-weight:700">quá hạn</div>':''}</td><td style="white-space:nowrap">${_MYT_TYPES[x.ty]}</td><td>${x.title}</td><td>${esc(x.who||'')}</td><td style="white-space:nowrap"><b>${esc(x.st||'')}</b>${x.done2?` <button class="btn-sec" style="font-size:11px" onclick="event.stopPropagation();${x.done2}">↪ Gửi lại</button>`:''}</td></tr>`).join('');
   openModal('📋 Việc của tôi', `<div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:6px">${tb('open','Đang chờ',open.length)}${tb('late','Quá hạn',late.length,true)}${tb('done','Hoàn thành',done.length)}</div><div style="display:flex;gap:4px;flex-wrap:wrap;margin-bottom:8px">${chips}</div>
-    <div class="tbl-scroll" style="max-height:60vh;overflow:auto">${_payOnly?`<table class="tbl" style="font-size:12.5px"><thead><tr><th><input type="checkbox" onchange="_mytSelAll(this.checked)" title="Chọn tất cả phiếu chờ duyệt chi"></th><th>Hạn</th><th>NCC / Người thụ hưởng</th><th>Nội dung</th><th>Số HĐ / PO</th><th style="text-align:right">Số tiền</th><th>Người lập / gửi</th></tr></thead><tbody>${_payRows}${_payTot}</tbody></table>`:`<table class="tbl" style="font-size:12.5px"><thead><tr>${hasPay?'<th><input type="checkbox" onchange="_mytSelAll(this.checked)" title="Chọn tất cả phiếu chờ duyệt chi"></th>':''}<th>Hạn</th><th>Loại</th><th>Nội dung</th><th>Người lập / gửi</th><th>Xử lý</th></tr></thead><tbody>${rows||'<tr><td colspan="6" style="text-align:center;color:var(--muted);padding:14px">Không có việc</td></tr>'}</tbody></table>`}</div>
+    <div class="tbl-scroll" style="max-height:60vh;overflow:auto">${_payOnly?`<table class="tbl" style="font-size:12.5px"><thead><tr><th><input type="checkbox" onchange="_mytSelAll(this.checked)" title="Chọn tất cả phiếu chờ duyệt chi"></th><th>Hạn</th><th>NCC / Người thụ hưởng</th><th>Nội dung</th><th>Số HĐ / PO</th><th style="text-align:right">Số tiền</th><th>Người lập / gửi</th></tr></thead><tbody>${_payRows}${_capList('mytask', L, 8, "openMyTasks(undefined,'"+String(ty||'')+"')").foot}${_payTot}</tbody></table>`:`<table class="tbl" style="font-size:12.5px"><thead><tr>${hasPay?'<th><input type="checkbox" onchange="_mytSelAll(this.checked)" title="Chọn tất cả phiếu chờ duyệt chi"></th>':''}<th>Hạn</th><th>Loại</th><th>Nội dung</th><th>Người lập / gửi</th><th>Xử lý</th></tr></thead><tbody>${rows||'<tr><td colspan="6" style="text-align:center;color:var(--muted);padding:14px">Không có việc</td></tr>'}${_cpM.foot}</tbody></table>`}</div>
     ${hasPay?`<div id="myt-paybar" style="display:flex;align-items:center;gap:8px;background:#123a5c;color:#fff;border-radius:6px;padding:6px 10px;margin-top:6px;font-size:12.5px"><span class="myt-cnt"></span><span style="flex:1"></span><button class="btn-primary" style="background:#1e7d44;border-color:#1e7d44" onclick="_mytPayAct('ok')">✓ Duyệt các phiếu đã chọn</button><button class="btn-primary" style="background:var(--bad);border-color:var(--bad)" onclick="_mytPayAct('ret')">↩ Trả về…</button></div>`:''}
     <div style="font-size:11px;color:var(--muted);margin-top:8px">Bấm dòng để mở đúng phiếu / màn xử lý · hồ sơ bị trả về: sửa rồi gửi lại (phiếu về đúng bước) hoặc bấm “↪ Gửi lại” · phiếu chờ duyệt chi: tick rồi duyệt cả lô.</div>`, `<button class="btn-ghost" onclick="closeModal()">Đóng</button>`);
   try{ setModalWide(true); }catch(e){} try{ _mytBar(); }catch(_){} }
@@ -124752,9 +124779,10 @@ function _pjLog(p){ const L=[]; const add=(d,who,ic,txt,open)=>{ if(!d) return; 
     else add(st,e.createdBy,'🚢',(({offhire:'Off-hire',standby:'Standby',dock:'Dock',transit:'Di chuyển'})[e.type]||e.type||'Sự kiện')+' '+vn(e.vesselId)+(en?' → '+_cdD(en):'')+(locAt(st)?' · 📍 '+locAt(st):''),`openEventModal('${esc(e.id)}')`); });
   { const _M=_pjMinsOf(p.id); _M.on.forEach(m=>add(m.actualAt||m.date||m.onhireDate||m.createdAt,m.createdBy,'📄','BB On-hire '+(vn(m.vesselId||p.vesselId)||'')+(m.location?' · 📍 '+m.location:'')+(m.signedFile&&m.signedFile.url?' · có bản ký':'')+(m.source==='import'?' · import':''),m.signedFile&&m.signedFile.url?`window.open('${esc(m.signedFile.url)}','_blank')`:''));
     _M.off.forEach(m=>add(m.actualAt||m.date||m.offhireDate||m.createdAt,m.createdBy,'📄','BB Off-hire '+(vn(m.vesselId||p.vesselId)||'')+(m.location?' · 📍 '+m.location:'')+(m.signedFile&&m.signedFile.url?' · có bản ký':'')+(m.source==='import'?' · import':''),m.signedFile&&m.signedFile.url?`window.open('${esc(m.signedFile.url)}','_blank')`:'')); }
-  /* mốc doanh thu (giữ) */
+  /* mốc doanh thu (giữ) — v3.69.69: chỉ người được xem giá trị */
+  if(_pjCanSeeValue(p)){
   (S.invoiceRequests||[]).filter(x=>x&&!x._deleted&&x.projectId===p.id).forEach(x=>add(x.createdAt||x.date,x.createdBy,'🧾','Đề nghị xuất HĐ '+(x.no||'')+(x.from?' · kỳ '+_cdD(x.from)+'–'+_cdD(x.to):''),`invReqView('${esc(x.id)}')`));
-  (AccountingService.receivables()||[]).filter(r=>r&&!r._deleted&&r.projectId===p.id&&!r._revExpected).forEach(r=>add(r.issueDate,r.createdBy,'🧾','Hóa đơn đã phát '+(r.invoiceNo||''),`openReceivableModal('${esc(r.id)}')`));
+  (AccountingService.receivables()||[]).filter(r=>r&&!r._deleted&&r.projectId===p.id&&!r._revExpected).forEach(r=>add(r.issueDate,r.createdBy,'🧾','Hóa đơn đã phát '+(r.invoiceNo||''),`openReceivableModal('${esc(r.id)}')`)); }
   if(p.ended||p.archived) add(p.endedAt||p.end,p.endedBy,'■','Kết thúc dự án'+(k?' · '+k+' đợt':''));
   return L.sort((a,b)=>b.d.localeCompare(a.d)); }
 function _pjAddDays(d,n){ const x=new Date(String(d).slice(0,10)+'T00:00:00'); x.setDate(x.getDate()+n); return x.toISOString().slice(0,10); }
@@ -124905,11 +124933,18 @@ function _pjMilestones(p){ const today=todayISO(); let tot=0;
   const paid=r=>(r.payments||[]).reduce((t,x)=>t+(+x.amount||0),0);
   const totReal={}, totPaid={}; real.forEach(r=>{ const c=r.ccy||'VND'; totReal[c]=(totReal[c]||0)+(+r.amount||0); totPaid[c]=(totPaid[c]||0)+paid(r); });
   const pct=Object.keys(totReal).map(c=>totReal[c]?Math.round(totPaid[c]/totReal[c]*100):0); const pc=pct.length?Math.min(...pct):0;
-  const box=(l,v,c)=>`<div style="flex:1;min-width:150px;border:1px solid var(--rule);border-top:3px solid ${c};border-radius:7px;padding:5px 8px;background:#fff"><div style="font-size:10.5px;color:var(--muted)">${l}</div><div style="font-weight:700;font-size:12.5px">${v}</div></div>`;
+  const box=(l,v,c)=>!_pjCanSeeValue(p)?'':`<div style="flex:1;min-width:150px;border:1px solid var(--rule);border-top:3px solid ${c};border-radius:7px;padding:5px 8px;background:#fff"><div style="font-size:10.5px;color:var(--muted)">${l}</div><div style="font-weight:700;font-size:12.5px">${v}</div></div>`;
   return `<div style="border:1px solid var(--rule);border-radius:8px;padding:8px 10px;background:var(--paper);margin-bottom:10px">
     <div style="font-weight:700;color:#123a5c;margin-bottom:4px">📍 Mốc dự án</div>
     <div style="margin-bottom:6px">${dots||'<span style="font-size:11.5px;color:var(--muted)">Chưa có đợt On-hire</span>'}${evs.length?` <span style="font-size:11.5px">· <b>Tổng thời gian thực hiện: ${tot} ngày On-hire</b></span>`:''}</div>
-    <div style="display:flex;gap:6px;flex-wrap:wrap">${box('◌ Doanh thu dự kiến (đã chuyển KTT, chưa phát HĐ)',sum(exp,r=>+r.amount||0),'#5b3f8c')}${box('🧾 Doanh thu thực hiện (HĐ đã phát)',sum(real,r=>+r.amount||0),'#1e7d44')}${box('💰 Đã thu',sum(real,paid),'#0f6e7a')}${box('Còn phải thu · thu hồi',sum(real,r=>(+r.amount||0)-paid(r))+(real.length?' · '+pc+'%':''),'#b26a00')}</div></div>`; }
+    ${!_pjCanSeeValue(p)?_pjTimeBar(p):''}<div style="display:${_pjCanSeeValue(p)?'flex':'none'};gap:6px;flex-wrap:wrap">${box('◌ Doanh thu dự kiến (đã chuyển KTT, chưa phát HĐ)',sum(exp,r=>+r.amount||0),'#5b3f8c')}${box('🧾 Doanh thu thực hiện (HĐ đã phát)',sum(real,r=>+r.amount||0),'#1e7d44')}${box('💰 Đã thu',sum(real,paid),'#0f6e7a')}${box('Còn phải thu · thu hồi',sum(real,r=>(+r.amount||0)-paid(r))+(real.length?' · '+pc+'%':''),'#b26a00')}</div></div>`; }
+/* v3.69.69 (Sếp): CNQN — dự án O&M: Nhân viên CHỈ thấy tiến độ theo thời gian; mọi giá trị (doanh thu dự kiến / thực hiện / thu tiền / hóa đơn)
+   chỉ Trưởng BP (cùng Admin · BOD · CEO · TCKT). Mảng khác giữ nguyên. */
+function _pjCanSeeValue(p){ try{ if(!p||p.segment!=='OM') return true; if(isAdmin()||CURRENT_ROLE==='admin') return true; const u=CURRENT_USER||{}; if(u.isBOD||u.isCEO) return true; const fg=Array.isArray(u.funcGroups)?u.funcGroups:[]; if(fg.includes('TCKT')) return true;
+  return !!((u.isDeptHead||(typeof _hasTier==='function'&&_hasTier(u,'truong_bp')))&&fg.includes('VPQN')); }catch(_){ return false; } }
+function _pjTimeBar(p){ const st=String(p.start||'').slice(0,10), en=String(p.end||'').slice(0,10), t=todayISO(); if(!st||!en) return '<div style="font-size:12px;color:var(--muted);margin:4px 0 8px">⏱ Chưa có thời gian dự án</div>';
+  const tot=Math.max(1,Math.round((Date.parse(en)-Date.parse(st))/864e5)+1), done=Math.min(tot,Math.max(0,Math.round((Date.parse(t<en?t:en)-Date.parse(st))/864e5)+1)), pc=Math.round(done/tot*100), left=Math.max(0,tot-done);
+  return `<div style="margin:4px 0 8px"><div style="font-size:12px;margin-bottom:3px">⏱ <b>Tiến độ theo thời gian:</b> ${t<st?'chưa bắt đầu (từ '+_cdD(st)+')':('đã qua <b>'+done+' / '+tot+'</b> ngày ('+pc+'%) · còn <b>'+left+'</b> ngày')}</div><div style="height:7px;background:var(--paper-2);border-radius:4px;overflow:hidden"><div style="height:100%;width:${t<st?0:pc}%;background:${pc>=90?'#b26a00':'#1e7d44'}"></div></div></div>`; }
 /* ════════════════════════════════════════════════════════════════════════════════════════════════
    v3.69.53 (Sếp duyệt A–F): CHỐNG MẤT / HỒI SINH TÀI KHOẢN & MẤT VAI TRÒ khi đồng bộ cấu hình
    A. Không gộp được với cloud → DỪNG đẩy (không đè).   C. Dấu xóa có THỜI ĐIỂM — NV tạo lại / khôi phục không bị loại.
@@ -125033,6 +125068,62 @@ const _DM_SUBJ_RE=/Vessel\s+(.+?)\s*[-–:]?\s*Daily\s+(?:Activit(?:y|ies)\s+)?R
 function _dmSubjInfo(row){ const t=String((row&&row.subject)||''); const m=_DM_SUBJ_RE.exec(t); if(!m) return {isDar:/daily\s+(activit(y|ies)\s+)?report/i.test(t), vessel:'', date:''};
   return {isDar:true, vessel:m[1].trim(), date:m[4]+'-'+m[3].padStart(2,'0')+'-'+m[2].padStart(2,'0')}; }
 function _dmRowVessel(row){ let v=row&&row.vessel&&row.vessel!=='?'?_dmVessel(row.vessel):null; if(!v){ const si=_dmSubjInfo(row); if(si.vessel) v=_dmVessel(si.vessel); } return v; }
+/* ════ v3.69.72 (Sếp duyệt A–D): CHỐNG TREO TOÀN APP ════
+   A. Bộ định dạng số dùng chung: Number.toLocaleString(locale, options) → Intl.NumberFormat nhớ sẵn theo (locale, options).
+      Kết quả HIỆN Y HỆT (cùng chuẩn ECMA-402); chỉ bỏ việc tạo bộ định dạng mới mỗi lần (967 chỗ trong app). */
+(function(){ try{
+  const _orig=Number.prototype.toLocaleString; const _cache=new Map(); let _n=0;
+  Number.prototype.toLocaleString=function(loc, opt){
+    if(loc===undefined && opt===undefined) return _orig.call(this);
+    let key; try{ key=(Array.isArray(loc)?loc.join(','):String(loc===undefined?'':loc))+'|'+(opt?JSON.stringify(opt):''); }catch(_){ return _orig.call(this,loc,opt); }
+    let f=_cache.get(key);
+    if(!f){ try{ f=new Intl.NumberFormat(loc,opt); }catch(e){ return _orig.call(this,loc,opt); } if(_n++>400){ _cache.clear(); _n=0; } _cache.set(key,f); }
+    try{ return f.format(this); }catch(e){ return _orig.call(this,loc,opt); } };
+  window._nfOrigToLocale=_orig;
+}catch(_){} })();
+/* C. Chia trang thật cho danh sách lớn: chỉ vẽ tối đa N dòng mới nhất + "Xem thêm"; tổng số vẫn tính trên toàn bộ. */
+window._LIM={};
+function _capList(key, list, colspan, onMore, lim){ const L=Array.isArray(list)?list:[]; const n=Math.max(100,+(window._LIM[key])||lim||200); const all=L.length; if(all<=n) return {rows:L, foot:'', all, shown:all};
+  return {rows:L.slice(0,n), all, shown:n, foot:`<tr class="ldg-foot"><td colspan="${colspan||20}" style="text-align:center;padding:9px;background:var(--paper-2);font-size:12px">Đang hiện <b>${n}</b> / ${all} dòng — <a href="javascript:void 0" onclick="window._LIM['${key}']=${n+200};${onMore||''}">📥 Xem thêm 200</a> · lọc để thu gọn</td></tr>`}; }
+/* D. Gom Lưu: nhiều lần Lưu liền nhau gộp thành 1 lần ghi (ghi ngay nếu đã lâu > 1,5 s; các lần kế tiếp dồn lại ghi sau 0,6 s); ghi bù khi rời trang / ẩn tab / trước khi đẩy cloud. */
+(function(){ try{
+  const _orig=window.saveState; if(typeof _orig!=='function') return; let last=0, tmr=null, pending=false;
+  const flush=()=>{ if(tmr){ clearTimeout(tmr); tmr=null; } if(!pending) return; pending=false; last=Date.now(); try{ _orig(); }catch(e){ console.warn('[saveState]',e); } };
+  /* rời trang: chỉ ghi bù khi dữ liệu máy CHƯA bị chủ ý xóa (Dọn máy · Đăng xuất · Sự cố cấu hình xóa STORE_KEY rồi tải lại) */
+  const flushUnload=()=>{ try{ if(typeof STORE_KEY!=='undefined' && localStorage.getItem(STORE_KEY)==null) { pending=false; return; } }catch(_){} flush(); };
+  window.saveState=function(){ const now=Date.now(); pending=true; if(now-last>1500){ flush(); return; } if(!tmr) tmr=setTimeout(flush,600); };
+  window.saveStateFlush=flush;
+  window.addEventListener('pagehide',flushUnload); window.addEventListener('beforeunload',flushUnload);
+  document.addEventListener('visibilitychange',()=>{ if(document.visibilityState==='hidden') flushUnload(); });
+  ['_cloudSyncOnce','_cloudSyncRaw','_syncBothRaw','lightSyncPull','emptyStatePullNow','startMachineCleanup','adminForcePull','pushLocalSnapshot','exportBackup','exportAllBackup'].forEach(n=>{ const f=window[n]; if(typeof f==='function'){ window[n]=function(){ flush(); return f.apply(this,arguments); }; } });
+}catch(_){} })();
+
+/* ════ v3.69.73 (F3 · F4): CHỐT CHẶN DỮ LIỆU TRÙNG DO APP TỰ TẠO — toàn app
+   Khóa tự nhiên: thiết bị = mã · PM = năm|nhóm|máy|số|nội dung · Running Hours = tháng|máy · NCC tự tạo = tên chuẩn hóa · tàu = mã tài sản · NV GEO = MSNV.
+   Bản "tự tạo" (createdBy import / migration / seed) trùng khóa và CHƯA ai dùng → xóa (dấu chống hồi sinh). Bản có dữ liệu → giữ, báo trong công cụ. ════ */
+const _AUTO_BY=/^(import|migration|seed\b|seed\s)/i;
+function _dupPlanExtra(){ const out={del:[], hold:[]}; const now=todayISO();
+  const grp=(arr,keyFn)=>{ const M=new Map(); (arr||[]).forEach((r,i)=>{ if(!r||r._deleted) return; const k=keyFn(r); if(k==null||k==='') return; let L=M.get(k); if(!L){ L=[]; M.set(k,L); } L.push({r,i}); }); return M; };
+  const pick=(field,label,M,usedFn,autoFn)=>{ M.forEach((L,k)=>{ if(L.length<2||!L.some(x=>autoFn(x.r))) return;
+      const info=L.map(x=>({r:x.r,i:x.i,u:usedFn(x.r),auto:autoFn(x.r)})).sort((a,b)=>(b.u-a.u)||((a.auto?1:0)-(b.auto?1:0))||String(a.r.createdAt||'').localeCompare(String(b.r.createdAt||''))||(a.i-b.i));
+      const keep=info[0]; info.slice(1).forEach(x=>{ const it={field,label,key:k,id:x.r.id,keepId:keep.r.id,createdAt:x.r.createdAt||'',name:x.r.name||x.r.desc||x.r.equip||''}; if(x.auto&&!x.u) out.del.push(it); else out.hold.push(it); }); }); };
+  pick('pmTasks','PM Checklist', grp(S.pmTasks,r=>[r.year,r.group,r.equip,r.no,String(r.desc||'').trim().toLowerCase()].join('|')), r=>(r.updatedAt||r.updatedBy||r.doneBy||(r.done&&Object.keys(r.done||{}).length)?1:0), r=>_AUTO_BY.test(String(r.createdBy||'')));
+  pick('pmRunHours','Running Hours', grp(S.pmRunHours,r=>[r.ym,r.equip].join('|')), r=>(r.updatedAt||r.updatedBy?1:0), r=>_AUTO_BY.test(String(r.createdBy||'')));
+  pick('vendors','Nhà cung cấp', grp(S.vendors,r=>String(r.normalized||'').trim()), r=>((r.updatedAt||r.taxCode||r.address||r.contact)?1:0), r=>_AUTO_BY.test(String(r.createdBy||'')));
+  /* tàu sinh từ tài sản: chỉ BÁO (có sự kiện / DAR gắn theo mã tàu) */
+  grp((VesselService.vessels()||[]),r=>r.fromAssetId?String(r.fromAssetId):'').forEach((L,k)=>{ if(L.length<2) return; L.slice(1).forEach(x=>out.hold.push({field:'vessels',label:'Tàu (từ tài sản)',key:k,id:x.r.id,keepId:L[0].r.id,createdAt:x.r.createdAt||'',name:x.r.name||''})); });
+  return out; }
+let _dedupeAt=0;
+function _dedupeAutoRecords(force){ try{ if(!isAdmin()&&!force) return 0; const now=Date.now(); if(!force&&now-_dedupeAt<120000) return 0; _dedupeAt=now;
+    const X=_dupPlanExtra(); const P=_dupPlan(); const n=X.del.length+P.equip.length; if(!n) return 0;
+    const ids={}; X.del.forEach(d=>{ (ids[d.field]=ids[d.field]||new Set()).add(d.id); }); P.equip.forEach(x=>{ (ids.equipment=ids.equipment||new Set()).add(x.del.id); });
+    const mts=ids.equipment?(S.equipMaint||[]).filter(m=>m&&ids.equipment.has(m.equipmentId)).map(m=>m.id):[];
+    const fields=Object.keys(ids); if(mts.length) fields.push('equipMaint');
+    commitMutation(()=>{ fields.forEach(f=>{ if(f==='equipMaint') return; const set=ids[f]; S[f]=(S[f]||[]).filter(r=>!(r&&set.has(r.id))); markDeleted(Array.from(set),f); });
+      if(mts.length){ const ms=new Set(mts); S.equipMaint=(S.equipMaint||[]).filter(m=>!ms.has(m.id)); markDeleted(mts,'equipMaint'); } },
+      {action:'dup_auto_dedupe', fields:fields.concat(['deletedIds']), onOk:()=>{ try{ logAuditEvent('dup_auto_dedupe',{n, by:actorName()}); }catch(_){} toast('🧹 Đã tự gỡ '+n+' bản trùng do nhập tự động (có dấu chống hồi sinh)','good'); }});
+    return n; }catch(e){ console.warn('[dedupe]',e); return 0; } }
+
 /* ── Sidebar khối màu: ẩn dải màu khi mọi mục trong khối đều ẩn ── */
 function _sbBandsRefresh(root){
   (root?[root]:document.querySelectorAll('#tm-sidebar,#vm-mod-sidebar,#kt-mod-sidebar,#vpqn-mod-sidebar,#hrm-sidebar,#fin-sidebar,#kho-mod-sidebar,#qhse-mod-sidebar')).forEach(sb=>{
@@ -125049,16 +125140,17 @@ function _sbBandsRefresh(root){
   if(document.readyState==='loading') document.addEventListener('DOMContentLoaded', boot); else setTimeout(boot,0);
 })();
 
-function _modMyTabShow(elId){
-  try{ const _all=isAdmin()||!!(CURRENT_USER&&(CURRENT_USER.isDeptHead||['truong_bp','ceo','thu_kho','thu_kho_module'].indexOf(CURRENT_USER.roleTier)>=0))||(typeof canCheckAcc==='function'&&canCheckAcc());
-    document.querySelectorAll('[onclick^="openToolsHeldModal"]').forEach(el=>{ el.textContent=el.closest('#vm-mod-sidebar')?(_all?'📍 Office Equipment Register':'📍 My Equipment'):(_all?'📍 Sổ theo dõi MMTB văn phòng':'📍 Theo dõi MMTB cá nhân'); }); }catch(e){}   /* v3.67.44 */
+function _modMyToolsLabel(){ try{ const _all=isAdmin()||!!(CURRENT_USER&&(CURRENT_USER.isDeptHead||['truong_bp','ceo','thu_kho','thu_kho_module'].indexOf(CURRENT_USER.roleTier)>=0))||(typeof canCheckAcc==='function'&&canCheckAcc());
+    document.querySelectorAll('.hrm-side-item[onclick^="openToolsHeldModal"]').forEach(el=>{ el.textContent=el.closest('#vm-mod-sidebar')?(_all?'📍 Office Equipment Register':'📍 My Equipment'):(_all?'📍 Sổ theo dõi MMTB văn phòng':'📍 Theo dõi MMTB cá nhân'); }); }catch(e){} }   /* v3.67.44 · v3.69.72: chạy 1 lần / lượt vẽ */
+function _modMyTabShow(elId, _shared){
+  if(!_shared) _modMyToolsLabel();
   try{
     const el=document.getElementById(elId); if(!el) return;
-    const ids=hrmMyEmpIds();
+    const ids=(_shared&&_shared.ids)||hrmMyEmpIds();
     el.style.display=(ids.length>0)?'':'none';
     if(!ids.length) return;
     /* v3.67.71 (Sếp duyệt mẫu): MY SECTION thống nhất — cùng tên khối, cùng mục, cùng thứ tự ở 7 module (bỏ đổi nhãn Anh/Việt theo từng NV). */
-    try{ _myTabBadges(); }catch(e){}
+    if(!_shared) try{ _myTabBadges(); }catch(e){}
   }catch(e){}
 }
 // v3.66.12 (Sếp: "Lưu Việt Hòa: tạo tài khoản xong hồ sơ Nhân sự biến mất, tìm không ra ở đâu" — cần
@@ -130721,6 +130813,7 @@ function openPerfLog(){
 }
 function renderAll(opts){
   try{ _tkReset(); }catch(e){}   // v3.67.58
+  try{ if(window._fullPullDone===true) setTimeout(()=>{ try{ _dedupeAutoRecords(); }catch(_){} },1500); }catch(e){}   /* v3.69.73 (F3): chốt chặn bản trùng tự tạo — chỉ sau khi đã tải đủ cloud */
   try{ _modMyTabsRefresh(); }catch(e){}   // v3.67.11: khung "Của tôi" hiện ngay khi mở app
   try{ if(!window._cdDueChecked){ window._cdDueChecked=1; setTimeout(()=>{ try{ _cdApplyDue(); }catch(_){} try{ _hrdApplyDue(); }catch(_){} try{ _spApplyDueRanks(); }catch(_){} },3000); } }catch(e){}   // v3.67.92: QĐ văn phòng + chức danh hẹn ngày cũng tự áp dụng khi mở app   // v3.67.24
   try{ if(typeof _darMailCan==='function'&&_darMailCan()) _dmBoot(); }catch(e){}   // v3.67.29: DAR email tự đọc mỗi 10 phút
