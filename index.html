@@ -4699,7 +4699,7 @@ const WH_TYPES = {
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.70.29';
+const APP_VERSION='3.70.32';
 /* HOTFIX 3.12.17-email: CHẶN TRIỆT ĐỂ gửi email TỰ ĐỘNG (mất kiểm soát — spam quota Google).
    Email phải do NV được phân quyền CHỦ ĐỘNG chọn gửi. Cờ này:
    (1) chặn auto-SCAN tạo email (hrmScanExpiries/vesselCertScanExpiries);
@@ -19866,7 +19866,7 @@ async function _cloudSyncRaw(mode, opts){
       }
       // v2.99.41: với NV (không phải admin) — pull tự động; nếu cloud nghèo hơn local nhiều,
       // KHÔNG đè thầm mà cảnh báo (tránh mất bản ghi NV vừa nhập chưa push).
-      if(CURRENT_ROLE!=='admin' && _localCount >= 10 && _cloudCount < _localCount * 0.5){
+      if(CURRENT_ROLE!=='admin' && _localCount >= 10 && _cloudCount < (_localCount - ((typeof _tombLocalCount==='function')?_tombLocalCount(filteredCloud):0)) * 0.5){   /* v3.70.30: phần cloud đã xóa có chủ đích (bia mộ) không tính là thiếu */
         console.warn('[pull] BẢO VỆ: cloud('+_cloudCount+') < 50% local('+_localCount+') — bỏ qua pull đè.');
         window._lastPullOutcome={at:new Date().toISOString(), branch:'GUARD_NV_SKIP', note:'Cloud('+_cloudCount+') < 50% local('+_localCount+') — hoãn pull đè'};
         updateSyncStatus('idle','Tạm hoãn tải về (cloud ít hơn máy)');
@@ -44168,7 +44168,7 @@ function scheduleAutoSync(){
   //  - backoff: nếu lần push gần nhất bị timeout (cloud bận) → lùi thêm để không dồn nghẽn.
   const backoff = (window._syncBackoffUntil && Date.now() < window._syncBackoffUntil)
     ? (window._syncBackoffUntil - Date.now()) : 0;
-  const delay = 15000 + Math.floor(Math.random()*10000) + backoff;
+  const delay = 3000 + Math.floor(Math.random()*2000) + backoff;   /* v3.70.31 (Sếp duyệt A): đẩy nhanh 3–5 giây (trước 15–25 giây) */
   _autoSyncTimer=setTimeout(()=>{
     // Chống push trùng: nếu state không đổi so với lần push gần nhất → bỏ qua.
     const h=_quickStateHash();
@@ -127676,13 +127676,14 @@ function _plFinFiltered(s){ return s.list.filter(p=>{ const d=_plApRowData(p);
     return _plQ(s.q,[p.dnttNo,p.partner,p.desc,p.payContent,p.invoiceNo,p.poNo,p.poRef,d.tg.n,+p.amount||0,+p.amountGross||0]); }); }
 function _renderFinLedgerModal(){
   const s=_finLedgerState; if(!s) return;
+  s.list=s.list.filter(p=>!_plIsEmpAdv(p));   /* v3.70.32: phiếu tạm ứng NV → tab Tạm ứng */
   const users=Array.from(new Set(s.list.map(p=>p.createdBy).filter(Boolean))).sort();
   const D=new Map(); s.list.forEach(p=>D.set(p.id,_plApRowData(p)));
   const stats=Array.from(new Set(s.list.map(p=>D.get(p.id).stLabel).filter(Boolean))).sort();
   const tgts=new Map(); s.list.forEach(p=>{ const t=D.get(p.id).tg; if(t.k) tgts.set(t.k,t.n); });
   const filtered=_plFinFiltered(s);
   const nKtKiem=s.list.filter(p=>p.status==='pending_acc').length;
-  const nChoChi=s.list.filter(p=>p.status==='approved' && (typeof arRemaining==='function'?arRemaining(p):0)>0.001).length;
+  const nChoChi=s.list.filter(p=>p.status==='approved' && (typeof apRemainingEff==='function'?apRemainingEff(p):0)>0.001).length;   /* v3.70.32 */
   const _canCheck=(typeof canCheckAcc==='function')&&canCheckAcc();
   const _cp=_capList('plap', filtered, 10, '_renderFinLedgerModal()');
   const rows=_cp.rows.map(p=>{ const d=D.get(p.id)||_plApRowData(p), ccy=p.ccy||'VND', doc=_plDocInfo([p], d.dk);
@@ -127716,7 +127717,7 @@ function _renderFinLedgerModal(){
       ${_plSel(s.byMonth||'', _plMonths(s.list.map(p=>p.issueDate)), '— Tất cả tháng —', "_finLedgerState.byMonth=this.value;_renderFinLedgerModal()")}
       <button class="btn-sec" style="font-size:11px" onclick="_plFinExport()" title="Xuất đúng danh sách đang lọc ra Excel">📊 Xuất Excel</button>
     </div>
-    ${_plFootNote(filtered.length, s.list.length, filtered.map(p=>[(D.get(p.id)||{}).rem||0,p.ccy]), _finLedgerCanSeeAll()?('phiếu do NV thuộc '+esc(s.moduleLabel)+' lập'):'chỉ phiếu do CHÍNH BẠN lập')}
+    ${_plFinFoot(filtered, s, D)}
     <div class="tbl-scroll"><table class="tbl" style="font-size:12px">${_PL_TH}
       <tbody>${rows||'<tr><td class="empty" colspan="10">Không có phiếu khớp bộ lọc</td></tr>'}${_cp.foot||''}</tbody></table></div>
     <div style="font-size:10.5px;color:var(--muted);margin-top:6px">Vạch cam = chi dự kiến · <b>Thiếu PO/Inv</b> = chi dự kiến chưa có PO hoặc hóa đơn · ⚖ Điều chỉnh tăng/giảm/quyết toán = phiếu riêng, đi đủ bước duyệt.</div>`;
@@ -127816,7 +127817,7 @@ function _plOpenAdvances(){
       ${_plSel(F.st||'', Array.from(new Set(all.map(x=>x.st))).map(x=>[x,x]), '— Tất cả trạng thái —', "window._TUF.st=this.value;_plOpenAdvances()")}
       ${_plSel(F.month||'', _plMonths(all.map(x=>x.a.date)), '— Tất cả tháng —', "window._TUF.month=this.value;_plOpenAdvances()")}
       <button class="btn-sec" style="font-size:11px" onclick="_plAdvExport()" title="Xuất đúng danh sách đang lọc ra Excel">📊 Xuất Excel</button></div>
-    <div style="font-size:11px;color:var(--muted);margin:2px 0 8px">${list.length}/${all.length} phiếu tạm ứng · Còn phải hoàn: <b style="color:#1c3a5c">${_plSumCcy(list.map(x=>[x.rem,x.a.ccy]))}</b></div>
+    ${_plAdvInflowHtml()}<div style="font-size:11px;color:var(--muted);margin:2px 0 8px">${list.length}/${all.length} phiếu tạm ứng · Còn phải hoàn: <b style="color:#1c3a5c">${_plSumCcy(list.map(x=>[x.rem,x.a.ccy]))}</b></div>
     <div class="tbl-scroll"><table class="tbl" style="font-size:12px"><thead><tr><th>Ngày ứng</th><th>Nội dung</th><th class="r">Số đã ứng</th><th class="r">Đã hoàn (chứng từ)</th><th class="r">Cân đối</th><th>Trạng thái</th><th>Thao tác</th></tr></thead>
     <tbody>${rows||'<tr><td class="empty" colspan="7">Chưa có tạm ứng nào</td></tr>'}${_cp.foot||''}</tbody></table></div>
     <div style="font-size:11px;color:var(--muted);margin-top:6px">Cân đối âm = NV hoàn lại · dương = công ty trả thêm.</div>`;
@@ -127873,7 +127874,7 @@ function _plOpenHoSo(){
         <td style="white-space:nowrap"><a href="javascript:void 0" onclick="_hsToggle('${it.id}')" style="text-decoration:none">${open?'▾':'▸'}</a> <span style="font-size:10.5px;font-weight:700;color:${it.isPO?'#1c3a5c':'var(--muted)'}">${it.isPO?'PO':'Phiếu'}</span><div>${tg.html}</div></td>
         <td>${no}</td><td style="font-size:12px">${content}<div style="font-size:10.5px;color:var(--muted)">${esc(it.loai||'')}${it.inv?(' · HĐ '+esc(it.inv)):''}</div></td>
         <td class="r num">${fmtOrig(val,ccy)}</td><td class="r num">${it.n.paid?fmtOrig(it.n.paid,ccy):'0'}</td><td class="r num" style="font-weight:700">${fmtOrig(it.n.rem,ccy)}</td>
-        <td>${_hsChip(it.st)}${(it.st==='BS'&&it.note)?`<div style="font-size:10.5px;color:#8a3b12;margin-top:2px">⚠ ${esc(it.note)}</div>`:''}</td>
+        <td>${_hsStCell(it)}${(it.st==='BS'&&it.note)?`<div style="font-size:10.5px;color:#8a3b12;margin-top:2px">⚠ ${esc(it.note)}</div>`:''}</td>
         <td style="white-space:nowrap">${it.doc.html}<div><button class="icon-btn" title="Tiến trình hồ sơ" onclick="_hsDetail('${it.kind}','${it.id}')">👁</button></div></td></tr>`;
       if(open){ let h='';
         if(it.isPO){ const dots=r.dnttNoByDot||{};
@@ -127902,7 +127903,7 @@ function _plOpenHoSo(){
 }
 function _hsBiaExport(){ const f=_hsBiaList().find(x=>x.k===_HS_SEL); if(!f){ toast('Chọn một bìa','warn'); return; }
   _plExport('HỒ SƠ THANH TOÁN — '+String(f.title).toUpperCase()+(f.mst?(' (MST '+f.mst+')'):''), ['Dòng','Số PO / ĐNTT','Ngày','Nội dung','Loại','Hóa đơn','Giá trị','Loại tiền','Đã TT','Còn','Trạng thái hồ sơ','Giấy tờ','Ghi chú KT'],
-    f.items.map(it=>{ const r=it.recs[0]; return [it.isPO?'PO':'Phiếu', it.isPO?('PO '+r.poNo):(it.no||''), it.date||'', String(r.desc||r.payContent||'')+(it.poLk?(' · PO '+it.poLk):''), it.loai||'', it.inv||'', +(it.isPO&&r.actualValue!=null&&r.actualValue!==''?+r.actualValue:it.amt)||0, it.ccy||'VND', +it.n.paid||0, +it.n.rem||0, (_HS_ST[it.st]||[])[0]||'', it.doc.txt, it.note||'']; }),
+    f.items.map(it=>{ const r=it.recs[0]; return [it.isPO?'PO':'Phiếu', it.isPO?('PO '+r.poNo):(it.no||''), it.date||'', String(r.desc||r.payContent||'')+(it.poLk?(' · PO '+it.poLk):''), it.loai||'', it.inv||'', +(it.isPO&&r.actualValue!=null&&r.actualValue!==''?+r.actualValue:it.amt)||0, it.ccy||'VND', +it.n.paid||0, +it.n.rem||0, _hsStTxt(it), it.doc.txt, it.note||'']; }),
     'HoSo_'+String(f.title).replace(/[\\/:*?"<>|\s]+/g,'_').slice(0,60)+'.xlsx', [7,22,11,40,14,16,14,7,14,14,18,16,30]); }
 
 
@@ -128422,6 +128423,245 @@ function cashLedgerDetail(fundId, kind){ const f=AccountingService.cashFunds().f
       Array.from(mb.querySelectorAll('div')).forEach(d=>{ if(d.children.length!==2) return; const lab=(d.children[0].textContent||'').trim(); let k='';
         if(/^Tổng ứng quỹ/i.test(lab)) k='IN'; else if(/^Tổng hoàn\/chi/i.test(lab)) k='OUT'; else if(/^Số dư đầu kỳ/i.test(lab)) k='OPEN'; else if(/^Số dư (cuối kỳ|hiện tại)/i.test(lab)) k='BAL'; if(!k) return;
         d.style.cursor='pointer'; d.title='Bấm để xem chi tiết'; d.children[0].insertAdjacentHTML('beforeend',' <span style="font-size:9px;color:var(--accent)">▸ chi tiết</span>'); d.onclick=()=>cashLedgerDetail(fundId,k); }); }catch(e){ console.warn('[cl detail]',e); } return r; }; }catch(_){} })();
+
+
+/* ════ v3.70.30 (Sếp 09/10 — xử lý ngay): MÁY NHÂN VIÊN NHẬN DỮ LIỆU MỚI LIÊN TỤC
+   Trước: máy NV CHỈ tự tải khi KHÔNG mở cửa sổ nào → làm việc liên tục (luôn có cửa sổ) thì không bao giờ được cập nhật.
+   Nay: (1) tải ngay cả khi đang mở cửa sổ — chỉ hoãn khi NV đang NHẬP DỞ trong cửa sổ (đã gõ, chưa lưu); hoãn thì tự tải ngay khi lưu / đóng.
+   (2) hỏi số phiên bản mỗi ~60 giây; máy chủ chưa có số phiên bản → tự tải định kỳ ~4 phút (cùng quy tắc).
+   (3) dải nhỏ "🔄 Có dữ liệu mới" khi đang hoãn — bấm để cập nhật ngay.
+   (4) Chặn an toàn "cloud ít hơn máy": trừ phần máy có nhưng cloud đã ghi bia mộ (xóa có chủ đích) — xóa của admin về được máy NV. ════ */
+function _revCanPullNow(){ if(document.hidden) return false; if(typeof syncMachine!=='undefined'&&syncMachine&&syncMachine.running) return false;
+  if(document.getElementById('pv-ov')) return false;   /* đang xem trước thay đổi */
+  const m=document.getElementById('modal'); if(m&&m.classList.contains('show')&&(typeof _modalDirty!=='undefined')&&_modalDirty) return false;   /* đang nhập dở */
+  if(window._lastMutationTs&&Date.now()-window._lastMutationTs<20000) return false; return true; }
+async function _revDoPull(tag){ const R=window._REV; if(R.pulling) return; R.pulling=true; try{ R.lastPull=Date.now(); R.pulls=(R.pulls||0)+1; await cloudSync('pull'); try{ renderAll(); }catch(_){} R.pendingRev=null; R.lastOk=Date.now(); _revChip(); }catch(e){ R.lastErr=String(e&&e.message||e); } finally{ R.pulling=false; } }
+async function _revTick(reason){ const R=window._REV; if(R.checking||!_revLogged()) return; if(document.hidden) return; if(reason==='timer'&&_revLite()) return;
+  if(R.off){ if(reason==='timer'&&Date.now()-(R.lastPull||0)>240000){ R.pendingRev='fb'+Date.now(); } _revTryPending(); return; }
+  R.checking=true; try{ const rv=await _revFetch(); R.lastCheck=Date.now(); if(!rv){ if(R.off) R.pendingRev='fb'+Date.now(); return; } if(R.last===null){ R.last=rv; return; }
+    if(rv!==R.last){ R.last=rv; R.pendingRev=rv; } }
+  finally{ R.checking=false; } _revTryPending(); }
+function _revTryPending(){ const R=window._REV; if(!R.pendingRev||R.pulling) { _revChip(); return; } if(_revCanPullNow()) _revDoPull('pending'); else _revChip(); }
+function _revChip(){ try{ const R=window._REV; let c=document.getElementById('rev-chip'); const show=!!R.pendingRev&&!R.pulling;
+    if(!show){ if(c) c.remove(); return; }
+    if(!c){ c=document.createElement('div'); c.id='rev-chip'; c.style.cssText='position:fixed;left:14px;bottom:14px;z-index:99990;background:#0b3d91;color:#fff;border-radius:18px;padding:7px 14px;font-size:12.5px;font-weight:600;box-shadow:0 3px 12px rgba(0,0,0,.25);cursor:pointer';
+      c.onclick=()=>{ const m=document.getElementById('modal'); const dirty=m&&m.classList.contains('show')&&(typeof _modalDirty!=='undefined')&&_modalDirty;
+        if(dirty&&!confirm('Bạn đang nhập dở trong cửa sổ — nên LƯU trước.\n\nCập nhật dữ liệu mới ngay bây giờ? (nội dung đang gõ trên màn hình vẫn giữ)')) return; _revDoPull('click'); }; document.body.appendChild(c); }
+    c.textContent='🔄 Có dữ liệu mới từ máy khác — tự cập nhật khi bạn lưu / đóng cửa sổ · bấm để cập nhật ngay'; }catch(_){} }
+(function(){ try{ const c0=closeModal; closeModal=function(){ const r=c0.apply(this,arguments); try{ if(window._REV&&window._REV.pendingRev) setTimeout(_revTryPending, 700); }catch(_){} return r; }; }catch(_){} })();
+(function(){ try{ if(window._rev30) return; window._rev30=1; setInterval(()=>_revTick('timer'), 60000+Math.floor(Math.random()*15000)); setInterval(_revTryPending, 12000); }catch(_){} })();
+function _tombLocalCount(cloud){ try{ const T=new Set(((cloud&&cloud.deletedIds)||[]).map(d=>String(d&&d.id!=null?d.id:d))); if(!T.size) return 0; let n=0;
+  ['payables','receivables','vessels','fixedAssets','companies','projects','transactions','opTransactions','opVessels','bankAccounts','loans'].forEach(f=>{ (S[f]||[]).forEach(r=>{ if(r&&T.has(String(r.id))) n++; }); }); return n; }catch(_){ return 0; } }
+
+
+/* ════ v3.70.31 (Sếp duyệt A 09/10): ĐỒNG BỘ NHANH — mục tiêu 10–25 giây giữa các máy
+   • Lưu xong → đẩy lên cloud sau ~3–5 giây (trước 15–25 giây).
+   • Máy hỏi số phiên bản mỗi ~15 giây khi đang mở app; hỏi ngay khi mở màn mới / quay lại tab (cách lần trước ≥ 5 giây).
+   • Hoãn sau khi chính máy vừa sửa: 8 giây (trước 20–30 giây). Đang nhập dở: vẫn hoãn, tự tải khi lưu / đóng.
+   • Tài khoản tàu / điện thoại tiết kiệm dữ liệu: giữ chế độ nhẹ (chỉ hỏi khi quay lại app). Cloud bận → tự lùi (như cũ). ════ */
+function _revCanPullNow(){ if(document.hidden) return false; if(typeof syncMachine!=='undefined'&&syncMachine&&syncMachine.running) return false;
+  if(document.getElementById('pv-ov')) return false;
+  const m=document.getElementById('modal'); if(m&&m.classList.contains('show')&&(typeof _modalDirty!=='undefined')&&_modalDirty) return false;
+  if(window._lastMutationTs&&Date.now()-window._lastMutationTs<8000) return false; return true; }
+(function(){ try{ if(window._rev31) return; window._rev31=1;
+  setInterval(()=>{ if(Date.now()-(window._REV.lastCheck||0)>=14000) _revTick('timer'); }, 15000+Math.floor(Math.random()*3000));
+  setInterval(_revTryPending, 5000);
+  const quick=()=>{ if(!document.hidden&&Date.now()-(window._REV.lastCheck||0)>5000) _revTick('visible'); };
+  document.addEventListener('visibilitychange', quick); window.addEventListener('focus', quick);
+  const o=openModal; openModal=function(){ const r=o.apply(this,arguments); try{ if(!window._mRestoring) setTimeout(quick, 50); }catch(_){} return r; };
+}catch(e){ console.warn('[rev31]',e); } })();
+
+/* ════ v3.70.32 (Sếp duyệt 09/10): SỔ THEO DÕI THANH TOÁN — sửa lỗi · TẠM ỨNG về tab Tạm ứng · SỐ ĐNTT cấp khi Lưu (mã đơn vị 2 chữ)
+   · XEM PHIẾU 3 PHẦN (Đề nghị · Các khoản mục · Phê duyệt & thanh toán). Nút & quy trình giữ nguyên. ════ */
+
+/* ── (1) Phiếu tạm ứng nhân viên ── */
+function _plIsEmpAdv(p){ try{ return !!(p && ((p.expenseType && typeof isExpenseEmpAdvance==='function' && isExpenseEmpAdvance(p.expenseType)) || String(p._advEmployee||'').trim())); }catch(_){ return false; } }
+
+/* ── (2) Dòng tổng của tab Phải trả: chỉ cộng phiếu ĐÃ NỘP; Nháp / Bị từ chối ghi riêng; phạm vi ghi đúng ── */
+function _plFinFoot(filtered, s, D){
+  const st=p=>{ try{ return wfStatus(p); }catch(_){ return p.status||''; } };
+  const act=filtered.filter(p=>['draft','rejected'].indexOf(st(p))<0), dr=filtered.filter(p=>['draft','rejected'].indexOf(st(p))>=0);
+  const rl=L=>L.map(p=>[(D.get(p.id)||{}).rem||0,p.ccy]);
+  const scope=(window._PL&&window._PL.mine)?'chỉ phiếu do CHÍNH BẠN lập':('phiếu do NV thuộc '+esc(s.moduleLabel||'')+' lập');
+  return `<div style="font-size:11px;color:var(--muted);margin:2px 0 8px">${filtered.length}/${s.list.length} phiếu · Tổng còn phải trả (phiếu đã nộp): <b style="color:#1c3a5c">${_plSumCcy(rl(act))}</b>${dr.length?` · <span title="Không cộng vào tổng">Nháp / Bị từ chối: ${dr.length} phiếu · ${_plSumCcy(rl(dr))}</span>`:''} · ${scope}</div>`; }
+
+/* ── (3) Tab Tạm ứng: phiếu đề nghị tạm ứng đang duyệt / chờ chi ── */
+function _plAdvInflowHtml(){ try{
+  const me=actorName(), myFull=_plName(me), mine=!!(window._PL&&window._PL.mine), cr=_plScopeCreators();
+  const L=AccountingService.payables().filter(p=>p&&!p._deleted&&_plIsEmpAdv(p)&&(p.createdBy===me||p._advEmployee===me||(myFull&&p._advEmployee===myFull)||(!mine&&cr.has(p.createdBy))))
+    .filter(p=>{ const st=wfStatus(p); return !p._advCreated || st!=='approved' || ((typeof apRemainingEff==='function')?apRemainingEff(p):0)>0.001; })
+    .sort((a,b)=>String(b.issueDate||'').localeCompare(String(a.issueDate||'')));
+  if(!L.length) return '';
+  const rows=L.map(p=>{ const ccy=p.ccy||'VND', si=docStatusInfo(p), paid=_plApPaid(p), rem=(typeof apRemainingEff==='function')?apRemainingEff(p):0;
+    return `<tr style="box-shadow:inset 4px 0 0 #d98a1c"><td style="font-size:11px;white-space:nowrap">${esc(_dnttD(p.issueDate||''))}</td><td style="font-family:var(--font-mono);font-size:11px;white-space:nowrap">${esc(p.dnttNo||'—')}</td>
+      <td><b style="font-weight:600">${esc(p._advEmployee||p.partner||'')}</b><div style="font-size:10.5px;color:var(--muted)">${esc(String(p.desc||p.payContent||'').slice(0,80))}</div></td>
+      <td class="r num">${fmtOrig(+p.amountGross||+p.amount||0,ccy)}</td><td class="r num">${paid?fmtOrig(paid,ccy):'0'}</td><td class="r num" style="font-weight:700">${fmtOrig(rem,ccy)}</td>
+      <td style="font-size:11px">${esc(si.icon||'')} ${esc(si.label||'')}<div style="font-size:10px;color:var(--muted)">${esc(_plName(p.createdBy))}</div></td>
+      <td style="white-space:nowrap"><button class="icon-btn" title="Xem phiếu" onclick="openPayableModal('${p.id}')">👁</button><button class="icon-btn" title="Giấy tờ đính kèm" onclick="_plFiles('ap','${p.id}')">📎</button></td></tr>`; }).join('');
+  return `<div style="margin:0 0 12px;padding:8px 10px;border:1px solid #f0d3a6;border-radius:8px;background:#fffaf2">
+    <div style="font-size:12px;font-weight:700;color:#9a5a05;margin-bottom:6px">💸 Đề nghị tạm ứng — đang duyệt / chờ chi tiền (${L.length})</div>
+    <div class="tbl-scroll"><table class="tbl" style="font-size:12px"><thead><tr><th>Ngày</th><th>Số ĐNTT</th><th>Người nhận · Nội dung</th><th class="r">Số tiền</th><th class="r">Đã chi</th><th class="r">Còn chi</th><th>Trạng thái</th><th>Thao tác</th></tr></thead><tbody>${rows}</tbody></table></div>
+    <div style="font-size:10.5px;color:var(--muted);margin-top:4px">Phiếu tạm ứng lập ở Đề xuất thanh toán → duyệt L2 xong tự ghi vào danh sách tạm ứng bên dưới để theo dõi hoàn ứng. Kế toán chi tiền như cũ.</div></div>`;
+}catch(e){ console.warn('[adv inflow]',e); return ''; } }
+
+/* ── (4) Tab Hồ sơ: phiếu tạm ứng = bìa "Tạm ứng · tên NV"; trạng thái dùng CHUNG nhãn với tab Phải trả ── */
+(function(){ try{ const o=_hsVendorKey; _hsVendorKey=function(it){ try{ if(it&&it.kind==='ap'){ const r0=(it.recs||[])[0]||{}; if(_plIsEmpAdv(r0)){ const em=String(r0._advEmployee||r0.partner||'').trim()||'(chưa ghi người nhận)'; return {k:'TU:'+_plNorm(em), title:'💸 Tạm ứng · '+em, mst:''}; } } }catch(_){} return o.apply(this,arguments); }; }catch(_){} })();
+function _hsStTxt(it){ try{ const r=(it.recs||[])[0]; if(!r) return ''; if(it.kind==='ap'){ const si=docStatusInfo(r); return ((si.icon?si.icon+' ':'')+(si.label||'')).trim(); } return _plChStLabel(r); }catch(_){ return ((_HS_ST[it.st]||[])[0]||''); } }
+function _hsStCell(it){ return `<span style="font-size:11px">${esc(_hsStTxt(it))}</span>`; }
+
+/* ── (5) SỐ ĐNTT: NNNN/PDNTT-SME-<mã đơn vị>/YYYY — mỗi đơn vị 1 dãy số; cấp khi Lưu; in lại không đổi số ── */
+const _DNTT_UNIT={TECH:'TE', TM:'CM', TCKT:'FA', HR:'HR', TAU:'VM', QHSE:'QS', KHO:'WH', VPQN:'QN', BOD:'AD'};
+const _DNTT_UNIT_ORDER=['TECH','TM','TAU','VPQN','QHSE','KHO','HR','TCKT','BOD'];
+const _DNTT_NEWRE=/\/PDNTT-SME-[A-Z0-9]{2,4}\/\d{4}$/;
+function _dnttUnitOf(user){ try{
+  const cfg=(typeof getAuthConfig==='function')?getAuthConfig():null;
+  let u=((cfg&&cfg.users)||[]).find(x=>x&&x.name===user)||null; if(!u&&typeof CURRENT_USER!=='undefined'&&CURRENT_USER&&CURRENT_USER.name===user) u=CURRENT_USER;
+  if(u&&(u.isVesselAccount||u.linkVesselId)&&u.linkVesselId){ const vid=u.linkVesselId;
+    const v=(VesselService.vessels()||[]).find(x=>x&&x.id===vid)||((VesselService.opVessels&&VesselService.opVessels())||[]).find(x=>x&&x.id===vid);
+    if(v){ let c=String((typeof _vesselAbbr==='function'?_vesselAbbr(v.name||''):String(v.name||'').slice(0,2))||'').toUpperCase().replace(/[^A-Z0-9]/g,'');
+      if(c){ if(Object.values(_DNTT_UNIT).indexOf(c)>=0) c+='T'; return c; } } }   /* mã tàu trùng mã phòng → thêm "T" */
+  if(u&&u.departmentId){ const d=((typeof HRService!=='undefined'&&HRService.departments)?HRService.departments():[]).find(x=>x&&x.id===u.departmentId); if(d&&d.dashboardModule&&_DNTT_UNIT[d.dashboardModule]) return _DNTT_UNIT[d.dashboardModule]; }
+  const fg=(u&&Array.isArray(u.funcGroups))?u.funcGroups:[]; const k=_DNTT_UNIT_ORDER.find(k=>fg.indexOf(k)>=0); if(k) return _DNTT_UNIT[k];
+}catch(_){} return 'AD'; }
+function _dnttNextNoU(unit, year){ const y=String(year||new Date().getFullYear()); const re=new RegExp('^(\\d+)\\/PDNTT-SME-'+unit+'\\/'+y+'$'); let mx=0;
+  [].concat(S.payables||[], S.opTransactions||[], S.advances||[]).forEach(x=>{ if(!x) return; const m=x.dnttNo&&re.exec(x.dnttNo); if(m) mx=Math.max(mx,+m[1]);
+    Object.values(x.dnttNoByDot||{}).forEach(v=>{ const m2=re.exec(v); if(m2) mx=Math.max(mx,+m2[1]); }); });
+  return String(mx+1).padStart(4,'0')+'/PDNTT-SME-'+unit+'/'+y; }
+try{ _dnttNextNo=function(){ return _dnttNextNoU(_dnttUnitOf(actorName())); }; }catch(_){}
+try{ _dnttEnsureNo=function(recs){ recs=(recs||[]).filter(Boolean); const has=recs.find(x=>x.dnttNo); const no=has?has.dnttNo:_dnttNextNoU(_dnttUnitOf((recs[0]||{}).createdBy||actorName()));
+  recs.forEach(x=>{ if(x.dnttNo!==no){ x.dnttNo=no; try{ touchRecord(x); }catch(e){} } }); try{ saveState(); }catch(e){} return no; }; }catch(_){}
+function _dnttAssignGroups(groups){ let n=0, last='';
+  groups.forEach(g=>{ g=(g||[]).filter(Boolean); if(!g.length) return; const has=g.find(x=>x.dnttNo);
+    if(has){ g.forEach(x=>{ if(!x.dnttNo){ x.dnttNo=has.dnttNo; try{ touchRecord(x); }catch(_){} } }); return; }
+    const no=_dnttNextNoU(_dnttUnitOf(g[0].createdBy||actorName())); g.forEach(x=>{ x.dnttNo=no; try{ touchRecord(x); }catch(_){} }); n++; last=no;
+    try{ logAuditEvent('dntt_no_issue',{no, ids:g.map(x=>x.id)}); }catch(_){} });
+  if(n){ try{ saveState(); }catch(_){} } return {n, last}; }
+/* Lưu phiếu (form nhiều dòng) = lấy số */
+(function(){ try{ const o=_mrSave; _mrSave=async function(target){ const st=(typeof _multiRowState!=='undefined')?_multiRowState:null; const mode=st&&st.mode; window._mrLastBatch=null;
+  const r=await o.apply(this,arguments);
+  try{ if(mode==='ap' && window._mrLastBatch){ const g=AccountingService.payables().filter(x=>x&&!x._deleted&&x.batchId===window._mrLastBatch); const res=_dnttAssignGroups([g]); const no=(g[0]||{}).dnttNo; if(no) setTimeout(()=>{ try{ toast('Số ĐNTT: '+no+(res.n?' (vừa cấp)':''),'good'); }catch(_){} },350); } }catch(e){ console.warn('[dntt no]',e); }
+  return r; }; }catch(e){ console.warn('[v3.70.32 mrSave]',e); } })();
+/* Phiếu chi hộ: cấp số cho phiếu mới lưu (chạy ngay sau khi lưu + quét định kỳ phòng trường hợp lưu qua hộp xác nhận) */
+function _dnttSince(){ let s=''; try{ s=localStorage.getItem('dntt_unit_since')||''; if(!s){ s=new Date().toISOString(); localStorage.setItem('dntt_unit_since', s); } }catch(_){ s=window.__dnttSince||(window.__dnttSince=new Date().toISOString()); } return s; }
+try{ _dnttSince(); }catch(_){}   /* mốc bắt đầu cấp số kiểu mới trên máy này = lúc mở bản v3.70.32 */
+function _dnttSweepOp(){ try{ const me=actorName(), since=_dnttSince(); const G=new Map();
+  (S.opTransactions||[]).forEach(x=>{ if(!x||x._deleted||x.dnttNo||x.type!=='OUT'||x.khoanRole==='doi'||x._fromAp||x._autoCreated||x._mgmtFeeId||!x.opBatchId||x.createdBy!==me||String(x.createdAt||'')<since) return;
+    if(!G.has(x.opBatchId)) G.set(x.opBatchId,[]); G.get(x.opBatchId).push(x); });
+  if(G.size){ const res=_dnttAssignGroups(Array.from(G.values())); if(res.n) try{ toast('Số ĐNTT: '+res.last,'good'); }catch(_){} } }catch(e){ console.warn('[dntt op]',e); } }
+(function(){ try{ const o=_opMrSave; _opMrSave=function(){ const r=o.apply(this,arguments); setTimeout(_dnttSweepOp, 300); setTimeout(_dnttSweepOp, 2500); return r; }; }catch(_){} })();
+
+/* Chốt chống trùng: sau mỗi lần đồng bộ — số mới (có mã đơn vị) bị trùng giữa 2 phiếu → phiếu lập SAU, do CHÍNH máy này lập:
+   chưa in → tự lấy số kế tiếp; đã in → báo người lập + KT (không tự đổi). */
+window._dnttDupWarned=window._dnttDupWarned||{};
+function _dnttDedupe(){ try{ const me=actorName(), M=new Map();
+  const add=(no,key,rec)=>{ if(!no||!_DNTT_NEWRE.test(no)) return; if(!M.has(no)) M.set(no,new Map()); const g=M.get(no); if(!g.has(key)) g.set(key,[]); g.get(key).push(rec); };
+  (S.payables||[]).forEach(x=>{ if(x&&!x._deleted) add(x.dnttNo,'ap:'+(x.batchId||x.id),x); });
+  (S.opTransactions||[]).forEach(x=>{ if(x&&!x._deleted) add(x.dnttNo,'op:'+(x.opBatchId||x.id),x); });
+  (S.advances||[]).forEach(x=>{ if(x&&!x._deleted) add(x.dnttNo,'adv:'+x.id,x); });
+  let changed=0; const msgs=[];
+  M.forEach((g,no)=>{ if(g.size<2) return; const arr=Array.from(g.values()).map(recs=>({recs, at:recs.map(x=>String(x.createdAt||'')).sort()[0]||'', by:(recs[0]||{}).createdBy||''})).sort((a,b)=>a.at.localeCompare(b.at)||String(a.recs[0].id).localeCompare(String(b.recs[0].id)));
+    arr.slice(1).forEach(x=>{ if(x.by!==me) return; const printed=x.recs.some(r=>r._printedAt||(r.dnttPdfs||[]).length);
+      if(printed){ const k=no+'|'+x.recs[0].id; if(!window._dnttDupWarned[k]){ window._dnttDupWarned[k]=1; msgs.push('⚠ Số ĐNTT '+no+' bị trùng với phiếu khác và phiếu của bạn ĐÃ IN — báo Kế toán xử lý.'); try{ logAuditEvent('dntt_dup_printed',{no, ids:x.recs.map(r=>r.id)}); }catch(_){} } return; }
+      const nn=_dnttNextNoU(_dnttUnitOf(me)); x.recs.forEach(r=>{ r.dnttNo=nn; try{ touchRecord(r); }catch(_){} }); changed++; msgs.push('Số ĐNTT '+no+' trùng với máy khác → phiếu của bạn đổi sang '+nn);
+      try{ logAuditEvent('dntt_renumber',{from:no, to:nn, ids:x.recs.map(r=>r.id)}); }catch(_){} }); });
+  if(changed){ try{ saveState(); }catch(_){} }
+  msgs.forEach((m,i)=>setTimeout(()=>{ try{ toast(m, m[0]==='⚠'?'bad':'warn'); }catch(_){} }, 400+i*1800));
+}catch(e){ console.warn('[dntt dedupe]',e); } }
+function _dnttSweep(){ if(document.hidden) return; _dnttSweepOp(); _dnttDedupe(); }
+(function(){ try{ const o=cloudSync; cloudSync=async function(){ const r=await o.apply(this,arguments); setTimeout(_dnttSweep, 600); return r; }; }catch(_){} try{ setInterval(_dnttSweep, 60000); setTimeout(_dnttSweep, 8000); }catch(_){} })();
+
+/* XEM TRƯỚC → LƯU: nút Lưu nháp / Chuyển KT ở chân form Đề xuất thanh toán mở màn Xem trước trước (màn Xem trước có sẵn các nút lưu) */
+function _dnttPreviewNo(recsOrNull, creator){ const has=(recsOrNull||[]).find(x=>x&&x.dnttNo); return has?{no:has.dnttNo, keep:true}:{no:_dnttNextNoU(_dnttUnitOf(creator||actorName())), keep:false}; }
+function _dnttPvLine(p){ return `<div style="margin:0 0 10px;padding:7px 10px;border:1px dashed #1c3a5c;border-radius:6px;font-size:12.5px;background:#f4f7fb">Số ĐNTT: <b style="font-family:var(--font-mono)">${esc(p.no)}</b> ${p.keep?'— giữ số cũ':'— cấp khi bấm Lưu'} · in lại nhiều lần không đổi số</div>`; }
+(function(){ try{ const o=_mrPreview; _mrPreview=function(){ try{ if(typeof _revTick==='function') _revTick(); }catch(_){} const r=o.apply(this,arguments);
+  try{ const s=_multiRowState, d=document.getElementById('mr-prev'); if(s&&d&&s.mode==='ap'){ const sibs=s._editBatch?AccountingService.payables().filter(x=>x&&x.batchId===s._editBatch):[]; const card=d.firstElementChild; const tgt=card&&card.children&&card.children[1]?card.children[1]:card; if(tgt) tgt.insertAdjacentHTML('afterbegin', _dnttPvLine(_dnttPreviewNo(sibs, sibs[0]&&sibs[0].createdBy))); } }catch(e){ console.warn('[pv dntt]',e); }
+  return r; }; }catch(_){} })();
+(function(){ try{ const o=_renderMultiRowModal; _renderMultiRowModal=function(){ const r=o.apply(this,arguments);
+  try{ const s=_multiRowState; const foot=document.getElementById('modal-foot'); if(s&&s.mode==='ap'&&foot) foot.querySelectorAll('button').forEach(b=>{ const oc=b.getAttribute('onclick')||''; if(/^\s*_mrSave\('(draft|submit)'\)\s*;?\s*$/.test(oc)){ b.setAttribute('onclick','_mrPreview()'); b.title=(b.title?b.title+' · ':'')+'Xem trước → Lưu = lấy số ĐNTT'; } }); }catch(_){}
+  return r; }; }catch(_){} })();
+/* Phiếu chi hộ: Xem trước → Lưu */
+function _opPvClose(){ const d=document.getElementById('op-prev'); if(d) d.remove(); }
+function _opPreview(){ const s=(typeof _opMrState!=='undefined')?_opMrState:null; if(!s) return; _opPvClose(); try{ if(typeof _revTick==='function') _revTick(); }catch(_){}
+  const ccy=s.ccy||'USD', lines=(s.lines||[]).filter(l=>(+l.gross||0)>0); const tot=lines.reduce((t,l)=>t+(+l.gross||0),0);
+  const v=((VesselService.opVessels&&VesselService.opVessels())||[]).find(x=>x&&x.id===s.vesselId)||(VesselService.vessels()||[]).find(x=>x&&x.id===s.vesselId);
+  const rows=lines.map((l,i)=>`<tr><td style="padding:3px 6px">${i+1}</td><td style="padding:3px 6px">${esc(l.desc||'')}${l.isBudget?' <span style="font-size:10px;color:#9a5a05">(dự kiến)</span>':''}</td><td style="padding:3px 6px">${esc(l.invoiceNo||'')}</td><td style="padding:3px 6px;text-align:right">${fmtOrig(+l.gross||0,ccy)}</td></tr>`).join('');
+  const d=document.createElement('div'); d.id='op-prev'; d.style.cssText='position:fixed;inset:0;z-index:99999;background:rgba(20,30,45,.45);display:flex;align-items:center;justify-content:center';
+  d.innerHTML=`<div style="width:min(600px,94vw);max-height:92vh;overflow:auto;background:#fff;border-radius:10px;box-shadow:0 12px 40px rgba(0,0,0,.3)">
+    <div style="background:#1c3a5c;color:#fff;padding:12px 16px;font-weight:800">👁 XEM TRƯỚC — Phiếu đề xuất chi hộ</div>
+    <div style="padding:14px 16px">${_dnttPvLine(_dnttPreviewNo(null, actorName()))}
+      <div style="font-size:12.5px;line-height:1.7">Tàu: <b>${esc(v?v.name:'—')}</b> · Đơn vị nhận tiền: <b>${esc(s.vendor||'—')}</b> · Ngày: ${esc(_dnttD(s.date||''))}<br>Nội dung: ${esc(s.payContent||(lines[0]&&lines[0].desc)||'—')}</div>
+      <table style="width:100%;border-collapse:collapse;font-size:12.5px;margin-top:8px"><tr style="background:#eef1f5"><th style="padding:3px 6px;text-align:left">#</th><th style="padding:3px 6px;text-align:left">Diễn giải</th><th style="padding:3px 6px;text-align:left">Số HĐ</th><th style="padding:3px 6px;text-align:right">Số tiền</th></tr>${rows||'<tr><td colspan="4" style="padding:6px;color:#999">Chưa có dòng có số tiền</td></tr>'}
+      <tr><td colspan="3" style="padding:5px 6px;font-weight:700">Tổng cộng</td><td style="padding:5px 6px;text-align:right;font-weight:700">${fmtOrig(tot,ccy)}</td></tr></table></div>
+    <div style="border-top:1px solid #e3e7ec;padding:10px 14px;display:flex;gap:6px;justify-content:space-between;background:#f7f8fa"><button class="btn-ghost" onclick="_opPvClose()">← Sửa</button><button class="btn-primary" onclick="_opPvClose();_opMrSave()">💾 Lưu phiếu chi hộ</button></div></div>`;
+  document.body.appendChild(d); }
+(function(){ try{ const o=_renderOpMrModal; _renderOpMrModal=function(){ const r=o.apply(this,arguments);
+  try{ const foot=document.getElementById('modal-foot'); if(foot) foot.querySelectorAll('button').forEach(b=>{ const oc=b.getAttribute('onclick')||''; if(/^\s*_opMrSave\(\)\s*;?\s*$/.test(oc)){ b.setAttribute('onclick','_opPreview()'); b.title='Xem trước → Lưu = lấy số ĐNTT'; } }); }catch(_){}
+  return r; }; }catch(_){} })();
+
+/* ── (6) XEM PHIẾU PHẢI TRẢ — 3 phần theo Phiếu đề nghị thanh toán (MH 04-DNTT). Chỉ đổi phần XEM của phiếu đã nộp / đã duyệt;
+   form 1 dòng cũ thu vào mục "Chi tiết đầy đủ" (vẫn giữ trong màn để mọi nút đang có hoạt động như cũ). ── */
+const _AP3_PRI={BT:'Bình thường', KHAN:'Khẩn', TK:'Thượng khẩn'};
+function _ap3Html(r){
+  const sibs=(r.batchId?AccountingService.payables().filter(x=>x&&!x._deleted&&x.batchId===r.batchId):[r]).slice().sort((a,b)=>String(a.createdAt||'').localeCompare(String(b.createdAt||'')));
+  const ccy=r.ccy||'VND', si=docStatusInfo(r), adv=_plIsEmpAdv(r);
+  const kv=(k,v)=>`<div><div style="font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em">${k}</div><div style="font-size:12.5px">${v||'—'}</div></div>`;
+  const sec=(t,h)=>`<div style="border:1px solid var(--rule);border-radius:8px;background:#fff;padding:10px 12px;margin-bottom:10px"><div style="font-size:10.5px;font-weight:800;letter-spacing:.07em;color:#1c3a5c;text-transform:uppercase;margin-bottom:8px">${t}</div>${h}</div>`;
+  const ben=adv?{name:r._advEmployee||r.partner||'', acc:'', bank:''}:_dnttBen(r.partner||'');
+  let po=''; try{ if(r.poNo) po='PO '+r.poNo; else if(r.poRef) po=String(r.poRef); if(r.poLinkId){ const rt=_poRootOf(r.poLinkId); po=(po?po+' · ':'')+'🔗 Chi phí đi kèm '+(rt&&rt.poNo?('PO '+rt.poNo):'PO / HĐ'); } }catch(_){}
+  let seg=''; try{ seg=(SEGMENTS[r.segment]||{}).name||''; }catch(_){}
+  let co=''; try{ const c=(S.companies||[]).find(x=>x&&x.id===r.companyId); co=c?(c.shortName||c.name||''):''; }catch(_){}
+  const tg=_plTarget(r);
+  const p1=`<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:8px 14px">
+    ${kv('Số ĐNTT · ngày', `<b style="font-family:var(--font-mono)">${esc(r.dnttNo||'chưa cấp')}</b> · ${esc(_dnttD(r.issueDate||''))}`)}
+    ${kv('Người đề nghị', esc(_plName(r.createdBy))+(r.createdByDept?(' · '+esc(r.createdByDept)):''))}
+    ${kv(adv?'Người nhận tạm ứng':'Người thụ hưởng', '<b>'+esc(ben.name||r.partner||'')+'</b>')}
+    ${kv('Ngân hàng', esc([ben.bank, ben.acc].filter(Boolean).join(' · ')))}
+    ${kv('Nội dung thanh toán', esc(r.payContent||r.noteHeader||r.desc||''))}
+    ${kv('Theo PO / HĐ số', esc(po))}
+    ${kv('Dự án / Tàu', esc(tg.n||''))}
+    ${kv('Công ty · Mảng', esc([co, seg].filter(Boolean).join(' · ')))}
+    ${kv('Loại phiếu', adv?('💸 Tạm ứng nhân viên · '+(r._advType==='canhan'?'Cá nhân':'Công tác')):(r._isProvisional||r._isBudget?'Chi dự kiến':'Thanh toán'))}
+    ${kv('Mức độ xử lý', esc(_AP3_PRI[r.priority]||'Bình thường'))}
+    ${kv('Hình thức', esc(r.payMethod==='TM'?'Tiền mặt':'Chuyển khoản'))}</div>`;
+  let tN=0,tV=0,tG=0;
+  const lr=sibs.map((x,i)=>{ const n=+x.amountNet||0, v=+x.vatAmount||0, g=+x.amountGross||+x.amount||0; tN+=n; tV+=v; tG+=g;
+    const et=_plIsEmpAdv(x)?'Tạm ứng nhân viên':(typeof expenseLabel==='function'?expenseLabel(x.expenseType):(x.expenseType||''));
+    return `<tr><td>${i+1}</td><td>${esc(x.desc||'')}</td><td style="font-size:11px">${esc(et||'')}</td><td style="font-size:11px;white-space:nowrap">${esc(x.invoiceNo||'')}${x.invoiceDate?(' · '+esc(_dnttD(x.invoiceDate))):''}</td>
+      <td class="r num">${x.itemQty!=null&&x.itemQty!==''?esc(String(x.itemQty))+(x.itemUnit?' '+esc(x.itemUnit):''):''}</td><td class="r num">${(+x.itemPrice)?fmtOrig(+x.itemPrice,ccy):''}</td>
+      <td class="r num">${fmtOrig(n,ccy)}</td><td class="r num">${fmtOrig(v,ccy)}</td><td class="r num"><b>${fmtOrig(g,ccy)}</b></td></tr>`; }).join('');
+  let files=''; try{ files=_hsFileLinks(sibs); }catch(_){}
+  const p2=`<div class="tbl-scroll"><table class="tbl" style="font-size:12px"><thead><tr><th>#</th><th style="min-width:200px">Khoản mục</th><th style="min-width:130px">Loại chi phí</th><th style="min-width:110px">Số HĐ · ngày</th><th class="r">SL</th><th class="r">Đơn giá</th><th class="r">Chưa VAT</th><th class="r">VAT</th><th class="r">Tổng</th></tr></thead>
+    <tbody>${lr}<tr><td colspan="6"><b>Tổng cộng</b></td><td class="r num"><b>${fmtOrig(tN,ccy)}</b></td><td class="r num"><b>${fmtOrig(tV,ccy)}</b></td><td class="r num"><b>${fmtOrig(tG,ccy)}</b></td></tr></tbody></table></div>
+    <div style="margin-top:8px;font-size:11px;font-weight:600;text-transform:uppercase;color:var(--muted)">Chứng từ kèm theo</div>${files||'<div style="font-size:12px;color:var(--muted)">Chưa có giấy tờ</div>'}<div id="hs-preview"></div>`;
+  const step=(t,by,at,note)=>`<tr><td>${t}</td><td>${by?esc(_plName(by)):'<span style="color:var(--muted)">—</span>'}</td><td style="white-space:nowrap">${at?esc(_dnttD(String(at).slice(0,10))):''}</td><td style="font-size:11.5px">${note||''}</td></tr>`;
+  const paid=sibs.reduce((t,x)=>t+_plApPaid(x),0), rem=sibs.reduce((t,x)=>t+((typeof apRemainingEff==='function')?apRemainingEff(x):0),0);
+  const pays=[]; sibs.forEach(x=>(x.payments||[]).filter(p=>p&&!p._feeOnly&&(+p.amount||0)).forEach(p=>pays.push(p))); pays.sort((a,b)=>String(a.date||'').localeCompare(String(b.date||'')));
+  const st=(()=>{ try{ return wfStatus(r); }catch(_){ return r.status; } })();
+  const p3=`<table class="tbl" style="font-size:12px"><thead><tr><th>Bước</th><th>Người</th><th>Ngày</th><th>Ghi chú</th></tr></thead><tbody>
+    ${step('Người đề nghị · lập phiếu', r.createdBy, r.createdAt, '')}
+    ${step('Chuyển Kế toán', r.submittedBy, r.submittedAt, '')}
+    ${step('KT kiểm', r.accCheckedBy, r.accCheckedAt, '')}
+    ${step('Duyệt L1 (KTT)', r.approvedL1By, r.approvedL1At, '')}
+    ${step('Duyệt L2 (BOD)', r.approvedL2By, r.approvedL2At, '')}
+    ${st==='rejected'?step('<span style="color:var(--bad)">Bị trả về</span>', r.rejectedBy, r.rejectedAt, '<span style="color:#8a3b12">'+esc(r.rejectReason||'')+'</span>'):''}
+    ${pays.map((p,i)=>step('Thanh toán lần '+(i+1), p.by||p.paidBy||'', p.date, fmtOrig(+p.amount||0,ccy)+(p._bkId?(' · Bảng kê '+esc(p._bkId)):''))).join('')}
+    <tr><td><b>Còn phải chi</b></td><td colspan="3"><b>${fmtOrig(rem,ccy)}</b> · đã chi ${fmtOrig(paid,ccy)}</td></tr></tbody></table>`;
+  return `<div id="ap3-view" style="background:#f6f7f9;border:1px solid var(--rule);border-radius:10px;padding:10px;margin-bottom:10px">
+    <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px;flex-wrap:wrap"><b style="font-size:14px">📄 Phiếu đề nghị thanh toán</b><span style="font-size:12px;padding:2px 8px;border-radius:999px;background:#e3ecf7;color:#1c3a5c">${esc(si.icon||'')} ${esc(si.label||'')}</span>${sibs.length>1?`<span style="font-size:11px;color:var(--muted)">${sibs.length} dòng</span>`:''}</div>
+    ${sec('Phần 1 · Đề nghị', p1)}${sec('Phần 2 · Các khoản mục', p2)}${sec('Phần 3 · Phê duyệt &amp; thanh toán', p3)}</div>`;
+}
+(function(){ try{
+  const oE=_arEditorBody; _arEditorBody=function(r,isP){ const h=oE.apply(this,arguments);
+    try{ if(isP && r && window._AP3_ID && r.id===window._AP3_ID) return `<details id="ap3-old" style="margin-top:4px;border:1px solid var(--rule);border-radius:6px;padding:6px 10px"><summary style="cursor:pointer;font-size:12px;color:var(--muted)">Chi tiết đầy đủ (bản cũ · chỉ xem)</summary>${h}</details>`; }catch(_){}
+    return h; };
+  const oP=openPayableModal; openPayableModal=function(id){
+    let on=false; try{ const r=id?AccountingService.payables().find(x=>x.id===id):null;
+      on=!!(r && !(typeof _apBatchEditable==='function'&&_apBatchEditable(r)) && ['draft','rejected'].indexOf(wfStatus(r))<0 && scopeCanSeeRecord(r,'ap') && !(wfStatus(r)==='pending_acc'&&((typeof canCheckAcc==='function'&&canCheckAcc())||isAdmin())));
+      window._AP3_ID=on?id:''; }catch(_){ window._AP3_ID=''; }
+    let res; try{ res=oP.apply(this,arguments); } finally { window._AP3_ID=''; }
+    try{ if(on){ const r=AccountingService.payables().find(x=>x.id===id); const mb=document.getElementById('modal-body'); if(r&&mb&&!document.getElementById('ap3-view')) mb.insertAdjacentHTML('afterbegin', _ap3Html(r)); } }catch(e){ console.warn('[ap3]',e); }
+    return res; };
+}catch(e){ console.warn('[v3.70.32 ap3]',e); } })();
 
 /* ── Sidebar khối màu: ẩn dải màu khi mọi mục trong khối đều ẩn ── */
 function _sbBandsRefresh(root){
