@@ -4699,7 +4699,7 @@ const WH_TYPES = {
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.70.33';
+const APP_VERSION='3.70.34';
 /* HOTFIX 3.12.17-email: CHẶN TRIỆT ĐỂ gửi email TỰ ĐỘNG (mất kiểm soát — spam quota Google).
    Email phải do NV được phân quyền CHỦ ĐỘNG chọn gửi. Cờ này:
    (1) chặn auto-SCAN tạo email (hrmScanExpiries/vesselCertScanExpiries);
@@ -56458,8 +56458,9 @@ function _dmBuild(p, row, vidOverride){
   const vid=v?v.id:'';
   if(!p.date) reasons.push('Không đọc được ngày báo cáo');
   else if(p.date>_dmAddDays(todayISO(),1)) reasons.push('Ngày báo cáo '+_cdD(p.date)+' ở tương lai');
-  const t=vid?darTplOf(vid):{family:'SME3', robItems:[], engines:[], codes:[], fuelMode:'charter_work', payerByCode:{}};
-  if(vid&&p.family!==t.family){ try{ if(!(S.darReports||[]).some(r=>r&&!r._deleted&&r.vesselId===vid&&r.family===t.family&&r.source!=='email')){ t.family=p.family; t.engines=DAR_FAMILIES[p.family].engines.slice(); t.codes=DAR_FAMILIES[p.family].codes.slice(); t._famAutoFrom='email'; try{ touchRecord(t); }catch(_){} } else reasons.push('Mẫu file là '+p.family+' — biểu DAR của tàu đang là '+t.family+' (đổi biểu tàu nếu đúng)'); }catch(_){ reasons.push('Mẫu file là '+p.family+' — biểu DAR của tàu đang là '+t.family); } }   /* v3.69.55: tàu chưa nhập DAR theo biểu cũ → theo đúng mẫu tàu gửi */
+  let t=vid?darTplOf(vid):{family:'SME3', robItems:[], engines:[], codes:[], fuelMode:'charter_work', payerByCode:{}};   /* v3.70.34: let — mẫu thư viện */
+  if(vid&&p.family!==t.family){ try{ if(!(S.darReports||[]).some(r=>r&&!r._deleted&&r.vesselId===vid&&r.family===t.family&&r.source!=='email')){ t.family=p.family; t.engines=DAR_FAMILIES[p.family].engines.slice(); t.codes=DAR_FAMILIES[p.family].codes.slice(); t._famAutoFrom='email'; try{ touchRecord(t); }catch(_){} } else { t=(typeof _darLibTpl==='function')?_darLibTpl(t,p.family):t; notes.push('Đọc theo mẫu thư viện '+p.family+' (biểu tàu: '+(darTplOf(vid)||{}).family+')'); } }catch(_){ reasons.push('Mẫu file là '+p.family+' — biểu DAR của tàu đang là '+t.family); } }   /* v3.70.34: thư viện mẫu — tàu nào gửi mẫu nào cũng đọc */
+  try{ if(p.family&&DAR_FAMILIES[p.family]&&DAR_FAMILIES[p.family].lib&&typeof _darLibTpl==='function') t=_darLibTpl(t,p.family); }catch(_){}   /* v3.69.55: tàu chưa nhập DAR theo biểu cũ → theo đúng mẫu tàu gửi */
   const prev=(vid&&p.date)?darPrevRob(vid,p.date):{};
   /* v3.67.30: chỉ so Open với ROB của DAR NGÀY LIỀN TRƯỚC — thiếu ngày giữa (DAR cũ chưa lấy / đang chờ xem lại) thì không so,
      tránh 1 ngày lỗi kéo theo cả chuỗi ngày sau vào "Cần xem lại" */
@@ -56485,7 +56486,7 @@ function _dmBuild(p, row, vidOverride){
   if(!acts.length) reasons.push('Không đọc được dòng hoạt động nào');
   const hrs=Math.round(acts.reduce((s,a)=>s+(+a.dur||0),0)*100)/100;
   if(acts.length&&Math.abs(hrs-24)>0.1) reasons.push('Tổng giờ hoạt động = '+hrs+' (phải = 24)');
-  const no=+p.head.reportNo||0; if(!no) reasons.push('Thiếu số báo cáo (Report No.)');
+  const no=+p.head.reportNo||0; if(!no&&!((DAR_FAMILIES[p.family]||{}).noReportNo)) reasons.push('Thiếu số báo cáo (Report No.)');   /* v3.70.34: mẫu không có số BC → theo ngày */
   if(!rob.some(x=>x.std==='fuel'&&x.open!=='')) reasons.push('Không đọc được dòng nhiên liệu (MGO)');
   let dupOf=null, dupSame=false;
   if(vid&&p.date){
@@ -56541,6 +56542,8 @@ async function _dmProcessRow(row){
   if(!row||!row.fileId) return 'err';
   const done=(S.darReports||[]).find(r=>r&&!r._deleted&&r.sourceFile&&r.sourceFile.id===row.fileId);
   if(done){ await _dmMark(row,'POSTED','Đã ghi trước đó', done.id); return 'posted'; }
+  if(/^xlsx?$/i.test(String(row.ext||''))||/\.xlsx?$/i.test(String(row.fileName||''))){ const gx=await _dmApi({action:'dar_inbox_get', fileId:row.fileId}); let px=null; try{ if(gx&&gx.ok&&gx.file) px=await _dmParseXls(gx.file.base64); }catch(_){} if(!px){ await _dmMark(row,'REVIEW','File Excel — mẫu chưa có trong thư viện DAR'); return 'review'; }
+    const bx=_dmBuild(px,row); if(bx.dupSame){ await _dmMark(row,'DUPLICATE','Trùng DAR ngày '+_cdD(bx.rep.date)+' đã có', bx.dupOf.id); return 'dup'; } if(bx.reasons.length){ await _dmMark(row,'REVIEW',bx.reasons.join(' | ')); return 'review'; } if(await _dmPost(bx.rep)){ await _dmMark(row,'POSTED','Tự ghi DAR ngày '+_cdD(bx.rep.date)+' (Excel '+px.family+')', bx.rep.id); return 'posted'; } return 'err'; }   /* v3.70.34 */
   if(String(row.ext||'').toLowerCase()!=='pdf'){ await _dmMark(row,'REVIEW','File '+row.ext+' — chưa tự đọc được, xử lý tay'); return 'review'; }
   const g=await _dmApi({action:'dar_inbox_get', fileId:row.fileId});
   if(!g||!g.ok||!g.file||!g.file.base64) throw new Error((g&&g.error)||'không tải được file');
@@ -56569,7 +56572,8 @@ async function darMailRun(manual, opts){   /* v3.69.61 (Sếp duyệt): nhanh h�
         if(!row||!row.fileId){ res[i]={row,out:'err'}; return; }
         const prev=(S.darReports||[]).find(r=>r&&!r._deleted&&r.sourceFile&&r.sourceFile.id===row.fileId);
         if(prev){ res[i]={row,out:'posted',mark:['POSTED','Đã ghi trước đó',prev.id]}; return; }
-        { const _c=_dmCat(row); if(_c!=='DAR'||(String(row.subject||'').trim()&&!_dmSubjInfo(row).isDar&&!/DAILY|DAR|MO-?PR-?003/i.test(String(row.fileName||'')))){ if(_c==='DAR'){ res[i]={row,out:'khac',cat:'DAR',mark:['KHAC','['+_dmCatLbl('DAR')+'] BDN / phụ lục DAR — tự gắn DAR ngày nhận dầu']}; return; } res[i]={row,out:'khac',cat:_c,mark:[_c==='ONOFF'?'POSTED':'KHAC','['+_dmCatLbl(_c)+'] '+(_c==='ONOFF'?'Biên bản On / Off-hire — chuyển hàng chờ TM import (Cập nhật triển khai)':'phân loại tự động theo tiêu đề / tên file')]}; return; } }   /* v3.70.05: 6 nhóm, không tải về đọc thử */
+        { const _c=_dmCat(row); if(_c!=='DAR'||(String(row.subject||'').trim()&&!_dmSubjInfo(row).isDar&&!/DAILY|DAR|VDR|MO-?PR-?003/i.test(String(row.fileName||'')))){ if(_c==='DAR'){ res[i]={row,out:'khac',cat:'DAR',mark:['KHAC','['+_dmCatLbl('DAR')+'] BDN / phụ lục DAR — tự gắn DAR ngày nhận dầu']}; return; } res[i]={row,out:'khac',cat:_c,mark:[_c==='ONOFF'?'POSTED':'KHAC','['+_dmCatLbl(_c)+'] '+(_c==='ONOFF'?'Biên bản On / Off-hire — chuyển hàng chờ TM import (Cập nhật triển khai)':'phân loại tự động theo tiêu đề / tên file')]}; return; } }   /* v3.70.05: 6 nhóm, không tải về đọc thử */
+        if(/^xlsx?$/i.test(String(row.ext||''))||/\.xlsx?$/i.test(String(row.fileName||''))){ const gx=await _dmApi({action:'dar_inbox_get', fileId:row.fileId}); if(!gx||!gx.ok||!gx.file||!gx.file.base64) throw new Error((gx&&gx.error)||'không tải được file'); let px=null, ex=''; try{ px=await _dmParseXls(gx.file.base64); }catch(e){ ex=e.message; } if(!px){ res[i]={row,out:'review',mark:['REVIEW',ex||'File Excel — mẫu chưa có trong thư viện DAR (gửi file mẫu để bổ sung)']}; return; } res[i]={row,p:px}; return; }   /* v3.70.34: đọc Excel theo thư viện mẫu */
         if(String(row.ext||'').toLowerCase()!=='pdf'){ res[i]={row,out:'review',mark:['REVIEW','File '+row.ext+' — chưa tự đọc được, xử lý tay']}; return; }
         const g=await _dmApi({action:'dar_inbox_get', fileId:row.fileId}); if(!g||!g.ok||!g.file||!g.file.base64) throw new Error((g&&g.error)||'không tải được file');
         let p; try{ p=_dmParse(await _dmPdfItems(g.file.base64)); }catch(e){ res[i]={row,out:'review',mark:['REVIEW','Không đọc được PDF: '+e.message]}; return; }
@@ -57557,7 +57561,7 @@ function darTplEdit(vid){
      <div class="field" style="margin-top:10px"><label>Chế độ nhiên liệu (v3.18.62)</label>
        <select onchange="window._darTpl.fuelMode=this.value;darTplEdit('${vid}')">
          <option value="charter_work" ${(t.fuelMode||'charter_work')==='charter_work'?'selected':''}>Tàu dịch vụ — KH chịu khi LÀM VIỆC (theo bảng mã dưới)</option>
-         <option value="owner_all" ${t.fuelMode==='owner_all'?'selected':''}>Tàu kỹ thuật — CHỦ TÀU chịu toàn bộ</option></select></div>
+         <option value="owner_all" ${t.fuelMode==='owner_all'?'selected':''}>Tàu kỹ thuật — CHỦ TÀU chịu toàn bộ</option><option value="by_job" ${t.fuelMode==='by_job'?'selected':''}>Theo job — ngày trong job (On-hire có dự án): KHÁCH HÀNG chịu · ngoài job: CHỦ TÀU</option></select>${t.fuelMode==='by_job'?`<div style="font-size:11px;margin-top:4px"><button class="btn-sec" style="font-size:11px" onclick="darJobApplyPreview('${vid}')">⛽ Áp “Theo job” cho DAR đã ghi (xem trước)</button></div>`:''}</div>
      ${(t.fuelMode||'charter_work')==='charter_work'?`<div style="font-size:11px;margin-top:4px"><b>Mã → ai chịu dầu</b> (bấm để lật):<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:4px">
        ${t.codes.map(c=>{const py=darPayerOf(t,c);return `<button class="btn-ghost" style="font-size:11px;padding:3px 9px;${py==='KH'?'border-color:var(--good);color:var(--good)':'color:var(--muted)'}" onclick="window._darTpl.payerByCode=window._darTpl.payerByCode||{};window._darTpl.payerByCode['${c}']='${py==='KH'?'CT':'KH'}';darTplEdit('${vid}')">${c}: ${py}</button>`;}).join('')}
      </div></div>`:''}
@@ -124591,7 +124595,7 @@ function fuelLedger(vid, k){
   const std=(FL_KINDS.find(x=>x[0]===k)||[])[2]; const reps=_flReps(vid);
   const days=reps.map(r=>{ const rows=(r.rob||[]).filter(x=>x&&x.std===std); if(!rows.length) return null; const d={date:String(r.date).slice(0,10), darId:r.id, no:r.reportNo, src:r.sourceFile||null, bdn:r.bdnFiles||[], files:r.files||[], unit:rows[0].unit||'', fac:_flFac(rows[0].unit), openL:0, loadCTL:0, loadKHL:0, trL:0, usedL:0, corrL:0, robL:0};
     rows.forEach(x=>{ const f=_flFac(x.unit); d.openL+=_flN(x.open)*f; const ld=_flN(x.load)*f; if(x.loadSrc==='KH') d.loadKHL+=ld; else d.loadCTL+=ld; d.trL+=_flN(x.transfer)*f; d.usedL+=_flN(x.used)*f; d.corrL+=_flN(x.corrected)*f; d.robL+=darRobCalc({open:_flN(x.open),load:_flN(x.load),transfer:_flN(x.transfer),used:_flN(x.used),corrected:_flN(x.corrected)})*f; });
-    if(std==='fuel'){ let kh=0,ct=0; (r.acts||[]).forEach(a=>{ const v=_flN(a&&a.fuel); if(!v) return; const py=(r.fuelMode==='owner_all')?'CT':(a.payer||darPayerOf(r,a.code||'')); if(py==='KH') kh+=v; else ct+=v; }); d.fKH=kh; d.fCT=ct;
+    if(std==='fuel'){ let kh=0,ct=0; (r.acts||[]).forEach(a=>{ const v=_flN(a&&a.fuel); if(!v) return; const py=(r.fuelMode==='owner_all')?'CT':(a.payer||darPayerOf(r,a.code||'')); if(py==='KH') kh+=v; else ct+=v; }); d.fKH=kh; d.fCT=ct; try{ if(typeof _darJobFix==='function') _darJobFix(d,r); }catch(_){}   /* v3.70.34: dầu theo job */
       const hrs={}; (r.acts||[]).forEach(a=>{ if(!a) return; const c=String(a.code||'—').trim()||'—'; hrs[c]=(hrs[c]||0)+_flN(a.dur); }); let top='—',th=-1; Object.keys(hrs).forEach(c=>{ if(hrs[c]>th){ th=hrs[c]; top=c; } }); d.topCode=top; }
     return d; }).filter(Boolean);
   const res={days, first:days.length?days[0].date:'', months:[]};
@@ -125034,7 +125038,8 @@ async function vfEmailFetch(vid){ const v=_vrVessels().find(x=>x.id===vid); if(!
   let L=null; try{ L=await _dmApi({action:'dar_inbox_list', statuses:['KHAC'], limit:120}); }catch(_){}
   const rows=((L&&L.rows)||[]).filter(r=>{ const vv=_dmRowVessel(r); return vv&&vv.id===vid; });
   const now=new Date().toISOString(), who=actorName(); const it=(row,note)=>({name:row.fileName||'', url:row.url||'', note:note||''});
-  for(const row of rows){ const cat=(typeof _dmCat==='function')?_dmCat(row):''; const k=cat==='ONOFF'?'ONOFF':_vfGuess(row);
+  for(const row of rows){ const cat=(typeof _dmCat==='function')?_dmCat(row):''; const _vc=(()=>{ try{ return _vfClass(row,vid)||{}; }catch(_){ return {}; } })(); const k=cat==='ONOFF'?'ONOFF':((cat==='DAR'&&_vc.sub!=='BDN')?'DARX':_vfGuess(row));   /* v3.70.34: DAR/VDR không rơi sang Quỹ tàu */
+    if(k==='DARX'){ await _dmMark(row,'INBOX','Trả về hàng chờ đọc DAR (Trung tâm tàu)'); window.__vfDarAgain=true; G.DAR.push(it(row,'→ chờ đọc DAR')); continue; }
     if(k==='ONOFF'){ let n=0; if(!_hdqList().some(q=>q&&q.fileId===row.fileId)){ await commitMutation(()=>{ n=_hdqAdd([row]); },{action:'hdq_add',fields:['hireDocQueue']}); }
       await _dmMark(row,'POSTED','[On / Off-hire] → hàng chờ TM import'); G.ONOFF.push(it(row,'→ hàng chờ TM import ('+(_dmOnOffKind(row)==='off'?'Off-hire':'On-hire')+')')); continue; }
     if(k==='BDN'){ const dr=_darLoadNear(vid,row.receivedAt); if(dr){ const r=await commitMutation(()=>{ _bdnAttachTo(dr,row,'auto'); },{action:'dar_bdn_auto',fields:['darReports']}); if(r&&r.success){ await _dmMark(row,'POSTED','BDN tự gắn → DAR #'+dr.reportNo,dr.id); G.DAR.push(it(row,'BDN → gắn DAR #'+dr.reportNo)); continue; } } }
@@ -128909,6 +128914,182 @@ function _hsPoExtra(it){ try{ if(!it||it.kind!=='ap') return ''; const r=it.recs
   if(rel.length) h+=cap('Chi phí đi kèm ('+rel.length+')')+rel.map(x=>fl('🔗',`<a href="javascript:void 0" onclick="openPayableModal('${x.id}')">${esc(x.partner||'')}</a> · ${esc(String(x.payContent||x.desc||'').slice(0,60))} · ${fmtOrig(+x.amountGross||+x.amount||0,x.ccy||'VND')}${String(x.expenseType||'')==='TAX_IMPORT_VAT'?' <span style="color:var(--muted)">(GTGT NK — không vào giá kho)</span>':''} <button class="icon-btn" title="Giấy tờ" onclick="_plFiles('ap','${x.id}')">📎</button>`, stL(x))).join('');
   if(docs.some(d=>d.status==='confirmed')) h+=`<div style="margin:6px 0 2px"><button class="btn-sec" style="font-size:11px" onclick="_bkOpen('${root.id}')">📑 Bảng kê chi phí nhập kho của PO</button></div>`;
   return h; }catch(e){ console.warn('[hs po]',e); return ''; } }
+
+/* ════ v3.70.34 (Sếp duyệt 10/10): THƯ VIỆN MẪU DAR · mẫu VIETSOVPETRO (Суточная сводка · Việt–Nga · Excel) · DẦU THEO JOB
+   · Hộp DAR: đọc được file Excel · lọc đúng VDR là DAR · không xếp DAR sang Quỹ tàu · ↪ Đổi loại (+ nhớ theo kiểu tên file) · dọn file lọc nhầm ════ */
+
+/* ── (1) Thư viện mẫu: thêm mẫu VSP. Mẫu nhận theo NỘI DUNG file, dùng được cho mọi tàu. ── */
+try{ DAR_FAMILIES.VSP={label:'Vietsovpetro — Суточная сводка (Việt–Nga · Excel · kỳ 18:00→18:00)', engines:[], codes:[], lib:true, noReportNo:true, lang:'vi-ru',
+  rob:[['MGO · Dầu DO · Диз. топливо','Ltrs','fuel'],['PW · Nước ăn · Пит. вода','M3','water'],['TW · Nước KT · Тех. вода','M3','water'],['Xi măng · Цемент','MT','drill'],['Barit · Барит','MT','drill'],['Bentonite · Бентонит','MT','drill'],['Hàng boong · ПГ/ВГ','MT','other']]}; }catch(_){}
+const DAR_LIB_INFO=[['PTSC','PDF','Bảng ROB Open/ROB · mã A→L · G/E1-3 + Habour'],['SME3','PDF','SME-MO-PR-003-FRM-001 · 3 máy chính · mã A→F'],['SME2','PDF','SME 1206 · máy trái/phải · mã A→F'],['VSP','Excel (.xls/.xlsx)','Dòng mã cột NgayNhap · TenTau · TieuHaoNhienLieu · TenCongViec · BatDau… — nhãn Việt–Nga']];
+function _darLibTpl(t, fam){ const F=DAR_FAMILIES[fam]; if(!F) return t; return Object.assign({}, t, {family:fam, robItems:F.rob.map((r,i)=>({code:'R'+(i+1), label:r[0], unit:r[1], std:r[2]})), engines:F.engines.slice(), codes:F.codes.slice()}); }
+
+/* số: "317.460" (chấm ngăn nghìn) → 317460 · 10.0 → 10 */
+function _vspNum(v){ if(v==null||v==='') return ''; if(typeof v==='number') return isNaN(v)?'':v; let s=String(v).trim().replace(/\s+/g,''); if(!s) return '';
+  if(/^-?\d{1,3}(\.\d{3})+$/.test(s)) s=s.replace(/\./g,''); else if(/^-?\d{1,3}(,\d{3})+(\.\d+)?$/.test(s)) s=s.replace(/,/g,''); else s=s.replace(',','.');
+  const n=parseFloat(s); return isNaN(n)?'':n; }
+function _vspDT(v){ const m=String(v||'').match(/(\d{1,2})\/(\d{1,2})\/(\d{4})\s+(\d{1,2}):(\d{2})/); if(!m) return null; return {d:m[3]+'-'+m[2].padStart(2,'0')+'-'+m[1].padStart(2,'0'), hm:m[4].padStart(2,'0')+':'+m[5], t:Date.UTC(+m[3],+m[2]-1,+m[1],+m[4],+m[5])}; }
+/* đọc AOA mẫu VSP → cấu trúc giống _dmParse (để dùng chung _dmBuild) */
+function _dmParseVspAoa(aoa){
+  const A=(aoa||[]).map(r=>(r||[]).map(c=>c==null?'':c)); const S_=v=>String(v==null?'':v).trim();
+  const find=(keys)=>{ for(let r=0;r<A.length;r++){ const row=A[r].map(S_); if(keys.every(k=>row.indexOf(k)>=0)){ const col={}; row.forEach((x,c)=>{ if(x) col[x]=c; }); return {r, col}; } } return null; };
+  const H1=find(['NgayNhap','TenTau','TieuHaoNhienLieu']); if(!H1) return null;
+  const v1=A[H1.r+1]||[]; const g=k=>(H1.col[k]!=null)?S_(v1[H1.col[k]]):'';
+  const out={family:'VSP', head:{}, date:'', rob:[], acts:[], totalFuel:null, warn:[]};
+  const dm=g('NgayNhap').match(/(\d{1,2})\/(\d{1,2})\/(\d{4})/); if(dm) out.date=dm[3]+'-'+dm[2].padStart(2,'0')+'-'+dm[1].padStart(2,'0');
+  out.head.vessel=g('TenTau'); out.head.wind=g('Gio'); out.head.sea=g('Song'); out.head.swell=g('BuocSong');
+  const tt=g('ThuyThu'); const cm=tt.match(/(\d+)\s*crew/i), pm=tt.match(/(\d+)\s*pax/i); out.head.crew=cm?cm[1]:tt; out.head.pax=pm?pm[1]:'';
+  out.head.pstn=[g('Vung'),g('CongTrinh')].filter(Boolean).join(' · '); out.head.planned=g('CVSeLam'); out.head.order=g('DonHang');
+  /* dòng Tồn / Остаток (cùng cột Tiêu hao dầu / Nước ăn / Nước KT) + dòng hàng Груз */
+  let rRob=-1; for(let r=H1.r+1;r<Math.min(A.length,H1.r+8);r++){ if(A[r].some(x=>/остаток|^t[ồo]n\b/i.test(S_(x)))){ rRob=r; break; } }
+  const rv=k=>rRob>=0&&H1.col[k]!=null?_vspNum(A[rRob][H1.col[k]]):'';
+  const used={fuel:_vspNum(v1[H1.col.TieuHaoNhienLieu]), pw:_vspNum(v1[H1.col.NuocAn]), tw:_vspNum(v1[H1.col.NuocKT])};
+  const L=DAR_FAMILIES.VSP.rob.map(x=>x[0]);
+  const mk=(i,u,rob)=>({label:L[i], unit:DAR_FAMILIES.VSP.rob[i][1], open:'', load:'', transfer:'', used:u, corrected:'', rob:rob, remark:''});
+  out.rob.push(mk(0,used.fuel,rv('TieuHaoNhienLieu')), mk(1,used.pw,rv('NuocAn')), mk(2,used.tw,rv('NuocKT')));
+  /* hàng: tiêu đề Барит/Цемент/Бентонит/ПГ — giá trị ở dòng "Груз" ngay dưới */
+  if(rRob>=0){ const hdr=A[rRob].map(S_); const rG=A.findIndex((row,i)=>i>rRob&&i<rRob+4&&row.some(x=>/груз|^h[aà]ng$/i.test(S_(x))));
+    const pick=(re,i)=>{ const c=hdr.findIndex(x=>re.test(x)); if(c<0) return; const v=rG>=0?S_(A[rG][c]):''; const n=_vspNum(String(v).split('/')[0]); out.rob.push(mk(i,'',n===''?0:n)); };
+    pick(/цемент/i,3); pick(/барит/i,4); pick(/бентонит/i,5); pick(/ПГ\/ВГ|ПГ/i,6); }
+  /* hoạt động */
+  const H2=find(['TenCongViec','BatDau','KetThuc']);
+  const load={fuel:0,pw:0,tw:0}, trf={fuel:0,pw:0,tw:0};
+  if(H2){ for(let r=H2.r+1;r<A.length;r++){ const row=A[r]; const c=k=>H2.col[k]!=null?S_(row[H2.col[k]]):'';
+      const job=c('TenCongViec'); if(!job) continue; const a=_vspDT(c('BatDau')), b=_vspDT(c('KetThuc')); if(!a||!b) continue;
+      const dur=Math.round((b.t-a.t)/36e5*100)/100; const note=c('GhiChu'), q=_vspNum(c('SoLuong')), unit=c('DVT');
+      const where=[c('NoiLam'),c('DenCongTrinh')].filter(Boolean).join(' → ');
+      const toL=v=>/m3|м3/i.test(unit)?v*1000:v;
+      if(q!==''){ if(/при[её]м\s*диз|nh[aậ]n\s*d[aầ]u/i.test(job)) load.fuel+=toL(q); else if(/выдача\s*диз|c[aấ]p\s*d[aầ]u/i.test(job)) trf.fuel+=toL(q);
+        else if(/при[её]м\s*пит|nh[aậ]n\s*n[uư][oớ]c\s*[aă]n/i.test(job)) load.pw+=q; else if(/выдача\s*пит|c[aấ]p\s*n[uư][oớ]c\s*[aă]n/i.test(job)) trf.pw+=q;
+        else if(/при[её]м\s*тех|nh[aậ]n\s*n[uư][oớ]c\s*k/i.test(job)) load.tw+=q; else if(/выдача\s*тех|c[aấ]p\s*n[uư][oớ]c\s*k/i.test(job)) trf.tw+=q; }
+      const dpre=(out.date&&a.d!==out.date)?('('+a.d.slice(8,10)+'/'+a.d.slice(5,7)+') '):'';
+      out.acts.push({from:a.hm, to:(b.hm==='00:00'&&dur>0?'24:00':b.hm), desc:dpre+job+(note?' — '+note:'')+(where?' ['+where+']':'')+(q!==''?' · '+q+' '+unit:''), code:'', wind:'', load:'', dur, eng:[], fuel:'', fuelRaw:''}); } }
+  /* đầu ngày = tồn + dùng + cấp đi − nhận (không có số đầu ngày trên mẫu) */
+  [['fuel',0],['pw',1],['tw',2]].forEach(([k,i])=>{ const x=out.rob[i]; if(x.rob===''&&x.used==='') return; if(load[k]) x.load=load[k]; if(trf[k]) x.transfer=trf[k];
+    x.open=(+x.rob||0)+(+x.used||0)+(+x.transfer||0)-(+x.load||0); x.open=Math.round(x.open*1000)/1000; });
+  out.rob.slice(3).forEach(x=>{ x.open=x.rob; });
+  out.totalFuel=used.fuel===''?null:used.fuel;
+  return out; }
+async function _dmParseXls(b64){
+  if(typeof XLSX==='undefined'){ try{ await _loadScriptOnce('https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js','XLSX'); }catch(_){} }
+  if(typeof XLSX==='undefined') throw new Error('Chưa tải được thư viện Excel (cần mạng lần đầu)');
+  const bin=atob(b64); const u=new Uint8Array(bin.length); for(let i=0;i<bin.length;i++) u[i]=bin.charCodeAt(i);
+  const wb=XLSX.read(u,{type:'array'});
+  for(const sn of wb.SheetNames){ const aoa=XLSX.utils.sheet_to_json(wb.Sheets[sn],{header:1,defval:'',raw:true}); const p=_dmParseVspAoa(aoa); if(p){ p._sheet=sn; p._wb=wb; return p; } }
+  return null; }
+
+/* ── (2) Dầu THEO JOB: ngày nằm trong job (On-hire có dự án) → Khách hàng chịu; ngoài job → Chủ tàu ── */
+function _darJobOf(vid, date){ try{ const d=String(date||'').slice(0,10); if(!vid||!d) return null;
+  const ev=(VesselService.events()||[]).filter(e=>e&&!e._deleted&&e.vesselId===vid&&e.projectId&&String(e.startAt||'').slice(0,10)<=d&&String(e.endAt||'9999').slice(0,10)>=d);
+  for(const e of ev){ const p=(S.projects||[]).find(x=>x&&x.id===e.projectId); if(p) return {projectId:p.id, code:p.code||p.name||'', client:p.client||''}; }
+  }catch(_){} return null; }
+(function(){ try{ const o=darPayerOf; darPayerOf=function(t,code){ if(t&&t.fuelMode==='by_job') return (t.date&&_darJobOf(t.vesselId,t.date))?'KH':'CT'; return o.apply(this,arguments); }; }catch(_){} })();
+function _darJobFix(d, r){ if(!r||r.fuelMode!=='by_job') return; const j=_darJobOf(r.vesselId, d.date); const tot=(+d.fKH||0)+(+d.fCT||0)||(+d.usedL||0); d.job=j; if(j){ d.fKH=tot; d.fCT=0; } else { d.fKH=0; d.fCT=tot; } }
+/* áp "Theo job" cho DAR đã ghi — xem trước rồi mới ghi */
+function darJobApplyPreview(vid, from){ from=from||(new Date().getFullYear()+'-01-01'); const v=(VesselService.vessels()||[]).find(x=>x.id===vid)||{};
+  const L=(S.darReports||[]).filter(r=>r&&!r._deleted&&r.vesselId===vid&&String(r.date||'')>=from&&r.fuelMode!=='by_job').sort((a,b)=>String(a.date).localeCompare(String(b.date)));
+  const fuelUsed=r=>(r.rob||[]).filter(x=>x&&x.std==='fuel').reduce((t,x)=>t+(+x.used||0)*((typeof _flFac==='function')?_flFac(x.unit):1),0);
+  let kh=0; const rows=L.map(r=>{ const j=_darJobOf(vid,r.date), u=fuelUsed(r); if(j) kh+=u; return `<tr><td>${esc(_cdD(r.date))}</td><td class="c">#${esc(r.reportNo)}</td><td>${esc(r.fuelMode==='owner_all'?'Chủ tàu chịu toàn bộ':'Theo mã')}</td><td>${j?('<b>'+esc(j.code)+'</b> · '+esc(j.client)):'<span style="color:var(--muted)">ngoài job</span>'}</td><td class="r num">${Math.round(u).toLocaleString('vi-VN')}</td><td>${j?'<b style="color:#1d6b3a">Khách hàng</b>':'Chủ tàu'}</td></tr>`; }).join('');
+  window._DJA={vid, ids:L.map(r=>r.id)};
+  openModal('⛽ Dầu theo job — '+esc(v.name||''), `<div style="display:flex;gap:8px;align-items:center;margin-bottom:8px;font-size:12.5px">Áp từ ngày <input type="date" value="${esc(from)}" onchange="darJobApplyPreview('${vid}',this.value)"> · ${L.length} DAR · dầu chuyển sang <b>Khách hàng chịu</b>: <b>${Math.round(kh).toLocaleString('vi-VN')} lít</b></div>
+    <div class="tbl-scroll" style="max-height:56vh"><table class="tbl" style="font-size:12px"><thead><tr><th>Ngày</th><th>DAR</th><th>Đang tính</th><th>Job (dự án · khách hàng)</th><th class="r">Dầu dùng (lít)</th><th>Sau khi áp</th></tr></thead><tbody>${rows||'<tr><td colspan="6" class="empty">Không có DAR cần đổi</td></tr>'}</tbody></table></div>
+    <div style="font-size:11px;color:var(--muted);margin-top:6px">Job = lịch On-hire / Off-hire có gắn dự án của tàu. Ngày trong job → Khách hàng chịu; ngoài job → Chủ tàu. Chỉ đổi cách tính ai chịu dầu, không đổi số lít.</div>`,
+    `<button class="btn-ghost" onclick="closeModal()">Hủy</button>${L.length?`<button class="btn-primary" onclick="darJobApplyDo()">✓ Áp dụng ${L.length} DAR</button>`:''}`); try{ setModalWide(true); }catch(_){} }
+function darJobApplyDo(){ const X=window._DJA; if(!X) return; let n=0;
+  commitMutation(()=>{ (S.darReports||[]).forEach(r=>{ if(r&&X.ids.indexOf(r.id)>=0){ r._fuelModeOld=r.fuelMode||''; r.fuelMode='by_job'; try{ touchRecord(r); }catch(_){} n++; } });
+    const t=darTplOf(X.vid); if(t&&t.fuelMode!=='by_job'){ t.fuelMode='by_job'; try{ touchRecord(t); }catch(_){} } },
+    {action:'dar_fuel_by_job', fields:['darReports','darTemplates'], onOk:()=>{ try{ logAuditEvent('dar_fuel_by_job',{vid:X.vid, n}); }catch(_){} closeModal(); toast('⛽ Đã áp "Theo job" cho '+n+' DAR','good'); }}); }
+
+/* ── (3) Lọc email: luật "nhớ" theo kiểu tên file + Quỹ tàu chỉ khi TÊN FILE nói là quỹ ── */
+function _mcRules(){ return Array.isArray(S.mailClassRules)?S.mailClassRules.filter(x=>x&&!x._deleted):[]; }
+function _mcRuleOf(row, vid){ try{ const f=_dmN2(row&&row.fileName); if(!f) return null; let rv=vid; if(!rv){ try{ const v=_dmRowVessel(row); rv=v?v.id:''; }catch(_){} }
+  return _mcRules().find(x=>(!x.vesselId||x.vesselId===rv)&&x.token&&f.indexOf(_dmN2(x.token))>=0)||null; }catch(_){ return null; } }
+const _MC_CLS={DAR:{cat:'DAR',sub:'DAR'}, BDN:{cat:'DAR',sub:'BDN'}, ONOFF:{cat:'ONOFF',sub:'on'}, BCC:{cat:'BCC'}, FUND:{cat:'FUND'}, REQ:{cat:'REQ'}, OTHER:{cat:'OTHER'}};
+const _MC_FUND_FILE=/qu[yỹ]\s*t[aà]u|quy\s*tau|petty\s*cash|cash\s*(report|book|fund)|s[oổ]\s*qu[yỹ]|so\s*quy|chi\s*ph[ií]\s*ti[eề]n\s*m[aặ]t/i;
+(function(){ try{ const o=_vfClass; _vfClass=function(row, vid){ const R=_mcRuleOf(row, vid); if(R&&_MC_CLS[R.cat]) return Object.assign({_rule:R.id}, _MC_CLS[R.cat]);
+    const c=o.apply(this,arguments); if(c&&c.cat==='FUND'&&!_MC_FUND_FILE.test(String((row&&row.fileName)||''))) return {cat:'OTHER', _why:'tiêu đề có chữ quỹ, tên file không'}; return c; }; }catch(_){} })();
+(function(){ try{ _vfGuess=function(row){ const R=_mcRuleOf(row); if(R){ return ({BDN:'BDN', BCC:'TIMESHEET', FUND:'FUND', REQ:'MR'})[R.cat]||''; }
+    const f=String(row.fileName||''), t=f+' '+String(row.subject||''); for(const [k,re] of _VF_RULES){ if(k==='FUND'){ if(re.test(f)&&_MC_FUND_FILE.test(f)) return k; continue; } if(re.test(t)) return k; } return ''; }; }catch(_){} })();
+/* Trung tâm tàu: file DAR / VDR nằm ở "Chưa phân loại" → trả về hàng chờ đọc DAR (không còn rơi sang Quỹ tàu) */
+(function(){ try{ const o=vfEmailFetch; vfEmailFetch=async function(vid){ window.__vfDarAgain=null; const r=await o.apply(this,arguments); if(window.__vfDarAgain){ window.__vfDarAgain=null; try{ await darMailRun(true,{vid}); }catch(_){} } return r; }; }catch(_){} })();
+
+/* ── (4) ↪ Đổi loại — mọi dòng trong Hộp DAR ── */
+const _MC_OPTS=[['DAR','📊 DAR / Daily report — đọc lại & ghi DAR'],['BDN','⛽ BDN (biên bản nhận dầu) — gắn vào DAR ngày gần nhất'],['ONOFF','🛳 On / Off-hire — hàng chờ TM import'],['BCC','🗓 BCC tàu'],['FUND','💵 Quỹ tàu'],['REQ','📝 Yêu cầu tàu (vật tư / order)'],['OTHER','🗂 Khác — để ở Chưa phân loại'],['SKIP','✗ Bỏ qua — không cần xử lý']];
+function _mcToken(row){ try{ const t=_vfParts(row).title||''; const w=t.split(/[\s\-]+/).filter(x=>x&&!/^\d+$/.test(x)); return (w[0]||'').slice(0,20); }catch(_){ return ''; } }
+function _dmChType(idx){ const row=(window._DM_ROWS||[])[idx]; if(!row) return; let v=null; try{ v=_dmRowVessel(row); }catch(_){} const cur=(_vfClass(row, v?v.id:'')||{}).cat||'OTHER';
+  openModal('↪ Đổi loại file', `<div style="font-size:12.5px;margin-bottom:8px"><b>${esc(row.fileName||'')}</b><br><span style="color:var(--muted)">${esc(v?v.name:(row.vessel||'?'))} · ${esc(String(row.receivedAt||'').slice(0,16).replace('T',' '))} · đang xếp: ${esc(_dmCatLbl(cur))}</span></div>
+    ${_MC_OPTS.map(([k,l],i)=>`<label style="display:flex;gap:8px;align-items:center;padding:5px 0;cursor:pointer;font-size:13px"><input type="radio" name="mc-t" value="${k}"> ${esc(l)}</label>`).join('')}
+    <div style="margin-top:10px;padding:8px 10px;border:1px dashed var(--rule);border-radius:6px;font-size:12.5px"><label style="display:flex;gap:8px;align-items:center"><input type="checkbox" id="mc-rem" checked> Nhớ: file của <b>${esc(v?v.name:'mọi tàu')}</b> có tên chứa</label>
+      <input id="mc-tok" value="${esc(_mcToken(row))}" style="margin-top:6px;width:220px"> <span style="font-size:11px;color:var(--muted)">→ lần sau tự xếp đúng loại này (bỏ qua không nhớ)</span></div>`,
+    `<button class="btn-ghost" onclick="openDarMailInbox()">← Danh sách</button><button class="btn-primary" onclick="_dmChTypeDo(${idx})">✓ Đổi loại</button>`); }
+function _mcDropVr(fileId, keepCat){ try{ const L=(S.vesselRequests||[]).filter(r=>r&&!r._deleted&&r.file&&r.file.id===fileId&&!(keepCat==='FUND'&&r._fundReport)&&!(keepCat==='REQ'&&r.type==='MR'));
+  if(!L.length) return 0; try{ markDeleted(L.map(r=>r.id),'vesselRequests'); }catch(_){} S.vesselRequests=(S.vesselRequests||[]).filter(r=>!L.some(x=>x.id===r.id)); return L.length; }catch(_){ return 0; } }
+function _mcVrAdd(row, vid, k){ const now=new Date().toISOString(), who=actorName(); const isF=k==='FUND';
+  const rec={id:'VR-'+uid().slice(-8), type:isF?'OTHER':'MR', vesselId:vid, date:String(row.receivedAt||now).slice(0,10), refNo:'', summary:(isF?'💵 Báo cáo quỹ tàu · ':'')+String(row.fileName||''), assignee:'', due:'', status:'new', _fundReport:isF||undefined,
+    file:{id:row.fileId,url:row.url,name:row.fileName,ext:row.ext}, mailRow:row.row, mailFrom:row.from||'', receivedAt:row.receivedAt||'', log:[{at:now,by:who,kind:'assign',text:'Đổi loại thủ công từ Hộp DAR'}], createdAt:now, createdBy:who};
+  S.vesselRequests=S.vesselRequests||[]; S.vesselRequests.push(rec); try{ touchRecord(rec); }catch(_){} return rec; }
+async function _dmChTypeDo(idx){ const row=(window._DM_ROWS||[])[idx]; if(!row) return; const k=(document.querySelector('input[name="mc-t"]:checked')||{}).value; if(!k){ toast('Chọn loại','warn'); return; }
+  const rem=(document.getElementById('mc-rem')||{}).checked, tok=String((document.getElementById('mc-tok')||{}).value||'').trim();
+  let v=null; try{ v=_dmRowVessel(row); }catch(_){} const vid=v?v.id:''; const me=actorName();
+  if(rem&&tok&&['DAR','BDN','ONOFF','BCC','FUND','REQ','OTHER'].indexOf(k)>=0){ await commitMutation(()=>{ S.mailClassRules=(S.mailClassRules||[]).filter(x=>!(x&&x.vesselId===vid&&_dmN2(x.token)===_dmN2(tok))); const r={id:'MCR-'+uid().slice(-8), vesselId:vid, token:tok, cat:k, by:me, at:new Date().toISOString()}; S.mailClassRules.push(r); try{ touchRecord(r); }catch(_){} },{action:'mail_class_rule', fields:['mailClassRules']}); }
+  if(k!=='FUND'&&k!=='REQ'){ await commitMutation(()=>{ _mcDropVr(row.fileId, k); },{action:'mail_class_drop_vr', fields:['vesselRequests']}); }
+  try{ logAuditEvent('mail_reclass',{file:row.fileName, to:k, vid, rule:rem?tok:''}); }catch(_){}
+  if(k==='DAR'){ await _dmMark(row,'INBOX','Đổi loại → DAR · '+me); closeModal(); toast('↪ Đã chuyển về hàng chờ đọc DAR — đang đọc…','info'); await darMailRun(true, vid?{vid}:{}); return; }
+  if(k==='BDN'){ const dr=vid?_darLoadNear(vid,row.receivedAt):null; if(!dr){ toast('Chưa có DAR gần ngày nhận của tàu này — ghi DAR trước rồi gắn BDN','bad'); return; }
+    const r=await commitMutation(()=>{ _bdnAttachTo(dr,row,'manual'); },{action:'dar_bdn_manual', fields:['darReports']}); if(r&&r.success) await _dmMark(row,'POSTED','Đổi loại → BDN · gắn DAR #'+dr.reportNo, dr.id); }
+  else if(k==='ONOFF'){ await commitMutation(()=>{ _hdqAdd([row]); },{action:'hdq_add', fields:['hireDocQueue']}); await _dmMark(row,'POSTED','Đổi loại → On / Off-hire · hàng chờ TM import'); }
+  else if(k==='BCC'){ closeModal(); dmFileToBcc(idx); return; }
+  else if(k==='FUND'||k==='REQ'){ if(!vid){ toast('Không nhận ra tàu của file','bad'); return; } let rec=null; await commitMutation(()=>{ _mcDropVr(row.fileId, k); rec=_mcVrAdd(row, vid, k); },{action:'vr_reclass', fields:['vesselRequests']}); await _dmMark(row,'POSTED','Đổi loại → '+(k==='FUND'?'Quỹ tàu':'Yêu cầu tàu'), rec?rec.id:''); }
+  else if(k==='OTHER'){ await _dmMark(row,'KHAC','Đổi loại → Khác · '+me); }
+  else if(k==='SKIP'){ await _dmMark(row,'REJECTED','Bỏ qua — không cần xử lý · '+me); }
+  toast('↪ Đã đổi loại','good'); try{ _dmRefreshBadge(); }catch(_){} openDarMailInbox(window._DM_TAB||'KHAC'); }
+/* file DAR bị xếp nhầm sang Quỹ tàu (trước bản này) */
+function _mcMisFund(){ return (S.vesselRequests||[]).filter(r=>{ if(!r||r._deleted||!r._fundReport||!r.file) return false; try{ const c=_vfClass({fileName:r.file.name, subject:''}, r.vesselId); return c&&c.cat==='DAR'; }catch(_){ return false; } }); }
+async function _mcFixMisFund(){ const L=_mcMisFund(); if(!L.length) return; if(!confirm('Chuyển '+L.length+' file DAR đang nằm nhầm ở "Báo cáo quỹ tàu" về Hộp DAR để đọc lại?')) return;
+  await commitMutation(()=>{ try{ markDeleted(L.map(r=>r.id),'vesselRequests'); }catch(_){} S.vesselRequests=(S.vesselRequests||[]).filter(r=>!L.some(x=>x.id===r.id)); },{action:'mail_fix_misfund', fields:['vesselRequests']});
+  for(const r of L){ if(r.mailRow!=null||r.file.id) await _dmMark({row:r.mailRow, fileId:r.file.id},'INBOX','Chuyển về DAR (trước đây lọc nhầm Quỹ tàu)'); }
+  try{ logAuditEvent('mail_fix_misfund',{n:L.length}); }catch(_){} toast('↪ Đã chuyển '+L.length+' file về DAR — đang đọc…','info'); await darMailRun(true); }
+function darLibOpen(){ const cnt={}; (S.darReports||[]).forEach(r=>{ if(r&&!r._deleted){ const k=r.family||'?'; cnt[k]=cnt[k]||{n:0, v:new Set()}; cnt[k].n++; cnt[k].v.add(r.vesselId); } });
+  const vn=id=>((VesselService.vessels()||[]).find(x=>x.id===id)||{}).name||id;
+  openModal('📚 Thư viện mẫu DAR', `<table class="tbl" style="font-size:12.5px"><thead><tr><th>Mẫu</th><th>Tên</th><th>File</th><th>Nhận diện</th><th class="r">DAR đã ghi</th><th>Tàu đã dùng</th></tr></thead><tbody>${DAR_LIB_INFO.map(([k,f,how])=>`<tr><td><b>${k}</b></td><td>${esc((DAR_FAMILIES[k]||{}).label||'')}</td><td>${esc(f)}</td><td style="font-size:11.5px">${esc(how)}</td><td class="r">${cnt[k]?cnt[k].n:0}</td><td style="font-size:11.5px">${cnt[k]?Array.from(cnt[k].v).map(vn).map(esc).join(', '):'—'}</td></tr>`).join('')}</tbody></table>
+    <div style="font-size:11.5px;color:var(--muted);margin-top:8px">App nhận mẫu theo NỘI DUNG file — tàu nào gửi mẫu nào cũng đọc được; mỗi DAR lưu mẫu của chính nó. File không khớp mẫu nào → "Cần xem lại · mẫu chưa có trong thư viện" — gửi file đó để bổ sung mẫu.</div>`, `<button class="btn-sec" onclick="openDarMailInbox()">← Hộp DAR</button><button class="btn-ghost" onclick="closeModal()">Đóng</button>`); try{ setModalWide(true); }catch(_){} }
+(function(){ try{ const o=_dmInboxPaint; _dmInboxPaint=function(tab, L, stale){ const r=o.apply(this,arguments);
+  try{ const box=document.getElementById('dm-box'); if(!box) return r;
+    box.querySelectorAll('tbody tr').forEach(tr=>{ const m=(tr.innerHTML.match(/(?:_dmClassify|dmFileToBcc|_dmReview)\((\d+)/)||[])[1]; if(m==null) return; const td=tr.lastElementChild; if(!td||td.querySelector('.mc-btn')) return;
+      const b=document.createElement('button'); b.className='btn-sec mc-btn'; b.style.cssText='font-size:11px;margin-left:4px'; b.textContent='↪ Đổi loại'; b.title='Đổi loại file (DAR / BDN / On-Off hire / BCC / Quỹ / Yêu cầu / Khác) — nhớ cho file cùng kiểu tên'; b.onclick=()=>_dmChType(+m); td.appendChild(b); });
+    const head=box.firstElementChild; if(head&&!box.querySelector('.dl-btn')){ const b=document.createElement('button'); b.className='btn-ghost dl-btn'; b.style.cssText='font-size:11.5px'; b.textContent='📚 Thư viện mẫu DAR'; b.onclick=darLibOpen; head.appendChild(b); }
+    const mis=_mcMisFund(); if(mis.length&&!box.querySelector('.mf-ban')){ const d=document.createElement('div'); d.className='mf-ban'; d.style.cssText='margin:0 0 8px;padding:8px 10px;border-radius:6px;background:#fff4e5;border:1px solid #f0c27b;font-size:12.5px;display:flex;gap:10px;align-items:center;flex-wrap:wrap';
+      d.innerHTML='⚠ <b>'+mis.length+' file DAR</b> đang bị xếp nhầm vào "Báo cáo quỹ tàu" ('+mis.slice(0,3).map(x=>esc(x.file.name)).join(', ')+(mis.length>3?'…':'')+')'; const b=document.createElement('button'); b.className='btn-primary'; b.style.cssText='font-size:11.5px'; b.textContent='↪ Chuyển về DAR'; b.onclick=_mcFixMisFund; d.appendChild(b); box.insertBefore(d, box.children[1]||null); } }catch(e){ console.warn('[dm paint+]',e); }
+  return r; }; }catch(_){} })();
+
+/* ── (5) Xem & xử lý file Excel trong Hộp DAR ── */
+(function(){ try{ const o=_dmReview; _dmReview=async function(idx, vidOverride){ const row=(window._DM_ROWS||[])[idx]; const isX=!!row&&(/^xlsx?$/i.test(String(row.ext||''))||/\.xlsx?$/i.test(String(row.fileName||''))); if(!isX) return o.apply(this,arguments);
+  openModal('🔎 DAR — '+esc(row.fileName||''), '<div style="padding:20px;text-align:center;color:var(--muted)">⏳ Đang đọc file Excel…</div>', '');
+  let g, p; try{ g=await _dmApi({action:'dar_inbox_get', fileId:row.fileId}); if(!g||!g.ok) throw new Error((g&&g.error)||'không tải được'); p=await _dmParseXls(g.file.base64); }catch(e){ p=null; window.__dmErr=e; }
+  if(!p){ openModal('🔎 DAR — chưa đọc được', `<div style="color:var(--bad)">${esc(window.__dmErr?window.__dmErr.message:'File Excel không khớp mẫu nào trong thư viện DAR')}</div><div style="margin-top:8px"><a href="${esc(row.url||'#')}" target="_blank">Mở file gốc</a> · gửi file này để bổ sung mẫu.</div>`, `<button class="btn-ghost" onclick="openDarMailInbox()">← Danh sách</button><button class="btn-sec" onclick="_dmChType(${idx})">↪ Đổi loại</button><button class="btn-sec" style="color:var(--bad)" onclick="_dmReject(${idx})">✗ Loại</button>`); return; }
+  const b=_dmBuild(p,row,vidOverride); window._DM_B={idx, b, p};
+  const vs=[].concat(VesselService.vessels()||[], (VesselService.opVessels?VesselService.opVessels():[])||[]).filter(v=>v&&!v._deleted&&!v.isShoreUnit);
+  const f=n=>n===''||n==null?'':(+n).toLocaleString('en-US');
+  const robT=b.rep.rob.map(x=>`<tr><td>${esc(x.label)}</td><td>${esc(x.unit||'')}</td><td class="r">${f(x.open)}</td><td class="r">${f(x.load)}</td><td class="r">${f(x.transfer)}</td><td class="r">${f(x.used)}</td><td class="r"><b>${x.open===''?'':f(darRobCalc(x))}</b></td></tr>`).join('');
+  const actT=b.rep.acts.map(a=>`<tr><td class="mono">${esc(a.from)}–${esc(a.to)}</td><td>${esc(a.desc)}</td><td class="r">${f(a.dur)}</td></tr>`).join('');
+  let sheet=''; try{ sheet=XLSX.utils.sheet_to_html(p._wb.Sheets[p._sheet]).replace(/<\/?(html|head|body|meta|title)[^>]*>/gi,''); }catch(_){}
+  const canDirect=b.vid&&b.rep.date&&!b.rep.rob.some(x=>x.std==='fuel'&&(+x.load||0)>0&&!x.loadSrc); const j=b.vid?_darJobOf(b.vid,b.rep.date):null;
+  openModal('🔎 DAR (Excel · '+esc(p.family)+') — '+esc(row.vessel||'?')+' · '+esc(row.fileName||''), `<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+    <div style="overflow:auto;max-height:72vh;border:1px solid var(--rule);font-size:10.5px;background:#fff" class="xls-src">${sheet}</div>
+    <div style="overflow:auto;max-height:72vh;font-size:12px">
+      ${b.reasons.length?`<div style="padding:8px 10px;background:#fdeaea;border-radius:6px;color:var(--bad);margin-bottom:8px"><b>Cần xem lại:</b><br>${b.reasons.map(r=>'• '+esc(r)).join('<br>')}</div>`:'<div style="padding:8px 10px;background:#eafaf0;border-radius:6px;color:#1e7d44;margin-bottom:8px"><b>✓ Đạt mọi kiểm tra</b></div>'}
+      <div style="display:grid;grid-template-columns:120px 1fr;gap:4px 8px;margin-bottom:8px">
+        <span>Tàu</span><select onchange="_dmReview(${idx},this.value)"><option value="">— chọn tàu —</option>${vs.map(v=>`<option value="${v.id}" ${v.id===b.vid?'selected':''}>${esc(v.name)}</option>`).join('')}</select>
+        <span>Ngày</span><b>${esc(_cdD(b.rep.date))}${b.rep.rev>1?' · Rev '+b.rep.rev:''}</b>
+        <span>Mẫu</span><span>${esc((DAR_FAMILIES[p.family]||{}).label||p.family)}</span>
+        <span>Thời tiết · người</span><span>${esc(b.rep.weather||'')} · ${esc(b.rep.crew||'')} crew${b.rep.pax?' + '+esc(b.rep.pax)+' pax':''}</span>
+        <span>Ai chịu dầu</span><span>${b.rep.fuelMode==='by_job'?(j?('Theo job → <b>Khách hàng</b> ('+esc(j.code)+')'):'Theo job → Chủ tàu (ngoài job)'):(b.rep.fuelMode==='owner_all'?'Chủ tàu chịu toàn bộ':'Theo mã hoạt động')}</span></div>
+      <table class="tbl" style="font-size:11px"><thead><tr><th>Mục</th><th>ĐV</th><th>Đầu ngày</th><th>Nhận</th><th>Cấp đi</th><th>Dùng</th><th>Tồn</th></tr></thead><tbody>${robT}</tbody></table>
+      <table class="tbl" style="font-size:11px;margin-top:8px"><thead><tr><th>Giờ</th><th>Công việc · Работы</th><th>Giờ</th></tr></thead><tbody>${actT}</tbody></table>
+      <div style="font-size:11px;color:var(--muted);margin-top:6px">Tổng giờ ${b.hrs} · Đầu ngày = Tồn + Dùng + Cấp đi − Nhận (mẫu không ghi số đầu ngày).</div></div></div>`,
+    `<button class="btn-ghost" onclick="openDarMailInbox()">← Danh sách</button><button class="btn-sec" onclick="_dmChType(${idx})">↪ Đổi loại</button><button class="btn-sec" style="color:var(--bad)" onclick="_dmReject(${idx})">✗ Loại</button>
+     ${b.vid?`<button class="btn-sec" onclick="_dmToForm()">✎ Mở form DAR để sửa</button>`:''}${canDirect?`<button class="btn-primary" onclick="_dmForcePost()">✓ Ghi vào DAR tàu${b.reasons.length?' (đã kiểm)':''}</button>`:''}`);
+  try{ setModalWide(true); }catch(_){} }; }catch(e){ console.warn('[v3.70.34 review]',e); } })();
 
 /* ── Sidebar khối màu: ẩn dải màu khi mọi mục trong khối đều ẩn ── */
 function _sbBandsRefresh(root){
