@@ -4699,7 +4699,7 @@ const WH_TYPES = {
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.70.34';
+const APP_VERSION='3.70.35';
 /* HOTFIX 3.12.17-email: CHẶN TRIỆT ĐỂ gửi email TỰ ĐỘNG (mất kiểm soát — spam quota Google).
    Email phải do NV được phân quyền CHỦ ĐỘNG chọn gửi. Cờ này:
    (1) chặn auto-SCAN tạo email (hrmScanExpiries/vesselCertScanExpiries);
@@ -19879,6 +19879,10 @@ async function _cloudSyncRaw(mode, opts){
       // → "mở lại thấy về giá trị trước sửa". mergeStateByFields đã có ở luồng PUSH nhưng
       // pull lại không dùng. NAY: pull cũng MERGE theo bản ghi (last-write-wins theo updatedAt) —
       // bản ghi local mới hơn KHÔNG bị cloud cũ đè; bản chỉ có ở cloud vẫn về đủ.
+      /* v3.70.35 (gốc lỗi "xóa rồi hiện lại"): KHÔNG áp bản tải về khi 1 giao dịch đang lưu dở (mutate xong, đang mã hóa) —
+         chờ hàng đợi giao dịch trống rồi mới gộp; sau khi gộp, khóa giao dịch mới trong lúc áp. */
+      try{ await _txDrain(12000); }catch(_){}
+      window._pullApplying=true;
       const _localBeforePull = S;  // giữ state local (đã có sửa đổi local) trước khi merge
       const _pullMergeFields = Array.from(new Set([...ALL_DATA_FIELDS, ...SHARED_FIELDS]));
       let _pullMerged;
@@ -19890,8 +19894,16 @@ async function _cloudSyncRaw(mode, opts){
         );
         _pullMerged = mp.merged;
       }catch(e){
-        console.warn('[pull merge] fallback to cloud:', e&&e.message);
-        _pullMerged = filteredCloud;  // nếu merge lỗi → an toàn dùng cloud (như cũ)
+        /* v3.70.35: TRƯỚC ĐÂY gộp lỗi → S = bản cloud THÔ → mất mọi thay đổi máy chưa đẩy (kể cả dấu xóa) + giao dịch đang lưu
+           bị trả lại "Version sau ghi ≠ kỳ vọng". NAY: hủy lần tải này, GIỮ NGUYÊN máy, ghi lỗi để truy. */
+        window._pullApplying=false;
+        const _em=String(e&&e.message||e); console.error('[pull merge] LỖI GỘP — hủy tải về, giữ dữ liệu máy:', e);
+        try{ logAuditEvent('pull_merge_error',{error:_em.slice(0,300), stack:String(e&&e.stack||'').slice(0,600), fieldErrors:(window._mergeFieldErrors||[]).slice(-5)}); }catch(_){}
+        try{ localStorage.setItem('seahorse_last_merge_error', JSON.stringify({at:new Date().toISOString(), error:_em, stack:String(e&&e.stack||'').slice(0,1500)})); }catch(_){}
+        window._lastPullOutcome={at:new Date().toISOString(), branch:'MERGE_ERROR', note:_em};
+        updateSyncStatus('error','Gộp dữ liệu tải về lỗi — giữ bản máy');
+        try{ toast('⚠ Tải về bị lỗi khi gộp ('+_em.slice(0,80)+') — đã GIỮ NGUYÊN dữ liệu máy, không ghi đè. Báo Admin.','bad'); }catch(_){}
+        return;
       }
       // v3.10.20 — GUARD PULL THEO CỤM (FLAG_PULL_CLUSTER_GUARD).
       // Chặn 1 cụm nghiệp vụ quan trọng bị nạp về ~rỗng (lỗi mảnh chunk cloud hỏng → cụm đó =0
@@ -19921,6 +19933,7 @@ async function _cloudSyncRaw(mode, opts){
       }catch(_gErr){ console.warn('[pull cluster-guard] lỗi, bỏ qua guard an toàn:', _gErr&&_gErr.message); }
       S=_pullMerged;
       try{ _cloudMarkLoaded(_cloudSeqOf(decoded)); }catch(_){}   /* v3.70.02 */
+      window._pullApplying=false;   /* v3.70.35 */
       try{ if(typeof _ftShadowReset==='function') _ftShadowReset(); }catch(_){}   /* v3.70.03 */
       S.auditLog = localAuditLog;  // restore local audit log
       S.presence = mergedPresence; // v2.72.0: giữ presence đã gộp
@@ -38965,7 +38978,7 @@ function mergeStateByFields(cloudFull, localFull, fields){
       merged.deletedIds=union;       // bản merged cũng có ngay (sẽ được mergeByID xác nhận lại)
     }
   }catch(e){ console.warn('[mergeState pre-tombstone]', e&&e.message); }
-  fields.forEach(f=>{
+  fields.forEach(f=>{ try{   /* v3.70.35: 1 field gộp lỗi → giữ bản máy field đó, ghi lỗi, các field khác vẫn gộp */
     if(localFull[f]===undefined) return;
     // v2.37.0: nếu local là mảng RỖNG mà cloud có dữ liệu → GIỮ cloud.
     // Mảng rỗng nghĩa là "không có gì đóng góp", KHÔNG phải "xóa sạch".
@@ -38973,6 +38986,8 @@ function mergeStateByFields(cloudFull, localFull, fields){
     if(Array.isArray(localFull[f]) && localFull[f].length===0){
       if(Array.isArray(cloudFull[f]) && cloudFull[f].length>0){
         merged[f]=cloudFull[f];   // giữ cloud, không để mảng rỗng đè
+        /* v3.70.35: máy vừa xóa HẾT bản ghi của mảng này → mảng rỗng + có dấu xóa → vẫn phải áp dấu xóa lên bản cloud (trước đây lấy nguyên cloud → sống lại) */
+        try{ if(f!=='deletedIds' && !TOMBSTONE_PROTECTED_FIELDS.has(f) && cloudFull[f][0] && typeof cloudFull[f][0]==='object' && 'id' in cloudFull[f][0]){ const _tb=deletedIdSetForField(f); if(_tb.size){ const _k=cloudFull[f].filter(r=>!(r&&_tb.has(String(r.id)))); if(_k.length!==cloudFull[f].length) merged[f]=_k; } } }catch(_){}
       } else {
         merged[f]=localFull[f];   // cả hai đều rỗng → giữ rỗng
       }
@@ -39140,7 +39155,7 @@ function mergeStateByFields(cloudFull, localFull, fields){
       // Non-record-array field (scalar, config, etc) → local overrides
       merged[f]=localFull[f];
     }
-  });
+  }catch(_fe){ merged[f]=localFull[f]; try{ (window._mergeFieldErrors=window._mergeFieldErrors||[]).push({at:new Date().toISOString(), field:f, error:String(_fe&&_fe.message||_fe)}); console.error('[merge field] '+f+':', _fe); _mergeDropAudit('merge_field_error', f, {error:String(_fe&&_fe.message||_fe).slice(0,200)}); }catch(_){} } });
   try{ if(fields&&fields.length>=5) window._fullPullDone=true; }catch(_){}   /* v3.69.73 (F1): đã gộp đủ từ cloud */
   return {merged, conflictReport};
 }
@@ -39252,8 +39267,11 @@ async function saveStateVerified(expectRev){
    transaction sau CHỜ transaction trước xong; trong 1 tab không bao giờ ghi chồng nữa.
    (Ghi chồng LIÊN TAB vẫn có thể — message đã khuyên đóng bớt tab.) */
 let _txQueue=Promise.resolve();
+window._txInFlight=0;
+function _txDrain(maxMs){ return Promise.race([_txQueue.catch(()=>{}), new Promise(r=>setTimeout(r, maxMs||12000))]); }   /* v3.70.35 */
+function _txWaitPull(maxMs){ return new Promise(res=>{ const t0=Date.now(); (function w(){ if(!window._pullApplying||Date.now()-t0>(maxMs||10000)) return res(); setTimeout(w,40); })(); }); }
 function commitTransaction(mutateFn, opts){
-  const run=()=>_commitTransactionInner(mutateFn, opts);
+  const run=async()=>{ window._txInFlight=(window._txInFlight||0)+1; try{ await _txWaitPull(10000); return await _commitTransactionInner(mutateFn, opts); } finally{ window._txInFlight=Math.max(0,(window._txInFlight||1)-1); } };
   const p=_txQueue.then(run, run);
   _txQueue=p.catch(()=>{});   // lỗi của tx trước không chặn hàng đợi
   return p;
@@ -39274,9 +39292,11 @@ async function _commitTransactionInner(mutateFn, opts){
              version:{before:_revBefore, after:_stateRev()}, error:'Mutate lỗi: '+((_mutateErr&&_mutateErr.message)||_mutateErr) };
   }
   const _revExpect=_bumpStateRev();   // bump version TRƯỚC persist (YC4)
+  const _S0=S, _meta0=S.meta;   /* v3.70.35: ghi vết nếu S / S.meta bị thay trong lúc lưu */
   let r;
   try{
     r=await saveStateVerified(_revExpect);
+    try{ if(S!==_S0||S.meta!==_meta0){ logAuditEvent('tx_state_replaced',{action, sameMeta:S.meta===_meta0, revNow:_stateRev(), expect:_revExpect, pull:(window._lastPullOutcome||{}).branch||''}); } }catch(_){}
   }catch(_persistErr){
     // YC5b: saveStateVerified NÉM lỗi (vd QuotaExceededError khi localStorage đầy) → coi như persist thất bại,
     //   ROLLBACK HẸP để tránh "UI báo thành công nhưng dữ liệu không lưu" + chống hồi sinh bản ghi.
@@ -129090,6 +129110,29 @@ function darLibOpen(){ const cnt={}; (S.darReports||[]).forEach(r=>{ if(r&&!r._d
     `<button class="btn-ghost" onclick="openDarMailInbox()">← Danh sách</button><button class="btn-sec" onclick="_dmChType(${idx})">↪ Đổi loại</button><button class="btn-sec" style="color:var(--bad)" onclick="_dmReject(${idx})">✗ Loại</button>
      ${b.vid?`<button class="btn-sec" onclick="_dmToForm()">✎ Mở form DAR để sửa</button>`:''}${canDirect?`<button class="btn-primary" onclick="_dmForcePost()">✓ Ghi vào DAR tàu${b.reasons.length?' (đã kiểm)':''}</button>`:''}`);
   try{ setModalWide(true); }catch(_){} }; }catch(e){ console.warn('[v3.70.34 review]',e); } })();
+
+/* ════ v3.70.35 (Sếp 10/10 — "xóa rồi xuất hiện lại", lỗi "Version sau ghi ≠ kỳ vọng" tái diễn): SỬA TẬN GỐC XUNG ĐỘT LƯU ↔ TẢI VỀ
+   Cơ chế lỗi (đã dựng lại được trên app bằng kiểm thử tự động):
+   1. Giao dịch (xóa đợt…) sửa dữ liệu xong, tăng số phiên bản, rồi MÃ HÓA + GHI máy mất vài giây.
+   2. Đúng lúc đó, tự tải về (v3.70.30/31 tải thường xuyên hơn) gộp xong → THAY CẢ BIẾN S. Khi gộp gặp lỗi, bản cũ thay S bằng
+      bản cloud THÔ → mất mọi thay đổi máy chưa đẩy (kể cả dấu xóa) → số phiên bản = số trên cloud (thấp hơn kỳ vọng đúng 1)
+      → giao dịch bị trả lại "Version sau ghi (n) ≠ kỳ vọng (n+1)" → dòng vừa xóa hiện lại, không có dấu xóa.
+   Sửa (index.html): tải về CHỜ giao dịch đang lưu xong mới gộp · gộp lỗi → HỦY tải, GIỮ máy, ghi lỗi (không bao giờ thay S bằng cloud thô)
+   · từng field gộp lỗi riêng, không hỏng cả lần gộp · mảng máy rỗng lấy cloud vẫn áp dấu xóa · giao dịch chờ khi đang áp bản tải về.
+   Dưới đây: ghi máy xếp hàng tuần tự (bản sau luôn chứa dữ liệu mới nhất) · không tự tải về khi đang có giao dịch / đang ghi · lệnh chẩn đoán. ════ */
+(function(){ try{ const _o=saveStateEncrypted; let q=Promise.resolve(); window._saveBusy=0;
+  saveStateEncrypted=function(){ const self=this, args=arguments; window._saveBusy=(window._saveBusy||0)+1;
+    const p=q.then(()=>_o.apply(self,args)); q=p.catch(()=>{}).then(()=>{ window._saveBusy=Math.max(0,(window._saveBusy||1)-1); }); return p; }; }catch(e){ console.warn('[v3.70.35 saveq]',e); } })();
+function _revCanPullNow(){ if(document.hidden) return false; if(typeof syncMachine!=='undefined'&&syncMachine&&syncMachine.running) return false;
+  if((window._txInFlight||0)>0||window._pullApplying||(window._saveBusy||0)>0) return false;   /* v3.70.35: đang lưu / đang áp → không tải về */
+  if(document.getElementById('pv-ov')) return false; if(document.getElementById('mr-prev')||document.getElementById('op-prev')) return false;
+  try{ const m=document.getElementById('modal'); if(m&&m.classList.contains('show')&&typeof _modalDirty==='function'&&_modalDirty()) return false; }catch(_){}
+  if(window._lastMutationTs&&Date.now()-window._lastMutationTs<8000) return false; return true; }
+function syncDiag(){ const out={version:APP_VERSION, machine:(typeof actorName==='function'?actorName():''), rev:_stateRev(), txInFlight:window._txInFlight||0, saveBusy:window._saveBusy||0, pullApplying:!!window._pullApplying, lastPull:window._lastPullOutcome||null, mergeFieldErrors:(window._mergeFieldErrors||[]).slice(-10)};
+  try{ out.lastMergeError=JSON.parse(localStorage.getItem('seahorse_last_merge_error')||'null'); }catch(_){}
+  const A=[].concat(S.auditLog||[],S.auditLogShared||[]).filter(a=>/tx_failed|pull_merge_error|tx_state_replaced|merge_field_error/.test(JSON.stringify(a))).slice(-12);
+  out.recentErrors=A.map(a=>({ts:a.ts, ev:a.event||a.action||a.type, detail:JSON.stringify(a.detail||a.data||a).slice(0,220)}));
+  console.log('── Chẩn đoán đồng bộ ──'); console.table(out.recentErrors); console.log(out); return out; }
 
 /* ── Sidebar khối màu: ẩn dải màu khi mọi mục trong khối đều ẩn ── */
 function _sbBandsRefresh(root){
