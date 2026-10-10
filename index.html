@@ -4699,7 +4699,7 @@ const WH_TYPES = {
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.70.40';
+const APP_VERSION='3.70.42';
 /* HOTFIX 3.12.17-email: CHẶN TRIỆT ĐỂ gửi email TỰ ĐỘNG (mất kiểm soát — spam quota Google).
    Email phải do NV được phân quyền CHỦ ĐỘNG chọn gửi. Cờ này:
    (1) chặn auto-SCAN tạo email (hrmScanExpiries/vesselCertScanExpiries);
@@ -8274,7 +8274,7 @@ const PRESET_ROLES={
 const TAB_TO_FIELDS={
   plan:           ['plans','dockPlans','projects','vessels','opVessels','receivables','payables','fixedAssets'],
   projects:       ['projects','vesselCapabilities'],
-  vessels:        ['vesselMailLog','hireDocQueue','crewMailDocs','vesselRequests','whMinStock','crewDocs','laborContracts','hrDecisions','crewRankMap','salaryScales','crewPayBooks','payProposals','crewHistImports','sbIgnore','vessels','onhires','events','dailyReports','darReports','darTemplates','warehouses','stockDocs','materials','materialGroups','invGroups','tools','toolMovements'],   /* v3.18.62 · v3.66.62: +tools (MMTB & CCDC từng tàu) · v3.66.61: +dữ liệu tồn (chỉ số lượng) cho "📦 Tồn kho" tại module Quản lý tàu */
+  vessels:        ['mailClassRules','vesselMailLog','hireDocQueue','crewMailDocs','vesselRequests','whMinStock','crewDocs','laborContracts','hrDecisions','crewRankMap','salaryScales','crewPayBooks','payProposals','crewHistImports','sbIgnore','vessels','onhires','events','dailyReports','darReports','darTemplates','warehouses','stockDocs','materials','materialGroups','invGroups','tools','toolMovements'],   /* v3.18.62 · v3.66.62: +tools (MMTB & CCDC từng tàu) · v3.66.61: +dữ liệu tồn (chỉ số lượng) cho "📦 Tồn kho" tại module Quản lý tàu */
   hrm:            ['crewMailDocs','payCcExpenseMap','bodNotifs','fixedAssets','tools','fuelLogs','equipRequests','crewDocs','laborContracts','hrDecisions','crewRankMap','salaryScales','crewPayBooks','payProposals','crewHistImports','hrEmployees','hrHistory','hrAttendance','crewAssignments','crewTimesheets','crewChangePlans','crewManning','crewRotationConfig','positions','vessels','opVessels','opTransactions','projects','bccSheets','ntpPayCards'],   /* v3.65.19: +ntpPayCards — thẻ lương NTP, HR tạo/sửa tại đây */
   receivables:    ['receivables','projects','vessels','opVessels'],
   periodic:       ['receivables','payables','opVessels','opTransactions','opMgmtFees','ownerReportLocks','qnExpenseCats','projects','vessels'],
@@ -8320,6 +8320,7 @@ const ALL_DATA_FIELDS=[
   'invoiceRequests',   /* v3.69.20: Đề nghị xuất hóa đơn (TM giao KT) */
   'hireDocQueue',   /* v3.70.05: biên bản On / Off-hire từ email tàu chờ TM import */
   'vesselMailLog',   /* v3.70.39: nhật ký email tàu (phân loại tự động, xem tại Trung tâm tàu) */
+  'mailClassRules',   /* v3.70.41: quy tắc nhớ phân loại email (↪ Đổi loại) — trước đây CHỈ nằm trên máy tạo, không đồng bộ */
   'crewMailDocs',   /* v3.70.11: tài liệu thuyền viên từ email tàu (QLTV xác nhận) */
   /* v3.68.87 (Sếp 01/10 "các phần chưa đồng bộ lên cloud"): các loại dữ liệu trước đây NGOÀI danh sách → chỉ nằm trên máy, mất sau mỗi lần kéo cloud */
   'otRequests','qhseIncidents','qhseNcrs','qhseAudits','qhseDocs','pmTasks','pmRunHours','coBankAccounts','coBankTxns','subCoPayrollLedger','vesselCapabilities','expenseGroupLetters','glAccounts','journalEntries','viewAsLog',
@@ -13681,7 +13682,7 @@ function bkVoid(id){
         t.paid=false;
         delete t.paidDate; delete t.paidAt; try{ touchRecord(t); }catch(e){} }
     });
-    S.bkBatchFees=(S.bkBatchFees||[]).filter(f=>{ const del=f&&f._bkId===id; if(del) nFee++; return !del; });
+    S.bkBatchFees=(S.bkBatchFees||[]).filter(f=>{ const del=f&&f._bkId===id; if(del){ nFee++; try{ if(f.id) markDeleted(f.id,'bkBatchFees'); }catch(_){} } return !del; });   /* v3.70.41: bia mộ */
     bk._voided=true; bk.voidedBy=actorName(); bk.voidedAt=new Date().toISOString();
     try{ touchRecord(bk); }catch(e){}
   },{action:'bk_void', fields:['payables','opTransactions','paymentSheets','bkBatchFees'], onOk:()=>{
@@ -16638,7 +16639,7 @@ function saveManning(vid){
     let m=(S.crewManning||[]).find(x=>x.vesselId===vid&&x.rankKey===r.key);
     if(req>0){
       if(m){ m.required=req; } else { (S.crewManning||(S.crewManning=[])).push({id:'mn_'+Date.now()+'_'+r.key, vesselId:vid, rankKey:r.key, required:req}); }
-    } else if(m){ S.crewManning=S.crewManning.filter(x=>x.id!==m.id); }
+    } else if(m){ S.crewManning=S.crewManning.filter(x=>x.id!==m.id); try{ markDeleted(m.id,'crewManning'); }catch(_){} }   /* v3.70.41: bia mộ */
   });
   saveState(); closeModal(); renderAll(); toast('Đã lưu định biên ✓','good');
 }
@@ -22378,13 +22379,14 @@ function expTreeUpsert(code, name){
   if(!code) return false;
   if(!S.expenseTree) S.expenseTree=[];
   const ex=S.expenseTree.find(x=>String(x.code)===code);
-  if(ex){ ex.name=name; } else { S.expenseTree.push({code, name}); }
+  if(ex){ ex.name=name; ex.updatedAt=new Date().toISOString(); } else { const _n={code, name, updatedAt:new Date().toISOString()}; S.expenseTree.push(_n); try{ _keyedUntomb('expenseTree',_n); }catch(_){} }   /* v3.70.41 (R11) */
   try{ expGroupsSync(); }catch(e){}   /* v3.18.71: nhánh chữ cái mới/đổi tên → nhóm động cập nhật ngay */
   return true;
 }
 function expTreeRemove(code){
   code=String(code||'').trim();
   if(!S.expenseTree) return false;
+  try{ S.expenseTree.filter(x=>String(x.code)===code).forEach(x=>_keyedTomb('expenseTree',x)); }catch(_){}   /* v3.70.41 (R11) */
   S.expenseTree=S.expenseTree.filter(x=>String(x.code)!==code);
   try{ expGroupsSync(); }catch(e){}   /* v3.18.71 */
   return true;
@@ -29904,7 +29906,7 @@ function omApplyToPeriod(omId){
 function omImportDelete(id){
   const o=(S.omImports||[]).find(x=>x.id===id); if(!o) return;
   if(!confirm('Xóa bộ import O&M '+o.period+'? (Dữ liệu đã nạp vào kỳ không bị gỡ)')) return;
-  S.omImports=(S.omImports||[]).filter(x=>x.id!==id);
+  S.omImports=(S.omImports||[]).filter(x=>x.id!==id); try{ markDeleted(id,'omImports'); }catch(_){}   /* v3.70.41: bia mộ */
   try{ logAuditEvent('om_import_delete',{period:o.period,batch:o.batchId}); }catch(e){}
   saveState(); omImportOpen();
 }
@@ -32267,7 +32269,7 @@ function siEventSetStatus(id, st, per){
 }
 function siEventDelete(id, per){
   const ev=(S.siEvents||[]).find(x=>x.id===id); if(!ev||ev.status!=='suggested') return;
-  S.siEvents=(S.siEvents||[]).filter(x=>x.id!==id);
+  S.siEvents=(S.siEvents||[]).filter(x=>x.id!==id); try{ markDeleted(id,'siEvents'); }catch(_){}   /* v3.70.41: bia mộ */
   saveState(); siEventsOpen(per);
 }
 function siExportD02(per){
@@ -34916,7 +34918,7 @@ function taxSrcDelete(srcId, empId, Y){
   const who=(CURRENT_USER&&CURRENT_USER.name)||'', at=new Date().toISOString();
   const p=taxYpGet(empId, Y);
   if(p) (p.auditTrail=p.auditTrail||[]).push({at,by:who,act:'source_delete',note:(s.payerName||'')+' · TN '+(+s.taxableIncome||0).toLocaleString('vi-VN')});
-  S.employeeTaxIncomeSources=(S.employeeTaxIncomeSources||[]).filter(x=>x.id!==srcId);
+  S.employeeTaxIncomeSources=(S.employeeTaxIncomeSources||[]).filter(x=>x.id!==srcId); try{ markDeleted(srcId,'employeeTaxIncomeSources'); }catch(_){}   /* v3.70.41: bia mộ */
   if(p) taxYpRefreshTotals(p);
   saveState(); taxYearProfileOpen(empId, Y);
 }
@@ -35074,7 +35076,7 @@ function _tyBuildFin(empId, Y, coId){
   if(!b.ok){ toast('Chặn: '+b.reason,'bad'); return; }
   const f=taxYearSnapshotFinalize(b.snapshot.id);
   if(!f.ok){
-    S.employeeTaxYearSnapshots=S.employeeTaxYearSnapshots.filter(x=>x.id!==b.snapshot.id);
+    S.employeeTaxYearSnapshots=S.employeeTaxYearSnapshots.filter(x=>x.id!==b.snapshot.id); try{ markDeleted(b.snapshot.id,'employeeTaxYearSnapshots'); }catch(_){} /* v3.70.41: bia mộ */
     try{ saveState(); }catch(e){}
     toast('Finalize chặn: '+f.reason,'bad'); return;
   }
@@ -35863,7 +35865,7 @@ function taxYearSnapshotAmend(snapId, reason){
   const nf=taxYearSnapshotFinalize(nb.snapshot.id);
   if(!nf.ok){
     // rollback bản build dở — không để rác
-    S.employeeTaxYearSnapshots=S.employeeTaxYearSnapshots.filter(x=>x.id!==nb.snapshot.id);
+    S.employeeTaxYearSnapshots=S.employeeTaxYearSnapshots.filter(x=>x.id!==nb.snapshot.id); try{ markDeleted(nb.snapshot.id,'employeeTaxYearSnapshots'); }catch(_){} /* v3.70.41: bia mộ */
     try{ saveState(); }catch(e){}
     return {ok:false, reason:'Finalize amendment thất bại: '+nf.reason};
   }
@@ -38998,6 +39000,7 @@ function mergeStateByFields(cloudFull, localFull, fields){
       if(Array.isArray(cloudFull[f]) && cloudFull[f].length>0){
         merged[f]=cloudFull[f];   // giữ cloud, không để mảng rỗng đè
         /* v3.70.35: máy vừa xóa HẾT bản ghi của mảng này → mảng rỗng + có dấu xóa → vẫn phải áp dấu xóa lên bản cloud (trước đây lấy nguyên cloud → sống lại) */
+        try{ if(window._KEYED_ARR&&window._KEYED_ARR[f]&&typeof _keyedMerge==='function'){ merged[f]=_keyedMerge(f, cloudFull[f], []); } }catch(_){}   /* v3.70.41 (R11) */
         try{ if(f!=='deletedIds' && !TOMBSTONE_PROTECTED_FIELDS.has(f) && cloudFull[f][0] && typeof cloudFull[f][0]==='object' && 'id' in cloudFull[f][0]){ const _tb=deletedIdSetForField(f); if(_tb.size){ const _k=cloudFull[f].filter(r=>!(r&&_tb.has(String(r.id)))); if(_k.length!==cloudFull[f].length) merged[f]=_k; } } }catch(_){}
       } else {
         merged[f]=localFull[f];   // cả hai đều rỗng → giữ rỗng
@@ -39163,6 +39166,8 @@ function mergeStateByFields(cloudFull, localFull, fields){
       } else {
         merged[f] = (cloudFull[f]!==undefined) ? cloudFull[f] : localFull[f];
       }
+    } else if(window._KEYED_ARR&&window._KEYED_ARR[f]&&typeof _keyedMerge==='function'&&Array.isArray(localFull[f])){
+      merged[f]=_keyedMerge(f, cloudFull[f], localFull[f]);   /* v3.70.41 (R11): kho không có id → gộp theo khóa, không đè nguyên khối */
     } else {
       // Non-record-array field (scalar, config, etc) → local overrides
       merged[f]=localFull[f];
@@ -39878,6 +39883,7 @@ async function emailQueueProcess(selectedIds){
       }
     }
     // dọn các email đã gửi xong khỏi hàng đợi (đã có trong lịch sử)
+    try{ const _sent=S.emailQueue.filter(r=>r&&r.status==='sent'&&r.id).map(r=>r.id); if(_sent.length) markDeleted(_sent,'emailQueue'); }catch(_){}   /* v3.70.41: bia mộ — bản 'chờ gửi' cũ ở máy khác không quay lại → không gửi lặp */
     S.emailQueue=S.emailQueue.filter(r=>r.status!=='sent');
     try{ saveState(); }catch(e){}
   } finally { _emailQueueBusy=false; }
@@ -40287,7 +40293,7 @@ function _ecSend(){
   if(!s.to.length){ toast('Chưa có người nhận','bad'); return; }
   const r=SendEmail({ to:s.to, cc:s.cc, bcc:s.bcc, subject:s.subject, body:_ecFinalBody(s),
     attachments:s.attachments, module:s.module, event:s.event, meta:s.meta, fromEmail:s.fromEmail, userInitiated:true });
-  if(s.draftId){ S.emailDrafts=(S.emailDrafts||[]).filter(d=>d.id!==s.draftId); }  // gửi nháp → xóa khỏi nháp
+  if(s.draftId){ S.emailDrafts=(S.emailDrafts||[]).filter(d=>d.id!==s.draftId); try{ markDeleted(s.draftId,'emailDrafts'); }catch(_){} }   /* v3.70.41: bia mộ */  // gửi nháp → xóa khỏi nháp
   saveState();
   if(r){
     // HOTFIX: NV đã kiểm tra + bấm Gửi → GỬI NGAY email vừa soạn (không để chờ hàng đợi).
@@ -40342,7 +40348,7 @@ function _openDraft(id){
 }
 function _deleteDraft(id){
   if(!confirm('Xóa bản nháp này?')) return;
-  S.emailDrafts=(S.emailDrafts||[]).filter(x=>x.id!==id); saveState(); openEmailDrafts();
+  S.emailDrafts=(S.emailDrafts||[]).filter(x=>x.id!==id); try{ markDeleted(id,'emailDrafts'); }catch(_){} saveState(); openEmailDrafts();   /* v3.70.41: bia mộ */
 }
 /* Mở hộp chọn loại chứng từ của tàu rồi mở Email Composer (Preview Before Send).
  * Dùng chung cho mọi nơi có vesselId. */
@@ -40736,6 +40742,7 @@ function emailQueueClear(){
   const q=(S.emailQueue||[]).filter(r=>r.status!=='sent');
   if(!q.length){ try{ toast('Hàng đợi trống','warn'); }catch(_){} return; }
   if(!confirm('⚠ XÓA '+q.length+' email chưa gửi khỏi hàng đợi?\n\nCác email nhắc tự động (hết hạn HĐLĐ/chứng chỉ...) sẽ bị bỏ, KHÔNG gửi.\nLịch sử email ĐÃ gửi vẫn được giữ.\n\nTiếp tục?')) return;
+  try{ const _q=q.filter(r=>r&&r.id).map(r=>r.id); if(_q.length) markDeleted(_q,'emailQueue'); }catch(_){}   /* v3.70.41 */
   S.emailQueue=(S.emailQueue||[]).filter(r=>r.status==='sent');
   try{ saveState(); }catch(_){}
   try{ toast('Đã xóa '+q.length+' email khỏi hàng đợi ✓','good'); }catch(_){}
@@ -42499,7 +42506,7 @@ function applyEtypeDupFix(){
     S.expenseTypes=(S.expenseTypes||[]).filter(t=>!(t && rmIds.indexOf(t.id)>=0));
     try{ markDeleted(rmIds, 'expenseTypes'); }catch(e){}
     const rmNodeIdx=new Set(list.filter(x=>x.kind==='node').map(x=>x.idx));
-    if(rmNodeIdx.size) S.expenseTree=(S.expenseTree||[]).filter((n,i)=>!rmNodeIdx.has(i));
+    if(rmNodeIdx.size){ try{ (S.expenseTree||[]).forEach((n,i)=>{ if(rmNodeIdx.has(i)) _keyedTomb('expenseTree',n); }); }catch(_){} S.expenseTree=(S.expenseTree||[]).filter((n,i)=>!rmNodeIdx.has(i)); }   /* v3.70.41 (R11) */
     list.forEach(x=>log.push({kind:x.kind, code:x.code, name:x.name, to:x.to}));
   }, {action:'etype_dedupe', fields:['expenseTypes','expenseTree','deletedIds'], onOk:()=>{
     try{ logAuditEvent('etype_dedupe',{by:actorName(), removed:log, migrated:nMig}); }catch(e){}
@@ -74995,12 +75002,13 @@ function glPostEntry(opts){
   const cSum=je.lines.filter(l=>l.dc==='C').reduce((s,l)=>s+(+l.amount||0),0);
   if(Math.round((dSum-cSum)*100)!==0){ console.warn('[glPostEntry] Nợ≠Có, không ghi', je.id, dSum, cSum); return null; }
   const idx=list.findIndex(x=>x.id===je.id);
+  try{ if(Array.isArray(S.deletedIds)&&S.deletedIds.some(d=>d&&d.id===je.id)) S.deletedIds=S.deletedIds.filter(d=>!(d&&d.id===je.id&&(d.field==='journalEntries'||!d.field))); }catch(_){}   /* v3.70.41: ghi lại bút toán cùng mã → gỡ bia mộ cũ */
   if(idx>=0) list[idx]=je; else list.push(je);
   return je;
 }
 function glRemoveEntry(sourceType, sourceId){
   const id='je:'+sourceType+':'+sourceId;
-  S.journalEntries=(S.journalEntries||[]).filter(x=>x.id!==id);
+  const _had=(S.journalEntries||[]).some(x=>x.id===id); S.journalEntries=(S.journalEntries||[]).filter(x=>x.id!==id); if(_had){ try{ markDeleted(id,'journalEntries'); }catch(_){} }   /* v3.70.41: bia mộ */
 }
 function ktSetGlAccount(kind, id, batchId){
   if(!canCheckAcc() && !isAdmin()){ toast('Chỉ Kế toán/Admin','bad'); return; }
@@ -94940,6 +94948,7 @@ function matGroupDelete(type,code){
   const used=mats.filter(m=>[m.group,m.group2].some(g=>g&&String(g).toUpperCase()===String(code).toUpperCase())).length;
   if(used>0){ toast('Không xóa được: '+used+' vật tư đang dùng nhóm '+code,'bad'); return; }
   if(!confirm('Xóa nhóm '+code+' khỏi danh mục? (Không vật tư nào đang dùng)')) return;
+  try{ (S.materialGroups||[]).filter(x=>String(x.type||1)===String(type)&&String(x.code)===String(code)).forEach(x=>_keyedTomb('materialGroups',x)); }catch(_){}   /* v3.70.41 (R11) */
   S.materialGroups=(S.materialGroups||[]).filter(x=>!(String(x.type||1)===String(type)&&String(x.code)===String(code)));
   saveState(); toast('✓ Đã xóa nhóm '+code,'good'); openMaterialGroupList();
 }
@@ -129065,7 +129074,7 @@ function _mcVrAdd(row, vid, k){ const now=new Date().toISOString(), who=actorNam
 async function _dmChTypeDo(idx){ const row=(window._DM_ROWS||[])[idx]; if(!row) return; const k=(document.querySelector('input[name="mc-t"]:checked')||{}).value; if(!k){ toast('Chọn loại','warn'); return; }
   const rem=(document.getElementById('mc-rem')||{}).checked, tok=String((document.getElementById('mc-tok')||{}).value||'').trim();
   let v=null; try{ v=_dmRowVessel(row); }catch(_){} const vid=v?v.id:''; const me=actorName();
-  if(rem&&tok&&['DAR','BDN','ONOFF','BCC','FUND','REQ','OTHER'].indexOf(k)>=0){ await commitMutation(()=>{ S.mailClassRules=(S.mailClassRules||[]).filter(x=>!(x&&x.vesselId===vid&&_dmN2(x.token)===_dmN2(tok))); const r={id:'MCR-'+uid().slice(-8), vesselId:vid, token:tok, cat:k, by:me, at:new Date().toISOString()}; S.mailClassRules.push(r); try{ touchRecord(r); }catch(_){} },{action:'mail_class_rule', fields:['mailClassRules']}); }
+  if(rem&&tok&&['DAR','BDN','ONOFF','BCC','FUND','REQ','OTHER'].indexOf(k)>=0){ await commitMutation(()=>{ try{ const _old=(S.mailClassRules||[]).filter(x=>x&&x.vesselId===vid&&_dmN2(x.token)===_dmN2(tok)&&x.id).map(x=>x.id); if(_old.length) markDeleted(_old,'mailClassRules'); }catch(_){} S.mailClassRules=(S.mailClassRules||[]).filter(x=>!(x&&x.vesselId===vid&&_dmN2(x.token)===_dmN2(tok))); const r={id:'MCR-'+uid().slice(-8), vesselId:vid, token:tok, cat:k, by:me, at:new Date().toISOString()}; S.mailClassRules.push(r); try{ touchRecord(r); }catch(_){} },{action:'mail_class_rule', fields:['mailClassRules']}); }
   if(k!=='FUND'&&k!=='REQ'){ await commitMutation(()=>{ _mcDropVr(row.fileId, k); },{action:'mail_class_drop_vr', fields:['vesselRequests']}); }
   try{ logAuditEvent('mail_reclass',{file:row.fileName, to:k, vid, rule:rem?tok:''}); }catch(_){}
   if(k==='DAR'){ await _dmMark(row,'INBOX','Đổi loại → DAR · '+me); closeModal(); toast('↪ Đã chuyển về hàng chờ đọc DAR — đang đọc…','info'); await darMailRun(true, vid?{vid}:{}); return; }
@@ -129361,6 +129370,79 @@ function _ftOnSaveH(){ try{ if(!window._ftShadowH){ _ftShadowHBuild(); return 0;
 /* ── R7b: số phiên bản "đã thấy" sau khi TẢI VỀ = số lấy TRƯỚC khi tải (không nuốt thay đổi máy khác đẩy trong lúc tải); đẩy của chính máy → _revAfterOwnPush (v3.70.36) ── */
 (function(){ try{ const _cs=cloudSync; cloudSync=function(mode,opts){ const R=window._REV||{}; const isPull=(mode||'push')==='pull'; const preP=(isPull&&!R.off&&typeof _revFetch==='function')?_revFetch().catch(()=>null):Promise.resolve(null);
     window._revSkipAutoAdopt=true; const p=_cs(mode,opts); Promise.all([preP, Promise.resolve(p).catch(()=>null)]).then(([pre])=>{ try{ if(isPull&&pre&&window._REV) window._REV.last=pre; }catch(_){} }); return p; }; }catch(e){ console.warn('[v3.70.40 r7b]',e); } })();
+
+/* ════ v3.70.41 (Sếp 10/10 "làm tiếp đồng bộ"): (a) bia mộ cho 11 kho nhỏ xóa thiếu dấu (vá thẳng) · quy tắc phân loại email đồng bộ
+   (b) R11 — KHO KHÔNG CÓ id (cây mã chi phí · nhóm vật tư · nhật ký nhập lịch sử TV): trước đây gộp "bản máy đè NGUYÊN KHỐI"
+       → máy A thêm nhóm, máy B đẩy lên là MẤT; máy tải về không nhận nhóm mới của người khác. NAY gộp THEO KHÓA (mã), bản mới hơn thắng,
+       xóa có bia mộ theo khóa; bản ghi đổi mà chưa đóng giờ → tự đóng giờ khi lưu. ════ */
+window._KEYED_ARR={ expenseTree:r=>'c:'+String(r&&r.code), materialGroups:r=>'g:'+String((r&&r.type)||1)+'|'+String(r&&r.code), crewHistImports:r=>'h:'+String(r&&r.runId||'')+'|'+String(r&&r.at||'') };
+function _keyedMerge(f, cloudArr, localArr){ const K=window._KEYED_ARR[f]; cloudArr=Array.isArray(cloudArr)?cloudArr:[]; localArr=Array.isArray(localArr)?localArr:[];
+  const ts=r=>{ const t=r&&(r.updatedAt||r.createdAt||r.at); return t?(Date.parse(t)||0):0; }; const by=new Map(); const order=[];
+  cloudArr.forEach(r=>{ if(!r) return; const k=K(r); if(!by.has(k)) order.push(k); by.set(k,r); });
+  localArr.forEach(r=>{ if(!r) return; const k=K(r); const c=by.get(k); if(!c){ order.push(k); by.set(k,r); return; } if(ts(r)>=ts(c)) by.set(k,r); });   /* hòa giờ → bản máy (giữ hành vi cũ) */
+  let out=order.map(k=>by.get(k)); try{ const tb=deletedIdSetForField(f); if(tb.size) out=out.filter(r=>!tb.has(K(r))); }catch(_){} return out; }
+function _keyedTomb(f, rec){ try{ const K=window._KEYED_ARR[f]; if(K&&rec) markDeleted(K(rec), f); }catch(_){} }
+function _keyedUntomb(f, rec){ try{ const K=window._KEYED_ARR[f]; if(!K||!rec||!Array.isArray(S.deletedIds)) return; const k=K(rec); if(S.deletedIds.some(d=>d&&d.id===k&&d.field===f)) S.deletedIds=S.deletedIds.filter(d=>!(d&&d.id===k&&d.field===f)); }catch(_){} }
+/* tự đóng giờ khi lưu cho kho theo khóa (cùng cơ chế bóng băm v3.70.40) */
+window._ftShadowK=null;
+function _ftShadowKBuild(){ const sh={}; Object.keys(window._KEYED_ARR).forEach(f=>{ const K=window._KEYED_ARR[f], m={}; (Array.isArray(S[f])?S[f]:[]).forEach(r=>{ if(r) m[K(r)]={h:_ftHash(_ftStrip(r)), u:String(r.updatedAt||'')}; }); sh[f]=m; }); window._ftShadowK=sh; }
+function _ftOnSaveK(){ try{ if(!window._ftShadowK){ _ftShadowKBuild(); return 0; } let n=0; const now=_ftNow();
+    Object.keys(window._KEYED_ARR).forEach(f=>{ const K=window._KEYED_ARR[f]; const m=window._ftShadowK[f]||(window._ftShadowK[f]={}); const seen=new Set();
+      (Array.isArray(S[f])?S[f]:[]).forEach(r=>{ if(!r) return; const k=K(r); seen.add(k); const h=_ftHash(_ftStrip(r)); const o=m[k];
+        if(!o){ if(!r.updatedAt){ r.updatedAt=now; } _keyedUntomb(f, r); m[k]={h,u:String(r.updatedAt||'')}; return; }   /* bản mới thêm (kể cả thêm lại mã đã xóa) → gỡ bia mộ */
+        if(o.h===h) return; if(String(r.updatedAt||'')===o.u){ r.updatedAt=now; n++; } m[k]={h,u:String(r.updatedAt||'')}; });
+      Object.keys(m).forEach(k=>{ if(!seen.has(k)) delete m[k]; });   /* KHÔNG suy ra xóa từ việc biến mất (tránh mảng tạm rỗng → bia mộ hàng loạt); bia mộ chỉ ghi ở thao tác xóa thật */
+    }); return n; }catch(e){ console.warn('[ft save K]',e&&e.message); return 0; } }
+(function(){ try{ const _b=_ftShadowBuild; _ftShadowBuild=function(){ const r=_b.apply(this,arguments); try{ _ftShadowKBuild(); }catch(_){} return r; };
+  const _o=_ftOnSave; _ftOnSave=function(){ const n=_o.apply(this,arguments); let k=0; try{ k=_ftOnSaveK(); }catch(_){} return (n||0)+k; };
+  /* đường commitTransaction: chạy cùng bộ so bóng khi field thuộc kho theo khóa */
+  const _s=_ftStampField; _ftStampField=function(f){ const r=_s.apply(this,arguments); try{ if(window._KEYED_ARR[f]) _ftOnSaveK(); }catch(_){} return r; };
+}catch(e){ console.warn('[v3.70.41 keyed]',e); } })();
+
+/* ════ v3.70.42 (Sếp duyệt 10/10 — rà soát đồng bộ R5): MỘT TAB CHÍNH MỖI TRÌNH DUYỆT
+   Hai tab (hoặc tab + cửa sổ app) cùng máy giữ 2 bản dữ liệu RAM nhưng ghi chung 1 chỗ lưu → tab cũ ghi đè thay đổi tab kia chưa kịp đẩy
+   (một nguồn lỗi "Version sau ghi ≠ kỳ vọng"). NAY: tab mở trước là TAB CHÍNH (ghi + đồng bộ); tab mở sau CHỈ XEM (không ghi máy, không đẩy cloud,
+   vẫn tải về để xem số mới) + băng vàng "Dùng tab này". Bấm → tab chính lưu hết rồi nhường, tab này tải lại làm tab chính.
+   Tab chính đóng → tab chỉ xem được báo "Tải lại để làm việc ở tab này". Trình duyệt không hỗ trợ khóa → giữ như cũ. ════ */
+window._tabReadOnly=false; window._tabRole='?';
+const _TAB_LOCK='seahorse-erp-primary-tab', _TAB_CH='seahorse-erp-tab';
+function _tabBand(kind){ try{ let b=document.getElementById('tab-ro-band'); if(kind==='none'){ if(b) b.remove(); document.body.style.paddingTop=''; return; }
+  if(!b){ b=document.createElement('div'); b.id='tab-ro-band'; b.style.cssText='position:fixed;top:0;left:0;right:0;z-index:100000;background:#fff3c4;color:#5a4300;border-bottom:2px solid #e0b100;font:600 13px/1.4 system-ui,sans-serif;padding:7px 14px;display:flex;gap:10px;align-items:center;justify-content:center;flex-wrap:wrap'; document.body.appendChild(b); }
+  const btn=(t,fn,dark)=>`<button onclick="${fn}" style="font:700 12px system-ui;padding:4px 12px;border-radius:6px;border:1px solid #b38800;background:${dark?'#5a4300':'#fff'};color:${dark?'#fff':'#5a4300'};cursor:pointer">${t}</button>`;
+  b.innerHTML=kind==='free'?`🔓 Tab chính đã đóng — tải lại để làm việc ở tab này (vẫn chỉ xem tới khi tải lại) ${btn('↻ Tải lại','location.reload()',true)}`
+    :kind==='taking'?`⏳ Đang chờ tab kia lưu xong để nhường…`
+    :`👁 App đang mở ở tab / cửa sổ khác trên máy này — tab này <u>CHỈ XEM</u> (không lưu, không đồng bộ) để không ghi đè dữ liệu. ${btn('Dùng tab này','_tabTake()',true)}`;
+  document.body.style.paddingTop=(b.offsetHeight||36)+'px'; }catch(_){} }
+let _tabBC=null; try{ _tabBC=new BroadcastChannel(_TAB_CH); }catch(_){}
+function _tabHold(onGot){ try{ return navigator.locks.request(_TAB_LOCK, async lock=>{ if(!lock) return; window._tabHeld=true; try{ onGot&&onGot(); }catch(_){} await new Promise(res=>{ window._tabRelease=res; }); window._tabHeld=false; }); }catch(e){ return null; } }
+function _tabBecomeReadOnly(){ window._tabReadOnly=true; window._tabRole='viewer'; _tabBand('ro'); }
+/* tab chính đóng (báo 'bye') → tab chỉ xem thử nhận khóa sau 4 s (để tab đang tải lại kịp nhận trước) */
+function _tabOnBye(){ if(window._tabRole!=='viewer'||window._tabWantTake) return; setTimeout(()=>{ if(window._tabRole!=='viewer'||window._tabWantTake) return; try{ navigator.locks.request(_TAB_LOCK,{ifAvailable:true}, async lock=>{ if(!lock) return; window._tabHeld=true; window._tabRole='free'; _tabBand('free'); await new Promise(res=>{ window._tabRelease=res; }); window._tabHeld=false; }); }catch(_){} }, 4000); }
+try{ window.addEventListener('pagehide', ()=>{ try{ if(window._tabRole==='primary'||window._tabRole==='free') _tabBC&&_tabBC.postMessage({t:'bye'}); }catch(_){} }); }catch(_){}
+function _tabInit(){ if(!(navigator.locks&&navigator.locks.request)){ window._tabRole='nolock'; return; }
+  navigator.locks.request(_TAB_LOCK, {ifAvailable:true}, async lock=>{ if(!lock){ _tabBecomeReadOnly(); return; } window._tabHeld=true; window._tabRole='primary'; await new Promise(res=>{ window._tabRelease=res; }); window._tabHeld=false; }).catch(e=>console.warn('[tab lock]',e)); }
+/* tab chỉ xem bấm "Dùng tab này" → báo tab chính nhường */
+function _tabTake(){ if(!window._tabReadOnly) return; if(window._tabRole==='free'){ location.reload(); return; } window._tabWantTake=true; _tabBand('taking');
+  try{ navigator.locks.request(_TAB_LOCK, async lock=>{ window._tabHeld=true; window._tabRole='taking'; location.reload(); await new Promise(()=>{}); }); }catch(_){}   /* xếp hàng nhận khóa → nhận được thì tải lại (nạp dữ liệu tab kia vừa lưu) */
+  try{ _tabBC&&_tabBC.postMessage({t:'take'}); }catch(_){}
+  setTimeout(()=>{ if(window._tabWantTake&&!window._tabHeld){ _tabBand('ro'); window._tabWantTake=false; try{ toast('Tab kia chưa nhường (đang lưu hoặc đã treo) — đóng tab kia rồi tải lại tab này','warn'); }catch(_){} } }, 20000); }
+/* tab chính nhận yêu cầu → lưu hết vào máy rồi nhường, tự chuyển sang chỉ xem */
+async function _tabYield(){ if(window._tabRole!=='primary') return; try{ if(typeof window.saveStateFlush==='function') window.saveStateFlush(); }catch(_){}
+  try{ await Promise.race([(typeof _txDrain==='function'?_txDrain(10000):Promise.resolve()), new Promise(r=>setTimeout(r,10000))]); }catch(_){}
+  try{ if(CRYPTO_KEY) await Promise.race([saveStateEncrypted(), new Promise(r=>setTimeout(r,10000))]); }catch(_){}
+  window._tabRole='viewer'; window._tabReadOnly=true; try{ window._tabRelease&&window._tabRelease(); }catch(_){}
+  setTimeout(()=>{ _tabBand('ro'); try{ toast('↪ Đã nhường cho tab khác — tab này chỉ xem','info'); }catch(_){} }, 50); }
+try{ if(_tabBC) _tabBC.onmessage=ev=>{ const m=ev&&ev.data; if(!m) return; if(m.t==='take') _tabYield(); else if(m.t==='bye') _tabOnBye(); }; }catch(_){}
+/* ── chặn ghi ở tab chỉ xem ── */
+(function(){ try{
+  const _se=saveStateEncrypted; saveStateEncrypted=async function(){ if(window._tabReadOnly) return; return _se.apply(this,arguments); };
+  const _ct=commitTransaction; commitTransaction=function(fn,opts){ if(window._tabReadOnly){ return Promise.resolve({success:false, verify:false, cache:false, cloud:'skipped', audit:false, version:{before:null,after:null}, error:'TAB_READONLY'}); } return _ct.apply(this,arguments); };
+  const _cm=commitMutation; commitMutation=function(fn,opts){ if(window._tabReadOnly){ try{ toast('👁 Tab này đang CHỈ XEM (app mở ở tab khác) — bấm "Dùng tab này" ở băng vàng trên cùng rồi làm lại','bad'); }catch(_){} return Promise.resolve({success:false, error:'TAB_READONLY'}); } return _cm.apply(this,arguments); };
+  const _ss=saveState; saveState=function(){ if(window._tabReadOnly){ if(!window._tabRoWarned||Date.now()-window._tabRoWarned>8000){ window._tabRoWarned=Date.now(); try{ toast('👁 Tab này đang CHỈ XEM — thay đổi KHÔNG được lưu. Bấm "Dùng tab này" ở băng vàng trên cùng.','bad'); }catch(_){} } return; } return _ss.apply(this,arguments); };
+  const _sa=scheduleAutoSync; scheduleAutoSync=function(){ if(window._tabReadOnly) return; return _sa.apply(this,arguments); };
+  const _cr=_cloudSyncRaw; _cloudSyncRaw=function(mode,opts){ if(window._tabReadOnly&&(mode==='push'||mode==='both'||!mode)) mode='pull'; return _cr.call(this,mode,opts); };   /* chỉ xem: vẫn tải về để xem số mới, không đẩy */
+}catch(e){ console.warn('[v3.70.42 ro]',e); } })();
+_tabInit();
 
 /* ── Sidebar khối màu: ẩn dải màu khi mọi mục trong khối đều ẩn ── */
 function _sbBandsRefresh(root){
