@@ -4699,7 +4699,7 @@ const WH_TYPES = {
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.70.46';
+const APP_VERSION='3.70.49';
 /* HOTFIX 3.12.17-email: CHẶN TRIỆT ĐỂ gửi email TỰ ĐỘNG (mất kiểm soát — spam quota Google).
    Email phải do NV được phân quyền CHỦ ĐỘNG chọn gửi. Cờ này:
    (1) chặn auto-SCAN tạo email (hrmScanExpiries/vesselCertScanExpiries);
@@ -21696,10 +21696,13 @@ function _bccAutoFillSheet(s){
       const iso=s.period+'-'+String(d).padStart(2,'0');
       if(r._joinedFrom && iso<String(r._joinedFrom).slice(0,10)) continue;
       if(r._leftFrom && iso>=String(r._leftFrom).slice(0,10)) continue;
-      r.days[d]=_bccVnHoliday(Y,M,d)?hol:def; r.auto[d]=true; rc=true; }
+      r.days[d]=_bccVnHoliday(Y,M,d)?hol:((s.period>='2026-10'&&!(_bccWeekendOff(s)&&_bccIsWeekend(s,d))&&typeof _hrdCtOn==='function'&&_hrdCtOn(r.empId, iso))?'C1':def); r.auto[d]=true; rc=true; }   /* v3.70.47: ngày công tác theo QĐ → C1 */
     if(rc){ changed=true; try{ _bccTouch(s,r); }catch(_){} } });
   return changed;
 }
+function _bccOffShip(s, r, d){ try{ if(!s||!r||!s.scope||s.scope.type!=='vessel'||!_crewMergeOn(s.period)) return ''; const iso=s.period+'-'+String(d).padStart(2,'0');
+  if(r._leftFrom && iso>=String(r._leftFrom).slice(0,10)) return 'Rời tàu '+_cdD(String(r._leftFrom).slice(0,10))+(r._leftBy?' ('+r._leftBy+')':'')+' → công các ngày sau ở BCC nghỉ ca / tàu mới';
+  if(r._joinedFrom && iso<String(r._joinedFrom).slice(0,10)) return 'Xuống tàu '+_cdD(String(r._joinedFrom).slice(0,10))+' → công trước ngày này ở BCC nghỉ ca / tàu trước'; }catch(_){} return ''; }   /* v3.70.48 */
 function _bccCellMark(s, r, d){   // '' | 'auto' | 'edit' — đã gửi / bảng đã chuyển → cùng màu
   if(!r || r.selfSubmittedAt || (s&&s.status!=='draft')) return '';
   if(r.edited && r.edited[d]) return 'edit'; if(r.auto && r.auto[d]) return 'auto'; return '';
@@ -21748,8 +21751,8 @@ function renderBccGridEditor(id){
     const _bg=idx%2===1?' style="background:var(--paper-3)"':'';
     const sumCells=sumCols.map(c=>`<td class="r" style="font-family:var(--font-mono);font-size:12px">${(+cols[c[0]]||0)}</td>`).join('');
     const codeCells=Array.from({length:s.numDays},(_,i)=>i+1).map(d=>{
-      const wknd=bccIsWeekend(s.year,s.month,d);
-      return `<td style="padding:1px;${wknd?'background:var(--paper-3)':''}"><input list="bcc-codes-${s.id}" id="bcc-in-${idx}-${d}" value="${_esc(r.days[d]||'')}" data-mk="${_bccCellMark(s,r,d)}" ${readOnly?'disabled':''} onchange="bccCellChange('${s.id}','${r.empId}',${d},this.value)" onkeydown="bccCellNav(event,${idx},${d},${s.numDays},${emps.length})" style="width:32px;text-align:center;padding:3px 1px;border:1px solid var(--rule);border-radius:3px;font-size:11px"></td>`;
+      const wknd=bccIsWeekend(s.year,s.month,d); const _off=_bccOffShip(s,r,d);   /* v3.70.48: ngoài thời gian ở tàu → xám */
+      return `<td style="padding:1px;${_off?'background:#d1d5db':(wknd?'background:var(--paper-3)':'')}"${_off?` title="${_esc(_off)}"`:''}><input list="bcc-codes-${s.id}" id="bcc-in-${idx}-${d}" value="${_esc(r.days[d]||'')}" data-mk="${_bccCellMark(s,r,d)}" ${(readOnly||(_off&&!r.days[d]))?'disabled':''} onchange="bccCellChange('${s.id}','${r.empId}',${d},this.value)" onkeydown="bccCellNav(event,${idx},${d},${s.numDays},${emps.length})" style="width:32px;text-align:center;padding:3px 1px;border:1px solid var(--rule);border-radius:3px;font-size:11px"></td>`;
     }).join('');
     let otRow='';
     if(hasOt){
@@ -25395,15 +25398,17 @@ function payComputeCrew(inp, prof){
   const _allFree=(inp._taxFreeAll===true||inp._taxFreeAll===1);   /* v3.68.12 (Sếp chốt): tàu cờ NƯỚC NGOÀI (Panama/Liberia/khác) → TOÀN BỘ lương miễn thuế; cờ Việt Nam giữ công thức trên */
   /* v3.67.73 (Sếp chốt): kỳ có ĐỔI THẺ LƯƠNG giữa tháng → tính theo TỪNG ĐOẠN (mỗi đoạn: số công của đoạn × mức của đoạn;
      nghỉ ca = LCB của đoạn ÷ SD). Cùng công thức engine, chỉ cộng theo đoạn; thuế/bảo hiểm tính trên TỔNG như cũ. */
+  let _flagMode=false, _ACf=0, _allSegFree=true; const _ncT=!!inp._ncTax;   /* v3.70.48: miễn thuế theo cờ tàu từng đoạn; nghỉ ca luôn chịu thuế */
   if(Array.isArray(inp._segs) && inp._segs.length>1){
     U=V=W=X=Ym=Z=_AC=0;
     inp._segs.forEach(sg=>{ const o=n(sg.O), nb=n(sg.N), t=n(sg.T);
       const _o2=(x,d)=>n(x)>0?n(x):d;
       const p_=_o2(sg._dockR, o*prof.dockPct), q_=_o2(sg._vnR, o*prof.standbyVnPct), r_=_o2(sg._restR, (prof.restDayPct!=null ? o*prof.restDayPct : (n(sg._restM)>0?n(sg._restM):nb)/30)), sm_=_o2(sg._fnR, o*prof.standbyFnPct);
-      U+=o*n(sg.G)+o*n(sg.H); V+=n(sg.I)*p_; W+=n(sg.J)*q_; X+=n(sg.K)*r_; Ym+=n(sg.L)*sm_; Z+=n(sg.M)*t; _AC+=n(sg.H)*o+n(sg.L)*sm_+t*n(sg.M); });
+      U+=o*n(sg.G)+o*n(sg.H); V+=n(sg.I)*p_; W+=n(sg.J)*q_; X+=n(sg.K)*r_; Ym+=n(sg.L)*sm_; Z+=n(sg.M)*t; _AC+=n(sg.H)*o+n(sg.L)*sm_+t*n(sg.M);
+      if(sg._free!==undefined){ _flagMode=true; const _all=o*n(sg.G)+o*n(sg.H)+n(sg.I)*p_+n(sg.J)*q_+n(sg.K)*r_+n(sg.L)*sm_+n(sg.M)*t; if(sg._free===true) _ACf+=_all-(_ncT?n(sg.K)*r_:0); else { _allSegFree=false; _ACf+=n(sg.H)*o+n(sg.L)*sm_+t*n(sg.M); } } });
   }
   const AB=Math.round(U+V+W+X+Ym+Z+AA);
-  const AC=_allFree?AB:_AC;
+  const AC=_flagMode?Math.min(AB, Math.round(_ACf+(_allSegFree?AA:0))):(_allFree?(_ncT?AB-Math.round(X):AB):_AC);
   const AI=prof.gtgcSelf + prof.gtgcDependent*F;
   const AD=(AB===0)?0:(AB-AC-AI);
   const AG=_payNet2Gross(AD, prof.grossBrackets);
@@ -28592,7 +28597,7 @@ function openPayPeriodDetail(id){
     const comp=_pcCols?_pcCols.map(([lb,fn,kind])=>`<td style="padding:5px 6px;text-align:right;font-family:monospace;font-size:12px${kind==='days'&&!(+fn(inp))?';color:var(--bad);font-weight:600':''}" ${kind==='days'?'title="Ngày công kéo từ BCC (biển+dock+bờ+DP) — 0 = BCC tháng chưa có công của người này"':''}>${kind==='days'?((+fn(inp))?(+fn(inp)).toLocaleString('vi-VN',{maximumFractionDigits:2}):'0'):_fm(fn(inp))}</td>`).join('')
       :`<td style="padding:5px 6px;text-align:right;font-family:monospace;font-size:12px">${_fm(_resPick(res,['AB','AC','total']))}</td>`;
     return `<tr style="border-bottom:1px solid var(--rule);cursor:pointer" title="Bấm để xem công thức tính" onclick="if(event.target.closest('button,a,input,select,span[onclick]'))return;payExplainRow('${id}','${r.empId}')">
-      <td style="padding:5px 8px${_payRowManualAtt(p,r).length?';background:#fff4dc':''}">${esc(r.name||'?')}${(r.result&&r.result._segs&&r.result._segs.length>1)?` <span onclick="event.stopPropagation();_payToggleSegs(this,'${id}','${r.empId}')" title="Thẻ lương đổi trong kỳ — bấm xem các dòng tính" style="cursor:pointer;margin-left:6px;font-size:10px;font-weight:700;color:#9a5a05;background:#fff3e0;border-radius:3px;padding:0 5px">⚙ Điều chỉnh ${r.result._segs.slice(1).map(g=>esc(String(g.from).slice(8,10)+'/'+String(g.from).slice(5,7))).join(', ')}</span>`:''}${_payRowManualAtt(p,r).length?`<span title="Có ô số công đã sửa tay trước đây (đang giữ số cũ, khác BCC) — bấm Nhập để xem / ↺ Dùng số BCC" style="margin-left:6px;font-size:10px;font-weight:700;color:#9a5b12;background:#ffe8b8;padding:0 5px;border-radius:3px">✎ công sửa tay</span>`:''}<div style="font-size:10px;color:var(--muted)">${esc(r.smartId||'')}${(()=>{ /* v3.14.65 (Sếp 08/8): VP → Bộ phận · Chức danh; thuyền viên → Tàu · Chức danh */
+      <td style="padding:5px 8px${_payRowManualAtt(p,r).length?';background:#fff4dc':''}">${esc(r.name||'?')}${_payPartsTag(p,r,id)}${(r.result&&r.result._segs&&r.result._segs.length>1)?` <span onclick="event.stopPropagation();_payToggleSegs(this,'${id}','${r.empId}')" title="Thẻ lương đổi trong kỳ — bấm xem các dòng tính" style="cursor:pointer;margin-left:6px;font-size:10px;font-weight:700;color:#9a5a05;background:#fff3e0;border-radius:3px;padding:0 5px">⚙ Điều chỉnh ${r.result._segs.slice(1).map(g=>esc(String(g.from).slice(8,10)+'/'+String(g.from).slice(5,7))).join(', ')}</span>`:''}${_payRowManualAtt(p,r).length?`<span title="Có ô số công đã sửa tay trước đây (đang giữ số cũ, khác BCC) — bấm Nhập để xem / ↺ Dùng số BCC" style="margin-left:6px;font-size:10px;font-weight:700;color:#9a5b12;background:#ffe8b8;padding:0 5px;border-radius:3px">✎ công sửa tay</span>`:''}<div style="font-size:10px;color:var(--muted)">${esc(r.smartId||'')}${(()=>{ /* v3.14.65 (Sếp 08/8): VP → Bộ phận · Chức danh; thuyền viên → Tàu · Chức danh */
         try{ const e=(typeof hrmEmpById==='function')?hrmEmpById(r.empId):null; if(!e) return '';
           const tt=e.title||e.position||'';
           if(p.profile==='crew'||p.profile==='crew_khoan'){
@@ -28904,9 +28909,9 @@ function _payCreateApBatch(p, etypes, opts){
   const newIds=[]; const nowIso=new Date().toISOString(); const who=(typeof actorName==='function'?actorName():'admin');
   if(p._fromVessel && /^crew/.test(String(p.profile||'')) && opts.hrm){   /* v3.68.55: lương tàu → tách theo dự án / chờ việc (OPEX tàu) / nghỉ ca (chung công ty) + dòng TNCN, BHXH riêng mã */
     const A=_crewCostAlloc(p); const buckets=[]; Object.keys(A.proj).forEach(pid=>buckets.push({kind:'proj', pid, b:A.proj[pid], lab:'dự án '+A.proj[pid].label}));
-    buckets.push({kind:'idle', b:A.idle, lab:'chờ việc (OPEX tàu)'}); buckets.push({kind:'leave', b:A.leave, lab:'nghỉ ca (chung công ty)'});
+    buckets.push({kind:'idle', b:A.idle, lab:'chờ việc (OPEX tàu)'}); Object.keys(A.idleBy||{}).forEach(v=>buckets.push({kind:'idle', vid:v, b:A.idleBy[v], lab:'chờ việc (OPEX tàu '+(anyVesselName(v)||v)+' — thuyền viên chuyển tàu)'}));   /* v3.70.48 */ buckets.push({kind:'leave', b:A.leave, lab:'nghỉ ca (chung công ty)'});
     const R=x=>t.usd?Math.round(x*100)/100:Math.round(x); const lines=[];
-    buckets.forEach(k=>{ const cc=k.kind==='leave'?{ccType:'company',ccId:'',vesselId:null,projectId:null}:{ccType:k.kind==='proj'?'project':'opVessel',ccId:k.kind==='proj'?k.pid:p._fromVessel,vesselId:p._fromVessel,projectId:k.kind==='proj'?k.pid:null};
+    buckets.forEach(k=>{ const cc=k.kind==='leave'?{ccType:'company',ccId:'',vesselId:null,projectId:null}:{ccType:k.kind==='proj'?'project':'opVessel',ccId:k.kind==='proj'?k.pid:(k.vid||p._fromVessel),vesselId:(k.vid||(k.kind==='proj'&&k.b.vid)||p._fromVessel),projectId:k.kind==='proj'?k.pid:null};
       if(R(k.b.net)) lines.push({code:CREW_COST_CODES[k.kind], amt:R(k.b.net), pit:0, bh:0, cc, desc:`Lương thuyền viên tàu ${p._vesselName||''} kỳ ${period} — ${k.lab} (${k.b.days} ngày công)`});
       if(!t.usd && R(k.b.pit)) lines.push({code:CREW_COST_CODES.pit, amt:0, pit:R(k.b.pit), bh:0, cc, desc:`Thuế TNCN — lương TV tàu ${p._vesselName||''} kỳ ${period} — ${k.lab}`});
       if(!t.usd && R(k.b.bhxh)) lines.push({code:CREW_COST_CODES.bhxh, amt:0, pit:0, bh:R(k.b.bhxh), cc, desc:`BHXH 32% — lương TV tàu ${p._vesselName||''} kỳ ${period} — ${k.lab}`}); });
@@ -30251,6 +30256,7 @@ function _meTaxableBase(profile, res){
    của tàu (mọi BCC theo ngày của kỳ có dòng NV). Tổng mỗi loại công giữ ĐÚNG số đang có ở dòng kỳ (inputs) — chênh lệch (sửa tay / BCC
    khác) dồn vào đoạn cuối. Không có BCC theo ngày → chia theo tỷ lệ số ngày của đoạn, gắn nhãn "ước tính". */
 function _payCrewSegments(empId, period, profile, inp){
+  if(typeof _crewMergeOn==='function' && _crewMergeOn(period) && /^\d{4}-\d{2}$/.test(String(period||''))) return _payCrewSegmentsM(empId, period, profile, inp);   /* v3.70.48: đoạn theo thẻ lương × nơi chấm công */
   const vs=_spList(empId).filter(v=>/^crew/.test(String(v.engine||'')));
   if(!vs.length || !/^\d{4}-\d{2}$/.test(String(period||''))) return [];
   const [Y,Mo]=period.split('-').map(Number), dim=new Date(Y,Mo,0).getDate();
@@ -30441,6 +30447,7 @@ function payComputeRow(p, row){
   if(p.fxTemp!=null && p.fxTemp!=='') inp._fxRate=+p.fxTemp||0;
   /* v3.68.12 (Sếp chốt): kỳ lương của tàu cờ NƯỚC NGOÀI → toàn bộ lương miễn thuế TNCN (cờ lấy từ hồ sơ tàu) */
   try{ if(/^crew/.test(String(p.profile||'')) && p._fromVessel && typeof vesTaxFreeAll==='function' && vesTaxFreeAll(p._fromVessel)) inp._taxFreeAll=true; }catch(_){}
+  try{ if(/^crew/.test(String(p.profile||''))) inp._ncTax=_crewMergeOn(p.period); }catch(_){}   /* v3.70.48: nghỉ ca luôn chịu thuế (từ kỳ 10/2026) */
   /* v3.14.26: CÔNG TẮC PC DỰ ÁN theo KỲ (chỉ nhóm Văn phòng): kỳ không BẬT → W=0 với mọi người.
      Mức từng người nằm trên thẻ (allow_duAn→W qua Kéo thẻ); kỳ nào trả thì bật 1 nút — không chọn từng người. */
   /* v3.14.30 FIX (Sếp 05/8 — "không tự suy diễn, không căn cứ số ngày tháng"): kiểm 6 bảng lương +
@@ -37105,7 +37112,13 @@ function _payPeriodCostGroups(p){
       label=(ves&&ves.name)||vn||(_isNC?'⚓ Nghỉ ca (nguyên tháng)':(_isXU?'⚠ BCC không ghi đơn vị':'— Không có trong BCC'));   /* v3.19.61: tên tàu chuẩn danh mục ('M/V KATRAN' → 'KATRAN') */
       key='V:'+(ccId||label); }
     else if(p.profile==='project'||p.profile==='expat'){ const pid=(e.projectIds&&e.projectIds[0])||''; ccType='project'; ccId=pid; const pr=(S.projects||[]).find(x=>x.id===pid); label=pr?pr.code:(e.dept||PAY_PROFILE_LABEL[p.profile]); key='P:'+(ccId||label); }
-    else { ccType='department'; ccId=''; label=e.dept||'Văn phòng'; key='D:'+label; }
+    else { ccType='department'; ccId=''; label=e.dept||'Văn phòng'; key='D:'+label;
+      /* v3.70.49: đổi phòng ban trong tháng → chia chi phí theo ngày công BCC từng phòng ban (làm tròn, phần dư vào phần cuối) */
+      const _pp=(typeof _payOfficeParts==='function')?_payOfficeParts(p,r):null;
+      if(_pp){ const by={}; _pp.forEach(x=>{ by[x.dept]=(by[x.dept]||0)+x.n; }); const ks=Object.keys(by); const tot=ks.reduce((t,k)=>t+by[k],0)||1; let aG=0, aN=0;
+        ks.forEach((k,i)=>{ const last=i===ks.length-1; const g2=last?gross-aG:Math.round(gross*by[k]/tot), n2=last?net-aN:Math.round(net*by[k]/tot); aG+=g2; aN+=n2; const k2='D:'+k;
+          if(!groups[k2]) groups[k2]={label:k, ccType:'department', ccId:'', gross:0, net:0, count:0}; groups[k2].gross+=g2; groups[k2].net+=n2; if(last) groups[k2].count++; });
+        return; } }
     /* v3.67.23: thuyền viên làm NHIỀU tàu trong tháng → chia chi phí theo tỷ lệ số ngày trên từng tàu (N1 tính cho tàu của dòng đó) */
     if(p.profile==='crew' && p.__bccVmap){ const vr=p.__bccVmap[String(r.smartId||'').trim().toUpperCase()]; const parts=(vr&&vr.parts||[]).filter(x=>x.days>0);
       if(parts.length>1){ const tot=parts.reduce((t,x)=>t+x.days,0)||1; const _vNorm=x=>String(x||'').toUpperCase().replace(/^M[.\/]?\s*V[.\s]+/,'').replace(/[-_.]/g,' ').replace(/\s+/g,' ').trim();
@@ -51083,7 +51096,7 @@ function _cdAppendixHtml(d){ const A=_cdAppendixData(d); if(!A) return ''; const
       <td style="width:56%"><div style="font-weight:700;font-size:12pt;white-space:nowrap">CỘNG HOÀ XÃ HỘI CHỦ NGHĨA VIỆT NAM</div><div style="font-weight:700;font-size:12.5pt"><span class="u">Độc lập - Tự do - Hạnh phúc</span></div></td></tr></table>
     <p style="text-align:center;font-weight:700;margin:22pt 0 2pt;font-size:14pt">PHỤ LỤC</p>
     <p style="text-align:center;font-weight:700;margin:0">CHI TIẾT LƯƠNG VÀ CÁCH TÍNH</p>
-    <p style="text-align:center;margin:2pt 0 12pt;font-style:italic;font-size:12pt">(Kèm theo Quyết định điều động số ${E(d.no3)}/QĐNS/${E(d.year||dt.slice(0,4))} ngày ${fD(dt)})</p>
+    <p style="text-align:center;margin:2pt 0 12pt;font-style:italic;font-size:12pt">(Kèm theo Quyết định điều động số ${E(_qdNoStr(Object.assign({year:dt.slice(0,4)},d)))} ngày ${fD(dt)})</p>
     <table style="width:100%;border-collapse:collapse;font-size:12.5pt"><tr><td style="padding:2pt 0;border:none">Họ và tên: <b>${E(d.empName||A.e.fullName||'')}</b></td><td style="border:none">MSNV: ${E(A.e.smartId||'')}</td></tr>
       <tr><td style="padding:2pt 0;border:none">Chức danh: <b>${E(d.rank||A.e.title||'')}</b></td><td style="border:none">Tàu: <b>${E(d.vesselName||anyVesselName(d.vesselId)||'')}</b></td></tr>
       <tr><td style="padding:2pt 0;border:none">Hiệu lực từ ngày: <b>${fD(eff)}</b></td><td style="border:none">Loại tiền: ${E(cc)}</td></tr></table>
@@ -51440,7 +51453,8 @@ function _hdBookExcel(){ const L=window._HDB_ROWS||[]; try{ const X=window.XLSX;
   const aoa=[['SỔ THEO DÕI HỢP ĐỒNG LAO ĐỘNG'],[],['Stt','Số HĐ','MSNV','Người lao động','Mẫu / loại','Từ ngày','Đến ngày','Ngày ký','Trạng thái']].concat(L.map((r,i)=>[i+1,r.x.no||'',r.e.smartId||'',r.x.empName||r.e.fullName||'',r.x.tpl?((HD_TPL[r.x.tpl]||{}).label||r.x.tpl):(r.x._type||''),_hdDD(r.x.f&&r.x.f.tuNgay),_hdDD(r.st[2]),_hdDD(r.x.ngayKy),r.st[0]]));
   const ws=X.utils.aoa_to_sheet(aoa); ws['!cols']=[{wch:5},{wch:22},{wch:10},{wch:26},{wch:32},{wch:12},{wch:12},{wch:12},{wch:20}]; const wb=X.utils.book_new(); X.utils.book_append_sheet(wb,ws,'So theo doi HD'); X.writeFile(wb,'So_theo_doi_hop_dong_'+todayISO()+'.xlsx'); }catch(err){ toast('Xuất Excel lỗi: '+err.message,'bad'); } }
 /* ── (3) QĐ điều chuyển · QĐ điều chỉnh lương / chức danh ── */
-const HRD_META={DC:{code:'SME-HR-PR-002-FRM-003', label:'QĐ điều chuyển nhân sự'}, DCL:{code:'SME-HR-PR-002-FRM-004', label:'QĐ điều chỉnh lương / chức danh'}};
+const HRD_META={DC:{code:'SME-HR-PR-002-FRM-003', label:'QĐ điều chuyển nhân sự'}, DCL:{code:'SME-HR-PR-002-FRM-004', label:'QĐ điều chỉnh lương / chức danh'},
+  KT:{code:'PH-02', label:'QĐ khen thưởng'}, KL:{code:'PH-02', label:'QĐ kỷ luật'}, CT:{code:'PH-02', label:'QĐ cử đi công tác'}, CD:{code:'PH-02', label:'QĐ chấm dứt HĐLĐ'}};   /* v3.70.47 */
 let _HRD=null;
 function _hrdCan(e){ try{ return isAdmin()||hrmCanSeeAll()||salaryProfileCanEdit()||(e&&e.type==='crew'&&_canSeeCrewMgmt()); }catch(_){ return isAdmin(); } }
 /* v3.67.88 (Sếp duyệt): SỐ QUYẾT ĐỊNH NHÂN SỰ tự đánh — một dãy chung (điều động, thôi việc, điều chuyển, điều chỉnh lương).
@@ -51454,9 +51468,10 @@ function _hrdCardAt(empId, date){ const L=_spList(empId); let hit=null; L.forEac
 function openHrDecision(kind, empId, opts){
   opts=opts||{}; const ex=opts.id?(S.hrDecisions||[]).find(x=>x.id===opts.id):null;
   if(ex && ex.signedAt){ hrdView(ex.id); return; }
-  if(ex){ _HRD=JSON.parse(JSON.stringify(ex)); _hrdRender(); return; }
+  if(ex){ _HRD=JSON.parse(JSON.stringify(ex)); if(!_HRD.noFmt) _HRD.noFmt='HCNS'; _hrdRender(); return; }   // v3.70.47: số dạng HCNS
+  if(_hrdIsG(kind)){ _hrdNewG(kind, empId); return; }
   const y=todayISO().slice(0,4);
-  _HRD={kind, empId:empId||'', no3:_hrdNextNo(y), year:y, date:todayISO(), fromDate:opts.fromDate||todayISO(), chkSal:kind==='DCL', chkTitle:false, xet:'', sal:{}, prefill:opts.prefill||null};
+  _HRD={kind, empId:empId||'', noFmt:'HCNS', no3:String(+_hrdNextNo(y)), year:y, date:todayISO(), fromDate:opts.fromDate||todayISO(), chkSal:kind==='DCL', chkTitle:false, xet:'', sal:{}, prefill:opts.prefill||null};
   if(empId) _hrdPick(empId, true); else _hrdRender();
 }
 function _hrdPick(id, noRender){ const H=_HRD, e=hrmEmpById(id); H.empId=id; if(!e){ if(!noRender) _hrdRender(); return; }
@@ -51469,13 +51484,14 @@ function _hrdPick(id, noRender){ const H=_HRD, e=hrmEmpById(id); H.empId=id; if(
   if(!H.xet) H.xet=H.kind==='DC'?('Xét nhu cầu công việc và đề nghị của Trưởng bộ phận '+_hrdDeptName(H.curDept)+'.'):(H.crew?'Xét đề nghị của Trưởng Bộ phận Quản lý tàu.':'Xét kết quả đánh giá công việc và đề nghị của Trưởng bộ phận '+_hrdDeptName(H.curDept)+'.');
   if(!noRender||true) _hrdRender(); }
 function _hrdRender(){
+  if(_hrdIsG(_HRD.kind)) return _hrdRenderG();   // v3.70.47
   const H=_HRD, isDC=H.kind==='DC'; const emps=(HRService.employees()||[]).filter(e=>e&&!e._deleted&&e.status!=='inactive'&&(isDC?e.type!=='crew':true)&&_hrdCan(e)).sort((a,b)=>String(a.fullName||'').localeCompare(String(b.fullName||''),'vi'));
   const depts=(HRService.departments?HRService.departments():[])||[];
   const box=(l,x,span)=>`<div style="${span?'grid-column:span '+span:''}"><div style="font-size:9.5px;font-weight:700;color:var(--muted);text-transform:uppercase;margin-bottom:2px">${l}</div>${x}</div>`;
   const G=x=>`<div style="display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px 10px;margin-bottom:8px">${x}</div>`;
   let h=G(box('Nhân viên *',`<select style="width:100%" onchange="_HRD.newTitle='';_HRD.newDept='';_HRD.xet='';_hrdPick(this.value)"><option value="">— chọn —</option>${emps.map(e=>`<option value="${e.id}" ${H.empId===e.id?'selected':''}>${esc(e.fullName)}${e.smartId?' · '+esc(e.smartId):''}</option>`).join('')}</select>`,2)
-    +box('Số QĐ (app tự đánh)',`<div style="display:flex;gap:4px;align-items:center"><input value="${esc(H.no3)}" maxlength="3" ${isAdmin()?'':'readonly title="App tự đánh số — chỉ Admin sửa"'} oninput="_HRD.no3=this.value.replace(/\\D/g,'')" style="width:60px;text-align:center${isAdmin()?'':';background:var(--paper-2)'}"><span style="font-size:12px">/QĐNS/${esc(H.year)}</span></div>`)
-    +box('Ngày QĐ',`<input type="date" value="${esc(H.date)}" onchange="_HRD.date=this.value;if(_HRD.year!==this.value.slice(0,4)){ _HRD.year=this.value.slice(0,4); if(!_HRD.id) _HRD.no3=_qdNextNo(_HRD.year); _hrdRender(); }" style="width:100%">`));
+    +box('Số QĐ',_qdNoBox(H.no3, H.year, H.id, "_HRD.no3=this.value.replace(/\\D/g,'')", "_HRD.no3='$N';_hrdRender()"))   /* v3.70.47: app gợi ý — người lập chọn */
+    +box('Ngày QĐ',`<input type="date" value="${esc(H.date)}" onchange="_HRD.date=this.value;if(_HRD.year!==this.value.slice(0,4)){ _HRD.year=this.value.slice(0,4); if(!_HRD.id) _HRD.no3=String(+_qdNextNo(_HRD.year)); _hrdRender(); }" style="width:100%">`));
   if(H.empId){
     h+=`<div style="font-size:12px;color:var(--muted);margin-bottom:6px">Hiện tại: <b>${esc(H.curTitle||'—')}</b>${H.crew?(' · tàu '+esc(H.vessel||'—')):(' · bộ phận '+esc(_hrdDeptName(H.curDept)||'—'))} · HĐLĐ ${esc(H.hdNo||'—')}${H.hdDate?' ký '+esc(_hdDD(H.hdDate)):''} · thẻ lương: ${esc(PAY_PROFILE_LABEL[H.engine]||H.engine||'chưa có')}</div>`;
     if(isDC) h+=G(box('Bộ phận mới *',`<select style="width:100%" onchange="_HRD.newDept=this.value;_HRD.xet='Xét nhu cầu công việc và đề nghị của Trưởng bộ phận '+_hrdDeptName(_HRD.curDept)+', Trưởng bộ phận '+_hrdDeptName(this.value)+'.';_hrdRender()"><option value="">— chọn —</option>${depts.filter(d=>!d.archived).map(d=>`<option value="${esc(d.code)}" ${hrDeptCanon(H.newDept)===hrDeptCanon(d.code)?'selected':''}>${esc(d.name||d.code)}</option>`).join('')}</select>`)
@@ -51493,7 +51509,27 @@ function _hrdRender(){
   try{ setModalWide(true); }catch(e){}
 }
 function _hrdSalRows(H){ const flds=SC_ENG_F[H.engine]||[]; return flds.filter(([k])=>k!=='bhxhBase'||(+H.sal[k]!==+H.cur[k])).map(([k,l])=>({l, a:+H.cur[k]||0, b:+((H.chkSal?H.sal:H.cur)[k])||0})).filter(r=>r.a||r.b); }
-function _hrdHtml(d, stamp){
+function _hrdHtml(d, stamp){ if(d&&(d.noFmt==='HCNS'||_hrdIsG(d.kind))) return _hrdHtmlNew(d, stamp); return _hrdHtmlOld(d, stamp); }   /* v3.70.47: QĐ mới theo mẫu 60-2026; QĐ ký trước giữ mẫu cũ */
+function _hrdHtmlParts(d){
+  const m=HRD_META[d.kind], E=x=>esc(x==null?'':String(x)), ong=d.gender==='Nữ'?'Bà':'Ông', nm=String(d.empName||'').toUpperCase(), dt=String(d.date||todayISO());
+  const f=v=>{ v=+v||0; return v?(d.ccy&&d.ccy!=='VND'?v.toLocaleString('en-US',{maximumFractionDigits:2}):Math.round(v).toLocaleString('vi-VN')):'—'; };
+  const titleChg=d.kind==='DC'?(d.newTitle&&d.newTitle!==d.curTitle):(d.chkTitle&&d.newTitle&&d.newTitle!==d.curTitle);
+  const sub=d.kind==='DC'?'Điều chuyển nhân sự':((d.chkSal&&titleChg)?'Điều chỉnh lương và chức danh':(titleChg?'Điều chỉnh chức danh':'Điều chỉnh lương'));
+  const rows=_hrdSalRows(d); const salChanged=d.chkSal&&rows.some(r=>r.a!==r.b);
+  const tbl=(withDiff)=>`<table class="t"><tr><th>Khoản</th><th>Hiện tại</th><th>${withDiff?'Điều chỉnh':'Mới'}</th>${withDiff?'<th>Chênh lệch</th>':''}</tr>${rows.map(r=>`<tr><td>${E(r.l)}</td><td class="r">${f(r.a)}</td><td class="r"><b>${f(r.b)}</b></td>${withDiff?`<td class="r">${r.b===r.a?'—':((r.b>r.a?'+':'−')+f(Math.abs(r.b-r.a)))}</td>`:''}</tr>`).join('')}</table><p style="font-size:10.5pt">(Đơn vị: ${E(d.ccy||'VND')}${/ngày/.test(rows.map(r=>r.l).join(''))?'':'/tháng'}.)</p>`;
+  const can=`<p>- Căn cứ Bộ luật Lao động số 45/2019/QH14 và các văn bản hướng dẫn thi hành;</p><p>- Căn cứ chức năng, nhiệm vụ và quyền hạn của Giám đốc Công ty;</p><p>- Căn cứ ${d.kind==='DC'?'Nội quy lao động, ':''}Quy chế lương thưởng của Công ty;</p>${d.hdNo?`<p>- Căn cứ Hợp đồng lao động${d.crew?' thuyền viên':''} số <b>${E(d.hdNo)}</b>${d.hdDate?' ký ngày '+E(_hdDD(d.hdDate)):''};</p>`:''}<p>- ${E(d.xet||'')}</p>`;
+  let art='';
+  if(d.kind==='DC'){ const nd=_hrdDeptName(d.newDept);
+    art=`<p><span class="art">Điều 1.</span> Điều chuyển ${ong} <b>${E(nm)}</b> — MSNV: ${E(d.smartId)}</p><div class="bk"><p>- Chức danh hiện tại: ${E(d.curTitle||'—')} — Bộ phận: ${E(_hrdDeptName(d.curDept)||'—')}</p><p>- Đến bộ phận: <b>${E(nd)}</b></p>${titleChg?`<p>- Chức danh mới: <b>${E(d.newTitle)}</b></p>`:''}<p>- Kể từ ngày: <b>${E(_hdDD(d.fromDate))}</b></p></div>
+      <p style="margin-top:2mm"><span class="art">Điều 2.</span> Tiền lương và phụ cấp kể từ ngày ${E(_hdDD(d.fromDate))}: ${salChanged?'':'<b>giữ nguyên</b> theo Hợp đồng lao động hiện hành.'}</p>${salChanged?`<div class="bk">${tbl(false)}<p style="font-size:10.5pt">Các chế độ khác theo Hợp đồng lao động và Quy chế lương thưởng của Công ty. Hai bên ký Phụ lục Hợp đồng lao động đối với nội dung thay đổi chức danh, tiền lương.</p></div>`:''}
+      <p style="margin-top:2mm"><span class="art">Điều 3.</span> Trưởng bộ phận ${E(_hrdDeptName(d.curDept))}, Trưởng bộ phận ${E(nd)}, Phòng Nhân sự, Phòng Tài chính – Kế toán và ${ong} ${E(d.empName)} chịu trách nhiệm thi hành Quyết định này. Quyết định có hiệu lực kể từ ngày ký.</p>`; }
+  else { const where=d.crew?(' — Chức danh: '+E(d.curTitle||'')+(d.vessel?' — Tàu: '+E(d.vessel):'')):(' — Bộ phận: '+E(_hrdDeptName(d.curDept)||''));
+    art=`<p><span class="art">Điều 1.</span> ${E(sub)} đối với ${ong} <b>${E(nm)}</b> — MSNV: ${E(d.smartId)}${where}</p><div class="bk">${titleChg?`<p>- Chức danh: ${E(d.curTitle||'—')} → <b>${E(d.newTitle)}</b></p>`:''}${d.chkSal?(titleChg?'<p>- Tiền lương, phụ cấp:</p>':'')+tbl(true):''}${d.chkSal&&!titleChg&&d.crew?'<p style="font-size:10.5pt">Chức danh: <b>giữ nguyên</b>.</p>':''}</div>
+      <p style="margin-top:2mm"><span class="art">Điều 2.</span> Thời điểm áp dụng: kể từ ngày <b>${E(_hdDD(d.fromDate))}</b>. Các chế độ khác thực hiện theo Hợp đồng lao động${d.crew?' thuyền viên':''} và Quy chế lương thưởng của Công ty.${d.crew?'':' Hai bên ký Phụ lục Hợp đồng lao động đối với nội dung điều chỉnh.'}</p>
+      <p style="margin-top:2mm"><span class="art">Điều 3.</span> ${d.crew?'Trưởng Bộ phận Quản lý tàu':'Trưởng bộ phận '+E(_hrdDeptName(d.curDept))}, Phòng Nhân sự, Phòng Tài chính – Kế toán${d.crew&&d.vessel?', Thuyền trưởng tàu '+E(d.vessel):''} và ${ong} ${E(d.empName)} chịu trách nhiệm thi hành Quyết định này. Quyết định có hiệu lực kể từ ngày ký.</p>`; }
+  const xet=['Căn cứ '+(d.kind==='DC'?'Nội quy lao động, ':'')+'Quy chế lương thưởng của Công ty;'].concat(d.hdNo?['Căn cứ Hợp đồng lao động'+(d.crew?' thuyền viên':'')+' số '+d.hdNo+(d.hdDate?' ký ngày '+_hdDD(d.hdDate):'')+';']:[]).concat(String(d.xet||'').trim()?[String(d.xet).trim()]:[]);
+  return {sub, xet, art:art.replace(/Quyết định này\. Quyết định có hiệu lực kể từ ngày ký\./g,'quyết định này. Quyết định có hiệu lực kể từ ngày ký.')}; }
+function _hrdHtmlOld(d, stamp){
   const m=HRD_META[d.kind], E=x=>esc(x==null?'':String(x)), ong=d.gender==='Nữ'?'Bà':'Ông', nm=String(d.empName||'').toUpperCase(), dt=String(d.date||todayISO());
   const f=v=>{ v=+v||0; return v?(d.ccy&&d.ccy!=='VND'?v.toLocaleString('en-US',{maximumFractionDigits:2}):Math.round(v).toLocaleString('vi-VN')):'—'; };
   const titleChg=d.kind==='DC'?(d.newTitle&&d.newTitle!==d.curTitle):(d.chkTitle&&d.newTitle&&d.newTitle!==d.curTitle);
@@ -51525,22 +51561,23 @@ function _hrdHtml(d, stamp){
     <div style="margin:8mm 0 0 auto;width:50%;text-align:center"><b>GIÁM ĐỐC ĐIỀU HÀNH</b></div>
     <div style="margin-top:auto;border-bottom:1px solid #000;padding-bottom:2mm;font-size:10.5pt"><b><i>Nơi nhận:</i></b><div style="margin-left:6mm;font-style:italic">- Như Điều 3;<br>- Lưu NS.</div></div></div></div></body></html>`;
 }
-function _hrdValidate(){ const H=_HRD, er=document.getElementById('hrd-err'); const miss=[];
-  if(!H.empId) miss.push('Nhân viên'); if(!/^\d{1,3}$/.test(String(H.no3||''))) miss.push('Số QĐ'); if(!H.fromDate) miss.push('Ngày hiệu lực');
+function _hrdValidate(){ if(_hrdIsG(_HRD.kind)) return _hrdValidateG(); const H=_HRD, er=document.getElementById('hrd-err'); const miss=[];
+  if(!H.empId) miss.push('Nhân viên'); if(!/^\d{1,4}$/.test(String(H.no3||''))||!(+H.no3)) miss.push('Số QĐ'); if(!H.fromDate) miss.push('Ngày hiệu lực');
   if(H.kind==='DC'&&!H.newDept) miss.push('Bộ phận mới'); if(H.kind==='DC'&&H.newDept&&hrDeptCanon(H.newDept)===hrDeptCanon(H.curDept)) miss.push('Bộ phận mới phải khác bộ phận hiện tại');
   if(H.kind==='DCL'&&!H.chkSal&&!H.chkTitle) miss.push('Chọn điều chỉnh lương và/hoặc chức danh');
-  if(miss.length){ if(er) er.textContent='Thiếu / sai: '+miss.join(', '); return false; } H.no3=String(H.no3).padStart(3,'0'); return true; }
+  if(miss.length){ if(er) er.textContent='Thiếu / sai: '+miss.join(', '); return false; } H.no3=H.noFmt==='HCNS'?String(+H.no3):String(H.no3).padStart(3,'0'); return true; }
 function _hrdOpen(d, auto, stamp){ const w=_printShim(); if(!w) return; w.document.open(); w.document.write(_hrdHtml(d, stamp)); if(auto) w.print(); else w.document.close(); }
 function _hrdPreview(){ if(!_hrdValidate()) return; _hrdOpen(_HRD,false,false); }
 /* áp dụng khi ký: hồ sơ · BCC · thẻ lương */
 function _hrdApply(d){
+  if(_hrdIsG(d.kind)) return _hrdApplyG(d);   // v3.70.47
   const warn=[]; const e=(S.hrEmployees||[]).find(x=>x.id===d.empId); if(!e) return ['Không tìm thấy hồ sơ'];
   const eff=String(d.fromDate).slice(0,10), now=new Date().toISOString(); const A={at:now, by:actorName(), prevDept:e.dept||'', prevTitle:e.title||''};
   if(d._external){ d._applied=Object.assign(A,{external:true}); return warn; }   // QĐ in từ thẻ lương đã lưu — thay đổi đã áp dụng lúc Lưu
   const titleChg=(d.kind==='DC'||d.chkTitle)&&d.newTitle&&d.newTitle!==e.title;
-  if(d.kind==='DC' && eff<=todayISO()){ A.bccLeave=_hrBccLeaveDept(e, eff, warn); e.dept=d.newDept; try{ hrmLogHistory(e.id,'transfer','Phòng ban',_hrdDeptName(A.prevDept),_hrdDeptName(d.newDept),'Theo QĐ '+d.no3+'/QĐNS/'+d.year); }catch(_){} A.bccJoin=_hrBccJoinDept(e, eff, warn); A.deptDone=true; }
+  if(d.kind==='DC' && eff<=todayISO()){ A.bccLeave=_hrBccLeaveDept(e, eff, warn); e.dept=d.newDept; try{ hrmLogHistory(e.id,'transfer','Phòng ban',_hrdDeptName(A.prevDept),_hrdDeptName(d.newDept),'Theo QĐ '+_qdNoStr(d)); }catch(_){} A.bccJoin=_hrBccJoinDept(e, eff, warn); A.deptDone=true; }
   else if(d.kind==='DC'){ d._scheduled=eff; }
-  if(titleChg && eff<=todayISO()){ e.title=d.newTitle; try{ hrmLogHistory(e.id,'promote','Chức danh',A.prevTitle,d.newTitle,'Theo QĐ '+d.no3+'/QĐNS/'+d.year); }catch(_){} A.titleDone=true;
+  if(titleChg && eff<=todayISO()){ e.title=d.newTitle; try{ hrmLogHistory(e.id,'promote','Chức danh',A.prevTitle,d.newTitle,'Theo QĐ '+_qdNoStr(d)); }catch(_){} A.titleDone=true;
     const a=(HRService.crewAssignments()||[]).find(x=>x.empId===e.id&&!x.actualSignoffDate&&x.status!=='signed_off'&&x.status!=='transfer_out'); if(a){ (a.rankHistory=a.rankHistory||[]).push({from:eff, rank:d.newTitle, prev:A.prevTitle, by:A.by, at:now, src:'hrDecision'}); A.rankAssign=a.id; try{ touchRecord(a); }catch(_){} } }
   const L=_spList(e.id), cur=L[L.length-1];
   const salChg=d.chkSal&&cur&&(SC_ENG_F[cur.engine]||[]).some(([k])=>(+d.sal[k]||0)!==_scR(cur,k));
@@ -51548,24 +51585,26 @@ function _hrdApply(d){
     if(_spFromDate(cur)>=eff) warn.push('Thẻ lương đã có kỳ từ '+_cdD(_spFromDate(cur))+' — chưa tạo kỳ theo QĐ (sửa tại Thẻ lương tổng hợp)');
     else { A.salPrev={id:cur.id, effectiveTo:cur.effectiveTo||'', effectiveDateTo:cur.effectiveDateTo||''};
       const next={}; if(d.chkSal) (SC_ENG_F[cur.engine]||[]).forEach(([k])=>{ next[k]=+d.sal[k]||0; });
-      const v=salaryProfileAddVersion(e.id,{effectiveDate:eff, engine:cur.engine, rank:(titleChg?d.newTitle:undefined), data:Object.assign({}, cur.data||{}, next), reason:'Theo QĐ '+d.no3+'/QĐNS/'+d.year, source:'manual', _crewMgr:/^crew/.test(String(cur.engine||''))});
+      const v=salaryProfileAddVersion(e.id,{effectiveDate:eff, engine:cur.engine, rank:(titleChg?d.newTitle:undefined), data:Object.assign({}, cur.data||{}, next), reason:'Theo QĐ '+_qdNoStr(d), source:'manual', _crewMgr:/^crew/.test(String(cur.engine||''))});
       if(v){ if(cur.companyId) v.companyId=cur.companyId; v.hrDecisionId=d.id; if(A.titleDone) v.rankApplied=now; try{ touchRecord(v); }catch(_){} A.salVerId=v.id; } else warn.push('Không tạo được kỳ thẻ lương'); } }
-  try{ _payFlagRecalc(eff.slice(0,7), e.id, ('QĐ '+d.no3+'/QĐNS/'+d.year)); }catch(_){}
+  try{ _payFlagRecalc(eff.slice(0,7), e.id, ('QĐ '+_qdNoStr(d))); }catch(_){}
   try{ touchRecord(e); }catch(_){}
   d._applied=A; return warn; }
-function _hrdRevert(d){ const A=d._applied; if(!A||A.external) return; const e=(S.hrEmployees||[]).find(x=>x.id===d.empId); if(!e) return;
+function _hrdRevert(d){ if(_hrdIsG(d.kind)) return _hrdRevertG(d); const A=d._applied; if(!A||A.external) return; const e=(S.hrEmployees||[]).find(x=>x.id===d.empId); if(!e) return;
   if(A.salVerId){ const v=(S.salaryProfiles||[]).find(x=>x.id===A.salVerId); if(v){ v._deleted=true; v.deletedAt=new Date().toISOString(); try{ touchRecord(v); }catch(_){} }
     if(A.salPrev){ const p=(S.salaryProfiles||[]).find(x=>x.id===A.salPrev.id); if(p){ p.effectiveTo=A.salPrev.effectiveTo; if(A.salPrev.effectiveDateTo) p.effectiveDateTo=A.salPrev.effectiveDateTo; else delete p.effectiveDateTo; try{ touchRecord(p); }catch(_){} } } }
   if(A.titleDone){ e.title=A.prevTitle; if(A.rankAssign){ const a=(HRService.crewAssignments()||[]).find(x=>x.id===A.rankAssign); if(a&&a.rankHistory){ a.rankHistory=a.rankHistory.filter(h=>h.src!=='hrDecision'||h.from!==String(d.fromDate).slice(0,10)); try{ touchRecord(a); }catch(_){} } } }
   if(A.deptDone){ e.dept=A.prevDept; (A.bccJoin||[]).forEach(j=>{ const sh=(S.bccSheets||[]).find(s=>s.id===j.id); if(!sh) return; if(j.created){ sh.rows=(sh.rows||[]).filter(r=>r.empId!==e.id); sh._removedRows=sh._removedRows||{}; sh._removedRows[e.id]=new Date().toISOString(); }   /* v3.70.40 (R3) */ else { const r=sh.rows.find(r=>r.empId===e.id); if(r) delete r._joinedFrom; } try{ _bccTouch(sh); }catch(_){} });
     (A.bccLeave||[]).forEach(j=>{ const sh=(S.bccSheets||[]).find(s=>s.id===j.id); const r=sh&&(sh.rows||[]).find(r=>r.empId===e.id); if(r){ if(j.prevLeft) r._leftFrom=j.prevLeft; else delete r._leftFrom; r.days=r.days||{}; r.ot=r.ot||{}; Object.keys(j.days||{}).forEach(d=>r.days[d]=j.days[d]); Object.keys(j.ot||{}).forEach(d=>r.ot[d]=j.ot[d]); if(j.auto&&Object.keys(j.auto).length){ r.auto=r.auto||{}; Object.keys(j.auto).forEach(d=>r.auto[d]=true); } try{ _bccTouch(sh,r); }catch(_){} } }); }
   try{ touchRecord(e); }catch(_){} }
-const _HRD_FIELDS=['hrDecisions','hrEmployees','hrHistory','salaryProfiles','bccSheets','crewAssignments','payrollPeriods'];
+const _HRD_FIELDS=['hrDecisions','hrEmployees','hrHistory','salaryProfiles','bccSheets','crewAssignments','payrollPeriods','payExtras','payExtraBatches','laborContracts','crewPayBooks','deletedIds'];   /* v3.70.47: + khoản PS / HĐLĐ */
 function _hrdSave(andSign){
   if(!_hrdValidate()) return; const H=_HRD, now=new Date().toISOString(), who=actorName();
-  const dup=(S.hrDecisions||[]).concat((S.crewDocs||[]).filter(x=>x&&x.kind==='QD')).find(x=>x&&!x._deleted&&x.id!==H.id&&String(x.year)===String(H.year)&&String(x.no3).padStart(3,'0')===H.no3);
-  if(dup){ const _old=H.no3; H.no3=_qdNextNo(H.year, H.id); toast('Số '+_old+' vừa được QĐ khác dùng — đổi sang '+H.no3+'/QĐNS/'+H.year,'warn'); }   // v3.67.88
-  if(andSign && !confirm('In PDF = KÝ '+HRD_META[H.kind].label+' '+H.no3+'/QĐNS/'+H.year+' — '+(H.empName||'')+'.\n\n'+(H._external?'Thay đổi đã áp dụng khi lưu thẻ lương — ký chỉ lưu bản QĐ.':'App cập nhật: hồ sơ'+(H.kind==='DC'?', BCC bộ phận cũ / mới':'')+(H.chkSal||H.newTitle?', thẻ lương (kỳ mới từ '+_hdDD(H.fromDate)+')':'')+'. Kỳ lương tự chia theo ngày.')+'\n\nTiếp tục?')) return;
+  if(!H.signedAt) H.noFmt='HCNS';   // v3.70.47: QĐ chưa ký → số dạng HCNS
+  const dup=_qdNoTaken(H);
+  if(dup){ const m='Số '+_qdNoStr(H)+' đã dùng cho '+(dup.kind==='QD'?'QĐ thuyền viên':((HRD_META[dup.kind]||{}).label||'QĐ khác'))+(dup.empName?' — '+dup.empName:'')+'. Chọn số khác (gợi ý '+(+_qdNextNo(H.year, H.id))+').'; const er=document.getElementById('hrd-err'); if(er) er.textContent=m; toast(m,'bad'); return; }   // v3.70.47: người lập chọn số — trùng thì chặn
+  if(andSign && _hrdIsG(H.kind) && !confirm('In PDF = KÝ '+HRD_META[H.kind].label+' '+_qdNoStr(H)+' — '+_hrdWho(H)+'.\n\nApp cập nhật:\n• '+_hrdGPlan(H).join('\n• ')+'\n\nTiếp tục?')) return;
+  if(andSign && !_hrdIsG(H.kind) && !confirm('In PDF = KÝ '+HRD_META[H.kind].label+' '+_qdNoStr(H)+' — '+(H.empName||'')+'.\n\n'+(H._external?'Thay đổi đã áp dụng khi lưu thẻ lương — ký chỉ lưu bản QĐ.':'App cập nhật: hồ sơ'+(H.kind==='DC'?', BCC bộ phận cũ / mới':'')+(H.chkSal||H.newTitle?', thẻ lương (kỳ mới từ '+_hdDD(H.fromDate)+')':'')+'. Kỳ lương tự chia theo ngày.')+'\n\nTiếp tục?')) return;
   let rec, warn=[];
   commitMutation(()=>{ S.hrDecisions=S.hrDecisions||[];
     if(H.id){ rec=S.hrDecisions.find(x=>x.id===H.id); Object.assign(rec, JSON.parse(JSON.stringify(H)), {updatedAt:now, updatedBy:who}); }
@@ -51574,23 +51613,28 @@ function _hrdSave(andSign){
     try{ touchRecord(rec); }catch(_){} },
     {action:andSign?'hr_decision_sign':'hr_decision_save', fields:_HRD_FIELDS, onOk:()=>{ try{ logAuditEvent(andSign?'hr_decision_sign':'hr_decision_save',{id:rec.id, kind:rec.kind, emp:rec.empName, no:rec.no3}); }catch(_){}
       _HRD=JSON.parse(JSON.stringify(rec));
-      if(andSign){ _hrdOpen(rec,true,false); hrdView(rec.id); if(warn.length) setTimeout(()=>alert('Đã ký. Cần lưu ý:\n\n• '+warn.join('\n• ')),200); else toast('✓ Đã ký & cập nhật','good'); try{ hrmRenderList(); }catch(_){} }
+      if(andSign){ _hrdOpen(rec,true,false); hrdView(rec.id); if(warn.length) setTimeout(()=>alert('Đã ký. Cần lưu ý:\n\n• '+warn.join('\n• ')),200); else toast('✓ Đã ký & cập nhật','good'); try{ hrmRenderList(); }catch(_){}
+        if(rec.kind==='KL'&&rec.form==='sa_thai'){ const L=(rec.people||[]).filter(p=>!p.crew); if(L.length) setTimeout(()=>{ if(confirm('Hình thức SA THẢI — lập tiếp QĐ chấm dứt HĐLĐ cho '+L.map(p=>p.name).join(', ')+'?')){ _hrdNewG('CD'); L.forEach(p=>_hrdGAdd(p.empId,true)); _HRD.reason='Sa thải theo QĐ '+_qdNoStr(rec); _HRD.people.forEach(p=>p.reason=_HRD.reason); _hrdRenderG(); } },(warn.length?900:500)); } }   /* v3.70.47 */
       else { toast('✓ Đã lưu nháp','good'); _hrdRender(); } }});
 }
-function _hrdApplyDue(){ const t=todayISO(); const due=(S.hrDecisions||[]).filter(d=>d&&!d._deleted&&d.signedAt&&d._scheduled&&d._scheduled<=t&&!(d._applied&&d._applied.deptDone)); if(!due.length) return;
-  commitMutation(()=>{ due.forEach(d=>{ const e=(S.hrEmployees||[]).find(x=>x.id===d.empId); if(!e) return; const w=[]; const A=d._applied||{}; A.bccLeave=_hrBccLeaveDept(e,d._scheduled,w); A.prevDept=e.dept||''; e.dept=d.newDept; A.bccJoin=_hrBccJoinDept(e,d._scheduled,w); A.deptDone=true;
+function _hrdApplyDue(){ const t=todayISO(); const due=(S.hrDecisions||[]).filter(d=>d&&!d._deleted&&d.signedAt&&d._scheduled&&d._scheduled<=t&&(d.kind==='CD'||!(d._applied&&d._applied.deptDone))); if(!due.length) return;
+  commitMutation(()=>{ due.forEach(d=>{
+      if(d.kind==='CD'){ ((d._applied||{}).emp||[]).forEach(sn=>{ const e=(S.hrEmployees||[]).find(x=>x.id===sn.empId); if(e&&!sn.statusDone){ e.status='inactive'; sn.statusDone=true; try{ touchRecord(e); }catch(_){} } }); delete d._scheduled; try{ touchRecord(d); }catch(_){} return; }   /* v3.70.47: chấm dứt HĐLĐ tới ngày */
+      const e=(S.hrEmployees||[]).find(x=>x.id===d.empId); if(!e) return; const w=[]; const A=d._applied||{}; A.bccLeave=_hrBccLeaveDept(e,d._scheduled,w); A.prevDept=e.dept||''; e.dept=d.newDept; A.bccJoin=_hrBccJoinDept(e,d._scheduled,w); A.deptDone=true;
       if(d.newTitle&&d.newTitle!==e.title){ A.prevTitle=e.title||''; e.title=d.newTitle; A.titleDone=true; } d._applied=A; delete d._scheduled; try{ touchRecord(d); touchRecord(e); }catch(_){} }); },{action:'hr_decision_due', fields:_HRD_FIELDS}); }
 function hrdView(id){ const d=(S.hrDecisions||[]).find(x=>x.id===id); if(!d) return;
-  openModal('📜 '+esc(d.no3)+'/QĐNS/'+esc(d.year)+' — '+esc(d.empName||''), `<div style="font-size:13px;line-height:1.7">${esc(HRD_META[d.kind].label)} · hiệu lực ${esc(_hdDD(d.fromDate))}<br>${d.signedAt?`<span style="display:inline-block;border:2px solid #b3122e;color:#b3122e;font-weight:900;border-radius:4px;padding:0 6px">ĐÃ KÝ · ${esc(_hdDD(String(d.signedAt).slice(0,10)))}</span> — ${esc(d.signedBy||'')}${d._scheduled?' · <b>hẹn áp dụng '+esc(_hdDD(d._scheduled))+'</b>':''}`:'<b>Bản nháp</b>'}</div>`,
+  openModal('📜 '+esc(_qdNoStr(d))+' — '+esc(_hrdWho(d)), `<div style="font-size:13px;line-height:1.7">${esc(HRD_META[d.kind].label)} · hiệu lực ${esc(_hdDD(d.fromDate))}${d.kind==='CT'&&d.toDate?' – '+esc(_hdDD(d.toDate)):''}${_hrdIsG(d.kind)?' · '+(d.people||[]).length+' người':''}<br>${d.signedAt?`<span style="display:inline-block;border:2px solid #b3122e;color:#b3122e;font-weight:900;border-radius:4px;padding:0 6px">ĐÃ KÝ · ${esc(_hdDD(String(d.signedAt).slice(0,10)))}</span> — ${esc(d.signedBy||'')}${d._scheduled?' · <b>hẹn áp dụng '+esc(_hdDD(d._scheduled))+'</b>':''}`:'<b>Bản nháp</b>'}</div>`,
     `<button class="btn-ghost" onclick="openHrDecisions()">← Danh sách</button><button class="btn-sec" onclick="_hrdOpen((S.hrDecisions||[]).find(x=>x.id==='${d.id}'),false,true)">👁 Xem bản lưu</button>${d.signedAt?'':`<button class="btn-primary" onclick="openHrDecision('${d.kind}','',{id:'${d.id}'})">✎ Sửa / Ký</button>`}<button class="btn-sec" style="color:var(--bad)" onclick="_hrdDelete('${d.id}')">🗑 Xóa${d.signedAt?' & hoàn tác':''}</button>`); }
-function _hrdDelete(id){ const d=(S.hrDecisions||[]).find(x=>x.id===id); if(!d) return; let why='';
-  if(d.signedAt){ if(!(isAdmin()||canSignHr())){ toast('QĐ đã ký — chỉ Trưởng phòng Nhân sự / Admin được xóa','bad'); return; } why=prompt('Xóa QĐ '+d.no3+'/QĐNS/'+d.year+(d._applied&&!d._applied.external?'\n\nApp HOÀN TÁC: hồ sơ, BCC, thẻ lương.':'')+'\n\nLý do (bắt buộc):'); if(!why||!why.trim()) return; }
+function _hrdDelete(id){ const d=(S.hrDecisions||[]).find(x=>x.id===id); if(!d) return; let why='', rw=[];
+  if(d.signedAt){ if(!(isAdmin()||canSignHr())){ toast('QĐ đã ký — chỉ Trưởng phòng Nhân sự / Admin được xóa','bad'); return; }
+    if(_hrdIsG(d.kind)){ const lk=_hrdGLocked(d); if(lk.length){ toast('Không xóa được — khoản PS của QĐ đã nằm trong bảng lương đã vào đề xuất / khóa: '+lk.join(', ')+' (hủy đề xuất trước)','bad'); return; } }   /* v3.70.47 */
+    why=prompt('Xóa QĐ '+_qdNoStr(d)+(d._applied&&!d._applied.external?'\n\nApp HOÀN TÁC: '+(_hrdIsG(d.kind)?'khoản PS, BCC, hồ sơ, thẻ lương do QĐ ghi.':'hồ sơ, BCC, thẻ lương.'):'')+'\n\nLý do (bắt buộc):'); if(!why||!why.trim()) return; }
   else if(!confirm('Xóa bản nháp?')) return;
-  commitMutation(()=>{ if(d.signedAt) _hrdRevert(d); d._deleted=true; d.deletedAt=new Date().toISOString(); d.deletedBy=actorName(); if(why) d.deleteReason=why; try{ touchRecord(d); }catch(_){} },{action:'hr_decision_delete', fields:_HRD_FIELDS, onOk:()=>{ toast('✓ Đã xóa','good'); openHrDecisions(); }}); }
+  commitMutation(()=>{ if(d.signedAt) rw=_hrdRevert(d)||[]; d._deleted=true; d.deletedAt=new Date().toISOString(); d.deletedBy=actorName(); if(why) d.deleteReason=why; try{ touchRecord(d); }catch(_){} },{action:'hr_decision_delete', fields:_HRD_FIELDS, onOk:()=>{ if(rw.length) setTimeout(()=>alert('Đã xóa. Cần lưu ý:\n\n• '+rw.join('\n• ')),200); else toast('✓ Đã xóa','good'); openHrDecisions(); }}); }
 function openHrDecisions(){ try{ _hrdApplyDue(); }catch(_){}
-  const L=(S.hrDecisions||[]).filter(d=>d&&!d._deleted&&_hrdCan(hrmEmpById(d.empId))).sort((a,b)=>(String(b.year)+b.no3).localeCompare(String(a.year)+a.no3));
-  openModal('📜 Quyết định nhân sự', `<div style="display:flex;gap:6px;margin-bottom:8px"><button class="btn-primary" onclick="openHrDecision('DC','')">＋ QĐ điều chuyển</button><button class="btn-primary" onclick="openHrDecision('DCL','')">＋ QĐ điều chỉnh lương / chức danh</button><span style="font-size:11px;color:var(--muted);align-self:center">QĐ điều động / nghỉ ca thuyền viên: tại Crew Change.</span></div>
-    <div class="tbl-scroll"><table class="tbl" style="font-size:12.5px"><thead><tr><th>Số QĐ</th><th>Loại</th><th>Nhân viên</th><th>Hiệu lực</th><th>Trạng thái</th></tr></thead><tbody>${(()=>{ window._HRD_P=_pg20('hrdlist', L.length, 'openHrDecisions'); return L.slice(window._HRD_P.from, window._HRD_P.to); })().map(d=>`<tr style="cursor:pointer" onclick="hrdView('${d.id}')"><td style="font-family:var(--font-mono)"><b>${esc(d.no3)}</b>/QĐNS/${esc(d.year)}</td><td style="font-size:12px">${esc(HRD_META[d.kind].label)}</td><td>${esc(d.empName||'')}</td><td>${esc(_hdDD(d.fromDate))}</td><td>${d.signedAt?'<b style="color:#b3122e">ĐÃ KÝ</b>':'Nháp'}</td></tr>`).join('')||'<tr><td colspan="5" style="text-align:center;color:var(--muted);padding:12px">Chưa có quyết định</td></tr>'}</tbody></table></div>${(window._HRD_P||{}).nav||''}`,
+  const L=(S.hrDecisions||[]).filter(d=>d&&!d._deleted&&_hrdCan(hrmEmpById(d.empId))).sort((a,b)=>(+b.year-+a.year)||((+b.no3||0)-(+a.no3||0)));
+  openModal('📜 Quyết định nhân sự', `<div style="display:flex;gap:6px;margin-bottom:8px;flex-wrap:wrap"><button class="btn-primary" onclick="openHrDecision('DC','')">＋ QĐ điều chuyển</button><button class="btn-primary" onclick="openHrDecision('DCL','')">＋ QĐ điều chỉnh lương / chức danh</button><button class="btn-primary" onclick="openHrDecision('CT','')">＋ QĐ cử đi công tác</button><button class="btn-primary" onclick="openHrDecision('KT','')">＋ QĐ khen thưởng</button><button class="btn-primary" onclick="openHrDecision('KL','')">＋ QĐ kỷ luật</button><button class="btn-primary" onclick="openHrDecision('CD','')">＋ QĐ chấm dứt HĐLĐ</button><span style="font-size:11px;color:var(--muted);align-self:center">QĐ điều động / nghỉ ca / thôi việc thuyền viên: tại Crew Change.</span></div>
+    <div class="tbl-scroll"><table class="tbl" style="font-size:12.5px"><thead><tr><th>Số QĐ</th><th>Loại</th><th>Nhân viên</th><th>Hiệu lực</th><th>Trạng thái</th></tr></thead><tbody>${(()=>{ window._HRD_P=_pg20('hrdlist', L.length, 'openHrDecisions'); return L.slice(window._HRD_P.from, window._HRD_P.to); })().map(d=>`<tr style="cursor:pointer" onclick="hrdView('${d.id}')"><td style="font-family:var(--font-mono);white-space:nowrap"><b>${esc(_qdNoStr(d))}</b></td><td style="font-size:12px">${esc(HRD_META[d.kind].label)}</td><td>${esc(_hrdWho(d))}</td><td>${esc(_hdDD(d.fromDate))}</td><td>${d.signedAt?'<b style="color:#b3122e">ĐÃ KÝ</b>':'Nháp'}</td></tr>`).join('')||'<tr><td colspan="5" style="text-align:center;color:var(--muted);padding:12px">Chưa có quyết định</td></tr>'}</tbody></table></div>${(window._HRD_P||{}).nav||''}`,
     `<button class="btn-ghost" onclick="closeModal()">Đóng</button>`); try{ setModalWide(true); }catch(_){} }
 /* nút In QĐ điều chỉnh sau khi Lưu tại dòng thẻ lương (thay đổi đã áp dụng) */
 function _hrdFromCardSave(empId, verId){ const e=hrmEmpById(empId); const L=_spList(empId); const i=L.findIndex(v=>v.id===verId); const v=L[i], p=L[i-1]; if(!e||!v) return;
@@ -51602,6 +51646,280 @@ function _hrdOfferAfterSave(empId){ const L=_spList(empId); const v=L[L.length-1
     n.innerHTML='<span>✓ Đã áp dụng thẻ lương từ '+_cdD(_spFromDate(v))+'</span><button style="font:600 12px Arial;padding:5px 10px;border:0;border-radius:5px;background:#fff;color:#1c3a5c;cursor:pointer">🖨 In QĐ điều chỉnh</button><span style="cursor:pointer;opacity:.7">✕</span>';
     n.querySelector('button').onclick=()=>{ n.remove(); _hrdFromCardSave(empId, v.id); }; n.querySelector('span:last-child').onclick=()=>n.remove();
     document.body.appendChild(n); setTimeout(()=>{ try{ n.remove(); }catch(_){} },20000); },300); }
+
+/* ═══════════════════════════════════════════════════════════════════════════════════════════════
+   v3.70.47 (Sếp duyệt 11/10): QUYẾT ĐỊNH NHÂN SỰ theo mẫu 60-2026/QĐ-SME-HCNS
+   • Số QĐ: một dãy chung mọi QĐ nhân sự (cả thuyền viên) — dạng NN-YYYY/QĐ-SME-HCNS; app gợi ý, người lập chọn / sửa; trùng → chặn.
+   • Loại mới (nhiều người / QĐ): Khen thưởng (+PS) · Kỷ luật (phạt tiền = −PS, hình thức khác ghi hồ sơ) · Cử đi công tác
+     (công tác phí = mức/ngày × số ngày, chia theo tháng, miễn thuế C.01.10.004 · BCC C1 · mức lương riêng nếu có) · Chấm dứt HĐLĐ (khối ngoài thuyền viên).
+   • Khen thưởng / phạt tiền dùng chung dữ liệu "Khoản PS theo QĐ" (payExtraBatches kind 'qd', hrdId) — ký = ban hành, không thêm bước HRM.
+   • Khuôn in chung theo QĐ 60-2026 · Lưu: VT, NS (PH-02) · song ngữ mặc định khi có người Expat / O&M / GEO.
+   ═══════════════════════════════════════════════════════════════════════════════════════════════ */
+const QD_FORM={code:'PH-02', eff:'01/01/2026', rev:'03', signer:'LÊ TRÍ THÀNH'};
+const HRD_G=['KT','KL','CT','CD'];
+function _hrdIsG(k){ return HRD_G.indexOf(k)>=0; }
+function _qdNoStr(d){ if(!d) return ''; const y=String(d.year||String(d.date||'').slice(0,4)||''); const n=String(d.no3==null?'':d.no3);
+  if(d.noFmt==='HCNS') return (/^\d+$/.test(n)?String(+n):n)+'-'+y+'/QĐ-SME-HCNS';
+  if(d.kind==='QD'&&d.sub==='TV') return n+'/'+y+'/QĐ-SME-NS';
+  return n+'/QĐNS/'+y; }
+/* ô Số QĐ dùng chung: nhập số — app gợi ý số kế tiếp */
+function _qdNoBox(no3, year, exceptId, setJs, useJs){ const sug=_qdNextNo(year, exceptId); const used=no3&&!_qdNoFree(year, no3, exceptId);
+  return `<div style="display:flex;gap:4px;align-items:center;flex-wrap:wrap"><input value="${esc(String(no3==null?'':no3).replace(/^0+(?=\d)/,''))}" maxlength="4" oninput="${setJs}" style="width:60px;text-align:center${used?';border-color:var(--bad)':''}"><span style="font-size:12px;white-space:nowrap">-${esc(year)}/QĐ-SME-HCNS</span>
+    <span style="font-size:10.5px;color:${used?'var(--bad)':'var(--muted)'};white-space:nowrap">${used?'⚠ số đã dùng · ':''}gợi ý <a href="javascript:void 0" onclick="${useJs.replace(/\$N/g, String(+sug))}">${+sug}</a></span></div>`; }
+function _qdNoTaken(d){ const all=(S.hrDecisions||[]).concat((S.crewDocs||[]).filter(x=>x&&x.kind==='QD')); return all.find(x=>x&&!x._deleted&&x.id!==d.id&&String(x.year)===String(d.year)&&(+x.no3||0)===(+d.no3||0)); }
+const HRD_KL_FORMS=[['khien_trach','Khiển trách','Reprimand'],['keo_dai','Kéo dài thời hạn nâng lương','Extension of the salary-raise period'],['cach_chuc','Cách chức','Removal from position'],['sa_thai','Sa thải','Dismissal'],['phat_tien','Phạt tiền','Monetary fine']];
+const HRD_DEF={
+  KT:{vv:'Khen thưởng nhân sự', vvEn:'Rewarding employees', xet:['Căn cứ Quy chế lương thưởng của Công ty;','Xét đề nghị của Trưởng Bộ phận nhân sự;'], xetEn:['Pursuant to the Company Salary and Bonus Regulation;','Upon the proposal of the Head of Human Resources;'],
+    d1:'Khen thưởng các nhân sự đã có thành tích trong công việc, cụ thể như sau:', d1En:'To reward the following employees for their achievements at work:'},
+  KL:{vv:'Kỷ luật lao động', vvEn:'Labour discipline', xet:['Căn cứ Nội quy lao động của Công ty;','Căn cứ Biên bản họp xử lý kỷ luật lao động;','Xét đề nghị của Trưởng Bộ phận nhân sự;'], xetEn:['Pursuant to the Company Labour Rules;','Pursuant to the minutes of the labour discipline meeting;','Upon the proposal of the Head of Human Resources;'],
+    d1:'Thi hành kỷ luật lao động đối với nhân sự sau:', d1En:'To impose labour discipline on the following employee(s):'},
+  CT:{vv:'Cử nhân sự đi công tác', vvEn:'Business trip assignment', xet:['Xét đạo đức và khả năng của người lao động;','Xét đề nghị của Trưởng Bộ phận nhân sự;'], xetEn:['Considering the ethics and capacity of the employees;','Upon the proposal of the Head of Human Resources;'],
+    d1:'Cử nhân sự đi công tác, cụ thể như sau:', d1En:'To assign the following employees on a business trip:'},
+  CD:{vv:'Chấm dứt hợp đồng lao động', vvEn:'Termination of labour contract', xet:['Căn cứ đơn xin chấm dứt hợp đồng lao động của người lao động;','Xét đề nghị của Trưởng Bộ phận nhân sự;'], xetEn:['Pursuant to the employee\'s application for termination of the labour contract;','Upon the proposal of the Head of Human Resources;'],
+    d1:'', d1En:''}};
+const HRD_D3=['Các ông/bà Trưởng Bộ phận Nhân sự, Trưởng bộ phận Kế toán, và nhân sự có tên trong danh sách chịu trách nhiệm thi hành quyết định này.','The Head of Human Resources, the Head of Accounting and the employees named in the list are responsible for implementing this Decision.'];
+function _hrdMY(iso){ iso=String(iso||''); return iso.slice(5,7)+'/'+iso.slice(0,4); }
+function _hrdFm(v){ return Math.round(+v||0).toLocaleString('vi-VN'); }
+function _hrdDayAfter(d){ const x=new Date(d+'T12:00:00'); x.setDate(x.getDate()+1); return x.toISOString().slice(0,10); }
+function _hrdDays(from, to){ const out=[]; if(!/^\d{4}-\d{2}-\d{2}$/.test(String(from||''))||!/^\d{4}-\d{2}-\d{2}$/.test(String(to||''))||to<from) return out; let d=from; while(d<=to&&out.length<400){ out.push(d); d=_hrdDayAfter(d); } return out; }
+function _hrdSplit(from, to){ const m={}; _hrdDays(from,to).forEach(d=>{ const k=d.slice(0,7); m[k]=(m[k]||0)+1; }); return m; }
+function _hrdEnProf(e){ try{ return ['expat','expert_om','geo'].indexOf(_empPayProfile(e))>=0; }catch(_){ return false; } }
+function _hrdGDept(e){ if(!e) return ''; if(e.type==='crew'){ const v=anyVesselName(e.linkVesselId)||''; return 'Đội tàu'+(v?' – '+v:''); } return _hrdDeptName(e.dept)||e.division||''; }
+function _hrdWho(d){ if(!_hrdIsG(d.kind)) return d.empName||''; const P=d.people||[]; if(!P.length) return '—'; return P[0].name+(P.length>1?' + '+(P.length-1)+' người':''); }
+function _hrdHasEmp(d, empId){ return d&&(d.empId===empId||(d.people||[]).some(p=>p.empId===empId)); }
+function _hrdKlForm(k){ return HRD_KL_FORMS.find(x=>x[0]===k)||HRD_KL_FORMS[0]; }
+/* Điều 2 mặc định theo loại */
+function _hrdD2Def(H){ const m=_hrdMY(H.fromDate), dd=_hdDD(H.fromDate);
+  if(H.kind==='KT') return ['Khoản thưởng được chi cùng kỳ lương tháng '+m+' và '+(H.taxable?'chịu':'không chịu')+' thuế TNCN theo quy định hiện hành.', 'The bonus is paid with the payroll of '+m+' and is '+(H.taxable?'':'not ')+'subject to personal income tax in accordance with current regulations.'];
+  if(H.kind==='KL') return H.form==='phat_tien'?['Số tiền phạt được khấu trừ vào tiền lương tháng '+m+' của nhân sự có tên tại Điều 1.','The fine is deducted from the salary of '+m+' of the employee(s) named in Article 1.']
+    :['Nhân sự có tên tại Điều 1 bị xử lý kỷ luật theo hình thức nêu trên kể từ ngày '+dd+'.','The employee(s) named in Article 1 are disciplined in the above form from '+_cdDEn(H.fromDate)+'.'];
+  if(H.kind==='CT') return ['Nhân sự được cử đi công tác được hưởng lương và các khoản phụ cấp theo quy định hiện hành.','Employees on the business trip are entitled to their salary and allowances in accordance with current regulations.'];
+  return ['Nhân sự có tên tại Điều 1 có trách nhiệm bàn giao công việc, hồ sơ tài liệu, tài sản và thanh toán công nợ (nếu có) cho Công ty trước khi chấm dứt hợp đồng lao động.','The employee(s) named in Article 1 shall hand over work, documents and assets and settle any debts (if any) with the Company before the termination of the labour contract.']; }
+function _hrdD2(H){ const def=_hrdD2Def(H); const v=H.d2Edit&&String(H.d2||'').trim()?String(H.d2).trim():def[0]; const en=H.d2Edit&&String(H.d2En||'').trim()?String(H.d2En).trim():def[1];
+  return [v+(String(H.d2x||'').trim()?' '+String(H.d2x).trim():''), en+(String(H.d2xEn||'').trim()?' '+String(H.d2xEn).trim():'')]; }
+function _hrdD1(H){ if(H.kind==='CD') return ['Chấm dứt Hợp đồng lao động đối với nhân sự sau kể từ ngày '+_hdDD(H.fromDate)+':','To terminate the labour contract of the following employee(s) from '+_cdDEn(H.fromDate)+':'];
+  return [String(H.d1||HRD_DEF[H.kind].d1), String(H.d1En||HRD_DEF[H.kind].d1En)]; }
+
+/* ── lập mới ── */
+function _hrdNewG(kind, empId){ const y=todayISO().slice(0,4), t=todayISO(), D=HRD_DEF[kind];
+  _HRD={kind, noFmt:'HCNS', no3:String(+_qdNextNo(y)), year:y, date:t, fromDate:t, toDate:t, vv:D.vv, vvEn:D.vvEn, xet:D.xet.join('\n'), xetEn:D.xetEn.join('\n'), d1:D.d1, d1En:D.d1En, d2:'', d2En:'', d2Edit:false, d2x:'', d2xEn:'',
+    en:false, enAuto:true, people:[], taxable:kind==='KT', form:'khien_trach', reason:'', reasonEn:'', place:'', rate:'', amt:'', salMode:'hd', pick:{by:'dept', v:''}};
+  if(empId) _hrdGAdd(empId, true); _hrdRenderG(); }
+function _hrdGPool(){ const H=_HRD; return (HRService.employees()||[]).filter(e=>e&&!e._deleted&&e.status!=='inactive'&&_hrdCan(e)&&(H.kind==='CD'?e.type!=='crew':true)).sort((a,b)=>String(a.fullName||'').localeCompare(String(b.fullName||''),'vi')); }
+function _hrdGAdd(id, quiet){ const H=_HRD, e=hrmEmpById(id); if(!e||(H.people||[]).some(p=>p.empId===id)) return;
+  const p={empId:id, smartId:e.smartId||'', name:e.fullName||'', dept:_hrdGDept(e), title:e.title||'', crew:e.type==='crew', amount:H.amt||'', rate:H.rate||'', from:H.fromDate, to:H.toDate||H.fromDate, place:H.place||'', reason:H.reason||'', pay:'', payTax:true, payNote:'', sal:{}};
+  if(H.kind==='CT'){ const v=_hrdCardAt(id, H.fromDate||todayISO()); p.engine=v?v.engine:''; p.ccy=v?_scCcy(v):'VND'; p.cur={}; (SC_ENG_F[p.engine]||[]).forEach(([k])=>{ p.cur[k]=_scR(v,k); }); p.sal=Object.assign({}, p.cur); }
+  H.people.push(p); if(H.enAuto&&_hrdEnProf(e)) H.en=true; if(!quiet) _hrdRenderG(); }
+function _hrdGAddGroup(){ const H=_HRD; const by=H.pick.by, v=H.pick.v; if(!v){ toast('Chọn nhóm','warn'); return; }
+  const L=_hrdGPool().filter(e=>(by==='dept'?_hrdGDept(e):(e.title||''))===v); L.forEach(e=>_hrdGAdd(e.id, true)); toast('＋ '+L.length+' người','good'); _hrdRenderG(); }
+function _hrdGDel(i){ _HRD.people.splice(i,1); if(_HRD.enAuto) _HRD.en=_HRD.people.some(p=>_hrdEnProf(hrmEmpById(p.empId))); _hrdRenderG(); }
+function _hrdGSetAll(k){ const H=_HRD; const map={amount:'amt', rate:'rate', place:'place', reason:'reason', from:'fromDate', to:'toDate'}; (H.people||[]).forEach(p=>{ p[k]=H[map[k]]; }); _hrdRenderG(); }
+function _hrdGP(i,k,v){ const p=_HRD.people[i]; if(p) p[k]=v; }
+/* kế hoạch ghi lương / hồ sơ — dùng cho màn lập + hộp xác nhận */
+function _hrdGPlan(H){ const out=[]; const P=H.people||[]; const m=String(H.fromDate||'').slice(0,7);
+  if(H.kind==='KT'){ const L=P.filter(p=>+p.amount>0); out.push('Kỳ lương '+_hrdMY(H.fromDate)+': '+L.length+' khoản PS (+) · tổng '+_hrdFm(L.reduce((t,p)=>t+(+p.amount||0),0))+' đ · '+(H.taxable?'chịu':'không chịu')+' thuế TNCN — hiện ở "Khoản PS theo QĐ"'); }
+  else if(H.kind==='KL'){ if(H.form==='phat_tien'){ const L=P.filter(p=>+p.amount>0); out.push('Kỳ lương '+_hrdMY(H.fromDate)+': '+L.length+' khoản PS (−) trừ lương · tổng '+_hrdFm(L.reduce((t,p)=>t+(+p.amount||0),0))+' đ — hiện ở "Khoản PS theo QĐ"'); }
+    else out.push('Hình thức '+_hrdKlForm(H.form)[1]+': chỉ ghi lịch sử hồ sơ, không đổi lương'+(H.form==='sa_thai'?' · ký xong app hỏi lập QĐ chấm dứt HĐLĐ':'')); }
+  else if(H.kind==='CT'){ const agg={}; let tot=0; P.forEach(p=>{ const sp=_hrdSplit(p.from,p.to); Object.keys(sp).forEach(k=>{ const a=sp[k]*(+p.rate||0); if(!a) return; agg[k]=agg[k]||{n:0,d:0,a:0}; agg[k].n++; agg[k].d+=sp[k]; agg[k].a+=a; tot+=a; }); });
+    Object.keys(agg).sort().forEach(k=>out.push('Kỳ '+_hrdMY(k+'-01')+': '+agg[k].n+' khoản công tác phí (miễn thuế, '+CTP_CODE+') · '+agg[k].d+' ngày · '+_hrdFm(agg[k].a)+' đ'));
+    if(!tot) out.push('Không có công tác phí (mức/ngày trống)'); out.push('BCC bộ phận: đánh mã C1 các ngày làm việc trong thời gian công tác (từ kỳ 10/2026)'); if(H.salMode==='own') out.push('Thẻ lương: mức riêng từ ngày đi → trở lại mức cũ từ ngày sau ngày về'); }
+  else if(H.kind==='CD'){ out.push('Hồ sơ: nghỉ việc từ '+_hdDD(H.fromDate)+(H.fromDate>todayISO()?' (trạng thái đổi khi tới ngày)':'')+' · HĐLĐ kết thúc · BCC bộ phận dừng từ ngày chấm dứt');
+    const L=P.filter(p=>+p.pay>0); if(L.length) out.push('Kỳ lương '+_hrdMY(_spDayBefore(H.fromDate))+': '+L.length+' khoản thanh toán khi nghỉ · '+_hrdFm(L.reduce((t,p)=>t+(+p.pay||0),0))+' đ'); }
+  return out; }
+
+function _hrdRenderG(){ const H=_HRD; const K=H.kind; const ed=!H.signedAt;
+  const box=(l,x,span)=>`<div style="${span?'grid-column:span '+span:''}"><div style="font-size:9.5px;font-weight:700;color:var(--muted);text-transform:uppercase;margin-bottom:2px">${l}</div>${x}</div>`;
+  const G=x=>`<div style="display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px 10px;margin-bottom:8px">${x}</div>`;
+  const inp=(k,ph,extra)=>`<input value="${esc(H[k]==null?'':String(H[k]))}" placeholder="${esc(ph||'')}" oninput="_HRD['${k}']=this.value" ${extra||''} style="width:100%">`;
+  const date=(k,re)=>`<input type="date" value="${esc(H[k]||'')}" onchange="_HRD['${k}']=this.value;${re?'_hrdGDateCh(\''+k+'\')':''}" style="width:100%">`;
+  let h=G(box('Số QĐ',_qdNoBox(H.no3, H.year, H.id, "_HRD.no3=this.value.replace(/\\D/g,'')", "_HRD.no3='$N';_hrdRenderG()"),2)
+    +box('Ngày QĐ',`<input type="date" value="${esc(H.date)}" onchange="_HRD.date=this.value;if(_HRD.year!==this.value.slice(0,4)){ _HRD.year=this.value.slice(0,4); if(!_HRD.id) _HRD.no3=String(+_qdNextNo(_HRD.year)); } _hrdRenderG()" style="width:100%">`)
+    +box('Song ngữ Việt – Anh',`<label style="font-size:12px"><input type="checkbox" ${H.en?'checked':''} onchange="_HRD.en=this.checked;_HRD.enAuto=false;_hrdRenderG()"> In thêm tiếng Anh</label>`)
+    +box('V/v (in trên QĐ) *',inp('vv'),4)
+    +box('Căn cứ "Xét …" (mỗi dòng 1 căn cứ — sau 2 căn cứ cố định)',`<textarea rows="2" oninput="_HRD.xet=this.value" style="width:100%">${esc(H.xet||'')}</textarea>`,4));
+  /* phần riêng theo loại */
+  if(K==='KT') h+=G(box('Ngày hiệu lực (kỳ lương) *',date('fromDate',1))+box('Thuế TNCN',`<label style="font-size:12px"><input type="checkbox" ${H.taxable?'checked':''} onchange="_HRD.taxable=this.checked;_hrdRenderG()"> Chịu thuế</label>`)
+    +box('Mức chung (đ / người)',`<div style="display:flex;gap:4px">${inp('amt','vd 2000000','type="number"')}<button class="btn-ghost" style="font-size:11px;white-space:nowrap" onclick="_hrdGSetAll('amount')">Áp tất cả</button></div>`,2));
+  else if(K==='KL') h+=G(box('Hình thức *',`<select style="width:100%" onchange="_HRD.form=this.value;_hrdRenderG()">${HRD_KL_FORMS.map(f=>`<option value="${f[0]}" ${H.form===f[0]?'selected':''}>${esc(f[1])}</option>`).join('')}</select>`)
+    +box('Ngày hiệu lực *',date('fromDate',1))+(H.form==='phat_tien'?box('Số tiền phạt chung',`<div style="display:flex;gap:4px">${inp('amt','vd 1000000','type="number"')}<button class="btn-ghost" style="font-size:11px;white-space:nowrap" onclick="_hrdGSetAll('amount')">Áp tất cả</button></div>`,2):'<div></div><div></div>')
+    +box('Lý do / hành vi vi phạm *',inp('reason','vd Vi phạm nội quy an toàn ngày …'),4)+(H.en?box('Lý do (tiếng Anh)',inp('reasonEn'),4):''));
+  else if(K==='CT') h+=G(box('Từ ngày *',date('fromDate',1))+box('Đến ngày *',date('toDate',1))+box('Mức công tác phí / ngày',`<div style="display:flex;gap:4px">${inp('rate','theo quy chế','type="number"')}<button class="btn-ghost" style="font-size:11px;white-space:nowrap" onclick="_hrdGSetAll('rate')">Áp tất cả</button></div>`)
+    +box('Lương trong thời gian CT',`<label style="font-size:12px;margin-right:8px"><input type="radio" name="hrd-sal" ${H.salMode!=='own'?'checked':''} onchange="_HRD.salMode='hd';_hrdRenderG()"> Theo HĐLĐ</label><label style="font-size:12px"><input type="radio" name="hrd-sal" ${H.salMode==='own'?'checked':''} onchange="_HRD.salMode='own';_hrdRenderG()"> Mức riêng</label>`)
+    +box('Địa điểm *',`<div style="display:flex;gap:4px">${inp('place','vd Công trường DA Nam Bộ 3, Vĩnh Long')}<button class="btn-ghost" style="font-size:11px;white-space:nowrap" onclick="_hrdGSetAll('from');_hrdGSetAll('to');_hrdGSetAll('place')">Áp thời gian + địa điểm cho tất cả</button></div>`,4));
+  else if(K==='CD') h+=G(box('Chấm dứt kể từ ngày *',date('fromDate',1))+box('Lý do chung',`<div style="display:flex;gap:4px">${inp('reason','vd Theo nguyện vọng cá nhân')}<button class="btn-ghost" style="font-size:11px;white-space:nowrap" onclick="_hrdGSetAll('reason')">Áp tất cả</button></div>`,3));
+  /* chọn người */
+  const pool=_hrdGPool(); const grp={}; pool.forEach(e=>{ const g=H.pick.by==='dept'?_hrdGDept(e):(e.title||''); if(g) grp[g]=(grp[g]||0)+1; });
+  h+=`<div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-bottom:6px;font-size:12px"><b>Đối tượng</b>
+    <select onchange="if(this.value)_hrdGAdd(this.value)" style="min-width:230px"><option value="">＋ Thêm người…</option>${pool.filter(e=>!(H.people||[]).some(p=>p.empId===e.id)).map(e=>`<option value="${e.id}">${esc(e.fullName)}${e.smartId?' · '+esc(e.smartId):''}</option>`).join('')}</select>
+    <span style="color:var(--muted)">hoặc theo</span><select onchange="_HRD.pick.by=this.value;_HRD.pick.v='';_hrdRenderG()"><option value="dept" ${H.pick.by==='dept'?'selected':''}>Bộ phận / tàu</option><option value="title" ${H.pick.by==='title'?'selected':''}>Chức danh</option></select>
+    <select onchange="_HRD.pick.v=this.value"><option value="">— chọn —</option>${Object.keys(grp).sort((a,b)=>a.localeCompare(b,'vi')).map(g=>`<option value="${esc(g)}" ${H.pick.v===g?'selected':''}>${esc(g)} (${grp[g]})</option>`).join('')}</select><button class="btn-ghost" style="font-size:11px" onclick="_hrdGAddGroup()">＋ Thêm cả nhóm</button></div>`;
+  const I=(i,k,v,t,w)=>`<input ${t?'type="'+t+'"':''} value="${esc(v==null?'':String(v))}" onchange="_hrdGP(${i},'${k}',this.value);${t==='date'||k==='rate'||k==='amount'||k==='pay'?'_hrdRenderG()':''}" style="width:${w||'100%'}${t==='number'?';text-align:right':''}">`;
+  const cols={KT:['Mức thưởng (đ)'], KL:H.form==='phat_tien'?['Số tiền phạt (đ)']:[], CT:['Từ','Đến','Địa điểm','Mức / ngày','Ngày','Công tác phí'], CD:['Lý do','Thanh toán khi nghỉ (đ)','Chịu thuế','Ghi chú khoản (không in)']}[K];
+  const rows=(H.people||[]).map((p,i)=>{ let c='';
+    if(K==='KT'||(K==='KL'&&H.form==='phat_tien')) c=`<td class="r">${I(i,'amount',p.amount,'number','120px')}</td>`;
+    else if(K==='CT'){ const n=_hrdDays(p.from,p.to).length; c=`<td>${I(i,'from',p.from,'date')}</td><td>${I(i,'to',p.to,'date')}</td><td>${I(i,'place',p.place)}</td><td class="r">${I(i,'rate',p.rate,'number','100px')}</td><td class="r">${n||'<span style="color:var(--bad)">!</span>'}</td><td class="r"><b>${_hrdFm(n*(+p.rate||0))}</b></td>`; }
+    else if(K==='CD') c=`<td>${I(i,'reason',p.reason)}</td><td class="r">${I(i,'pay',p.pay,'number','120px')}</td><td style="text-align:center"><input type="checkbox" ${p.payTax!==false?'checked':''} onchange="_hrdGP(${i},'payTax',this.checked)"></td><td>${I(i,'payNote',p.payNote)}</td>`;
+    let sal='';
+    if(K==='CT'&&H.salMode==='own'){ const flds=SC_ENG_F[p.engine]||[]; sal=`<tr><td></td><td colspan="${4+cols.length}" style="background:#f4faf6"><b style="font-size:11px;color:#1e7d44">💰 Mức lương trong thời gian công tác</b> <span style="font-size:10.5px;color:var(--muted)">(${esc(p.ccy||'VND')} · điền sẵn từ thẻ lương)</span>
+      <div style="display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:4px 8px">${flds.map(([k,l])=>`<label style="font-size:10.5px;color:var(--muted)">${esc(l)} <span>(hiện ${_hrdFm((p.cur||{})[k])})</span><input type="number" step="any" value="${+((p.sal||{})[k])||0}" oninput="_HRD.people[${i}].sal['${k}']=+this.value||0" style="width:100%;text-align:right"></label>`).join('')}</div>${flds.length?'':'<span style="color:var(--bad);font-size:11px">Chưa có thẻ lương</span>'}</td></tr>`; }
+    return `<tr><td>${esc(p.smartId)}</td><td><b>${esc(p.name)}</b></td><td style="font-size:11px">${esc(p.dept)}</td><td style="font-size:11px">${esc(p.title)}</td>${c}<td><a href="javascript:void 0" style="color:var(--bad)" onclick="_hrdGDel(${i})">✕</a></td></tr>`+sal; }).join('');
+  h+=`<div class="tbl-scroll" style="max-height:38vh;overflow:auto;margin-bottom:8px"><table class="tbl" style="font-size:12px"><thead><tr><th>MSNV</th><th>Họ tên</th><th>Bộ phận</th><th>Chức danh</th>${cols.map(c=>`<th>${esc(c)}</th>`).join('')}<th></th></tr></thead><tbody>${rows||`<tr><td colspan="${5+cols.length}" style="text-align:center;color:var(--muted);padding:10px">Chưa chọn người</td></tr>`}</tbody></table></div>`;
+  /* nội dung in */
+  const d2=_hrdD2Def(H);
+  h+=G((K!=='CD'?box('Điều 1 — câu dẫn',inp('d1'),4):'')
+    +box('Điều 2'+(H.d2Edit?' <a href="javascript:void 0" onclick="_HRD.d2Edit=false;_HRD.d2=\'\';_HRD.d2En=\'\';_hrdRenderG()">↺ dùng câu mặc định</a>':' (mặc định — sửa được)'),`<textarea rows="2" oninput="_HRD.d2Edit=true;_HRD.d2=this.value" style="width:100%">${esc(H.d2Edit?H.d2:d2[0])}</textarea>`,4)
+    +(K==='CT'?box('Chi phí khác — thêm vào Điều 2 (nếu có)',inp('d2x','vd Vé máy bay khứ hồi và lưu trú do Công ty chi trả.'),4):''));
+  if(H.en) h+=`<details open style="margin-bottom:8px"><summary style="cursor:pointer;font-size:12px;font-weight:700">🇬🇧 Nội dung tiếng Anh (in nghiêng dưới tiếng Việt)</summary>`+G(box('V/v (EN)',inp('vvEn'),4)+box('Căn cứ "Xét …" (EN, mỗi dòng 1 căn cứ)',`<textarea rows="2" oninput="_HRD.xetEn=this.value" style="width:100%">${esc(H.xetEn||'')}</textarea>`,4)
+    +(K!=='CD'?box('Điều 1 (EN)',inp('d1En'),4):'')+box('Điều 2 (EN)',`<textarea rows="2" oninput="_HRD.d2Edit=true;if(!_HRD.d2)_HRD.d2=${JSON.stringify(d2[0]).replace(/"/g,'&quot;')};_HRD.d2En=this.value" style="width:100%">${esc(H.d2Edit&&H.d2En?H.d2En:d2[1])}</textarea>`,4)
+    +(K==='CT'?box('Chi phí khác (EN)',inp('d2xEn'),4):'')+(K==='CD'?box('Lý do (EN, dùng chung)',inp('reasonEn'),4):''))+`</details>`;
+  h+=`<div style="border:1.5px dashed #1c3a5c;border-radius:8px;padding:6px 10px;font-size:12px;margin-bottom:6px"><b>Ký xong app tự ghi</b> (theo ngày hiệu lực)${_hrdGPlan(H).map(x=>`<div>• ${esc(x)}</div>`).join('')}</div>`;
+  h+='<div id="hrd-err" style="color:var(--bad);font-size:12px"></div>';
+  openModal('📜 '+HRD_META[K].label+(H.id?' — sửa':''), h, `<button class="btn-ghost" onclick="openHrDecisions()">← Danh sách</button><button class="btn-sec" onclick="_hrdSave(false)">💾 Lưu nháp</button><button class="btn-sec" onclick="_hrdPreview()">👁 Xem trước</button><button class="btn-primary" onclick="_hrdSave(true)">🖨 In PDF = Ký</button>`);
+  try{ setModalWide(true); }catch(e){} }
+function _hrdGDateCh(k){ const H=_HRD; if(H.kind==='CT'&&k==='fromDate'&&(!H.toDate||H.toDate<H.fromDate)) H.toDate=H.fromDate;
+  if(H.kind==='CT') (H.people||[]).forEach(p=>{ if(k==='fromDate'&&(!p.from||p.from===p._lf)) p.from=H.fromDate; if(k==='toDate'&&(!p.to||p.to===p._lt)) p.to=H.toDate; p._lf=H.fromDate; p._lt=H.toDate; });
+  _hrdRenderG(); }
+function _hrdValidateG(){ const H=_HRD, er=document.getElementById('hrd-err'); const miss=[]; const P=H.people||[];
+  if(!/^\d{1,4}$/.test(String(H.no3||''))||!(+H.no3)) miss.push('Số QĐ'); if(!/^\d{4}-\d{2}-\d{2}$/.test(String(H.fromDate||''))) miss.push('Ngày hiệu lực'); if(!String(H.vv||'').trim()) miss.push('V/v');
+  if(!P.length) miss.push('Chọn ít nhất 1 người');
+  if(H.kind==='KT'&&P.some(p=>!(+p.amount>0))) miss.push('Mức thưởng từng người');
+  if(H.kind==='KL'){ if(!String(H.reason||'').trim()) miss.push('Lý do kỷ luật'); if(H.form==='phat_tien'&&P.some(p=>!(+p.amount>0))) miss.push('Số tiền phạt từng người'); }
+  if(H.kind==='CT'){ if(P.some(p=>!_hrdDays(p.from,p.to).length)) miss.push('Thời gian công tác (từ ≤ đến)'); if(P.some(p=>!String(p.place||'').trim())) miss.push('Địa điểm'); if(P.some(p=>+p.rate<0)) miss.push('Mức / ngày'); }
+  if(H.kind==='CD'){ if(P.some(p=>p.crew)) miss.push('Thuyền viên: chấm dứt tại Crew Change (QĐ thôi việc)'); if(P.some(p=>!String(p.reason||'').trim())) miss.push('Lý do chấm dứt từng người'); }
+  if(miss.length){ if(er) er.textContent='Thiếu / sai: '+miss.join(', '); else toast('Thiếu / sai: '+miss.join(', '),'bad'); return false; }
+  H.no3=String(+H.no3); H.empName=_hrdWho(H); H.fromDate=String(H.fromDate).slice(0,10); return true; }
+
+/* ── bản in chung theo mẫu 60-2026 ── */
+function _qdDocHtml(o){ const E=x=>esc(x==null?'':String(x)), en=!!o.en, dt=String(o.date||todayISO());
+  const ens=x=>en&&x?`<div class="en">${E(x)}</div>`:'';
+  const xet=(o.xet||[]).map((l,i)=>`<li>${E(l)}${en&&(o.xetEn||[])[i]?`<div class="en">${E(o.xetEn[i])}</div>`:''}</li>`).join('');
+  const st=o.stamp&&o.signedAt?`<div style="position:absolute;right:16mm;top:44mm;border:3px solid #b3122e;color:#b3122e;border-radius:50%;width:98px;height:98px;display:flex;flex-direction:column;align-items:center;justify-content:center;font-weight:900;transform:rotate(-14deg);font-family:Arial;background:rgba(255,255,255,.55)"><div style="font-size:15px">ĐÃ KÝ</div><div style="font-size:10px">${E(_hdDD(String(o.signedAt).slice(0,10)))}</div></div>`:'';
+  const foot=`Ngày hiệu lực/Eff. Date: ${QD_FORM.eff}`;
+  return `<!doctype html><html><head><meta charset="utf-8"><title>${E(o.title)}</title><style>
+  @page{size:A4;margin:14mm 15mm 18mm 25mm;@bottom-left{content:"${foot}";font:10pt "Times New Roman",serif}@bottom-center{content:"Lần soát xét/Rev: ${QD_FORM.rev}";font:10pt "Times New Roman",serif}@bottom-right{content:"Trang/Page " counter(page) " of " counter(pages);font:10pt "Times New Roman",serif}}
+  body{margin:0;color:#000}.qd{font-family:"Times New Roman",Times,serif;font-size:13pt;line-height:1.3;position:relative}.qd p{margin:0 0 1.5mm;text-align:justify}
+  .hd{width:100%;border-collapse:collapse}.hd td{vertical-align:top;text-align:center;padding:0;border:none;font-weight:700;font-size:12.5pt;white-space:nowrap}.u{display:inline-block;border-bottom:1px solid #000;padding-bottom:1px}
+  .c{text-align:center}.b{font-weight:700}.i{font-style:italic}.en{font-style:italic;font-size:11pt;color:#222;font-weight:400}
+  ul.cc{margin:0 0 0 6mm;padding:0;list-style:none}ul.cc li{position:relative;padding-left:7mm;margin-bottom:1mm;text-align:justify}ul.cc li:before{content:"-";position:absolute;left:0}
+  .ar{display:flex;gap:2mm;margin:0 0 2.5mm;text-align:justify}.ar>b{white-space:nowrap}.ar>div{flex:1}
+  table.k{width:100%;border-collapse:collapse;margin:1mm 0 3mm;page-break-inside:auto}table.k th,table.k td{border:1px solid #000;padding:1.2mm 1.5mm;text-align:center;vertical-align:middle;font-size:12pt}table.k th{font-weight:700}table.k tr{page-break-inside:avoid}
+  .art{font-weight:700;text-decoration:underline}.bk{margin-left:9mm}.t{border-collapse:collapse;width:100%;margin:1mm 0}.t td,.t th{border:1px solid #000;padding:2px 6px;font-size:11.5pt}.t th{background:#f0f0f0}.r{text-align:right}
+  .sf{display:none}
+  @media screen{html{background:#e9e7e1}body{padding:12px 0}.pp{width:210mm;min-height:297mm;margin:0 auto;background:#fff;box-shadow:0 1px 6px rgba(0,0,0,.25);box-sizing:border-box;padding:14mm 15mm 22mm 25mm;position:relative}.sf{display:flex;position:absolute;left:25mm;right:15mm;bottom:8mm;justify-content:space-between;font:10pt "Times New Roman",serif}}</style></head>
+  <body><div class="pp"><div class="qd">${st}
+  <table class="hd"><tr><td style="width:47%">CÔNG TY CỔ PHẦN HÀNG HẢI VÀ<br><span class="u">NĂNG LƯỢNG HẢI MÃ</span></td><td>CỘNG HOÀ XÃ HỘI CHỦ NGHĨA VIỆT NAM<br><span class="u">Độc lập - Tự do - Hạnh phúc</span></td></tr></table>
+  <div class="i" style="text-align:right;margin-top:6mm">Ho Chi Minh, ngày ${dt.slice(8,10)} tháng ${dt.slice(5,7)} năm ${dt.slice(0,4)}</div>${en?`<div class="en" style="text-align:right">Ho Chi Minh City, ${E(_cdDEn(dt))}</div>`:''}
+  <div style="margin:1mm 0 6mm 4mm">Số/No.: ${E(o.no)}</div>
+  <div class="c b" style="font-size:14pt">QUYẾT ĐỊNH${en?' / <i>DECISION</i>':''}</div>
+  <div class="c b">(V/v: ${E(o.vv)})</div>${en&&o.vvEn?`<div class="c en">(Re: ${E(o.vvEn)})</div>`:''}
+  <div class="c b" style="margin:3mm 0 ${en?'0':'3mm'}">GIÁM ĐỐC CÔNG TY CỔ PHẦN HÀNG HẢI VÀ NĂNG LƯỢNG HẢI MÃ</div>${en?'<div class="c en b" style="margin-bottom:3mm">DIRECTOR OF SEAHORSE MARINE AND ENERGY JSC</div>':''}
+  <ul class="cc"><li>Căn cứ Bộ luật lao động và các văn bản hướng dẫn thi hành Bộ luật lao động;${ens('Pursuant to the Labour Code and its guiding documents;')}</li><li>Căn cứ vào chức năng, nhiệm vụ và quyền hạn của Giám đốc Công ty;${ens('Pursuant to the functions, duties and powers of the Company Director;')}</li>${xet}</ul>
+  <div class="c b" style="font-size:14pt;margin:4mm 0 3mm">QUYẾT ĐỊNH${en?' / <i>DECIDES</i>':''}</div>
+  ${o.body}
+  <table style="width:100%;margin-top:3mm;border-collapse:collapse;page-break-inside:avoid"><tr><td style="width:50%"></td><td style="width:50%;text-align:center;font-weight:700">GIÁM ĐỐC ĐIỀU HÀNH<div class="i">(MANAGING DIRECTOR)</div><div style="height:24mm"></div>${E(QD_FORM.signer)}</td></tr></table>
+  <div style="font-size:10.5pt;margin-left:4mm;page-break-inside:avoid"><div class="b i">Nơi nhận/ Recipient:</div><div>- Như Điều 3</div><div>- BGĐ Công ty</div><div>- Lưu: VT, NS (${E(QD_FORM.code)})</div></div>
+  </div><div class="sf"><span>${foot}</span><span>Lần soát xét/Rev: ${QD_FORM.rev}</span><span>Trang/Page <b>1</b> of <b>1</b></span></div></div></body></html>`; }
+function _hrdArt(n, vn, en, isEn){ return `<div class="ar"><b>Điều ${n}:</b><div>${vn}${isEn&&en?`<div class="en"><b>Article ${n}.</b> ${en}</div>`:''}</div></div>`; }
+function _hrdBodyG(d){ const E=x=>esc(x==null?'':String(x)), en=!!d.en, P=d.people||[], K=d.kind;
+  const th=(vn,eng)=>`<th>${vn}${en?`<div class="en">${eng}</div>`:''}</th>`;
+  const head=th('Stt','No.')+th('MSNV','ID')+th('Họ tên','Full name')+th('Bộ phận','Department')+th('Chức danh','Position');
+  let extra='', cells;
+  if(K==='CT'){ extra=th('Thời gian','Period')+th('Địa điểm','Location');
+    const tStr=p=>_hdDD(p.from)+'<br>-<br>'+_hdDD(p.to);
+    /* gộp ô Thời gian / Địa điểm giống nhau liên tiếp (như mẫu 60-2026) */
+    const span=(i,f)=>{ if(i>0&&f(P[i-1])===f(P[i])) return -1; let n=1; while(i+n<P.length&&f(P[i+n])===f(P[i])) n++; return n; };
+    const fT=p=>p.from+'|'+p.to, fP=p=>String(p.place||'').trim();
+    cells=(p,i)=>{ const a=span(i,fT), b=span(i,fP); return (a>0?`<td${a>1?' rowspan="'+a+'"':''}>${tStr(p)}</td>`:'')+(b>0?`<td${b>1?' rowspan="'+b+'"':''}>${E(p.place)}</td>`:''); }; }
+  else if(K==='KT'){ extra=th('Mức thưởng (đồng)','Amount (VND)'); cells=p=>`<td style="text-align:right">${_hrdFm(p.amount)}</td>`; }
+  else if(K==='KL'){ const f=_hrdKlForm(d.form); extra=th('Hình thức','Form'); cells=p=>`<td>${E(f[1])}${d.form==='phat_tien'?' '+_hrdFm(p.amount)+' đồng':''}${en?`<div class="en">${E(f[2])}${d.form==='phat_tien'?' VND '+_hrdFm(p.amount):''}</div>`:''}</td>`; }
+  else { extra=th('Lý do','Reason'); cells=p=>`<td>${E(p.reason)}${en&&d.reasonEn?`<div class="en">${E(d.reasonEn)}</div>`:''}</td>`; }
+  const rows=P.map((p,i)=>`<tr><td>${i+1}</td><td>${E(p.smartId)}</td><td>${E(p.name)}</td><td>${E(p.dept)}</td><td>${E(p.title)}</td>${cells(p,i)}</tr>`).join('');
+  const tot=K==='KT'?`<tr><td colspan="5"><b>Tổng cộng${en?' / Total':''}</b></td><td style="text-align:right"><b>${_hrdFm(P.reduce((t,p)=>t+(+p.amount||0),0))}</b></td></tr>`:'';
+  const d1=_hrdD1(d), d2=_hrdD2(d);
+  return _hrdArt(1, E(d1[0]), E(d1[1]), en)+`<table class="k"><tr>${head}${extra}</tr>${rows}${tot}</table>`
+    +(K==='KL'?`<p style="margin-left:14mm">Lý do: ${E(d.reason)}${en&&d.reasonEn?`<span class="en"> / Reason: ${E(d.reasonEn)}</span>`:''}</p>`:'')
+    +_hrdArt(2, E(d2[0]), E(d2[1]), en)+_hrdArt(3, E(HRD_D3[0]), E(HRD_D3[1]), en); }
+function _hrdHtmlNew(d, stamp){ const no=_qdNoStr(d);
+  if(_hrdIsG(d.kind)) return _qdDocHtml({title:no+' - '+HRD_META[d.kind].label+' - '+_hrdWho(d), no, date:d.date, vv:d.vv, vvEn:d.vvEn, en:d.en, xet:String(d.xet||'').split('\n').map(s=>s.trim()).filter(Boolean), xetEn:String(d.xetEn||'').split('\n').map(s=>s.trim()).filter(Boolean), body:_hrdBodyG(d), stamp, signedAt:d.signedAt});
+  /* QĐ điều chuyển / điều chỉnh lương — khuôn chung, giữ nội dung Điều như cũ */
+  const P=_hrdHtmlParts(d);
+  return _qdDocHtml({title:no+' - '+(d.empName||'')+' - '+HRD_META[d.kind].label, no, date:d.date, vv:P.sub, en:false, xet:P.xet, body:P.art, stamp, signedAt:d.signedAt}); }
+
+/* ── ký: ghi hồ sơ / lương / BCC ── */
+function _hrdLockedPeriods(month, empIds){ const set=new Set(empIds); return (PayrollService.periods()||[]).filter(p=>p&&!p._deleted&&p.period===month&&(p.rows||[]).some(r=>set.has(r.empId))&&(payStatusIdx(p.status)>=payStatusIdx('submitted')||_payVoucherLinesOf(p).length||p._histImport)); }
+function _hrdRecalcMonths(A, lbl, warn){ Object.keys(A.months||{}).sort().forEach(m=>{ const ids=Array.from(new Set(A.months[m])); let R={done:[],skipped:[]}; try{ R=_qdRecalc(ids, m); }catch(e){ console.warn('[hrd recalc]',e); }
+    const lk=_hrdLockedPeriods(m, ids); lk.forEach(p=>{ ids.forEach(id=>{ if(!(p.rows||[]).some(r=>r.empId===id)) return; p._needsRecalc=(p._needsRecalc||[]).filter(x=>!(x.empId===id&&x.label===lbl)); p._needsRecalc.push({empId:id, label:lbl, at:new Date().toISOString()}); }); try{ touchRecord(p); }catch(_){} });
+    if(lk.length&&warn) warn.push('Kỳ '+_hrdMY(m+'-01')+': '+lk.map(_payPropLabel).join(', ')+' đã vào đề xuất / khóa — ⚠ Cần tính lại'); }); }
+function _hrdCtMark(p, A, warn){ const byM={}; _hrdDays(p.from,p.to).forEach(iso=>{ const m=iso.slice(0,7); if(m<'2026-10') return; (byM[m]=byM[m]||[]).push(iso); });
+  Object.keys(byM).forEach(m=>{ const [Y,M]=m.split('-').map(Number);
+    (S.bccSheets||[]).filter(sh=>sh&&!sh._deleted&&sh.period===m&&sh.mode==='daily'&&sh.scope&&sh.scope.type!=='vessel'&&(sh.rows||[]).some(r=>r&&r.empId===p.empId)).forEach(sh=>{
+      if(_cdBccLocked(sh)){ warn.push('BCC '+_hrdMY(m+'-01')+' ('+bccScopeLabel(sh.scope)+') đã gửi/khóa — '+p.name+': ghi C1 thủ công'); return; }
+      const r=sh.rows.find(x=>x&&x.empId===p.empId); if(r.selfSubmittedAt) return; r.days=r.days||{}; r.auto=r.auto||{}; const ch={};
+      byM[m].forEach(iso=>{ const d=+iso.slice(8,10); if(_bccWeekendOff(sh)&&_bccIsWeekend(sh,d)) return; if(_bccVnHoliday(Y,M,d)) return; if(r.edited&&r.edited[d]) return;
+        const v=r.days[d]; if(v!=null&&v!==''&&!r.auto[d]) return; ch[d]=[v==null?'':v, !!r.auto[d]]; r.days[d]='C1'; r.auto[d]=true; });
+      if(Object.keys(ch).length){ A.bcc.push({id:sh.id, empId:p.empId, ch}); try{ _bccTouch(sh,r); }catch(_){} } }); }); }
+function _hrdCtOn(empId, iso){ return (S.hrDecisions||[]).some(d=>d&&!d._deleted&&d.kind==='CT'&&d.signedAt&&(d.people||[]).some(p=>p.empId===empId&&String(p.from)<=iso&&iso<=String(p.to))); }
+function _hrdCtSal(p, d, A, warn, lbl){ const L=_spList(p.empId), cur=L[L.length-1]; if(!cur){ warn.push(p.name+': chưa có thẻ lương — chưa áp mức lương riêng'); return; }
+  const flds=SC_ENG_F[cur.engine]||[]; if(!flds.some(([k])=>(+((p.sal||{})[k])||0)!==_scR(cur,k))) return;
+  if(_spFromDate(cur)>=p.from){ warn.push(p.name+': thẻ lương đã có kỳ từ '+_cdD(_spFromDate(cur))+' — chưa áp mức lương riêng (sửa tại Thẻ lương)'); return; }
+  const prev={id:cur.id, effectiveTo:cur.effectiveTo||'', effectiveDateTo:cur.effectiveDateTo||''}; const next={}; flds.forEach(([k])=>{ next[k]=+((p.sal||{})[k])||0; });
+  const crewMgr=/^crew/.test(String(cur.engine||''));
+  const v1=salaryProfileAddVersion(p.empId,{effectiveDate:p.from, engine:cur.engine, rank:cur.rank, data:Object.assign({}, cur.data||{}, next), reason:'Lương thời gian công tác theo '+lbl, source:'manual', _crewMgr:crewMgr});
+  if(!v1){ warn.push(p.name+': không tạo được kỳ thẻ lương (quyền thẻ lương)'); return; } v1.hrDecisionId=d.id; if(cur.companyId) v1.companyId=cur.companyId; try{ touchRecord(v1); }catch(_){}
+  const v2=salaryProfileAddVersion(p.empId,{effectiveDate:_hrdDayAfter(p.to), engine:cur.engine, rank:cur.rank, data:Object.assign({}, cur.data||{}), reason:'Hết thời gian công tác — trở lại mức theo HĐLĐ ('+lbl+')', source:'manual', _crewMgr:crewMgr});
+  if(v2){ v2.hrDecisionId=d.id; if(cur.companyId) v2.companyId=cur.companyId; try{ touchRecord(v2); }catch(_){} } else warn.push(p.name+': chưa tạo được kỳ trở lại mức cũ — kiểm tra Thẻ lương');
+  A.sal.push({empId:p.empId, prev, v1:v1.id, v2:v2?v2.id:''}); _hrdDays(p.from, _hrdDayAfter(p.to)).forEach(x=>{ (A.months[x.slice(0,7)]=A.months[x.slice(0,7)]||[]).push(p.empId); }); }
+function _hrdApplyG(d){ const warn=[], now=new Date().toISOString(), who=actorName(), no=_qdNoStr(d), lbl='QĐ '+no, eff=String(d.fromDate).slice(0,10), K=d.kind, P=d.people||[];
+  const A={at:now, by:who, pex:[], months:{}, bcc:[], sal:[], emp:[], bccLeave:{}};
+  const mark=(m,id)=>{ (A.months[m]=A.months[m]||[]).push(id); };
+  const addPex=(p, month, amount, sign, taxable, kind, desc)=>{ const x={id:'pex_'+uid(), batchId:A.batchId||'', qdId:A.batchId||'', hrdId:d.id, empId:p.empId, period:month, effectivePeriod:month, sign, amount:Math.round(+amount||0), currency:'VND', taxable:!!taxable, insuranceApplicable:false, showOnPayslip:true,
+      kind, desc, docRef:lbl, sourceType:kind==='CTP'?'ctp':'qd', status:'approved', createdBy:d.createdBy||who, createdAt:now, approvedBy:who, approvedAt:now, auditTrail:[{at:now,by:who,act:'create_approve',note:'Ký '+lbl}]};
+    (S.payExtras=S.payExtras||[]).push(x); A.pex.push(x.id); mark(month, p.empId); try{ touchRecord(x); }catch(_){} return x; };
+  const hist=(p,kind,field,val,note)=>{ try{ hrmLogHistory(p.empId,kind,field,'',val,lbl+(note?' · '+note:'')); }catch(_){} };
+  if(K==='KT'||(K==='KL'&&d.form==='phat_tien')){ const month=eff.slice(0,7), sign=K==='KT'?1:-1, tax=K==='KT'?!!d.taxable:false; const L=P.filter(p=>+p.amount>0);
+    const q={id:'qd_'+uid(), kind:'qd', hrdId:d.id, status:'approved', no, date:d.date, content:d.vv, name:d.vv, sign, period:month, payout:'period', payDate:'', taxable:tax, block:L.every(p=>p.crew)?'crew':'office', target:'person', c1:'', c2:'', bands:[], asOf:'', calc:'amt', vals:{}, personVals:{}, off:{}, fileName:'Quyết định nhân sự '+no,
+      items:L.map(p=>({empId:p.empId, smartId:p.smartId, name:p.name, amount:Math.round(+p.amount), group:''})), extrasIds:[], createdBy:d.createdBy||who, createdAt:now, updatedAt:now, submittedBy:who, submittedAt:now, hrmApprovedBy:who, hrmApprovedAt:now, log:[{at:now,by:who,act:'Ký '+lbl+' (Quyết định nhân sự — ký = ban hành)'}]};
+    L.forEach(p=>{ q.personVals[p.empId]=Math.round(+p.amount); }); (S.payExtraBatches=S.payExtraBatches||[]).push(q); A.batchId=q.id;
+    L.forEach(p=>{ const x=addPex(p, month, +p.amount, sign, tax, 'QD', d.vv+' ('+lbl+')'); q.extrasIds.push(x.id); }); try{ touchRecord(q); }catch(_){} }
+  if(K==='KT') P.forEach(p=>hist(p,'reward','Khen thưởng',_hrdFm(p.amount)+' đ',d.vv));
+  if(K==='KL'){ const f=_hrdKlForm(d.form); P.forEach(p=>hist(p,'discipline','Kỷ luật',f[1]+(d.form==='phat_tien'?' '+_hrdFm(p.amount)+' đ':''),d.reason)); }
+  if(K==='CT') P.forEach(p=>{ const sp=_hrdSplit(p.from,p.to), rate=+p.rate||0;
+    if(rate>0) Object.keys(sp).sort().forEach(m=>addPex(p, m, sp[m]*rate, 1, false, 'CTP', 'Công tác phí: '+String(p.place||'').trim()+' ('+sp[m]+' ngày × '+_hrdFm(rate)+') — '+lbl));
+    _hrdCtMark(p, A, warn); if(d.salMode==='own') _hrdCtSal(p, d, A, warn, lbl);
+    hist(p,'trip','Công tác',_hdDD(p.from)+' – '+_hdDD(p.to)+' · '+String(p.place||'').trim(),''); });
+  if(K==='CD') P.forEach(p=>{ const e=(S.hrEmployees||[]).find(x=>x.id===p.empId); if(!e){ warn.push('Không tìm thấy hồ sơ '+p.name); return; }
+    const snap={empId:e.id, status:e.status||'', resignDate:e.resignDate||'', lastWorkDay:e.lastWorkDay||'', terminateDecisionNo:e.terminateDecisionNo||'', terminateReason:e.terminateReason||'', termSrc:e._termSrc?JSON.parse(JSON.stringify(e._termSrc)):null, statusDone:false, hd:null};
+    e.resignDate=eff; e.lastWorkDay=_spDayBefore(eff); e.terminateDecisionNo=no; e.terminateReason=p.reason||''; _markTerm(e,'QĐ chấm dứt HĐLĐ '+no);
+    if(eff<=todayISO()){ e.status='inactive'; snap.statusDone=true; } else d._scheduled=eff;
+    hist(p,'terminate','Nghỉ việc','nghỉ việc từ '+_cdD(eff),p.reason);
+    try{ const hd=(S.laborContracts||[]).filter(x=>x&&!x._deleted&&x.signedAt&&x.empId===e.id).sort((x,y)=>String(y.ngayKy).localeCompare(String(x.ngayKy)))[0]; if(hd){ snap.hd={id:hd.id, terminatedAt:hd.terminatedAt||'', terminateDecision:hd.terminateDecision||''}; hd.terminatedAt=eff; hd.terminateDecision=lbl; try{ touchRecord(hd); }catch(_){} } }catch(_){}
+    A.bccLeave[e.id]=_hrBccLeaveDept(e, eff, warn);
+    if(+p.pay>0) addPex(p, _spDayBefore(eff).slice(0,7), +p.pay, 1, p.payTax!==false, 'QD', 'Thanh toán khi nghỉ việc'+(String(p.payNote||'').trim()?': '+String(p.payNote).trim():'')+' ('+lbl+')');
+    mark(eff.slice(0,7), e.id); mark(_spDayBefore(eff).slice(0,7), e.id); A.emp.push(snap); try{ touchRecord(e); }catch(_){} });
+  _hrdRecalcMonths(A, lbl, warn);
+  d._applied=A; return warn; }
+function _hrdGLocked(d){ const A=d._applied||{}; const out=[]; const by={}; (A.pex||[]).forEach(id=>{ const x=(S.payExtras||[]).find(y=>y.id===id); if(x&&!x._deleted){ const m=x.effectivePeriod||x.period; (by[m]=by[m]||[]).push(x.empId); } });
+  Object.keys(by).forEach(m=>_hrdLockedPeriods(m, by[m]).forEach(p=>out.push(_payPropLabel(p)+' · '+_hrdMY(m+'-01')))); return out; }
+function _hrdRevertG(d){ const A=d._applied; const warn=[]; if(!A) return warn; const now=new Date().toISOString(), who=actorName(), lbl='QĐ '+_qdNoStr(d);
+  (A.pex||[]).forEach(id=>{ const x=(S.payExtras||[]).find(y=>y.id===id); if(x&&!x._deleted){ x._deleted=true; x.deletedAt=now; x.deletedBy=who; (x.auditTrail=x.auditTrail||[]).push({at:now,by:who,act:'cancel_hrd',note:'Xóa '+lbl}); try{ touchRecord(x); }catch(_){} } });
+  if(A.batchId){ const q=(S.payExtraBatches||[]).find(b=>b.id===A.batchId); if(q){ q.status='cancelled'; (q.log=q.log||[]).push({at:now,by:who,act:'Hủy theo xóa '+lbl}); q.updatedAt=now; try{ touchRecord(q); }catch(_){} } }
+  /* BCC C1 */
+  const done=new Set(); (A.bcc||[]).forEach(j=>{ const sh=(S.bccSheets||[]).find(s=>s.id===j.id); const r=sh&&(sh.rows||[]).find(x=>x&&x.empId===j.empId); if(!r) return;
+    if(_cdBccLocked(sh)){ warn.push('BCC '+_hrdMY(sh.period+'-01')+' ('+bccScopeLabel(sh.scope)+') đã gửi/khóa — '+((hrmEmpById(j.empId)||{}).fullName||'')+': bỏ C1 thủ công'); return; }
+    Object.keys(j.ch||{}).forEach(k=>{ done.add(sh.id+'|'+j.empId+'|'+k); if(r.days&&r.days[k]==='C1'){ const pv=j.ch[k]; if(pv[0]==='') delete r.days[k]; else r.days[k]=pv[0]; if(r.auto){ if(pv[1]) r.auto[k]=true; else delete r.auto[k]; } } }); try{ _bccTouch(sh,r); }catch(_){} });
+  if(d.kind==='CT') (d.people||[]).forEach(p=>{ _hrdDays(p.from,p.to).forEach(iso=>{ (S.bccSheets||[]).filter(sh=>sh&&!sh._deleted&&sh.period===iso.slice(0,7)&&sh.mode==='daily'&&!_cdBccLocked(sh)).forEach(sh=>{ const r=(sh.rows||[]).find(x=>x&&x.empId===p.empId); const k=String(+iso.slice(8,10));
+      if(r&&!done.has(sh.id+'|'+p.empId+'|'+k)&&r.days&&r.days[k]==='C1'&&r.auto&&r.auto[k]){ delete r.days[k]; delete r.auto[k]; try{ _bccTouch(sh,r); }catch(_){} } }); }); });   /* C1 do app tự điền sau khi ký */
+  /* thẻ lương mức riêng */
+  (A.sal||[]).forEach(s=>{ [s.v2,s.v1].forEach(id=>{ const v=id&&(S.salaryProfiles||[]).find(x=>x.id===id); if(v){ v._deleted=true; v.deletedAt=now; try{ touchRecord(v); }catch(_){} } });
+    const p=(S.salaryProfiles||[]).find(x=>x.id===s.prev.id); if(p){ p.effectiveTo=s.prev.effectiveTo; if(s.prev.effectiveDateTo) p.effectiveDateTo=s.prev.effectiveDateTo; else delete p.effectiveDateTo; try{ touchRecord(p); }catch(_){} } });
+  /* chấm dứt HĐLĐ */
+  (A.emp||[]).forEach(sn=>{ const e=(S.hrEmployees||[]).find(x=>x.id===sn.empId); if(!e) return;
+    e.status=sn.status||'active'; ['resignDate','lastWorkDay','terminateDecisionNo','terminateReason'].forEach(k=>{ if(sn[k]) e[k]=sn[k]; else delete e[k]; }); if(sn.termSrc) e._termSrc=sn.termSrc; else delete e._termSrc;
+    if(sn.hd){ const h=(S.laborContracts||[]).find(x=>x.id===sn.hd.id); if(h){ if(sn.hd.terminatedAt) h.terminatedAt=sn.hd.terminatedAt; else delete h.terminatedAt; if(sn.hd.terminateDecision) h.terminateDecision=sn.hd.terminateDecision; else delete h.terminateDecision; try{ touchRecord(h); }catch(_){} } }
+    _hrdBccUnleave(e, (A.bccLeave||{})[e.id]); try{ touchRecord(e); }catch(_){} });
+  (d.people||[]).forEach(p=>{ try{ hrmLogHistory(p.empId,'revert',HRD_META[d.kind].label,'','đã hủy',lbl+' bị xóa'); }catch(_){} });
+  _hrdRecalcMonths(A, lbl, warn); return warn; }
+function _hrdBccUnleave(e, list){ (list||[]).forEach(j=>{ const sh=(S.bccSheets||[]).find(s=>s.id===j.id); const r=sh&&(sh.rows||[]).find(r=>r.empId===e.id); if(r){ if(j.prevLeft) r._leftFrom=j.prevLeft; else delete r._leftFrom; r.days=r.days||{}; r.ot=r.ot||{}; Object.keys(j.days||{}).forEach(d=>r.days[d]=j.days[d]); Object.keys(j.ot||{}).forEach(d=>r.ot[d]=j.ot[d]); if(j.auto&&Object.keys(j.auto).length){ r.auto=r.auto||{}; Object.keys(j.auto).forEach(d=>r.auto[d]=true); } try{ _bccTouch(sh,r); }catch(_){} } }); }
 
 let _CD=null, _CD_Q='';
 function _cdCanUse(){ try{ return _canSeeCrewMgmt(); }catch(e){ return isAdmin(); } }
@@ -51620,7 +51938,7 @@ function openCrewDocs(kind, showDraft){
   const signed=all.filter(d=>d.signedAt), drafts=all.filter(d=>!d.signedAt);
   const key=d=>isQD?(String(d.year||'')+String(d.no3||'').padStart(3,'0')):String(d.signedAt||'');
   const list=(showDraft?drafts:signed).sort((x,y)=>key(x).localeCompare(key(y)));
-  const rows=list.map((d,i)=>`<tr><td style="text-align:center">${i+1}</td>${isQD?`<td style="font-family:var(--font-mono)"><b>${esc(d.no3||'')}</b>/QĐNS/${esc(d.year||'')}</td>`:''}<td>${esc(_cdD(String(d.signedAt||d.date||'').slice(0,10)))}</td>
+  const rows=list.map((d,i)=>`<tr><td style="text-align:center">${i+1}</td>${isQD?`<td style="font-family:var(--font-mono)"><b>${esc(_qdNoStr(d))}</b></td>`:''}<td>${esc(_cdD(String(d.signedAt||d.date||'').slice(0,10)))}</td>
     <td><b>${esc(d.empName||'')}</b><div style="font-size:11px;color:var(--muted)">${esc(d.rank||'')}${d.vesselName?' · '+esc(d.vesselName):''}</div></td>
     <td style="font-size:12px">${isQD?(d.sub==='TV'?'Thôi việc':(d.sub==='NC'?'Điều động · nghỉ ca':'Điều động')):esc((CREW_TPL.meta[d.tpl]||{}).label||d.tpl)}</td>
     <td style="white-space:nowrap"><a href="javascript:void 0" onclick="_cdOpenOrView('${d.id}')">🔗 Mở</a></td></tr>`).join('');
@@ -51638,13 +51956,13 @@ function openCrewDocs(kind, showDraft){
 function openCrewDocForm(kind, id){
   const ex=id?(S.crewDocs||[]).find(x=>x.id===id):null;
   if(ex && ex.signedAt){ toast('Phiếu đã ký — khóa sửa. Trưởng BP mở khóa nếu cần sửa','warn'); _cdView(id); return; }   // v3.67.15
-  _CD=ex?JSON.parse(JSON.stringify(ex)):{kind, sub:'DD', tpl:'FRM014', date:todayISO(), year:todayISO().slice(0,4), no3:(kind==='QD'?_qdNextNo(todayISO().slice(0,4)):''), empId:'', empName:'', empNameEn:'', gender:'M', rank:'', rankEn:'', vesselId:'', vesselName:'', task:'', taskEn:'', fromDate:todayISO(), instructor:'', joinDate:'', dept:'', method:'', ans:{}, extra:{}};
+  _CD=ex?JSON.parse(JSON.stringify(ex)):{kind, sub:'DD', tpl:'FRM014', date:todayISO(), year:todayISO().slice(0,4), no3:(kind==='QD'?String(+_qdNextNo(todayISO().slice(0,4))):''), noFmt:(kind==='QD'?'HCNS':undefined), empId:'', empName:'', empNameEn:'', gender:'M', rank:'', rankEn:'', vesselId:'', vesselName:'', task:'', taskEn:'', fromDate:todayISO(), instructor:'', joinDate:'', dept:'', method:'', ans:{}, extra:{}};
   _cdRender();
 }
 function _cdPickEmp(id){ const e=_cdCrew().find(x=>x.id===id); const C=_CD; C.empId=id; if(e){ C.empName=e.fullName||''; C.empNameEn=_cdEn(e.fullName); C.rank=C.rank||e.title||''; C.gender=(String(e.gender||'').toLowerCase().startsWith('f')||/nữ/i.test(e.gender||''))?'F':'M';
   if(C.kind!=='QD' && !C.vesselId && e.linkVesselId){ const v=_cdVessels().find(x=>x.id===e.linkVesselId); if(v){ C.vesselId=v.id; C.vesselName=v.name; } }   // v3.68.08: QĐ — ô Đến không điền sẵn
   const ri=_cdRankInfo(C.rank); if(ri.en) C.rankEn=ri.en; if(C.kind==='BRIEF' && !Object.keys(C.ans||{}).length) C.tpl=_CD_DEPT_TPL[ri.dept]||C.tpl; } try{ _cdSalPrefill(true); }catch(e){} _cdRender(); }   // v3.67.15 · v3.67.74
-function _cdF(k,v){ _CD[k]=v; if(k==='date'&&_CD.kind==='QD'){ const y=String(v||'').slice(0,4); if(/^\d{4}$/.test(y)&&y!==_CD.year){ _CD.year=y; if(!_CD.id) _CD.no3=_qdNextNo(y); try{ _cdRender(); }catch(_){} } } }   // v3.67.88: đổi năm → đánh lại số
+function _cdF(k,v){ _CD[k]=v; if(k==='date'&&_CD.kind==='QD'){ const y=String(v||'').slice(0,4); if(/^\d{4}$/.test(y)&&y!==_CD.year){ _CD.year=y; if(!_CD.id) _CD.no3=String(+_qdNextNo(y)); try{ _cdRender(); }catch(_){} } } }   // v3.67.88: đổi năm → đánh lại số
 function _cdAns(k,f,v){ const a=(_CD.ans[k]=_CD.ans[k]||{}); a[f]=v; }
 function _cdItemsOf(tpl){
   const D=CREW_TPL.data, out=[];
@@ -51677,7 +51995,7 @@ function _cdRenderTV(){
   const body=`<div style="font-weight:800;color:#C62828;margin-bottom:8px">🔴 Quyết định chấm dứt hợp đồng lao động (thôi việc)</div>
   <div style="display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px">
     ${f('Thuyền viên *',`<select style="width:100%" onchange="_CD.empId=this.value;_CD._tvInit=0;_CD.dob='';_CD.rank='';_cdRenderTV()"><option value="">— Chọn thuyền viên —</option>${crew.map(e=>`<option value="${e.id}" ${C.empId===e.id?'selected':''}>${esc(e.fullName)}${e.smartId?' · '+esc(e.smartId):''}</option>`).join('')}</select>`,2)}
-    ${f('Số QĐ (app tự đánh)',`<div style="display:flex;gap:4px;align-items:center"><input value="${esc(C.no3)}" maxlength="3" ${isAdmin()?'':'readonly'} oninput="_cdF('no3',this.value.replace(/\\D/g,''))" style="width:60px;text-align:center${isAdmin()?'':';background:var(--paper-2)'}"><span style="font-size:12px">/${esc(C.year||todayISO().slice(0,4))}/QĐ-SME-NS</span></div>`)}
+    ${f('Số QĐ',_qdNoBox(C.no3, C.year||todayISO().slice(0,4), C.id, "_cdF('no3',this.value.replace(/\\D/g,''))", "_cdF('no3','$N');_cdRender()"))}
     ${f('Ngày QĐ',inp('date','','date'))}
     ${f('Ông / Bà',`<select style="width:100%" onchange="_cdF('gender',this.value)"><option value="M" ${C.gender!=='F'?'selected':''}>Ông</option><option value="F" ${C.gender==='F'?'selected':''}>Bà</option></select>`)}
     ${f('Ngày sinh (từ hồ sơ)',inp('dob','','date'))}${f('Chức danh (từ hồ sơ)',inp('rank'))}${f('Bộ phận',inp('dept','Đội tàu','',true))}
@@ -51721,7 +52039,7 @@ function _cdRenderQD2(){ const C=_CD; const crew=_cdCrew(), ves=_cdVessels(); co
     return h; })();
   let body=`<div style="display:grid;grid-template-columns:1.5fr .9fr .9fr;gap:10px;margin-bottom:10px">
     ${f('Thuyền viên *',`<select style="width:100%" onchange="_CD.rankPick='';_cdPickEmp(this.value)"><option value="">— Chọn thuyền viên —</option>${crew.map(x=>`<option value="${x.id}" ${C.empId===x.id?'selected':''}>${esc(x.fullName)}${x.title?' · '+esc(x.title):''}</option>`).join('')}</select>`,0,C.empId?'Họ tên, tên tiếng Anh, Ông/Bà lấy từ hồ sơ':'')}
-    ${f('Số QĐ (app tự đánh)',`<div style="display:flex;gap:6px;align-items:center"><input value="${esc(C.no3)}" maxlength="3" ${isAdmin()?'':'readonly title="App tự đánh số — chỉ Admin sửa"'} oninput="_cdF('no3',this.value.replace(/\\D/g,''))" style="width:70px;text-align:center${isAdmin()?'':';background:var(--paper-2)'}"><span>/QĐNS/${esc(C.year||todayISO().slice(0,4))}</span></div>`)}
+    ${f('Số QĐ',_qdNoBox(C.no3, C.year||todayISO().slice(0,4), C.id, "_cdF('no3',this.value.replace(/\\D/g,''))", "_cdF('no3','$N');_cdRender()"))}
     ${f('Ngày quyết định *',`<input type="date" value="${esc(C.date||'')}" onchange="_cdF('date',this.value)" style="width:100%">`)}</div>
   <div style="display:grid;grid-template-columns:1fr 20px 1fr 1fr;gap:10px;align-items:end;margin-bottom:10px">
     ${f('Từ (tàu / trạng thái)',ro(C.fromState),0,'tự lấy — trạng thái hiện tại')}<div style="text-align:center;font-size:16px;padding-bottom:8px">→</div>
@@ -51766,7 +52084,7 @@ function _cdRender(){
     ${f(isQD?'Ngày quyết định':'Ngày hướng dẫn',inp('date','','date'))}`;
   if(isQD){
     body+=`${f('Loại quyết định',`<select style="width:100%" onchange="_cdF('sub',this.value);_cdRender()"><option value="DD" ${C.sub==='DD'||!C.sub?'selected':''}>QĐ điều động — xuống tàu / chuyển tàu</option><option value="NC" ${C.sub==='NC'?'selected':''}>QĐ điều động — lên bờ nghỉ ca</option></select>`)}
-      ${f('Số QĐ (app tự đánh)',`<div style="display:flex;gap:6px;align-items:center"><input value="${esc(C.no3)}" maxlength="3" ${isAdmin()?'':'readonly title="App tự đánh số — chỉ Admin sửa"'} oninput="_cdF('no3',this.value.replace(/\\D/g,''))" style="width:70px;text-align:center${isAdmin()?'':';background:var(--paper-2)'}"><span>${C.sub==='TV'?'/'+esc(C.year||todayISO().slice(0,4))+'/QĐ-SME-NS':'/QĐNS/'+esc(C.year||todayISO().slice(0,4))}</span></div>`)}
+      ${f('Số QĐ',_qdNoBox(C.no3, C.year||todayISO().slice(0,4), C.id, "_cdF('no3',this.value.replace(/\\D/g,''))", "_cdF('no3','$N');_cdRender()"))}
       ${f('Họ tên tiếng Anh',inp('empNameEn','NGUYEN VAN A'))}
       ${f('Ông / Bà',`<select style="width:100%" onchange="_cdF('gender',this.value)"><option value="M" ${C.gender!=='F'?'selected':''}>Ông / Mr.</option><option value="F" ${C.gender==='F'?'selected':''}>Bà / Ms.</option></select>`)}
       ${f('Chức danh tiếng Anh',inp('rankEn','VD: 2nd Engineer'))}
@@ -51809,7 +52127,9 @@ function _cdSave(andPrint){
   const C=_CD; if(!C) return;
   if(!String(C.empName||'').trim()){ toast('Chọn / nhập thuyền viên','bad'); return; }
   if(C.kind==='QD' && C.empId){ const _e=hrmEmpById(C.empId); if(_e && !_isCrewType(_e)){ toast((_e.fullName||'')+' ('+(_e.smartId||'')+') là nhân viên '+(PAY_PROFILE_LABEL[_e.type]||_e.type||'')+' — không lập QĐ điều động tàu. Đổi Loại nhân sự nếu đúng là thuyền viên.','bad'); return; } }   /* v3.68.27 */
-  if(C.kind==='QD'){ C.year=String(C.date||todayISO()).slice(0,4); if(!/^\d{1,3}$/.test(String(C.no3||''))) C.no3=_qdNextNo(C.year, C.id); else if(!_qdNoFree(C.year, C.no3, C.id)){ const _o=C.no3; C.no3=_qdNextNo(C.year, C.id); toast('Số '+_o+' đã có QĐ khác dùng — đổi sang '+C.no3,'warn'); } }   // v3.67.88: tự đánh số
+  if(C.kind==='QD'){ C.year=String(C.date||todayISO()).slice(0,4); if(!C.signedAt) C.noFmt='HCNS';   /* v3.70.47: số HCNS — app gợi ý, người lập chọn; trùng → chặn */
+    if(!/^\d{1,4}$/.test(String(C.no3||''))||!(+C.no3)){ toast('Nhập số QĐ (gợi ý '+(+_qdNextNo(C.year, C.id))+')','bad'); return; }
+    if(!_qdNoFree(C.year, C.no3, C.id)){ toast('Số '+_qdNoStr(C)+' đã dùng cho QĐ khác — chọn số khác (gợi ý '+(+_qdNextNo(C.year, C.id))+')','bad'); return; } }
   if(C.kind==='QD' && !C.fromDate){ toast('Chọn ngày hiệu lực (có gợi ý bên dưới ô ngày)','bad'); return; }   // v3.67.24
   if(C.kind==='QD' && C.sub==='DD' && !C.vesselId){ toast('Chọn Đến (tàu / Nghỉ ca)','bad'); return; }
   if(C.kind==='QD' && C.sub!=='NC' && C.sub!=='TV'){   /* v3.68.08 */
@@ -51819,7 +52139,7 @@ function _cdSave(andPrint){
     C.task=C.rank; C.taskEn=C.rankEn; C.fromState=_cdFromState(C); }
   if(C.kind==='QD' && C.sub==='TV' && !String(C.reason||'').trim()){ toast('Nhập lý do chấm dứt hợp đồng lao động','bad'); return; }
   if(C.kind==='QD' && C.sub==='TV' && !C.dob){ const _e=hrmEmpById(C.empId); if(_e&&_e.dob) C.dob=String(_e.dob).slice(0,10); }
-  if(C.kind==='QD'){ C.no3=String(C.no3).padStart(3,'0'); if(!C.empNameEn) C.empNameEn=_cdEn(C.empName); }
+  if(C.kind==='QD'){ C.no3=C.noFmt==='HCNS'?String(+C.no3):String(C.no3).padStart(3,'0'); if(!C.empNameEn) C.empNameEn=_cdEn(C.empName); }
   const now=new Date().toISOString(), who=actorName(); let rec;
   commitMutation(()=>{ S.crewDocs=S.crewDocs||[];
     if(C.id){ rec=S.crewDocs.find(x=>x.id===C.id); Object.assign(rec,C,{updatedAt:now, updatedBy:who}); }
@@ -51858,7 +52178,7 @@ function _cdTvHtml(d){
     .tvq ul{margin:0 0 0 10pt;padding:0;list-style:none}.tvq ul li{margin-bottom:3pt;text-align:justify}
     .tvq .sig{width:100%;border-collapse:collapse;margin-top:14pt}.tvq .sig td{vertical-align:top;padding:0;border:none}
     @media screen{.cd-paper.cd-qd{padding:20mm 20mm 20mm 25mm}}</style><div class="qd tvq">
-  <table class="hd"><tr><td style="width:44%"><div class="b" style="font-size:12pt;white-space:nowrap">CÔNG TY CỔ PHẦN HÀNG HẢI VÀ</div><div class="b" style="font-size:12pt"><span class="u">NĂNG LƯỢNG HẢI MÃ</span></div><div style="margin-top:6pt">Số: ${E(d.no3)}/${E(d.year||dt.slice(0,4))}/QĐ-SME-NS</div></td>
+  <table class="hd"><tr><td style="width:44%"><div class="b" style="font-size:12pt;white-space:nowrap">CÔNG TY CỔ PHẦN HÀNG HẢI VÀ</div><div class="b" style="font-size:12pt"><span class="u">NĂNG LƯỢNG HẢI MÃ</span></div><div style="margin-top:6pt">Số${d.noFmt==='HCNS'?'/No.':''}: ${E(_qdNoStr(Object.assign({year:dt.slice(0,4)},d)))}</div></td>
     <td style="width:56%"><div class="b" style="font-size:12pt;white-space:nowrap">CỘNG HOÀ XÃ HỘI CHỦ NGHĨA VIỆT NAM</div><div class="b" style="font-size:12.5pt"><span class="u">Độc lập - Tự do - Hạnh phúc</span></div><div class="i" style="margin-top:6pt">TP.HCM, ngày ${dt.slice(8,10)} tháng ${dt.slice(5,7)} năm ${dt.slice(0,4)}</div></td></tr></table>
   <p class="c b" style="margin-top:18pt;font-size:14pt">QUYẾT ĐỊNH</p>
   <p class="c b" style="font-size:13.5pt"><span class="u">Về việc chấm dứt hợp đồng lao động</span></p>
@@ -51899,7 +52219,7 @@ function _cdQdHtml(d){
      <tr><td colspan="3" style="padding:6px 8px 8px">
        <div style="text-align:center;font-weight:700;font-size:12.5pt">QUYẾT ĐỊNH<br>DECISION</div>
        <div style="text-align:center;font-style:italic;font-size:11.5pt">V/v: Điều động nhân sự (Subj: Personnel mobilization)</div>
-       <div style="display:flex;justify-content:space-between;font-style:italic;font-size:11pt;margin-top:4px"><span>Số (No): <b style="font-style:normal">${esc(d.no3)}</b>/QĐNS/${esc(d.year||dt.slice(0,4))}</span>
+       <div style="display:flex;justify-content:space-between;font-style:italic;font-size:11pt;margin-top:4px"><span>Số (No): <b style="font-style:normal">${esc(_qdNoStr(Object.assign({year:dt.slice(0,4)},d)))}</b></span>
        <span>TP.HCM, ngày <span style="font-size:9.5pt">(date)</span> ${dt.slice(8,10)} tháng <span style="font-size:9.5pt">(month)</span> ${dt.slice(5,7)} năm <span style="font-size:9.5pt">(year)</span> ${dt.slice(0,4)}</span></div></td></tr></table>
    <div style="text-align:center;font-weight:700;margin-top:12mm">GIÁM ĐỐC CÔNG TY CỔ PHẦN HÀNG HẢI VÀ NĂNG LƯỢNG HẢI MÃ</div>
    <div style="text-align:center;font-weight:700;font-size:10.5pt">THE DIRECTOR OF SEAHORSE MARINE AND ENERGY JSC</div>
@@ -51978,7 +52298,7 @@ function _cdPrint(id){
     if(!confirm('In PDF = XÁC NHẬN ra '+(d.kind==='QD'?'quyết định':'phiếu hướng dẫn')+'.\n\nBản lưu trong app sẽ đóng dấu "ĐÃ KÝ · '+_cdD(todayISO())+'" và khóa sửa.'+_qdTxt+'\n\nTiếp tục?')) return;
     const now=new Date().toISOString(); let _warn=[];
     const _prevV=((S.hrEmployees||[]).find(x=>x.id===d.empId)||{}).linkVesselId||'';
-    commitMutation(()=>{ d.signedAt=now; d.signedBy=actorName();
+    commitMutation(()=>{ if(d.kind==='QD'&&!d.noFmt) d.noFmt='HCNS'; d.signedAt=now; d.signedBy=actorName();
       if(d.kind==='QD'){ if(String(d.fromDate||'')>todayISO()){ d._scheduled=String(d.fromDate).slice(0,10); }   // v3.67.24: báo trước → hẹn áp dụng
         else { try{ _warn=_cdApplyQD(d); }catch(e){ _warn=['Lỗi áp dụng điều động: '+e.message]; } } }
       try{ touchRecord(d); }catch(e){} },
@@ -52063,12 +52383,12 @@ function openCrewDocChooser(empId, opts){
     ${rec?btn('📋 Hướng dẫn theo chức danh — '+esc(CREW_TPL.meta[rec].label),`openCrewDocFor('BRIEF','${empId}',Object.assign(${o},{tpl:'${rec}'}))`,'Đề xuất theo khối '+_CD_DEPT_LABEL[ri.dept]):''}
     ${btn('📋 Hướng dẫn chung trước khi lên tàu (FRM-003)',`openCrewDocFor('BRIEF','${empId}',Object.assign(${o},{tpl:'FRM016G'}))`,'Mọi thuyền viên')}
     <div style="font-size:11px;font-weight:600;text-transform:uppercase;color:var(--muted);margin:12px 0 4px">Đã lưu trong hồ sơ (${docs.length})</div>
-    ${docs.map(d=>`<div style="display:flex;gap:8px;align-items:center;padding:5px 0;border-bottom:1px solid var(--rule);font-size:12px"><span style="flex:1">${d.kind==='QD'?('📜 '+esc(d.no3||'')+'/QĐNS/'+esc(d.year||'')+' · '+(d.sub==='NC'?'Nghỉ ca':'Điều động')):('📋 '+esc((CREW_TPL.meta[d.tpl]||{}).label||d.tpl))} · ${esc(_cdD(d.date))}</span>${_cdStatusChip(d)}<button class="btn-sec" style="font-size:11px" onclick="_cdView('${d.id}')">👁 Xem</button></div>`).join('')||'<div style="font-size:12px;color:var(--muted)">Chưa có</div>'}`,
+    ${docs.map(d=>`<div style="display:flex;gap:8px;align-items:center;padding:5px 0;border-bottom:1px solid var(--rule);font-size:12px"><span style="flex:1">${d.kind==='QD'?('📜 '+esc(_qdNoStr(d))+' · '+(d.sub==='NC'?'Nghỉ ca':'Điều động')):('📋 '+esc((CREW_TPL.meta[d.tpl]||{}).label||d.tpl))} · ${esc(_cdD(d.date))}</span>${_cdStatusChip(d)}<button class="btn-sec" style="font-size:11px" onclick="_cdView('${d.id}')">👁 Xem</button></div>`).join('')||'<div style="font-size:12px;color:var(--muted)">Chưa có</div>'}`,
     `<button class="btn-ghost" onclick="closeModal()">Đóng</button>`);
 }
 /* Dấu tròn ĐÃ KÝ (SVG) */
 function _cdStampSvg(d){
-  const dt=_cdD(String(d.signedAt||'').slice(0,10)), no=d.kind==='QD'?((d.no3||'')+'/QĐNS/'+(d.year||'')):((CREW_TPL.meta[d.tpl]||{}).code||'');
+  const dt=_cdD(String(d.signedAt||'').slice(0,10)), no=d.kind==='QD'?_qdNoStr(d):((CREW_TPL.meta[d.tpl]||{}).code||'');
   return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200" width="46mm" height="46mm" style="transform:rotate(-12deg);opacity:.88">
     <defs><path id="cdTop" d="M 30,100 A 70,70 0 0 1 170,100"/><path id="cdBot" d="M 36,104 A 64,64 0 0 0 164,104"/></defs>
     <circle cx="100" cy="100" r="94" fill="none" stroke="#b3122e" stroke-width="5"/><circle cx="100" cy="100" r="86" fill="none" stroke="#b3122e" stroke-width="1.6"/>
@@ -52149,7 +52469,7 @@ function _cdBccLeave(vid, empId, eff, warn, nc, qdLabel, snap){
   const d0=+eff.slice(8,10); row.days=row.days||{}; row.ot=row.ot||{};
   if(snap){ const sd={}, so={}; for(let d=d0; d<=(+sh.numDays||31); d++){ if(row.days[d]!=null) sd[d]=row.days[d]; if(row.ot[d]!=null) so[d]=row.ot[d]; }
     snap.bccLeave={vid, period:sh.period, empId, from:d0, days:sd, ot:so, prevLeftFrom:row._leftFrom||'', prevLeftBy:row._leftBy||''}; }   // v3.67.26: để Xóa QĐ khôi phục đúng
-  for(let d=d0; d<=(+sh.numDays||31); d++){ if(nc && CREW_NC_CODE) row.days[d]=CREW_NC_CODE; else delete row.days[d]; delete row.ot[d]; }
+  for(let d=d0; d<=(+sh.numDays||31); d++){ if(nc && CREW_NC_CODE && !_crewMergeOn(eff.slice(0,7))) row.days[d]=CREW_NC_CODE; else delete row.days[d]; delete row.ot[d]; }   /* v3.70.48: từ kỳ 10/2026 nghỉ ca → BCC nghỉ ca */
   row._leftFrom=eff; row._leftBy=qdLabel; try{ _bccTouch(sh,row); }catch(e){}
 }
 function _cdBccJoin(vid, empId, eff, warn, qdLabel, snap){
@@ -52217,24 +52537,26 @@ function bccCheckQd(sheetId){ const sh=(S.bccSheets||[]).find(x=>x.id===sheetId)
   const vid=sh.scope.value, nd=+sh.numDays||31, f0=sh.period+'-01', f1=sh.period+'-'+String(nd).padStart(2,'0'); const NC=(typeof CREW_NC_CODE!=='undefined'?CREW_NC_CODE:'NGHICA');
   const issues=[]; const seen=new Set();
   (sh.rows||[]).forEach(r=>{ if(!r) return; seen.add(r.empId); const e=hrmEmpById(r.empId)||{}; const iv=_qdIntervalsFor(r.empId, vid, f0, f1);
-    const inIv=iso=>iv.some(x=>iso>=x.from&&iso<=x.to); const outDays=[], ncOn=[], empty=[];
+    const inIv=iso=>iv.some(x=>iso>=x.from&&iso<=x.to); const outDays=[], ncOn=[], empty=[], ncOut=[];
     for(let d=1; d<=nd; d++){ const iso=sh.period+'-'+String(d).padStart(2,'0'); const c=(r.days||{})[d];
       const term=e.status==='inactive'&&_empLastDay(e)&&iso>_empLastDay(e);   /* v3.68.28: có công ĐẾN HẾT ngày làm việc cuối */
       if(c && c!==NC && (!inIv(iso)||term)) outDays.push(d);
       if(c===NC && inIv(iso)) ncOn.push(d);
+      if(c===NC && !inIv(iso) && _crewMergeOn(sh.period)) ncOut.push(d);   /* v3.70.48 */
       if(!c && inIv(iso) && !term && iso<=todayISO()) empty.push(d); }
     const ign=r._qdIgnore||{};
     if(!iv.length && Object.keys(r.days||{}).length && !ign.noqd) issues.push({k:'noqd', empId:r.empId, name:e.fullName||r.empId, text:'Có tên trên BCC nhưng KHÔNG có QĐ điều động xuống tàu này trong tháng', fix:''});
     else if(outDays.length && !ign.out) issues.push({k:'out', empId:r.empId, name:e.fullName||r.empId, text:'Có công ngoài khoảng trên tàu theo QĐ'+(e.status==='inactive'?' / sau ngày thôi việc':'')+': ngày '+outDays.join(', '), fix:'out', days:outDays});
+    if(ncOut.length && !ign.ncv) issues.push({k:'ncv', empId:r.empId, name:e.fullName||r.empId, text:'Nghỉ ca ghi trên BCC tàu (ngoài thời gian ở tàu theo QĐ) — thuộc BCC nghỉ ca: ngày '+ncOut.join(', '), fix:'ncv', days:ncOut});
     if(ncOn.length && !ign.nc) issues.push({k:'nc', empId:r.empId, name:e.fullName||r.empId, text:'Mã nghỉ ca trong lúc QĐ ghi đang trên tàu: ngày '+ncOn.join(', '), fix:''});
     if(empty.length && !ign.empty) issues.push({k:'empty', empId:r.empId, name:e.fullName||r.empId, text:'Đang trên tàu theo QĐ nhưng chưa chấm: ngày '+empty.join(', '), fix:''}); });
   (HRService.crewAssignments()||[]).filter(a=>a&&!a._deleted&&a.vesselId===vid&&a.onboardDate&&String(a.onboardDate).slice(0,10)<=f1&&(!a.actualSignoffDate||String(a.actualSignoffDate).slice(0,10)>f0)).forEach(a=>{
     if(seen.has(a.empId)) return; seen.add(a.empId); const e=hrmEmpById(a.empId)||{}; if(e.type!=='crew') return;
     issues.push({k:'missing', empId:a.empId, name:e.fullName||a.empId, text:'Có QĐ xuống tàu ('+_cdD(String(a.onboardDate).slice(0,10))+') nhưng THIẾU dòng trên BCC', fix:'add'}); });
-  const lab={noqd:'Không có QĐ',out:'Công ngoài QĐ',nc:'Nghỉ ca sai',empty:'Thiếu công',missing:'Thiếu dòng'};
+  const lab={noqd:'Không có QĐ',out:'Công ngoài QĐ',nc:'Nghỉ ca sai',ncv:'Nghỉ ca trên BCC tàu',empty:'Thiếu công',missing:'Thiếu dòng'};
   const locked=_cdBccLocked(sh);
   const rows=issues.map((x,i)=>`<tr><td style="white-space:nowrap;color:${x.k==='empty'?'#9a5a05':'var(--bad)'};font-weight:700;font-size:11.5px">${lab[x.k]}</td><td><b>${esc(x.name)}</b></td><td style="font-size:12px">${esc(x.text)}</td>
-    <td style="white-space:nowrap">${!locked&&x.fix==='out'?`<button class="btn-sec" style="font-size:11px;padding:2px 8px" onclick="_bccQdFix('${sh.id}','${x.empId}','out','${x.days.join('.')}')">Xóa công ngoài QĐ</button> `:''}${!locked&&x.fix==='add'?`<button class="btn-sec" style="font-size:11px;padding:2px 8px" onclick="_bccQdFix('${sh.id}','${x.empId}','add','')">Thêm dòng</button> `:''}${x.k!=='missing'?`<button class="btn-ghost" style="font-size:11px;padding:2px 8px" onclick="_bccQdIgnore('${sh.id}','${x.empId}','${x.k}')">Bỏ qua</button>`:''}</td></tr>`).join('');
+    <td style="white-space:nowrap">${!locked&&x.fix==='out'?`<button class="btn-sec" style="font-size:11px;padding:2px 8px" onclick="_bccQdFix('${sh.id}','${x.empId}','out','${x.days.join('.')}')">Xóa công ngoài QĐ</button> `:''}${!locked&&x.fix==='ncv'?`<button class="btn-sec" style="font-size:11px;padding:2px 8px" onclick="_bccQdFix('${sh.id}','${x.empId}','ncv','${x.days.join('.')}')">Chuyển sang BCC nghỉ ca</button> `:''}${!locked&&x.fix==='add'?`<button class="btn-sec" style="font-size:11px;padding:2px 8px" onclick="_bccQdFix('${sh.id}','${x.empId}','add','')">Thêm dòng</button> `:''}${x.k!=='missing'?`<button class="btn-ghost" style="font-size:11px;padding:2px 8px" onclick="_bccQdIgnore('${sh.id}','${x.empId}','${x.k}')">Bỏ qua</button>`:''}</td></tr>`).join('');
   const pend=(sh._pendingFix||[]).map((x,i)=>`<div style="font-size:12px">• ${esc((hrmEmpById(x.empId)||{}).fullName||x.empId)}: ${esc(x.text)} <a href="javascript:void 0" onclick="_bccPendDone('${sh.id}',${i})">✓ đã xử lý</a></div>`).join('');
   openModal('🔎 Kiểm tra BCC tàu theo quyết định — '+esc(bccScopeLabel(sh.scope))+' · '+esc(sh.period), `${locked?'<div style="font-size:12px;color:#9a5a05;margin-bottom:6px">Bảng đã gửi / chốt — chỉ xem; trả bảng về để sửa.</div>':''}
     ${pend?`<div style="margin-bottom:8px;padding:7px 10px;border:1.5px solid #d98a1c;border-radius:6px;background:#fffaf1"><b>Việc cần xử lý (từ QĐ ký khi bảng đã gửi)</b>${pend}</div>`:''}
@@ -52244,6 +52566,7 @@ function bccCheckQd(sheetId){ const sh=(S.bccSheets||[]).find(x=>x.id===sheetId)
   try{ setModalWide(true); }catch(_){} }
 function _bccQdFix(sheetId, empId, kind, days){ const sh=(S.bccSheets||[]).find(x=>x.id===sheetId); if(!sh) return;
   if(kind==='out'){ const row=(sh.rows||[]).find(r=>r.empId===empId); if(!row) return; if(!confirm('Xóa công các ngày '+days.replace(/\./g,', ')+'?')) return; days.split('.').forEach(d=>{ if(row.days) delete row.days[d]; if(row.ot) delete row.ot[d]; }); _bccTouch(sh,row); }
+  if(kind==='ncv'){ const row=(sh.rows||[]).find(r=>r.empId===empId); if(!row) return; if(!confirm('Chuyển nghỉ ca các ngày '+days.replace(/\./g,', ')+' sang BCC nghỉ ca?\n\nApp xóa mã NGHICA các ngày này trên BCC tàu — BCC nghỉ ca tự nhận.')) return; days.split('.').forEach(d=>{ if(row.days) delete row.days[d]; if(row.ot) delete row.ot[d]; }); _bccTouch(sh,row); try{ if(typeof _clvSync==='function') _clvSync(sh.period); }catch(_){} }   /* v3.70.48 */
   if(kind==='add'){ sh.rows=sh.rows||[]; if(!sh.rows.some(r=>r.empId===empId)){ const r={empId, days:{}, ot:{}}; sh.rows.push(r); _bccTouch(sh,r); } }
   saveState(); bccCheckQd(sheetId); }
 function _bccQdIgnore(sheetId, empId, k){ const sh=(S.bccSheets||[]).find(x=>x.id===sheetId); const row=sh&&(sh.rows||[]).find(r=>r.empId===empId); if(!row) return; const note=prompt('Ghi chú lý do bỏ qua (BCC đúng thực tế):',''); if(note==null) return;
@@ -52271,14 +52594,14 @@ function openCrewTermLedger(){ const F=window._CTL=Object.assign({q:'',year:''},
   L.sort((a,b)=>String(b.fromDate||b.date||'').localeCompare(String(a.fromDate||a.date||'')));
   const years=Array.from(new Set((S.crewDocs||[]).filter(d=>d&&d.sub==='TV').map(d=>String(d.year||'')))).filter(Boolean).sort().reverse();
   const P=_pg20('ctl', L.length, 'openCrewTermLedger');
-  const rows=L.slice(P.from,P.to).map(d=>{ const e=hrmEmpById(d.empId)||{}; return `<tr style="cursor:pointer" onclick="_cdView('${d.id}')"><td style="white-space:nowrap"><b>${esc(d.no3||'')}</b>/${esc(d.year||'')}/QĐ-SME-NS</td><td><b>${esc(d.empName||e.fullName||'')}</b><div style="font-size:10.5px;color:var(--muted)">${esc(e.smartId||'')}</div></td><td style="font-size:12px">${esc(d.rank||e.title||'')}</td><td style="white-space:nowrap">${esc(_cdD(String(d.date||'').slice(0,10)))}</td><td style="white-space:nowrap"><b>${esc(_cdD(String(d.fromDate||'').slice(0,10)))}</b></td><td style="font-size:12px">${esc(d.reason||'')}</td><td>${d.signedAt?'<b style="color:#b3122e">ĐÃ KÝ</b>':'<span style="color:#9a5a05">Nháp</span>'}${(d.files||[]).length?' 📎':''}</td></tr>`; }).join('');
+  const rows=L.slice(P.from,P.to).map(d=>{ const e=hrmEmpById(d.empId)||{}; return `<tr style="cursor:pointer" onclick="_cdView('${d.id}')"><td style="white-space:nowrap"><b>${esc(_qdNoStr(d))}</b></td><td><b>${esc(d.empName||e.fullName||'')}</b><div style="font-size:10.5px;color:var(--muted)">${esc(e.smartId||'')}</div></td><td style="font-size:12px">${esc(d.rank||e.title||'')}</td><td style="white-space:nowrap">${esc(_cdD(String(d.date||'').slice(0,10)))}</td><td style="white-space:nowrap"><b>${esc(_cdD(String(d.fromDate||'').slice(0,10)))}</b></td><td style="font-size:12px">${esc(d.reason||'')}</td><td>${d.signedAt?'<b style="color:#b3122e">ĐÃ KÝ</b>':'<span style="color:#9a5a05">Nháp</span>'}${(d.files||[]).length?' 📎':''}</td></tr>`; }).join('');
   openModal('🔴 Sổ QĐ thôi việc — thuyền viên', `<div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px">${_cdCanUse&&_cdCanUse()?'<button class="btn-primary" style="background:var(--bad);border-color:var(--bad)" onclick="openCrewDocFor(\'QD\',\'\',{sub:\'TV\'})">＋ Lập QĐ thôi việc</button>':''}
       <select onchange="window._CTL.year=this.value;(window._PG=window._PG||{}).ctl=1;openCrewTermLedger()" style="font-size:12.5px;padding:5px 8px"><option value="">Năm: tất cả</option>${years.map(y=>`<option ${F.year===y?'selected':''}>${y}</option>`).join('')}</select>
       <input placeholder="🔍 Tên / số QĐ / lý do" value="${esc(F.q||'')}" onchange="window._CTL.q=this.value;(window._PG=window._PG||{}).ctl=1;openCrewTermLedger()" style="flex:1;min-width:160px;padding:5px 8px"><button class="btn-sec" onclick="_ctlExcel()">⬇ Excel</button></div>
     <div class="tbl-scroll"><table class="tbl" style="font-size:12.5px"><thead><tr><th>Số QĐ</th><th>Thuyền viên</th><th>Chức danh</th><th>Ngày QĐ</th><th>Chấm dứt từ</th><th>Lý do</th><th>Trạng thái</th></tr></thead><tbody>${rows||'<tr><td colspan="7" style="text-align:center;color:var(--muted);padding:14px">Chưa có QĐ thôi việc</td></tr>'}</tbody></table></div>${P.nav}
     <div style="font-size:11px;color:var(--muted);margin-top:6px">Bấm dòng → xem / in bản lưu đóng dấu. Xóa QĐ đã ký = hoàn tác (hồ sơ, tàu, BCC, HĐLĐ).</div>`, `<button class="btn-ghost" onclick="closeModal()">Đóng</button>`); try{ setModalWide(true); }catch(_){} }
 function _ctlExcel(){ try{ const X=window.XLSX; const L=(S.crewDocs||[]).filter(d=>d&&!d._deleted&&d.kind==='QD'&&d.sub==='TV');
-  const aoa=[['SỔ QUYẾT ĐỊNH THÔI VIỆC — THUYỀN VIÊN'],[],['Số QĐ','Thuyền viên','MSNV','Chức danh','Ngày QĐ','Chấm dứt từ','Lý do','Trạng thái']].concat(L.map(d=>{ const e=hrmEmpById(d.empId)||{}; return [d.no3+'/'+d.year+'/QĐ-SME-NS', d.empName||e.fullName||'', e.smartId||'', d.rank||e.title||'', _cdD(String(d.date||'').slice(0,10)), _cdD(String(d.fromDate||'').slice(0,10)), d.reason||'', d.signedAt?'Đã ký':'Nháp']; }));
+  const aoa=[['SỔ QUYẾT ĐỊNH THÔI VIỆC — THUYỀN VIÊN'],[],['Số QĐ','Thuyền viên','MSNV','Chức danh','Ngày QĐ','Chấm dứt từ','Lý do','Trạng thái']].concat(L.map(d=>{ const e=hrmEmpById(d.empId)||{}; return [_qdNoStr(d), d.empName||e.fullName||'', e.smartId||'', d.rank||e.title||'', _cdD(String(d.date||'').slice(0,10)), _cdD(String(d.fromDate||'').slice(0,10)), d.reason||'', d.signedAt?'Đã ký':'Nháp']; }));
   const ws=X.utils.aoa_to_sheet(aoa); const wb=X.utils.book_new(); X.utils.book_append_sheet(wb,ws,'QD thoi viec'); X.writeFile(wb,'So_QD_thoi_viec_'+todayISO()+'.xlsx'); }catch(e){ toast('Xuất Excel lỗi: '+e.message,'bad'); } }
 function _cdApplyQD(d){
   const warn=[]; if(!d||d.kind!=='QD') return warn;
@@ -52346,7 +52669,7 @@ function _cdApplyQD(d){
    • Quyền: nháp — người Quản lý thuyền viên; đã ký — Trưởng BP / Admin, bắt buộc ghi lý do. Phiếu giữ bia mộ + nhật ký.
    ════════════════════════════════════════════════════════════════════════════════════════════════ */
 function _cdCanDeleteSigned(){ try{ return isAdmin()||_modCanManageStaff('TAU'); }catch(e){ return false; } }
-function _cdLabelOf(d){ return d&&d.sub==='TV'?('QĐ '+(d.no3||'')+'/'+(d.year||'')+'/QĐ-SME-NS'):('QĐ '+(d.no3||'')+'/QĐNS/'+(d.year||'')); }
+function _cdLabelOf(d){ return 'QĐ '+_qdNoStr(d); }   // v3.70.47
 function _cdBccUnleave(vid, empId, eff, sl, warn, lbl){
   if(!vid) return; const sh=_cdBccSheet(vid, eff); if(!sh) return; const vn=anyVesselName(vid)||vid;
   const row=(sh.rows||[]).find(r=>r&&r.empId===empId); if(!row) return;
@@ -53471,7 +53794,7 @@ function _crewPayRowsRaw(p){
       segs.forEach(sg=>{ const o=+sg.O||0, nb=+sg.N||0;
         const dock=(+sg._dockR>0)?+sg._dockR:o*prof.dockPct, vn=(+sg._vnR>0)?+sg._vnR:o*prof.standbyVnPct, fn=(+sg._fnR>0)?+sg._fnR:o*prof.standbyFnPct;
         const rest=(+sg._restR>0)?+sg._restR:((prof.restDayPct!=null)?o*prof.restDayPct:((+sg._restM>0?+sg._restM:nb)/30));
-        out.push(mk(sg.rank||e.title||'', +sg.G||0,+sg.H||0,+sg.I||0,+sg.J||0,+sg.K||0,+sg.L||0,+sg.M||0, nb,o, dock,vn,fn,rest,+sg.T||0)); });
+        out.push(_cpSegTag(sg, segs, mk(sg.rank||e.title||'', +sg.G||0,+sg.H||0,+sg.I||0,+sg.J||0,+sg.K||0,+sg.L||0,+sg.M||0, nb,o, dock,vn,fn,rest,+sg.T||0))); });
     } else {
       const o=+inp.O||0, nb=+inp.N||0;
       const dock=(+inp._dockR>0)?+inp._dockR:o*prof.dockPct, vn=(+inp._vnR>0)?+inp._vnR:o*prof.standbyVnPct, fn=(+inp._fnR>0)?+inp._fnR:o*prof.standbyFnPct;
@@ -53504,6 +53827,7 @@ const CREW_PAY_COLS=[
 ];
 /* v3.68.49 (Sếp): bảng tính lương chỉ hiện cột CÓ SỐ — cột trống ẩn, nút "Xem toàn bộ cột" */
 window._PAY_ALLCOLS=window._PAY_ALLCOLS||false;
+function _cpSegTag(sg, segs, r){ r._rank0=r.rank; r._src=sg.src||''; const multi=segs.some(x=>x.src&&x.src!==segs[0].src); if(multi) r.rank=r.rank+' · '+(sg.srcName||'')+(sg.flag?' ('+sg.flag+')':'')+' · '+String(sg.from).slice(8,10)+'–'+String(sg.to).slice(8,10); return r; }   /* v3.70.48 */
 function crewPayRows(p){ const L=_crewPayRowsRaw(p); try{ L.forEach(r=>{ if(r&&r.first){ r._ps=_pexSumFor(p, r.empId); r._adj=payRowAdjustTotal(r.row||{}); } }); }catch(e){ console.warn('[crewPayRows ps]',e); } return L; }   /* v3.68.54: Khoản PS + thực lĩnh gồm khoản không chịu thuế */
 function _payColVis(nCols, alwaysIdx, hasData){ const out=[]; for(let i=0;i<nCols;i++){ if(window._PAY_ALLCOLS || alwaysIdx.indexOf(i)>=0 || hasData(i)) out.push(i); } return out; }
 function _payColToggleHtml(onclick, nHidden){ return `<button class="btn-ghost" style="font-size:11px;padding:2px 8px" onclick="window._PAY_ALLCOLS=!window._PAY_ALLCOLS;${onclick}">${window._PAY_ALLCOLS?'◧ Chỉ cột có số':'◨ Xem toàn bộ cột'+(nHidden?(' (ẩn '+nHidden+')'):'')}</button>`; }
@@ -53515,49 +53839,53 @@ function _cpTotals(rows){ const t={}; CREW_PAY_COLS.forEach((c,i)=>{ if(c[2]==='
    + TNCN + BHXH 32% chia theo tỷ lệ tiền ngày công của chính người đó. Mã chi phí: nhóm M.01.10 (danh mục Sếp đã có). ════ */
 const CREW_COST_CODES={proj:'M.01.10.001', bhxh:'M.01.10.002', pit:'M.01.10.003', idle:'M.01.10.004', leave:'M.01.10.005'};
 function _crewCodeCat(c){ c=String(c||'').trim().toUpperCase(); if(!c) return ''; if(c==='DB1'||c==='DB2') return 'sea'; if(c==='DOCK') return 'dock'; if(c==='BO') return 'vn'; if(c==='BO2') return 'fn'; if(c==='NGHICA'||c==='N1') return 'rest'; if(c==='DP') return 'dp'; return 'sea'; }
-function _crewCostAlloc(p){ const out={proj:{}, idle:{net:0,pit:0,bhxh:0,days:0}, leave:{net:0,pit:0,bhxh:0,days:0}, total:{net:0,pit:0,bhxh:0}};
-  if(!p||!p._fromVessel) return out; const sh=(S.bccSheets||[]).find(x=>x&&x.id===p._fromBcc); const [Y,M]=String(p.period).split('-').map(Number);
-  const _wins={}; const _stDays={}; const projOfDay=d=>{ const iso=p.period+'-'+String(d).padStart(2,'0'); const w=_projOfVesselOn(p._fromVessel, iso); if(w){ (_wins[w.p.id]=_wins[w.p.id]||{})[w.from+'|'+w.to]=w; return w.p.id; } return ''; };   /* v3.68.66: dự án liên tục theo ngày dự án */
-  const dayStatus=d=>{ const iso=p.period+'-'+String(d).padStart(2,'0'); const e=_vesselEvOn(p._fromVessel, iso); const st=e?((_EV_LABEL[String(e.type||'').toLowerCase()]||e.type)+(e.projectId&&w0(iso)&&e.projectId!==w0(iso)?' (Lịch tàu ghi dự án khác)':'')):'Lịch tàu chưa cập nhật'; (_stDays[st]=_stDays[st]||new Set()).add(d); return st; };
-  const w0=iso=>{ const w=_projOfVesselOn(p._fromVessel, iso); return w?w.p.id:''; };
+function _crewCostAlloc(p){ const out={proj:{}, idle:{net:0,pit:0,bhxh:0,days:0}, idleBy:{}, leave:{net:0,pit:0,bhxh:0,days:0}, total:{net:0,pit:0,bhxh:0}};
+  if(!p||!p._fromVessel) return out; const sh=(S.bccSheets||[]).find(x=>x&&x.id===p._fromBcc); const [Y,M]=String(p.period).split('-').map(Number); const own=p._fromVessel;
+  const _wins={}; const _stDays={}; const projOfDay=(d,vid)=>{ vid=vid||own; if(vid===CLV_ID) return ''; const iso=p.period+'-'+String(d).padStart(2,'0'); const w=_projOfVesselOn(vid, iso); if(w){ (_wins[w.p.id]=_wins[w.p.id]||{})[w.from+'|'+w.to]=w; return w.p.id; } return ''; };   /* v3.68.66: dự án liên tục theo ngày dự án · v3.70.48: theo tàu của từng ngày */
+  const dayStatus=(d,vid)=>{ vid=vid||own; const iso=p.period+'-'+String(d).padStart(2,'0'); const e=_vesselEvOn(vid, iso); const st=e?((_EV_LABEL[String(e.type||'').toLowerCase()]||e.type)+(e.projectId&&w0(iso,vid)&&e.projectId!==w0(iso,vid)?' (Lịch tàu ghi dự án khác)':'')):'Lịch tàu chưa cập nhật'; (_stDays[st]=_stDays[st]||new Set()).add(d); return st; };
+  const w0=(iso,vid)=>{ const w=_projOfVesselOn(vid||own, iso); return w?w.p.id:''; };
   let segRows=[]; try{ segRows=crewPayRows(p); }catch(_){}
   (p.rows||[]).forEach(r=>{ const res=r.result||{}; const netP=(+res.AS||0)+payRowAdjustTotal(r); const pitP=+res.AL||0, bhP=(+res.AO||0)+(+res.AOco||0); if(!netP&&!pitP&&!bhP) return;
     const comp={sea:0,dock:0,vn:0,fn:0,rest:0,dp:0}; segRows.filter(x=>x.empId===r.empId).forEach(x=>{ comp.sea+=+x.tBien||0; comp.dock+=+x.tDock||0; comp.vn+=+x.tVn||0; comp.fn+=+x.tFn||0; comp.rest+=+x.tRest||0; comp.dp+=+x.tDp||0; });
-    const br=sh&&(sh.rows||[]).find(x=>x.empId===r.empId); const days=(br&&br.days)||{}; const cnt={}; Object.keys(days).forEach(d=>{ const c=_crewCodeCat(days[d]); if(c) cnt[c]=(cnt[c]||0)+1; });
-    const vals={}; let V=0; const dcount={}; const segV={}, segD={};   /* key: 'P:'+projectId | 'idle' | 'leave'; seg: pid|status */
-    Object.keys(days).forEach(d=>{ const c=_crewCodeCat(days[d]); if(!c) return; const v=cnt[c]?(comp[c]||0)/cnt[c]:0; const pid=c==='rest'?'':projOfDay(+d); const key=c==='rest'?'leave':(pid?('P:'+pid):'idle'); vals[key]=(vals[key]||0)+v; dcount[key]=(dcount[key]||0)+1; V+=v;
-      if(pid){ const st=dayStatus(+d); const sk=pid+'|'+st; segV[sk]=(segV[sk]||0)+v; segD[sk]=(segD[sk]||0)+1; } });
+    /* v3.70.48: dòng gộp nhiều nơi → ngày công lấy từ mọi BCC (mỗi ngày kèm tàu của ngày đó) */
+    const days={}, dvid={}; if(r._srcs&&r._srcs.length>1&&typeof _crewDayMap==='function'){ const m=_crewDayMap(r.empId, p.period); Object.keys(m).forEach(d=>{ days[d]=m[d].c; dvid[d]=m[d].src; }); }
+    else { const br=sh&&(sh.rows||[]).find(x=>x.empId===r.empId); Object.assign(days, (br&&br.days)||{}); Object.keys(days).forEach(d=>dvid[d]=own); }
+    const cnt={}; Object.keys(days).forEach(d=>{ const c=_crewCodeCat(days[d]); if(c) cnt[c]=(cnt[c]||0)+1; });
+    const vals={}; let V=0; const dcount={}; const segV={}, segD={};   /* key: 'P:'+projectId | 'idle' | 'I:'+tàu khác | 'leave'; seg: pid|status */
+    Object.keys(days).forEach(d=>{ const c=_crewCodeCat(days[d]); if(!c) return; const vid=dvid[d]||own; const v=cnt[c]?(comp[c]||0)/cnt[c]:0; const pid=(c==='rest'||vid===CLV_ID)?'':projOfDay(+d, vid);
+      const key=(c==='rest'||vid===CLV_ID)?'leave':(pid?('P:'+pid):(vid===own?'idle':('I:'+vid))); vals[key]=(vals[key]||0)+v; dcount[key]=(dcount[key]||0)+1; V+=v;
+      if(pid){ const st=dayStatus(+d, vid); const sk=pid+'|'+st; segV[sk]=(segV[sk]||0)+v; segD[sk]=(segD[sk]||0)+1; (out._pvid=out._pvid||{})[pid]=vid; } });
     if(V<=0){ const allRest=Object.keys(days).length&&Object.keys(days).every(d=>_crewCodeCat(days[d])==='rest'); vals[allRest?'leave':'idle']=1; V=1; }
-    Object.keys(vals).forEach(key=>{ const f=vals[key]/V; const b=key==='idle'?out.idle:(key==='leave'?out.leave:(out.proj[key.slice(2)]=out.proj[key.slice(2)]||{net:0,pit:0,bhxh:0,days:0,seg:{}}));
+    Object.keys(vals).forEach(key=>{ const f=vals[key]/V; const b=key==='idle'?out.idle:(key==='leave'?out.leave:(key.slice(0,2)==='I:'?(out.idleBy[key.slice(2)]=out.idleBy[key.slice(2)]||{net:0,pit:0,bhxh:0,days:0,vid:key.slice(2)}):(out.proj[key.slice(2)]=out.proj[key.slice(2)]||{net:0,pit:0,bhxh:0,days:0,seg:{}})));
       b.net+=netP*f; b.pit+=pitP*f; b.bhxh+=bhP*f; b.days+=(dcount[key]||0); });
     Object.keys(segV).forEach(sk=>{ const [pid,st]=sk.split('|'); const f=segV[sk]/V; const pb=out.proj[pid]; if(!pb) return; const g=(pb.seg[st]=pb.seg[st]||{net:0,pit:0,bhxh:0,days:0,dates:[]}); g.net+=netP*f; g.pit+=pitP*f; g.bhxh+=bhP*f; g.days+=segD[sk]; });
     out.total.net+=netP; out.total.pit+=pitP; out.total.bhxh+=bhP; });
-  Object.keys(out.proj).forEach(pid=>{ const pr=(S.projects||[]).find(x=>x.id===pid); const W=Object.values(_wins[pid]||{}); out.proj[pid].label=(pr?(pr.code+(pr.name?' — '+pr.name:'')):'(dự án)')+(W.length?' ('+W.map(w=>_cdD(w.from)+' → '+(w.to==='9999-12-31'?'…':_cdD(w.to))).join('; ')+')':''); out.proj[pid].src=Array.from(new Set(W.map(w=>w.srcLong))).join(' + '); out.proj[pid].code=pr?pr.code:'';
-    Object.keys(out.proj[pid].seg||{}).forEach(st=>{ const ds=Array.from(_stDays[st]||[]).filter(d=>projOfDay(d)===pid); out.proj[pid].seg[st].ranges=_clvRanges(ds); }); });
+  Object.keys(out.proj).forEach(pid=>{ const pr=(S.projects||[]).find(x=>x.id===pid); const W=Object.values(_wins[pid]||{}); const vid=(out._pvid||{})[pid]||own; out.proj[pid].vid=vid; out.proj[pid].label=(pr?(pr.code+(pr.name?' — '+pr.name:'')):'(dự án)')+(W.length?' ('+W.map(w=>_cdD(w.from)+' → '+(w.to==='9999-12-31'?'…':_cdD(w.to))).join('; ')+')':'')+(vid!==own?' · tàu '+(anyVesselName(vid)||vid)+' (thuyền viên chuyển tàu)':''); out.proj[pid].src=Array.from(new Set(W.map(w=>w.srcLong))).join(' + '); out.proj[pid].code=pr?pr.code:'';
+    Object.keys(out.proj[pid].seg||{}).forEach(st=>{ const ds=Array.from(_stDays[st]||[]).filter(d=>projOfDay(d, vid)===pid); out.proj[pid].seg[st].ranges=_clvRanges(ds); }); });
   return out; }
 function _crewCostRows(p){ const A=_crewCostAlloc(p); const R=[]; const add=(lab,b,cls,src)=>R.push({label:lab, days:b.days||0, net:b.net, pit:b.pit, bhxh:b.bhxh, total:b.net+b.pit+b.bhxh, cls:cls||'', src:src||''});
   const pj=Object.keys(A.proj).map(k=>A.proj[k]); pj.forEach(b=>{ add('Dự án '+b.label, b, '', b.src); const S_=b.seg||{}; const ks=Object.keys(S_); if(ks.length) ks.sort().forEach(st=>add('   · '+st+(S_[st].ranges?' — ngày '+S_[st].ranges:''), S_[st], 'seg', st==='Lịch tàu chưa cập nhật'?'Theo ngày dự án':'Lịch tàu')); }); const sp={net:0,pit:0,bhxh:0,days:0}; pj.forEach(b=>{ sp.net+=b.net; sp.pit+=b.pit; sp.bhxh+=b.bhxh; sp.days+=b.days; });
-  add('Tổng lương dự án', sp, 'sub'); add('Lương chờ việc → OPEX tàu', A.idle, '', 'Ngày ngoài thời gian dự án'); add('Lương nghỉ ca → chi phí chung công ty', A.leave, '', 'Mã NGHICA trên BCC'); add('TỔNG CỘNG', Object.assign({days:sp.days+(A.idle.days||0)+(A.leave.days||0)}, A.total), 'tot'); return R; }
+  add('Tổng lương dự án', sp, 'sub'); add('Lương chờ việc → OPEX tàu', A.idle, '', 'Ngày ngoài thời gian dự án'); Object.keys(A.idleBy||{}).forEach(v=>add('Lương chờ việc → OPEX tàu '+(anyVesselName(v)||v)+' (thuyền viên chuyển tàu)', A.idleBy[v], '', 'Ngày ở tàu khác, ngoài dự án')); add('Lương nghỉ ca → chi phí chung công ty', A.leave, '', 'Mã NGHICA trên BCC'); add('TỔNG CỘNG', Object.assign({days:sp.days+(A.idle.days||0)+(A.leave.days||0)+Object.values(A.idleBy||{}).reduce((t,b)=>t+(b.days||0),0)}, A.total), 'tot'); return R; }
 function _crewCostSumHtml(rows, print, vid){ const f=v=>Math.round(+v||0).toLocaleString('vi-VN'); rows=(rows||[]).filter(r=>r.cls!=='seg'||isAdmin());   /* v3.68.67: chi tiết đoạn Lịch tàu — chỉ Admin */
   const _pw=vid?_prjEndWarnings(vid):[];
   const tr=rows.map(r=>`<tr${r.cls==='tot'?' class="t" style="background:#e2efda;font-weight:800"':(r.cls==='sub'?' style="font-weight:700;background:#f3f6fa"':(r.cls==='seg'?' style="color:#4a5563;font-size:'+(print?'6.5pt':'11px')+'"':''))}><td${print?' class="tx"':''}>${esc(r.label)}</td><td${print?' class="tx"':''} style="font-size:${print?'6.5pt':'11px'};color:#0b3d91">${esc(r.src||'')}</td><td class="r">${r.days||''}</td><td class="r">${f(r.net)}</td><td class="r">${f(r.pit)}</td><td class="r">${f(r.bhxh)}</td><td class="r"><b>${f(r.total)}</b></td></tr>`).join('');
   return `<div style="margin-top:8px"><div style="font-weight:800;font-size:${print?'8.5pt':'12.5px'};margin-bottom:3px">TỔNG HỢP CHI PHÍ LƯƠNG — theo ngày công BCC &amp; ngày dự án</div><table class="${print?'pay':'tbl'}" style="font-size:${print?'7pt':'12px'}"><thead><tr><th>Khoản</th><th>Nguồn ngày</th><th>Ngày công</th><th>NET</th><th>Thuế TNCN</th><th>BHXH 32%</th><th>Tổng chi phí</th></tr></thead><tbody>${tr}</tbody></table><div style="font-size:${print?'6.5pt':'10.5px'};color:var(--muted,#666);margin-top:2px">Nguyên tắc: dự án liên tục từ ngày bắt đầu đến ngày kết thúc — ngày thực tế nhập tay; chưa có thì BĐ sớm hơn / KT muộn hơn giữa Lịch tàu và ngày dự kiến. ${isAdmin()?' Dòng "·" = chi tiết từng đoạn theo Lịch tàu bên trong dự án (chỉ Admin thấy, không cộng thêm).':''}</div>${_pw.length?`<div style="font-size:${print?'6.5pt':'11px'};color:#b8450a;margin-top:3px">⚠ ${_pw.map(x=>esc((x.p.code||'')+': '+x.w)).join(' · ')}</div>`:''}</div>`; }
 function crewPayBoardOpen(periodId){
   const p=payPeriodById(periodId); if(!p){ toast('Không tìm thấy kỳ lương','bad'); return; }
-  const rows=crewPayRows(p); rows.forEach((r,i)=>r._stt=r.first?(rows.filter((x,j)=>j<=i&&x.first).length):'');
-  const tot=_cpTotals(rows); const flag=p._flag||(p._fromVessel?vesFlagCode(p._fromVessel):'');
+  const rows0=crewPayRows(p); const rows=_cpDisplayRows(rows0,false,p); rows.forEach((r,i)=>r._stt=r.first?(rows.filter((x,j)=>j<=i&&x.first).length):'');   /* v3.70.48: dòng tổng ▸/▾ */
+  const tot=_cpTotals(rows0); const flag=p._flag||(p._fromVessel?vesFlagCode(p._fromVessel):'');
   const fnote=p._fromVessel?vesFlagNote(p._fromVessel).text:'';
   const _vis=_payColVis(CREW_PAY_COLS.length, _cpAlwaysIdx(), ci=>rows.some(r=>{ const v=CREW_PAY_COLS[ci][1](r); return v!=null && v!=='' && (typeof v!=='number' || v!==0) && String(v)!=='0'; })); const _nHid=CREW_PAY_COLS.length-_vis.length;
   const th=_vis.map(ci=>CREW_PAY_COLS[ci]).map(c=>`<th style="font-size:10px;white-space:nowrap">${esc(c[0])}</th>`).join('');
-  const body=rows.map(r=>`<tr>${_vis.map(ci=>CREW_PAY_COLS[ci]).map(c=>{ const v=c[1](r); const cls=(c[2]==='n'||c[2]==='n0'||c[2]==='c')?' class="r"':'';
+  const body=rows.map(r=>`<tr${r._sub?' style="font-style:italic;background:#fbfcfd"':(r._sum?' style="font-weight:700;background:#f3f6fa"':'')}><td style="cursor:pointer;color:#123a5c;font-weight:900;width:14px" ${r._sum?`onclick="_cpTog('${r.empId}','${p.id}')"`:''}>${r._sum?(window._CPX[r.empId]?'▾':'▸'):''}</td>${_vis.map(ci=>CREW_PAY_COLS[ci]).map(c=>{ const v=c[1](r); const cls=(c[2]==='n'||c[2]==='n0'||c[2]==='c')?' class="r"':'';
       const txt=(c[2]==='n')?_cpTxt(c,r,v):(v==null?'':String(v));
       return `<td${cls} style="white-space:nowrap${c[3]&&r.first?';cursor:pointer':''}"${c[3]&&r.first?` onclick="crewPayExplain('${p.id}','${r.empId}','${c[3]}')"`:''}>${c[3]&&r.first&&txt?`<span style="color:#0b3d91;text-decoration:underline;font-weight:700">${esc(txt)}</span>`:esc(txt)}</td>`; }).join('')}</tr>`).join('');
-  const trTot=`<tr style="background:#e2efda;font-weight:800">${_vis.map(i=>{ const c=CREW_PAY_COLS[i]; return i===2?'<td>TỔNG</td>':((c[2]==='n'||c[2]==='n0')?`<td class="r">${esc(c[2]==='n'?_cpN(tot[i]):(tot[i]||''))}</td>`:'<td></td>'); }).join('')}</tr>`;
+  const trTot=`<tr style="background:#e2efda;font-weight:800"><td></td>${_vis.map(i=>{ const c=CREW_PAY_COLS[i]; return i===2?'<td>TỔNG</td>':((c[2]==='n'||c[2]==='n0')?`<td class="r">${esc(c[2]==='n'?_cpN(tot[i]):(tot[i]||''))}</td>`:'<td></td>'); }).join('')}</tr>`;
   openModal('💰 Bảng lương tàu — '+esc(p._vesselName||'')+' · '+esc(p.period),
     `<div style="font-size:12.5px;margin-bottom:6px">Tàu <b>${esc(p._vesselName||'')}</b>${flag?` <span style="background:#eef4ff;color:#0b3d91;border-radius:9px;padding:0 6px;font-size:11px;font-weight:700">${esc(flag==='VN'?'VN':(flag==='PANAMA'?'PN':(flag==='LIBERIA'?'LB':'NN')))}</span>`:''} · kỳ <b>${esc(p.period)}</b> · ${(p.rows||[]).length} thuyền viên · ${payStatusChip(p.status)} ${_payHrChip(p)}<div style="color:var(--muted);font-size:11.5px">${esc(fnote)} · Hệ số ngày công: ${esc(String(_cpProf(p).standardDays||31))} · Tỉ giá USD: ${_cpFx(p).toLocaleString('vi-VN')}${_cpFx(p)!==fxRate()?' <span style="color:#9a5a05">(tỷ giá đã dùng khi kéo thẻ · app hiện '+fxRate().toLocaleString('vi-VN')+' — kéo thẻ lại để cập nhật)</span>':''}</div></div>
      ${payRuleHtml(p,false)}
-     <div style="display:flex;justify-content:flex-end;margin:4px 0">${_payColToggleHtml("crewPayBoardOpen('"+p.id+"')", _nHid)}</div>
-     <div class="tbl-scroll" style="max-height:58vh;overflow:auto"><table class="tbl" style="font-size:11.5px"><thead><tr>${th}</tr></thead><tbody>${body}${trTot}</tbody></table></div>
+     <div style="display:flex;justify-content:flex-end;margin:4px 0">${rows.some(r=>r._sum)?`<button class="btn-ghost" style="font-size:11px;padding:2px 8px" onclick="_cpTogAll('${p.id}',true)">▾ Mở tất cả</button><button class="btn-ghost" style="font-size:11px;padding:2px 8px" onclick="_cpTogAll('${p.id}',false)">▸ Gập tất cả</button>`:''}${_payColToggleHtml("crewPayBoardOpen('"+p.id+"')", _nHid)}</div>
+     <div class="tbl-scroll" style="max-height:58vh;overflow:auto"><table class="tbl" style="font-size:11.5px"><thead><tr><th></th>${th}</tr></thead><tbody>${body}${trTot}${_cpAwayHtml(p,_vis.length)}</tbody></table></div>
      ${(function(){ try{ return _crewCostSumHtml(_crewCostRows(p), false, p._fromVessel); }catch(e){ console.warn('[cost sum]',e); return ''; } })()}
      <div style="font-size:11.5px;margin-top:6px;padding:4px 8px;border-left:3px solid #0b3d91;background:#f6f9ff">💱 ${esc(payFxNote(p))}. Mức bằng USD ghi <b>$</b> (2 số lẻ); tiền quy đổi VND không số lẻ.</div>
      <div style="font-size:11px;color:var(--muted);margin-top:6px">Bấm số <b>NET · Thuế TNCN · BHXH · Thực lĩnh</b> để xem cách tính. Người đổi chức danh / mức giữa tháng được tách thành nhiều dòng; các cột tiền tổng đặt ở dòng đầu.</div>`,
@@ -53631,16 +53959,16 @@ function crewPayExplain(periodId, empId, kind){
 
 function crewPayPrint(periodId){
   const p=payPeriodById(periodId); if(!p) return;
-  const rows=crewPayRows(p); rows.forEach((r,i)=>r._stt=r.first?(rows.filter((x,j)=>j<=i&&x.first).length):'');
-  const tot=_cpTotals(rows); const co=(S.companyInfo&&S.companyInfo.name)||'CÔNG TY CỔ PHẦN HÀNG HẢI VÀ NĂNG LƯỢNG HẢI MÃ';
+  const rows0=crewPayRows(p); const rows=_cpDisplayRows(rows0,true,p); rows.forEach((r,i)=>r._stt=r.first?(rows.filter((x,j)=>j<=i&&x.first).length):'');   /* v3.70.48 */
+  const tot=_cpTotals(rows0); const co=(S.companyInfo&&S.companyInfo.name)||'CÔNG TY CỔ PHẦN HÀNG HẢI VÀ NĂNG LƯỢNG HẢI MÃ';
   const mo=+String(p.period).slice(5,7), yr=String(p.period).slice(0,4);
   const _vis=_payColVis(CREW_PAY_COLS.length, _cpAlwaysIdx(), ci=>rows.some(r=>{ const v=CREW_PAY_COLS[ci][1](r); return v!=null && v!=='' && String(v)!=='0'; }));   /* v3.68.49 */
   const th=_vis.map(i=>i<=4?`<th>${esc(CREW_PAY_COLS[i][0])}</th>`:`<th class="v"><div>${esc(CREW_PAY_COLS[i][0])}</div></th>`).join('');
   const tds=r=>_vis.map(ci=>CREW_PAY_COLS[ci]).map(c=>{ const v=c[1](r); const t=(c[2]==='n')?_cpTxt(c,r,v):(v==null?'':String(v));
     return `<td class="${c[2]==='t'?'tx':((c[2]==='n'||c[2]==='n0'||c[2]==='c')?'r':'')}">${esc(t)}</td>`; }).join('');
-  const body=rows.map(r=>`<tr>${tds(r)}</tr>`).join('')
+  const body=rows.map(r=>`<tr${r._sub?' style="font-style:italic"':(r._sum?' style="font-weight:700"':'')}>${tds(r)}</tr>`).join('')
     +`<tr class="t">${_vis.map(i=>{ const c=CREW_PAY_COLS[i]; return i===2?'<td class="tx">TỔNG</td>':((c[2]==='n'||c[2]==='n0')?`<td class="r">${esc(c[2]==='n'?_cpN(tot[i]):(tot[i]||''))}</td>`:'<td></td>'); }).join('')}</tr>`;
-  const notes=[]; (p.rows||[]).forEach(r=>{ const v=_cdCardAt(r.empId, p.period+'-28'); if(v&&v.reason&&/khác thang/i.test(v.reason)) notes.push((r.name||'')+': '+v.reason); });
+  const notes=(p._awayRows||[]).map(a=>'Không tính tại bảng này: '+(a.smartId||'')+' '+(a.name||'')+' — '+a.days+' ngày → lương tính tại '+a.homeName); (p.rows||[]).forEach(r=>{ const v=_cdCardAt(r.empId, p.period+'-28'); if(v&&v.reason&&/khác thang/i.test(v.reason)) notes.push((r.name||'')+': '+v.reason); });
   const sc=(typeof sbrScaleAt==='function')?sbrScaleAt(p.period+'-15'):null;
   const html=`<!doctype html><html lang="vi"><head><meta charset="utf-8"><title>Bảng thanh toán tiền lương ${esc(p._vesselName||'')} ${esc(p.period)}</title><style>
     @page{size:A4 landscape;margin:8mm 7mm} body{margin:0;font-family:"Times New Roman",serif;color:#000}
@@ -54440,7 +54768,7 @@ function qdHrmApprove(id){ if(!_isHRM()){ toast('Chỉ Trưởng bộ phận Nh�
 function qdHrmReturn(id){ if(!_isHRM()){ toast('Chỉ Trưởng bộ phận Nhân sự','bad'); return; } const q=_qdById(id); if(!q||q.status!=='pending_hrm') return; const r=prompt('HRM trả về QĐ '+q.no+' — lý do:',''); if(r===null) return; if(!String(r).trim()){ toast('Ghi lý do','bad'); return; }
   const now=new Date().toISOString(), who=actorName(); commitMutation(()=>{ q.status='returned'; q.hrmReturn={at:now,by:who,reason:String(r).trim()}; (q.log=q.log||[]).push({at:now,by:who,act:'HRM trả về',note:String(r).trim()}); try{ touchRecord(q); }catch(_){} },
     {action:'qd_hrm_return', fields:['payExtraBatches'], onOk:()=>{ toast('↩ Đã trả về Nhân sự','good'); _hpwAfter(q.period); }}); }
-function qdCancel(id){ const q=_qdById(id); if(!q||q.status!=='approved') return; const xs=(S.payExtras||[]).filter(x=>x&&!x._deleted&&q.extrasIds&&q.extrasIds.indexOf(x.id)>=0);
+function qdCancel(id){ const q=_qdById(id); if(!q||q.status!=='approved') return; if(q.hrdId){ toast('Khoản này theo QĐ nhân sự '+(q.no||'')+' — xóa QĐ tại Nhân sự → Quyết định nhân sự (app hoàn tác cả khoản PS)','warn'); return; }   /* v3.70.47 */ const xs=(S.payExtras||[]).filter(x=>x&&!x._deleted&&q.extrasIds&&q.extrasIds.indexOf(x.id)>=0);
   const set=new Set(xs.map(x=>x.empId)); const locked=(PayrollService.periods()||[]).filter(p=>p&&!p._deleted&&p.period===q.period&&(p.rows||[]).some(r=>set.has(r.empId))&&(payStatusIdx(p.status)>=payStatusIdx('submitted')||_payVoucherLinesOf(p).length));
   if(locked.length){ toast('Không hủy được — bảng đã vào đề xuất: '+locked.map(_payPropLabel).join(', ')+' (hủy đề xuất trước)','bad'); return; }
   const r=prompt('HỦY cả QĐ '+q.no+' ('+xs.length+' khoản) — lý do:',''); if(r===null) return; if(!String(r).trim()){ toast('Ghi lý do','bad'); return; } const now=new Date().toISOString(), who=actorName(); let R={done:[]};
@@ -54637,7 +54965,7 @@ function _dupEmpRefs(id){ let n=0; const why=[];
   if((S.crewAssignments||[]).some(a=>a&&!a._deleted&&a.empId===id)) why.push('điều động');
   if((S.salaryProfiles||[]).some(v=>v&&!v._deleted&&v.empId===id&&v.source!=='seed_geo_team')) why.push('thẻ lương sửa tay');
   if((S.payExtras||[]).some(x=>x&&!x._deleted&&x.empId===id)) why.push('khoản PS');
-  if((S.hrDecisions||[]).some(d=>d&&!d._deleted&&d.empId===id)) why.push('quyết định');
+  if((S.hrDecisions||[]).some(d=>d&&!d._deleted&&_hrdHasEmp(d,id))) why.push('quyết định');
   if((S.laborContracts||[]).some(c=>c&&!c._deleted&&c.empId===id)) why.push('HĐLĐ');
   return why; }
 function _dupPlan(){ const plan={emp:[], empHold:[], equip:[], equipHold:[]};
@@ -54750,6 +55078,7 @@ function crewPaySubmitToAcc(periodId){
   const noRes=(p.rows||[]).filter(r=>!r.result||!(+r.result.AS)); if(noRes.length===(p.rows||[]).length){ toast('Chưa tính lương — bấm Tính cả bảng','bad'); return; }
   if(p.hrState==='sent'||p.hrState==='proposed'){ toast('Bảng lương đã chuyển HR — đang khóa, chờ HR xử lý / trả về','warn'); return; }   /* v3.68.51 */
   if(payStatusIdx(p.status)>=payStatusIdx('submitted')){ toast('Kỳ đã chuyển kế toán','warn'); return; }
+  { const pend=[]; (p.rows||[]).forEach(r=>{ const L=_crewPendingSrc(p,r); if(L.length) pend.push((r.name||'')+': chờ '+L.join(', ')); }); if(pend.length){ toast('Chưa chốt được — dòng gộp còn BCC nơi khác chưa xác nhận: '+pend.slice(0,3).join(' · ')+(pend.length>3?' …':''),'bad'); return; } }   /* v3.70.48 */
   const snap=_cpbSnapshot(p);
   { const ov=_opVesselForFleet(p._fromVessel); if(ov && _isKhoanVessel(ov.id)){   /* v3.68.40 (Sếp): lương khoán AFALINA / KATRAN — nhập lương đòi chủ tàu để tạo cặp */
       const had=_khoanDoiSum(ov.id,'Lương thuyền viên',p.period);
@@ -55050,7 +55379,7 @@ function _ctsVesselHtml(p, v){
   const col={}; CTS_CODES.forEach(c=>col[c[0]]=[c[1],c[2]]);
   const head=`<tr><th style="text-align:left">Họ tên</th><th>Chức danh</th><th>Mức đi biển (thẻ)</th>${Array.from({length:nd},(_,i)=>`<th style="padding:1px 2px;font-size:9.5px">${i+1}</th>`).join('')}${CTS_CODES.map(c=>`<th style="font-size:9.5px">${c[1]}</th>`).join('')}<th>Tổng</th></tr>`;
   const body=(sh.rows||[]).map(r=>{ const e=eById[r.empId]||{}; const c=_ctsCnt(r); const v0=_cdCardAt(r.empId, p+'-15'); const d=(v0&&v0.data)||{};
-    const cells=Array.from({length:nd},(_,i)=>{ const k=r.days&&r.days[i+1]; const m=col[k]; return `<td style="padding:0 1px;font-size:9.5px;text-align:center;${m?'background:'+m[1]:(k?'background:#fecaca;color:#C62828;font-weight:800':'')}">${m?m[0]:esc(k||'')}</td>`; }).join('');
+    const cells=Array.from({length:nd},(_,i)=>{ const k=r.days&&r.days[i+1]; const m=col[k]; return `<td style="padding:0 1px;font-size:9.5px;text-align:center;${m?'background:'+m[1]:(k?'background:#fecaca;color:#C62828;font-weight:800':(_bccOffShip(sh,r,i+1)?'background:#d1d5db':''))}"${!k&&_bccOffShip(sh,r,i+1)?` title="${esc(_bccOffShip(sh,r,i+1))}"`:''}>${m?m[0]:esc(k||'')}</td>`; }).join('');
     const dp=Object.keys(r.dpExtra||{}).length?`<tr style="background:#f6f8fb"><td style="padding-left:14px;font-size:10.5px;white-space:nowrap">↳ kiêm DP</td><td></td><td></td>${Array.from({length:nd},(_,i)=>`<td style="padding:0 1px;font-size:9.5px;text-align:center;${r.dpExtra[i+1]?'background:#bbf7d0':''}">${r.dpExtra[i+1]?'DP':''}</td>`).join('')}${CTS_CODES.map(x=>`<td style="font-size:10px;text-align:center">${x[0]==='DP'?Object.keys(r.dpExtra).length:''}</td>`).join('')}<td></td></tr>`:'';
     const _why=_ctsWhy(sh, r.empId); const _nc=!_isCrewType(e);
     return `<tr style="${_nc?'background:#fff7e0':''}"><td style="white-space:nowrap;font-size:11px"><b>${esc(e.fullName||r.empId)}</b><div style="font-size:9.5px;color:${_nc?'#9a5a05':'var(--muted)'}">${_nc?'⚠ '+esc(PAY_PROFILE_LABEL[e.type]||e.type||'không phải thuyền viên')+' · ':''}${esc(_why)}</div></td><td style="white-space:nowrap;font-size:10.5px">${esc(r.rank||e.title||'')}</td><td class="r" style="font-size:10.5px;white-space:nowrap${String(d.ccy||'').toUpperCase()==='USD'?';background:#fff4d6;color:#8a5a00;font-weight:700':''}">${v0?_cpN(d.crewSeaRate,d.ccy):'<span style="color:#C62828;font-weight:700">chưa có thẻ</span>'}</td>${cells}${CTS_CODES.map(x=>`<td style="font-size:10px;text-align:center">${(x[0]==='DP'?c.DP-Object.keys(r.dpExtra||{}).length:c[x[0]])||''}</td>`).join('')}<td style="text-align:center"><b>${_ctsWork(c)}</b></td></tr>${dp}`; }).join('');
@@ -55093,7 +55422,7 @@ function _clvCompute(p){ const [Y,M]=p.split('-').map(Number); const nd=new Date
   (HRService.employees()||[]).filter(e=>e&&!e._deleted&&e.type==='crew').forEach(e=>{ const start=String(e.startDate||'').slice(0,10); const term=_clvTermDate(e);
     if(e.status==='inactive' && !term) return;
     const segs=asg.filter(a=>a.empId===e.id).map(a=>({a:String(a.onboardDate).slice(0,10), b:a.actualSignoffDate?String(a.actualSignoffDate).slice(0,10):'9999-12-31', v:a.vesselId}));
-    const days=[]; for(let d=1; d<=nd; d++){ const x=iso(d); if(start&&x<start) continue; if(term&&x>=term) continue; if(onVes[e.id]&&onVes[e.id].has(d)) continue; if(segs.some(g=>x>=g.a&&x<=g.b)) continue; days.push(d); }
+    const days=[]; for(let d=1; d<=nd; d++){ const x=iso(d); if(start&&x<start) continue; if(term&&x>=term) continue; if(onVes[e.id]&&onVes[e.id].has(d)) continue; if(segs.some(g=>x>=g.a&&(g.b==='9999-12-31'?true:(_crewMergeOn(p)?x<g.b:x<=g.b)))) continue;   /* v3.70.48: ngày rời tàu (hiệu lực QĐ) = ngày nghỉ ca đầu tiên */ days.push(d); }
     if(!days.length) return;
     const last=segs.filter(g=>g.b<iso(1)||g.b<=iso(nd)).sort((a,b)=>b.b.localeCompare(a.b))[0];
     const why=last?('Rời tàu '+(anyVesselName(last.v)||'')+' ngày '+_cdD(last.b)+' — chưa có QĐ đi tàu mới'):('Chưa đi tàu lần nào (vào làm '+(start?_cdD(start):'—')+')');
@@ -55153,7 +55482,7 @@ function clvPayRun(p){ const sh=_clvFind(p); if(!sh) return; if(sh.payLocked){ t
   commitMutation(()=>{ if(!per){ per={id:'PP'+Date.now().toString(36)+Math.random().toString(36).slice(2,5), period:p, profile:'crew', companyId:'', ccy:'VND', name:'Lương thuyền viên nghỉ ca — '+p, _fromVessel:CLV_ID, _vesselName:'Nghỉ ca', _fromBcc:sh.id, status:'draft', rows:[], createdAt:new Date().toISOString(), createdBy:actorName()}; (S.payrollPeriods=S.payrollPeriods||[]).push(per); }
       per._fromBcc=sh.id; per.rows=ok.map(r=>{ const e=emps[r.empId]||{}; const old=(per.rows||[]).find(x=>x.empId===r.empId); return {empId:r.empId, name:e.fullName||'', smartId:e.smartId||'', inputs:Object.assign({}, (old&&old.inputs)||{}, {G:0,H:0,I:0,J:0,L:0,M:0,K:Object.keys(r.days||{}).length}), result:{}}; });
       if(per.hrState==='returned') delete per.hrState; try{ touchRecord(per); }catch(_){} },
-    {action:'crew_leave_pay_run', fields:['payrollPeriods','bccSheets'], onOk:()=>{ try{ _payAutoPullSalary(per); }catch(e){ console.warn(e); } try{ (per.rows||[]).forEach(r=>{ const x=ok.find(o=>o.empId===r.empId); if(x) r.inputs.K=Object.keys(x.days||{}).length; }); payPeriodComputeAll(per.id); }catch(e){ console.warn(e); } saveState();
+    {action:'crew_leave_pay_run', fields:['payrollPeriods','bccSheets'], onOk:()=>{ try{ _payAutoPullSalary(per); }catch(e){ console.warn(e); } try{ (per.rows||[]).forEach(r=>{ const x=ok.find(o=>o.empId===r.empId); if(x) r.inputs.K=Object.keys(x.days||{}).length; }); try{ _crewMergeFix(per); }catch(_){} payPeriodComputeAll(per.id); }catch(e){ console.warn(e); } saveState();
       toast('✓ Đã tính lương nghỉ ca '+p+' ('+ok.length+' người)','good'); try{ crewPayBoardOpen(per.id); }catch(_){ renderVmCrewTs(); } }}); }
 function ctsRender(box, p, header){ try{ _v32AutoFix(); }catch(_){}
   const vs=(typeof fleetVessels==='function'?fleetVessels():[]).filter(v=>v&&!v._deleted&&!v.isShoreUnit);
@@ -123270,9 +123599,9 @@ function _hpWork(e){ const canPay=(typeof payrollFieldVisible==='function')?payr
   const job=_hpCard('Thông tin công việc', _hpRow('Nhóm',HRM_TYPE_LABEL[e.type]||e.type)+_hpRow('Chức danh',e.title)+_hpRow('Phòng ban',e.dept)+_hpRow('Bộ phận',e.division)+_hpRow('Khối (VPCT)',e.workBlock)+_hpRow('Tàu công tác',hrmVesselName(e.linkVesselId)||e.currentVessel||'')+_hpRow('Chức danh đi biển',e.seaRank)+_hpRow('Ngày vào làm',_hpD(e.startDate))+_hpRow('Ngày thử việc',_hpD(e.probationDate))+_hpRow('Ngày ký HĐ',maskIfIT(e.contractSignDate))+_hpRow('Loại hợp đồng',maskIfIT(e.contractType))+_hpRow('Số hợp đồng',e.contractNo)+_hpRow('HĐLĐ đến',_hpD(e.contractEndDate))+_hpRow('Mã số BHXH',e.insuranceNo));
   const bank=canPay?_hpCard('Ngân hàng & thuế 🔒', _hpRow('Ngân hàng',e.bankName)+_hpRow('Chủ tài khoản',e.bankAccName)+_hpRow('Số tài khoản',e.bankAccNo)+_hpRow('Chi nhánh',e.bankBranch)+_hpRow('MST cá nhân',e.taxCode)):'';
   const hd=(S.laborContracts||[]).filter(x=>x&&!x._deleted&&x.empId===e.id).sort((a,b)=>String(b.createdAt||'').localeCompare(String(a.createdAt||'')));
-  const qd=(S.hrDecisions||[]).filter(x=>x&&!x._deleted&&x.empId===e.id).sort((a,b)=>String(b.createdAt||'').localeCompare(String(a.createdAt||'')));
+  const qd=(S.hrDecisions||[]).filter(x=>x&&!x._deleted&&_hrdHasEmp(x,e.id)).sort((a,b)=>String(b.createdAt||'').localeCompare(String(a.createdAt||'')));
   const hdT=hd.length?`<table class="tbl" style="font-size:12px"><thead><tr><th>Số HĐ</th><th>Ngày</th><th>Trạng thái</th><th></th></tr></thead><tbody>${hd.map(x=>`<tr><td>${esc(typeof _hdNoText==='function'?_hdNoText(x.tpl,x.nn,x.year):(x.id))}</td><td>${esc(_hpD(x.signedAt||x.createdAt))}</td><td>${x.signedAt?'<b style="color:#188038">Đã ký</b>':'Nháp'}</td><td><button class="btn-ghost" style="font-size:11px" onclick="hdView('${x.id}')">Xem</button></td></tr>`).join('')}</tbody></table>`:'';
-  const qdT=qd.length?`<table class="tbl" style="font-size:12px"><thead><tr><th>Quyết định</th><th>Số</th><th>Ngày</th><th></th></tr></thead><tbody>${qd.map(x=>`<tr><td>${esc((typeof HRD_META!=='undefined'&&HRD_META[x.kind]&&HRD_META[x.kind].label)||x.kind||'')}</td><td>${esc((x.no3||'')+(x.year?'/QĐNS/'+x.year:''))}</td><td>${esc(_hpD(x.signedAt||x.createdAt))}</td><td><button class="btn-ghost" style="font-size:11px" onclick="_hrdOpen((S.hrDecisions||[]).find(d=>d.id==='${x.id}'),false,${x.signedAt?'true':'false'})">Xem</button></td></tr>`).join('')}</tbody></table>`:'';
+  const qdT=qd.length?`<table class="tbl" style="font-size:12px"><thead><tr><th>Quyết định</th><th>Số</th><th>Ngày</th><th></th></tr></thead><tbody>${qd.map(x=>`<tr><td>${esc((typeof HRD_META!=='undefined'&&HRD_META[x.kind]&&HRD_META[x.kind].label)||x.kind||'')}</td><td>${esc(_qdNoStr(x))}</td><td>${esc(_hpD(x.signedAt||x.createdAt))}</td><td><button class="btn-ghost" style="font-size:11px" onclick="_hrdOpen((S.hrDecisions||[]).find(d=>d.id==='${x.id}'),false,${x.signedAt?'true':'false'})">Xem</button></td></tr>`).join('')}</tbody></table>`:'';
   return `<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">${job}<div style="display:grid;gap:8px">${bank}${_hpCard('Hợp đồng lao động'+((typeof _hdCan==='function'&&_hdCan())?`<button class="btn-primary" style="float:right;font-size:11px;padding:2px 8px" onclick="hdUpdateOpen('${e.id}')">✎ Cập nhật HĐLĐ</button><button class="btn-sec" style="float:right;font-size:11px;padding:2px 8px;margin-right:4px" onclick="hdTbnsExport('',false,'${e.id}')">🧾 Thông báo NS</button>`:''), hdT)}${_hpCard('Quyết định nhân sự', qdT)}</div></div>`; }
 function _hpPayRows(e){ const out=[]; const RM={office:{bh:'AL',tax:'AK'},tech:{bh:'AP',tax:'AM'},crew:{bh:'AO',tax:'AL'},crew_khoan:{bh:'AO',tax:'AL'},office_gross:{bh:'insEmp',tax:'pit'}};
   (PayrollService.periods()||[]).filter(p=>p&&!p._deleted).forEach(p=>{ const r=(p.rows||[]).find(x=>x.empId===e.id); if(!r) return; const res=r.result||{}, rm=RM[p.profile]||{}; let ps=0; try{ ps=(payExtrasFor(e.id,p.period)||[]).reduce((t,x)=>t+(x.sign<0?-1:1)*(+x.amount||0),0); }catch(_){}
@@ -129516,6 +129845,111 @@ function _crewAuditBtn(sh, A){ const blk=A&&A.nBlock?'disabled title="Còn '+A.n
   if(sh.status==='draft'&&_crewTsCanManage()) return `<button class="btn-primary" ${blk} onclick="closeModal();_crewTsSubmit('${id}')">✓ Đúng — Chuyển HR</button>`;
   return ''; }
 
+/* ═══════════════════════════════════════════════════════════════════════════════════════════════
+   v3.70.48 (Sếp duyệt 11/10): THUYỀN VIÊN THAY ĐỔI TRONG THÁNG — 1 DÒNG LƯƠNG / NGƯỜI
+   • BCC: tàu chỉ có công từ ngày xuống đến trước ngày rời; nghỉ ca → BCC nghỉ ca (mọi trường hợp).
+   • Bảng lương (từ kỳ 10/2026): người có công ở nhiều nơi (tàu / nghỉ ca) gộp 1 dòng vào TÀU CÓ CÔNG NGÀY LÀM VIỆC
+     SAU CÙNG của tháng (NGHICA không tính là ngày làm việc; không có ngày làm việc → bảng nghỉ ca). Nơi còn lại: dòng xám.
+   • Dòng con theo từng trạng thái (tàu · chức danh / mức lương). Thuế TNCN 1 lần / tháng — miễn thuế theo cờ tàu
+     từng dòng con; NGHỈ CA LUÔN CHỊU THUẾ. BHXH, Khoản PS 1 lần. Chi phí chia theo ngày về đúng tàu / dự án.
+   ═══════════════════════════════════════════════════════════════════════════════════════════════ */
+const CREW_MERGE_FROM='2026-10';
+const CREW_WORK_CODES=new Set(['DB1','DB2','DOCK','BO','BO2','DP']);
+function _crewMergeOn(period){ return String(period||'')>=CREW_MERGE_FROM; }
+function _crewSheetsOf(period){ return (S.bccSheets||[]).filter(sh=>sh&&!sh._deleted&&sh.period===period&&sh.mode==='daily'&&sh.scope&&(sh.scope.type==='vessel'||sh.scope.type==='crewleave')); }
+function _crewSrcOf(sh){ return sh.scope.type==='vessel'?sh.scope.value:CLV_ID; }
+function _crewSrcName(src){ return src===CLV_ID?'Nghỉ ca':(anyVesselName(src)||src); }
+function _crewAsgVid(empId, iso){ const a=(HRService.crewAssignments()||[]).filter(x=>x&&!x._deleted&&x.empId===empId&&x.onboardDate&&String(x.onboardDate).slice(0,10)<=iso&&(!x.actualSignoffDate||String(x.actualSignoffDate).slice(0,10)>iso)).sort((a,b)=>String(b.onboardDate).localeCompare(String(a.onboardDate)))[0]; return a?a.vesselId:''; }
+/* ngày → {c: mã, src: tàu | __NGHICA__} gộp mọi BCC tàu + BCC nghỉ ca của tháng */
+function _crewDayMap(empId, period){ const m={};
+  _crewSheetsOf(period).forEach(sh=>{ const r=(sh.rows||[]).find(x=>x&&x.empId===empId); if(!r) return; if(sh.scope.type==='crewleave'&&r.conf&&r.conf.st==='no') return; const src=_crewSrcOf(sh);
+    Object.keys(r.days||{}).forEach(d=>{ const c=String(r.days[d]||'').trim(); if(!c) return; const prev=m[+d];
+      if(!prev){ m[+d]={c, src}; return; }
+      if(prev.src===CLV_ID&&src!==CLV_ID){ m[+d]={c, src}; return; }   /* trùng ngày: công tàu ưu tiên hơn nghỉ ca */
+      if(prev.src!==CLV_ID&&src!==CLV_ID&&prev.src!==src){ const iso=period+'-'+String(d).padStart(2,'0'); if(_crewAsgVid(empId, iso)===src) m[+d]={c, src}; } }); });   /* 2 tàu cùng ngày → tàu theo QĐ ngày đó */
+  return m; }
+function _crewSrcList(empId, period){ const m=_crewDayMap(empId, period); const L=[]; Object.keys(m).sort((a,b)=>a-b).forEach(d=>{ const s=m[d].src; if(L.indexOf(s)<0) L.push(s); }); return L; }
+/* tàu có công ngày làm việc sau cùng của tháng (không có → nghỉ ca) */
+function _crewHomeOf(empId, period){ const m=_crewDayMap(empId, period); let best=0, vid='', lastAny=0, lastSrc='';
+  Object.keys(m).forEach(d=>{ const x=m[d]; if(x.src!==CLV_ID&&CREW_WORK_CODES.has(String(x.c).toUpperCase())&&+d>=best){ best=+d; vid=x.src; } if(+d>=lastAny){ lastAny=+d; lastSrc=x.src; } });
+  if(vid) return vid; if(!Object.keys(m).length) return ''; if(Object.keys(m).some(d=>m[d].src===CLV_ID)) return CLV_ID; return lastSrc; }
+function _crewCountAll(empId, period, profile){ const map=(PAY_ATT_MAP[profile]||PAY_ATT_MAP.crew||{}); const code2k={}; Object.keys(map).forEach(k=>(map[k]||[]).forEach(c=>{ code2k[c]=k; }));
+  const out={}; Object.keys(map).forEach(k=>out[k]=0); const m=_crewDayMap(empId, period); Object.keys(m).forEach(d=>{ const k=code2k[String(m[d].c).toUpperCase()]; if(k) out[k]+=1; });
+  const dpK=Object.keys(map).find(k=>(map[k]||[]).indexOf('DP')>=0);
+  if(dpK) _crewSheetsOf(period).filter(sh=>sh.scope.type==='vessel').forEach(sh=>{ const r=(sh.rows||[]).find(x=>x&&x.empId===empId); if(r&&r.dpExtra) out[dpK]+=Object.keys(r.dpExtra).length; });
+  return out; }
+function _crewOwnDays(empId, p){ const sh=(S.bccSheets||[]).find(x=>x&&x.id===p._fromBcc); const r=sh&&(sh.rows||[]).find(x=>x&&x.empId===empId); return r?Object.keys(r.days||{}).filter(d=>String(r.days[d]||'').trim()).length:0; }
+/* sau khi kéo công: người "ở nơi khác" → dòng xám; người ở đây có công nhiều nơi → cộng công tất cả các nơi */
+function _crewMergeFix(p){ if(!p||!p._fromVessel||!/^crew/.test(String(p.profile||''))||!_crewMergeOn(p.period)||p._histImport) return;
+  const own=p._fromVessel, away=[], keep=[];
+  (p.rows||[]).forEach(r=>{ const home=_crewHomeOf(r.empId, p.period);
+    if(home && home!==own){ away.push({empId:r.empId, name:r.name||'', smartId:r.smartId||'', home, homeName:_crewSrcName(home), days:_crewOwnDays(r.empId,p)}); return; }
+    keep.push(r); const srcs=_crewSrcList(r.empId, p.period);
+    if(srcs.length>1){ const cnt=_crewCountAll(r.empId, p.period, p.profile); r.inputs=r.inputs||{}; Object.keys(cnt).forEach(k=>{ r.inputs[k]=cnt[k]; }); r._srcs=srcs; } else delete r._srcs; });
+  p.rows=keep; p._awayRows=away; }
+/* BCC liên quan (nơi khác) chưa xác nhận → chưa chốt được */
+function _crewPendingSrc(p, row){ const out=[]; (row&&row._srcs||[]).forEach(src=>{ if(src===p._fromVessel) return;
+    if(src===CLV_ID){ const sh=_clvFind(p.period); const r=sh&&(sh.rows||[]).find(x=>x.empId===row.empId); if(!r||!r.conf) out.push('BCC nghỉ ca'); return; }
+    const sh=_vtsFindSheet(src, p.period); if(!sh||sh.status!=='confirmed') out.push('BCC tàu '+_crewSrcName(src)); });
+  return out; }
+/* đoạn lương: theo kỳ thẻ lương × nơi chấm công (tàu / nghỉ ca) */
+function _payCrewSegmentsM(empId, period, profile, inp){
+  const vs=_spList(empId).filter(v=>/^crew/.test(String(v.engine||''))); if(!vs.length) return [];
+  const [Y,Mo]=period.split('-').map(Number), dim=new Date(Y,Mo,0).getDate(); const first=period+'-01', last=period+'-'+String(dim).padStart(2,'0'); const iso=d=>period+'-'+String(d).padStart(2,'0');
+  let base=null; vs.forEach(v=>{ if(_spFromDate(v)<=first) base=v; });
+  const pts=[{from:first, v:base}].concat(vs.filter(v=>_spFromDate(v)>first&&_spFromDate(v)<=last).map(v=>({from:_spFromDate(v), v})));
+  const map=(PAY_ATT_MAP[profile]||PAY_ATT_MAP.crew||{}); const code2k={}; Object.keys(map).forEach(k=>(map[k]||[]).forEach(c=>{ code2k[c]=k; })); const KEYS=Object.keys(map);
+  const dm=_crewDayMap(empId, period); if(!Object.keys(dm).length) return [];
+  const firstSrc=dm[Object.keys(dm).sort((a,b)=>a-b)[0]].src; let cur=firstSrc; const srcOf={}; for(let d=1; d<=dim; d++){ if(dm[d]) cur=dm[d].src; srcOf[d]=cur; }
+  const verOf=d=>{ let k=0; pts.forEach((pt,i)=>{ if(pt.from<=iso(d)) k=i; }); return k; };
+  const pieces=[]; for(let d=1; d<=dim; d++){ const key=verOf(d)+'|'+srcOf[d]; const L=pieces[pieces.length-1]; if(L&&L.key===key) L.d1=d; else pieces.push({key, v:verOf(d), src:srcOf[d], d0:d, d1:d}); }
+  if(pieces.length<2) return [];
+  const _rkAt={}; let _cr=''; vs.forEach(v=>{ if(v.rank) _cr=v.rank; _rkAt[v.id]=_cr; });
+  const segs=pieces.map(pc=>{ const pt=pts[pc.v]; const R=f=>pt.v?_spResolve(pt.v,f):0; const _fx=(pt.v&&String((pt.v.data||{}).ccy||'VND').toUpperCase()==='USD')?((+inp._fx>0)?+inp._fx:fxRate()):1; const Q=f=>Math.round(R(f)*_fx);
+    const sg={from:iso(pc.d0), to:iso(pc.d1), days:pc.d1-pc.d0+1, verId:pt.v?pt.v.id:'', rank:(pt.v&&_rkAt[pt.v.id])||'', N:R('netBase'), O:Q('crewSeaRate'), T:Q('crewDpRate'), _restM:R('crewRestSalary'), _dockR:Q('crewDockRate'), _vnR:Q('crewStbVnRate'), _fnR:Q('crewStbFnRate'), _restR:Q('crewRestRate'), _fx:(_fx>1?_fx:0), est:false,
+      src:pc.src, srcName:_crewSrcName(pc.src), flag:pc.src===CLV_ID?'':vesFlagShort(pc.src), _free:pc.src===CLV_ID?false:!!vesTaxFreeAll(pc.src)};
+    KEYS.forEach(k=>{ sg[k]=0; }); for(let d=pc.d0; d<=pc.d1; d++){ const x=dm[d]; const k=x&&code2k[String(x.c).toUpperCase()]; if(k) sg[k]+=1; }
+    return sg; });
+  const dpK=KEYS.find(k=>(map[k]||[]).indexOf('DP')>=0);   /* DP kiêm nhiệm (dòng phụ BCC tàu) → đúng đoạn của ngày đó */
+  if(dpK) _crewSheetsOf(period).filter(sh=>sh.scope.type==='vessel').forEach(sh=>{ const r=(sh.rows||[]).find(x=>x&&x.empId===empId); if(!r||!r.dpExtra) return; Object.keys(r.dpExtra).forEach(d=>{ const sg=segs.find(s=>s.from<=iso(+d)&&iso(+d)<=s.to); if(sg) sg[dpK]+=1; }); });
+  KEYS.forEach(k=>{ const tot=+inp[k]||0, sum=segs.reduce((a,sg)=>a+(+sg[k]||0),0); const diff=Math.round((tot-sum)*100)/100; if(diff){ segs[segs.length-1][k]=Math.round(((+segs[segs.length-1][k]||0)+diff)*100)/100; segs[segs.length-1].adj=true; } });
+  return segs; }
+/* hiển thị: dòng tổng ▸/▾ + dòng con */
+window._CPX=window._CPX||{};
+function _cpTog(empId, pid){ window._CPX[empId]=!window._CPX[empId]; crewPayBoardOpen(pid); }
+function _cpTogAll(pid, on){ const p=payPeriodById(pid); (p&&p.rows||[]).forEach(r=>{ window._CPX[r.empId]=!!on; }); crewPayBoardOpen(pid); }
+function _cpDisplayRows(rows, print, p){ const by={}; rows.forEach(r=>{ (by[r.empId]=by[r.empId]||[]).push(r); }); const out=[]; const seen={};
+  rows.forEach(r=>{ if(seen[r.empId]) return; seen[r.empId]=1; const L=by[r.empId]; if(L.length<2){ out.push(r); return; }
+    const f=L[0], la=L[L.length-1]; const sum=Object.assign({}, f, {_sum:true, _n:L.length, first:true});
+    ['G','H','I','J','K','L','M','tong','tBien','tDock','tVn','tRest','tFn','tDp'].forEach(k=>{ sum[k]=Math.round(L.reduce((t,x)=>t+(+x[k]||0),0)*100)/100; }); ['N','O','rDock','rVn','rFn','rRest','rDp'].forEach(k=>{ sum[k]=''; });
+    const pend=p?_crewPendingSrc(p, f.row):[]; sum.rank=String(la._rank0||la.rank||'').split(' · ')[0]+' ▸ '+L.length+' trạng thái'+(pend.length?' ⚠ chờ '+pend.join(', '):'');
+    out.push(sum); if(print||window._CPX[r.empId]) L.forEach(x=>out.push(Object.assign({}, x, {first:false, _sub:true, _ps:0, _adj:0}))); });
+  return out; }
+function _cpAwayHtml(p, nCols){ const A=p&&p._awayRows||[]; if(!A.length) return '';
+  return A.map(a=>`<tr style="color:#8a9099;font-style:italic;background:#f4f4f4"><td></td><td colspan="${nCols}">— ${esc(a.smartId||'')} <b>${esc(a.name||'')}</b>: ${a.days} ngày ${p._fromVessel===CLV_ID?'nghỉ ca':'công ở tàu này'} → <b>lương tính tại ${esc(a.homeName)}</b> (${a.home===CLV_ID?'không có ngày làm việc ở tàu':'tàu có công ngày làm việc sau cùng của tháng'}) · không tính tiền, không vào tổng</td></tr>`).join(''); }
+
+/* ═══ v3.70.49 (Sếp duyệt 11/10): NHÂN SỰ ĐỔI PHÒNG BAN / CHỨC DANH TRONG THÁNG — bảng lương 1 dòng, ▸ xem từng trạng thái;
+   chi phí lương chia theo phòng ban theo số ngày công trên BCC từng phòng ban (từ kỳ 10/2026). ═══ */
+function _payOfficeParts(p, r){ try{ if(!p||!r||/^crew/.test(String(p.profile||''))||!_crewMergeOn(p.period)) return null;
+  const SH=(S.bccSheets||[]).filter(s=>s&&!s._deleted&&s.period===p.period&&s.mode==='daily'&&s.scope&&s.scope.type==='dept'&&(s.rows||[]).some(x=>x&&x.empId===r.empId));
+  if(SH.length<2) return null; const [Y,M]=String(p.period).split('-').map(Number); const dim=new Date(Y,M,0).getDate(); const iso=d=>p.period+'-'+String(d).padStart(2,'0');
+  const dd={}, dc={}; SH.forEach(s=>{ const row=s.rows.find(x=>x&&x.empId===r.empId); Object.keys(row.days||{}).forEach(d=>{ const c=String(row.days[d]||'').trim(); if(!c||dd[+d]) return; dd[+d]=s.scope.value; dc[+d]=c; }); });
+  if(new Set(Object.values(dd)).size<2) return null;
+  const vs=_spList(r.empId); const verAt=x=>{ let h=null; vs.forEach(v=>{ if(_spFromDate(v)<=x) h=v; }); return h; }; const e=hrmEmpById(r.empId)||{};
+  const ks=Object.keys(dd).map(Number).sort((a,b)=>a-b); let cur=dd[ks[0]]; const out=[];
+  for(let d=1; d<=dim; d++){ if(dd[d]) cur=dd[d]; const v=verAt(iso(d)); const key=cur+'|'+(v?v.id:''); let L=out[out.length-1];
+    if(!L||L.key!==key){ let G=0; try{ G=+((salaryProfileBuildInp(r.empId, p.period, v)||{}).G)||0; }catch(_){} L={key, dept:cur, deptName:_hrdDeptName(cur)||cur, title:(v&&v.rank)||e.title||'', G, d0:d, d1:d, codes:{}, n:0}; out.push(L); }
+    L.d1=d; if(dc[d]){ L.codes[dc[d]]=(L.codes[dc[d]]||0)+1; L.n++; } }
+  return out.length>1?out:null; }catch(e){ console.warn('[office parts]',e); return null; } }
+function _payPartsNet(p, r){ const x=r.result||{}; const adj=payRowAdjustTotal(r); return p.profile==='office'?((+x.AP||0)+adj):((+x.total||+x.AT||0)+adj); }
+function _payTogParts(el, periodId, empId){ const tr=el.closest('tr'); if(!tr) return; const nx=tr.nextElementSibling; if(nx&&nx.classList.contains('pay-part-row')){ nx.remove(); el.textContent=el.textContent.replace('▾','▸'); return; }
+  const p=payPeriodById(periodId); const r=p&&(p.rows||[]).find(x=>x.empId===empId); const L=_payOfficeParts(p,r); if(!L) return; el.textContent=el.textContent.replace('▸','▾');
+  const fm=v=>Math.round(+v||0).toLocaleString('vi-VN'); const tot=L.reduce((t,x)=>t+x.n,0)||1; const net=_payPartsNet(p,r);
+  const body=L.map(x=>`<tr style="font-style:italic"><td style="padding:2px 8px">${esc(x.deptName)} · ${esc(x.title||'')}</td><td style="padding:2px 8px">${String(x.d0).padStart(2,'0')}–${String(x.d1).padStart(2,'0')}</td><td style="padding:2px 8px">${Object.keys(x.codes).map(c=>esc(c)+' '+x.codes[c]).join(' · ')}</td><td style="padding:2px 8px;text-align:right">${x.n}</td><td style="padding:2px 8px;text-align:right;font-family:monospace">${fm(x.G)}</td><td style="padding:2px 8px;text-align:right">${Math.round(x.n/tot*1000)/10}%</td><td style="padding:2px 8px;text-align:right;font-family:monospace">${fm(net*x.n/tot)}</td></tr>`).join('');
+  const row=document.createElement('tr'); row.className='pay-part-row'; row.innerHTML=`<td colspan="${tr.children.length}" style="padding:6px 10px;background:#f8fafc"><div style="font-size:12px;font-weight:700;margin-bottom:4px">▾ Từng trạng thái trong tháng — ${esc(r.name||'')}</div><table style="border-collapse:collapse;font-size:12px"><tr style="color:var(--muted);font-size:11px"><th style="padding:2px 8px;text-align:left">Phòng ban · chức danh</th><th style="padding:2px 8px">Từ – đến</th><th style="padding:2px 8px;text-align:left">Công (BCC)</th><th style="padding:2px 8px">Tổng công</th><th style="padding:2px 8px">Lương cơ bản</th><th style="padding:2px 8px">Tỷ lệ</th><th style="padding:2px 8px">Chi phí phân bổ (thực lĩnh)</th></tr>${body}</table><div style="font-size:11px;color:var(--muted);margin-top:3px">Lương tính 1 lần cho cả tháng (đổi lương giữa tháng: xem ⚙). Chi phí lương chia về từng phòng ban theo tỷ lệ ngày công trên BCC phòng ban.</div></td>`;
+  tr.after(row); }
+function _payPartsTag(p, r, id){ const L=_payOfficeParts(p,r); if(!L) return ''; return ` <span onclick="event.stopPropagation();_payTogParts(this,'${id}','${r.empId}')" title="Đổi phòng ban / chức danh trong tháng — bấm xem từng trạng thái" style="cursor:pointer;margin-left:6px;font-size:10px;font-weight:700;color:#123a5c;background:#e8f0fa;border-radius:3px;padding:0 5px">▸ ${L.length} trạng thái</span>`; }
+
 /* ── Sidebar khối màu: ẩn dải màu khi mọi mục trong khối đều ẩn ── */
 function _sbBandsRefresh(root){
   (root?[root]:document.querySelectorAll('#tm-sidebar,#vm-mod-sidebar,#kt-mod-sidebar,#vpqn-mod-sidebar,#hrm-sidebar,#fin-sidebar,#kho-mod-sidebar,#qhse-mod-sidebar')).forEach(sb=>{
@@ -134898,6 +135332,7 @@ function _payAutoPullAttendance(p){
     try{ row.result=payComputeRow(p, row); }catch(e){}
   });
   p.attSource={attId:att.id, attPeriod:att.period, pulledAt:new Date().toISOString(), pulledBy:'auto'};
+  try{ if(p._fromVessel && typeof _crewMergeFix==='function') _crewMergeFix(p); }catch(e){ console.warn('[crew merge]',e); }   /* v3.70.48 */
   return {ok:true, nAdd, nSet, wrongEngine:diff.wrongEngine||[], noProfile:diff.noProfile||[]};
 }
 function _payAutoPullSalary(p){
