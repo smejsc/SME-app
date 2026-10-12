@@ -4699,7 +4699,7 @@ const WH_TYPES = {
    ============================================================ */
 
 const AUTH_KEY='seahorse_auth_v3';   // multi-user config
-const APP_VERSION='3.70.57';
+const APP_VERSION='3.70.59';
 /* HOTFIX 3.12.17-email: CHẶN TRIỆT ĐỂ gửi email TỰ ĐỘNG (mất kiểm soát — spam quota Google).
    Email phải do NV được phân quyền CHỦ ĐỘNG chọn gửi. Cờ này:
    (1) chặn auto-SCAN tạo email (hrmScanExpiries/vesselCertScanExpiries);
@@ -75201,7 +75201,7 @@ function printDnttOp(id){
   const d={ no, payMethod:t.payMethod||'CK', priority:t.priority||'BT', date:_dnttD(t.date||todayISO()), reqName:_dnttFullName(t.createdBy), reqDept:_dnttDept(t.createdBy),
     benName:ben.name||t.vendor||'', benAcc:ben.acc, benAccCcy:ben.accCcy, benBank:ben.bank, ccy,
     rows:[{desc:base+conv, invNo:invs.join(', '), invDate:dr, price:total, qty:1, amount:total}], total, poList:_dnttPoList(sibs),
-    attachments:Array.from(new Set([].concat(...sibs.map(x=>(x.attachments||[]).map(f=>(f&&(f.docType||f.name||f.fileName))||'')))).filter(Boolean)) };
+    attachments:Array.from(new Set([].concat(...sibs.map(x=>(Array.isArray(x.attachments)?x.attachments:[]).map(f=>(f&&(f.docType||f.name||f.fileName))||''))))).filter(Boolean) };   /* v3.70.59: .filter đặt nhầm trên Set → lỗi in ĐNTT chi hộ */
   try{ sibs.forEach(x=>{ if(x&&!x._printedAt){ x._printedAt=new Date().toISOString(); try{ touchRecord(x); }catch(e){} } }); saveState(); }catch(e){}   /* v3.66.88 */
   const _inner=_dnttMH04(d); _dnttWrite(w, _inner, 'DNTT '+no); try{ logAuditEvent('dntt_print',{kind:'op', id, no, lines:sibs.length}); }catch(e){}
   try{ _dnttSavePdf(_inner, no, sibs, ''); }catch(e){}   /* v3.66.90 */
@@ -130273,6 +130273,108 @@ function _bccDpRow(s, r, idx, nSum, readOnly){ if(!_bccDpEligible(s, r)) return 
 function bccDpCellChange(sheetId, empId, day, value){ const s=(S.bccSheets||[]).find(x=>x&&x.id===sheetId); if(!s) return; const row=(s.rows||[]).find(r=>r.empId===empId); if(!row) return;
   row.dpExtra=row.dpExtra||{}; if(String(value||'').trim()) row.dpExtra[day]=1; else delete row.dpExtra[day]; if(!Object.keys(row.dpExtra).length) delete row.dpExtra;
   try{ _bccMarkEdit(row, day); }catch(_){} _bccTouch(s, row); renderBccGridEditor(sheetId); }
+
+/* ═══ v3.70.58 (Sếp duyệt 12/10): CHẤM CÔNG THÔNG MINH — BCC TÀU
+   · Gợi ý công tàu từng ngày từ DAR: có DAR → DB1 (VN) / DB2 (NN) · sự kiện Dock → DOCK · không DAR + không on-hire → BO / BO2 · DAR có mã DP (A/B1 mẫu SME) & giờ > 0 → DP (dòng ↳ DP).
+   · Tàu chọn 1 ô → app điền tiếp các ngày sau cho TOÀN BỘ thuyền viên đang ở tàu, đến ngày DAR đổi trạng thái → theo DAR từng đoạn → dừng ở ngày chưa có DAR / ngoài thời gian ở tàu.
+   · Ô app tự điền: nghiêng; ô khác gợi ý DAR: vàng. Không bao giờ ghi đè ô tàu tự chọn. DAR về muộn → cập nhật ô app tự điền theo DAR. ═══ */
+const DAR_DP_CODES_DEFAULT={SME3:['A','B1'], SME2:['A','B1'], PTSC:[]};
+const DAR_PLACE_VN_DEFAULT=['VIET NAM','VIETNAM','VUNG TAU','CAT LO','CON DAO','BACH HO','RONG','SU TU','CA NGU VANG','LO 15','BLOCK 15','DUNG QUAT','HAI PHONG','PHU MY','SAO MAI','BEN DINH','LONG SON','NAM CON SON','CUU LONG','THI VAI','CAM RANH','QUY NHON','DA NANG','NGHI SON','VAN PHONG','SONG DOC','PHU QUOC','CA MAU','TIEN GIANG','BA RIA','DINH VU','LACH HUYEN'];
+const DAR_PLACE_NN_DEFAULT=['SINGAPORE','MALAYSIA','THAILAND','INDONESIA','BRUNEI','PHILIPPINES','MYANMAR','CAMBODIA','TAIWAN','JAPAN','KOREA','CHINA','HONG KONG','LABUAN','KEMAMAN','BATAM','SONGKHLA','SATTAHIP','KUANTAN','MIRI','BINTULU','LAEM CHABANG','KOTA KINABALU'];
+function _darPlaces(){ const m=(S.meta&&S.meta.darPlaces)||{}; return {vn:DAR_PLACE_VN_DEFAULT.concat(m.vn||[]), nn:DAR_PLACE_NN_DEFAULT.concat(m.nn||[])}; }
+function _darDpCodes(vid, fam){ try{ const t=(S.darTemplates||[]).find(x=>x&&x.vesselId===vid&&!x._deleted); if(t&&Array.isArray(t.dpCodes)) return t.dpCodes; return DAR_DP_CODES_DEFAULT[fam||(t&&t.family)||'']||[]; }catch(_){ return []; } }
+function _darNormTxt(s){ return String(s||'').normalize('NFD').replace(/[̀-ͯ]/g,'').replace(/đ/g,'d').replace(/Đ/g,'D').toUpperCase(); }
+function _darLocOf(rep){ const txt=_darNormTxt((rep.pstn||'')+' | '+(rep.dest||'')); const P=_darPlaces();
+  const ll=/(\d{1,2})[°º\s-]+(\d{1,2}(?:[.,]\d+)?)?[^NS\d]{0,6}([NS])[^\d]{0,6}(\d{2,3})[°º\s-]+(\d{1,2}(?:[.,]\d+)?)?[^EW\d]{0,6}([EW])/.exec(txt);
+  if(ll){ let lat=+ll[1]+(+(String(ll[2]||0).replace(',','.'))/60), lon=+ll[4]+(+(String(ll[5]||0).replace(',','.'))/60); if(ll[3]==='S') lat=-lat; if(ll[6]==='W') lon=-lon; return (lat>=6&&lat<=23.5&&lon>=102&&lon<=117.5)?'VN':'NN'; }
+  const dec=/(-?\d{1,2}\.\d{2,})\s*[,;\s]\s*(-?\d{2,3}\.\d{2,})/.exec(txt); if(dec){ const lat=+dec[1], lon=+dec[2]; return (lat>=6&&lat<=23.5&&lon>=102&&lon<=117.5)?'VN':'NN'; }
+  const has=L=>L.some(k=>k&&txt.indexOf(_darNormTxt(k))>=0); const vn=has(P.vn), nn=has(P.nn); if(vn&&!nn) return 'VN'; if(nn&&!vn) return 'NN'; return ''; }
+function _evCovers(e, iso){ const a=String(e.startAt||e.from||e.start||'').slice(0,10), b=String(e.endAt||e.to||e.end||'').slice(0,10); return !!a&&a<=iso&&(!b||b>=iso); }
+/* gợi ý từng ngày: {d:{has, code, dp, why}} */
+function _bccDarSuggest(vid, period){ const [Y,M]=period.split('-').map(Number); const nd=new Date(Y,M,0).getDate(); const out={}; const today=todayISO();
+  let reps=[]; try{ reps=(typeof _flReps==='function')?_flReps(vid):[]; }catch(_){}
+  const byDate={}; reps.forEach(r=>{ const d=String(r.date||'').slice(0,10); if(d) byDate[d]=r; });
+  const evs=(VesselService.events()||[]).filter(e=>e&&!e._deleted&&e.vesselId===vid);
+  let lastLoc=''; reps.filter(r=>String(r.date)<period+'-01').forEach(r=>{ const l=_darLocOf(r); if(l) lastLoc=l; });
+  for(let d=1; d<=nd; d++){ const iso=period+'-'+String(d).padStart(2,'0'); const rep=byDate[iso]; let code='', dp=false, why='', has=false;
+    if(rep){ const l=_darLocOf(rep); if(l) lastLoc=l; }
+    const dock=evs.find(e=>e.type==='dock'&&_evCovers(e,iso));
+    if(dock){ has=true; code='DOCK'; why='Dock '+String(dock.startAt||'').slice(0,10); }
+    else if(rep){ has=true; const l=_darLocOf(rep)||lastLoc; code=l==='VN'?'DB1':(l==='NN'?'DB2':''); why='DAR #'+(rep.reportNo||'')+(rep.pstn?' · '+rep.pstn:'')+(l?'':' · vị trí chưa rõ');
+      const dc=_darDpCodes(vid, rep.family); dp=(rep.acts||[]).some(a=>a&&dc.indexOf(String(a.code||'').trim().toUpperCase())>=0&&(+a.dur||0)>0); if(dp) why+=' · có hoạt động DP'; }
+    else if(iso<=today&&reps.length&&!evs.some(e=>(e.type==='onhire'||!e.type)&&_evCovers(e,iso))){ has=true; code=lastLoc==='NN'?'BO2':(lastLoc==='VN'?'BO':''); why='Không có DAR · không on-hire'+(code?'':' · vị trí chưa rõ'); }
+    out[d]={has, code, dp, why}; }
+  return out; }
+function _bccSmartOn(){ try{ return localStorage.getItem('bccSmartFwd')!=='0'; }catch(_){ return true; } }
+function _bccSugCache(s){ const k=s.id+'|'+((S.darReports||[]).length)+'|'+((VesselService.events()||[]).length); if(window._BSC&&window._BSC.k===k) return window._BSC.v; const v=_bccDarSuggest(s.scope.value, s.period); window._BSC={k, v}; return v; }
+function _bccOffDay(s, r, d){ try{ return !!_bccOffShip(s, r, d); }catch(_){ return false; } }
+/* điền tiếp từ ô (empId, day) = v cho toàn bộ thuyền viên */
+function _bccFillForward(s, day, v){ const sug=_bccSugCache(s); const nd=+s.numDays||31; let n=0;
+  const plan={}; plan[day]=v; let prev=(sug[day]||{}).code||'', cur=v;
+  for(let d=day+1; d<=nd; d++){ const g=sug[d]; if(!g||!g.has) break; if(g.code&&g.code!==prev){ cur=g.code; prev=g.code; plan[d]={v:cur, src:'dar'}; } else plan[d]={v:cur, src:cur===g.code?'dar':'fwd'}; }
+  plan[day]={v, src:'fwd'};
+  (s.rows||[]).forEach(r=>{ r.days=r.days||{}; r.sAuto=r.sAuto||{}; const elig=(typeof _bccDpEligible==='function')&&_bccDpEligible(s,r);
+    Object.keys(plan).map(Number).forEach(d=>{ if(_bccOffDay(s,r,d)) return; const cell=r.days[d]; const manual=cell&&!r.sAuto[d]; if(manual) return; if(cell===plan[d].v&&r.sAuto[d]) return;
+      r.days[d]=plan[d].v; r.sAuto[d]=plan[d].src; n++;
+      if(elig&&sug[d]&&sug[d].dp){ r.dpExtra=r.dpExtra||{}; r.sAutoDp=r.sAutoDp||{}; if(!r.dpExtra[d]){ r.dpExtra[d]=1; r.sAutoDp[d]=1; } } });
+    if(!Object.keys(r.sAuto).length) delete r.sAuto; });
+  return n; }
+/* điền mọi ô trống theo DAR */
+function bccSmartFillEmpty(sheetId){ const s=(S.bccSheets||[]).find(x=>x&&x.id===sheetId); if(!s) return; const sug=_bccSugCache(s); let n=0;
+  (s.rows||[]).forEach(r=>{ r.days=r.days||{}; r.sAuto=r.sAuto||{}; const elig=(typeof _bccDpEligible==='function')&&_bccDpEligible(s,r);
+    Object.keys(sug).map(Number).forEach(d=>{ const g=sug[d]; if(!g||!g.code||_bccOffDay(s,r,d)||r.days[d]) return; r.days[d]=g.code; r.sAuto[d]='dar'; n++;
+      if(elig&&g.dp&&!(r.dpExtra||{})[d]){ r.dpExtra=r.dpExtra||{}; r.sAutoDp=r.sAutoDp||{}; r.dpExtra[d]=1; r.sAutoDp[d]=1; } });
+    if(!Object.keys(r.sAuto).length) delete r.sAuto; _bccTouch(s, r); });
+  _bccTouch(s); try{ saveState(); }catch(_){} toast(n?('⚡ Đã điền '+n+' ô theo DAR — kiểm lại ô vàng / ngày khác biệt'):'Không có ô trống nào có gợi ý DAR', n?'good':'info'); renderBccGridEditor(sheetId); }
+/* DAR về muộn: ô app tự điền theo DAR → cập nhật theo gợi ý mới (ô tàu chọn giữ nguyên) */
+function _bccSmartRefresh(s){ try{ if(!s||s.status!=='draft') return 0; const sug=_bccSugCache(s); let n=0;
+    (s.rows||[]).forEach(r=>{ if(!r.sAuto) return; Object.keys(r.sAuto).forEach(k=>{ const d=+k; if(r.sAuto[k]!=='dar') return; const g=sug[d]; if(g&&g.code&&r.days[d]!==g.code&&!_bccOffDay(s,r,d)){ r.days[d]=g.code; n++; _bccTouch(s,r); } }); });
+    return n; }catch(_){ return 0; } }
+(function(){ try{
+  const _cc0=bccCellChange; bccCellChange=function(sheetId, empId, day, value){ const s=(S.bccSheets||[]).find(x=>x&&x.id===sheetId); const isV=!!(s&&s.scope&&s.scope.type==='vessel'&&s.mode==='daily');
+    let _wasEmpty=false; if(isV){ const r=(s.rows||[]).find(x=>x.empId===empId); _wasEmpty=!!r&&!String((r.days||{})[day]||'').trim(); if(r&&r.sAuto){ delete r.sAuto[day]; if(!Object.keys(r.sAuto).length) delete r.sAuto; } }
+    const v=String(value||'').trim().toUpperCase();
+    if(isV&&v&&_wasEmpty&&_bccSmartOn()&&s.status==='draft'){   /* chỉ ô đang TRỐNG mới điền tiếp; sửa ô đã có công = sửa đúng ô đó */ const _rr=renderBccGridEditor; renderBccGridEditor=function(){}; try{ _cc0.apply(this, arguments); } finally{ renderBccGridEditor=_rr; }
+      const r=(s.rows||[]).find(x=>x.empId===empId); const n=_bccFillForward(s, day, v); if(r){ if(r.sAuto){ delete r.sAuto[day]; } } _bccTouch(s); if(n) try{ saveState(); }catch(_){} return renderBccGridEditor(sheetId); }
+    return _cc0.apply(this, arguments); };
+  const _dpc0=bccDpCellChange; bccDpCellChange=function(sheetId, empId, day, value){ const s=(S.bccSheets||[]).find(x=>x&&x.id===sheetId); const r=s&&(s.rows||[]).find(x=>x.empId===empId); if(r&&r.sAutoDp){ delete r.sAutoDp[day]; if(!Object.keys(r.sAutoDp).length) delete r.sAutoDp; } return _dpc0.apply(this, arguments); };
+  const _rg0=renderBccGridEditor; renderBccGridEditor=function(id){ const s=(S.bccSheets||[]).find(x=>x&&x.id===id); const isV=!!(s&&s.scope&&s.scope.type==='vessel'&&s.mode==='daily');
+    if(isV){ const n=_bccSmartRefresh(s); if(n){ try{ _bccTouch(s); saveState(); }catch(_){} } }
+    const r0=_rg0.apply(this, arguments); if(!isV) return r0;
+    try{ const mb=document.getElementById('modal-body'); if(!mb) return r0; const sug=_bccSugCache(s); const nd=+s.numDays||31; const ro=s.status!=='draft';
+      /* style ô: nghiêng (app tự điền) · vàng (khác DAR) */
+      mb.querySelectorAll('select[id^="bcc-in-"]').forEach(sel=>{ const m=/bccCellChange\('[^']*','([^']*)',(\d+)/.exec(sel.getAttribute('onchange')||''); if(!m) return; const r=(s.rows||[]).find(x=>x.empId===m[1]); if(!r) return; const d=+m[2]; const v=(r.days||{})[d]||''; const g=sug[d];
+        if(r.sAuto&&r.sAuto[d]){ sel.style.fontStyle='italic'; sel.style.background='#eef3f9'; sel.style.color='#4b5563'; sel.title='App tự điền'+(g&&g.why?' · '+g.why:''); }
+        if(v&&g&&g.code&&v!==g.code&&!(r.sAuto&&r.sAuto[d])){ sel.style.background='#fff3c4'; sel.style.border='1.5px solid #d9a33a'; sel.style.fontWeight='700'; sel.title='Khác gợi ý DAR: '+g.code+' — '+(g.why||''); } });
+      mb.querySelectorAll('select[onchange^="bccDpCellChange"]').forEach(sel=>{ const m=/bccDpCellChange\('[^']*','([^']*)',(\d+)/.exec(sel.getAttribute('onchange')||''); if(!m) return; const r=(s.rows||[]).find(x=>x.empId===m[1]); const d=+m[2]; if(r&&r.sAutoDp&&r.sAutoDp[d]){ sel.style.fontStyle='italic'; sel.style.background='#eef3f9'; sel.title='App tự điền theo DAR (có hoạt động DP)'; } });
+      /* dòng Gợi ý từ DAR + thanh công cụ */
+      const show=(()=>{ try{ return localStorage.getItem('bccSugRow')!=='0'; }catch(_){ return true; } })();
+      const tb=mb.querySelector('table tbody'); const firstSel=mb.querySelector('select[id^="bcc-in-0-1"]'); const tr0=firstSel&&firstSel.closest('tr');
+      if(tb&&tr0&&show){ const nCols=tr0.children.length; const lead=nCols-nd; const tr=document.createElement('tr'); tr.className='bcc-sug-row'; tr.style.background='#eef4ff';
+        tr.innerHTML=`<td colspan="${lead}" style="padding:3px 8px;font-size:11px;font-weight:700;color:#0b3d91;white-space:nowrap">📊 Gợi ý từ DAR</td>`+Array.from({length:nd},(_,i)=>{ const g=sug[i+1]||{}; return `<td style="text-align:center;font-size:10.5px;color:#0b3d91;padding:2px 1px" title="${esc(g.why||'Chưa có DAR')}">${g.has?esc(g.code||'?'):'—'}${g.dp?'<div style="font-size:9px;font-weight:700">DP</div>':''}</td>`; }).join('');
+        tb.insertBefore(tr, tb.firstChild); }
+      const tbl=mb.querySelector('table'); if(tbl&&!mb.querySelector('.bcc-smart-bar')){ const bar=document.createElement('div'); bar.className='bcc-smart-bar'; bar.style.cssText='display:flex;gap:10px;align-items:center;flex-wrap:wrap;font-size:12px;margin:0 4px 8px';
+        bar.innerHTML=`<b style="color:#0b3d91">Chấm công thông minh</b><button class="btn-sec" style="font-size:11px;padding:2px 9px" onclick="try{localStorage.setItem('bccSugRow','${show?'0':'1'}')}catch(e){};renderBccGridEditor('${esc(s.id)}')">📊 ${show?'Ẩn':'Hiện'} gợi ý DAR</button>${ro?'':`<button class="btn-sec" style="font-size:11px;padding:2px 9px" onclick="bccSmartFillEmpty('${esc(s.id)}')">⚡ Điền theo DAR (ô trống)</button><label style="display:flex;gap:4px;align-items:center"><input type="checkbox" ${_bccSmartOn()?'checked':''} onchange="try{localStorage.setItem('bccSmartFwd',this.checked?'1':'0')}catch(e){}"> Điền tiếp khi chọn (cả tàu)</label>`}<span style="color:var(--muted)"><i style="background:#eef3f9;padding:0 4px">nghiêng</i> = app tự điền · <span style="background:#fff3c4;border:1px solid #d9a33a;padding:0 4px">vàng</span> = khác gợi ý DAR</span>`;
+        const wrap=tbl.closest('.tbl-scroll')||tbl; wrap.parentNode.insertBefore(bar, wrap); }
+    }catch(e){ console.warn('[v3.70.58 grid]',e); } return r0; };
+  /* QLTV Kiểm tra: + Ô khác gợi ý DAR (cảnh báo) */
+  const _pa0=crewPayAudit; crewPayAudit=function(sh){ const R=_pa0.apply(this, arguments); try{ if(sh&&sh.scope&&sh.scope.type==='vessel'&&sh.mode==='daily'&&String(sh.period)>=BCC_ATT_FROM){ const sug=_bccDarSuggest(sh.scope.value, sh.period); const L=[];
+        (sh.rows||[]).forEach(r=>{ const ds=Object.keys(r.days||{}).filter(d=>{ const g=sug[+d]; return g&&g.code&&r.days[d]&&r.days[d]!==g.code&&!(r.sAuto&&r.sAuto[d]); }); if(ds.length){ const nm=(hrmEmpById(r.empId)||{}).fullName||r.empId; L.push({empId:r.empId, msg:nm+' — ngày '+ds.map(d=>d+': '+r.days[d]+' (DAR '+sug[+d].code+')').slice(0,6).join(', ')+(ds.length>6?' …':'')}); } });
+        let lvl=L.length?'warn':'ok', ppl=L; const ig=sh._auditIgnore||{}; const keep=L.filter(x=>!ig['dar|'+x.empId]); const nIg=L.length-keep.length; ppl=keep; if(!keep.length&&L.length) lvl='ok';
+        R.items.push({t:'Ô khác gợi ý DAR', detail:keep.length?keep.map(x=>x.msg).slice(0,4).join(' · '):(nIg?'đã bỏ qua '+nIg+' (đúng thực tế)':'0'), lvl, ppl:keep, kind:'dar'}); if(lvl==='warn') R.nWarn++; } }catch(e){ console.warn('[v3.70.58 audit]',e); } return R; };
+}catch(err){ console.warn('[v3.70.58]',err); } })();
+/* Admin: địa danh VN / nước ngoài + mã DP theo mẫu DAR từng tàu */
+function darPlacesOpen(){ if(!isAdmin()){ toast('Chỉ Admin','bad'); return; } const m=(S.meta&&S.meta.darPlaces)||{}; const T=(S.darTemplates||[]).filter(t=>t&&!t._deleted);
+  const rows=T.map(t=>`<tr><td>${esc(anyVesselName(t.vesselId)||t.vesselId||'')}</td><td>${esc(t.family||'')}</td><td><input id="dpc-${esc(t.id)}" value="${esc((Array.isArray(t.dpCodes)?t.dpCodes:(DAR_DP_CODES_DEFAULT[t.family]||[])).join(', '))}" style="width:140px"></td></tr>`).join('');
+  openModal('📍 Địa danh VN / nước ngoài · mã DP (chấm công thông minh)', `<div style="font-size:12px;margin-bottom:6px">Có sẵn — VN: ${esc(DAR_PLACE_VN_DEFAULT.join(', '))}<br>Nước ngoài: ${esc(DAR_PLACE_NN_DEFAULT.join(', '))}</div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px"><div><b style="font-size:12px">Thêm địa danh VN</b> (mỗi dòng 1)<textarea id="dpl-vn" rows="5" style="width:100%">${esc((m.vn||[]).join('\n'))}</textarea></div><div><b style="font-size:12px">Thêm địa danh nước ngoài</b><textarea id="dpl-nn" rows="5" style="width:100%">${esc((m.nn||[]).join('\n'))}</textarea></div></div>
+    <div style="margin-top:8px"><b style="font-size:12px">Mã hoạt động DP theo mẫu DAR từng tàu</b> (cách nhau dấu phẩy — theo bảng mã in trên DAR)<table class="tbl" style="font-size:12px"><thead><tr><th>Tàu</th><th>Mẫu</th><th>Mã DP</th></tr></thead><tbody>${rows||'<tr><td colspan="3">Chưa có mẫu DAR</td></tr>'}</tbody></table></div>`,
+    `<button class="btn-ghost" onclick="closeModal()">Đóng</button><button class="btn-primary" onclick="darPlacesSave()">Lưu</button>`); }
+function darPlacesSave(){ const L=id=>String((document.getElementById(id)||{}).value||'').split(/\n|,/).map(x=>x.trim()).filter(Boolean);
+  const vn=L('dpl-vn'), nn=L('dpl-nn'); const T=(S.darTemplates||[]).filter(t=>t&&!t._deleted);
+  commitMutation(()=>{ S.meta=S.meta||{}; S.meta.darPlaces={vn, nn}; T.forEach(t=>{ const el=document.getElementById('dpc-'+t.id); if(!el) return; const c=String(el.value||'').split(/[,\s]+/).map(x=>x.trim().toUpperCase()).filter(Boolean); t.dpCodes=c; try{ touchRecord(t); }catch(_){} }); window._BSC=null; },
+    {action:'dar_places_save', fields:['meta','darTemplates'], onOk:()=>{ toast('✓ Đã lưu','good'); closeModal(); }}); }
+(function(){ try{ if(typeof darLibOpen!=='function') return; const _dl0=darLibOpen; darLibOpen=function(){ const r=_dl0.apply(this, arguments); try{ if(isAdmin()){ const f=document.getElementById('modal-foot')||document.querySelector('#modal .modal-foot'); if(f&&!f.querySelector('.dpl-btn')) f.insertAdjacentHTML('afterbegin','<button class="btn-sec dpl-btn" onclick="darPlacesOpen()">📍 Địa danh VN/NN · mã DP</button>'); } }catch(_){} return r; }; }catch(e){} })();
 
 /* ── Sidebar khối màu: ẩn dải màu khi mọi mục trong khối đều ẩn ── */
 function _sbBandsRefresh(root){
