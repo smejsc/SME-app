@@ -12,12 +12,12 @@
    - v3.20.101: CHỈ ép {cache:'reload'} cho index.html (file thực sự cần luôn mới) — icon/manifest/
      thư viện Excel dùng cache bình thường (hiếm đổi, không phải nguồn gây lỗi "kẹt bản cũ") — giảm
      tải mạng mỗi lần cập nhật mà không tái phát lỗi cũ.
-   Chiến lược: Network-first cho index.html (luôn mới); cache-first cho tài sản tĩnh (icon/manifest/lib).
+   Chiến lược (v3.70.83): cache-first cho index.html + tự kiểm tra version.json; cache-first cho tài sản tĩnh (icon/manifest/lib).
    Cache tự đổi tên khi SW_VERSION bên dưới đổi.
    ⚠ QUAN TRỌNG: tăng SW_VERSION mỗi khi release bản mới của index.html để buộc trình duyệt bỏ cache cũ.
 */
 
-const SW_VERSION = 'v3.70.82';
+const SW_VERSION = 'v3.70.91';
 const CACHE_NAME = `seahorse-${SW_VERSION}`;
 
 // Pre-cache critical files on install
@@ -44,10 +44,12 @@ self.addEventListener('install', event => {
   event.waitUntil(
     caches.open(CACHE_NAME)
       .then(cache => Promise.all(PRECACHE_URLS.map(url => {
+        /* v3.70.83: './' và './index.html' là CÙNG một file — chỉ tải 1 lần, lưu cho cả 2 (trước tải 2 lần × 4MB) */
+        if(url==='./') return null;
         if(FORCE_FRESH.has(url)){
           const bustUrl = url + (url.includes('?') ? '&' : '?') + '_sw=' + Date.now();
           return fetch(new Request(bustUrl, {cache:'reload'}))
-            .then(res => { if(res.ok) return cache.put(url, res); })
+            .then(res => { if(res.ok){ const c2=res.clone(); return Promise.all([cache.put(url, res), cache.put('./', c2)]); } })
             .catch(e => console.warn('[SW] Precache fail (bỏ qua, không chặn cài đặt):', url, e));
         }
         return fetch(url)
@@ -92,34 +94,22 @@ self.addEventListener('fetch', event => {
   const isHTML = req.mode === 'navigate' || url.pathname.endsWith('.html') || url.pathname.endsWith('/');
 
   if (isHTML) {
-    // v3.12.35 — CACHE-FIRST + CẬP NHẬT NỀN (stale-while-revalidate) cho index.html.
-    //   FIX "mở app chậm": trước đây network-first chờ mạng tải 5.2MB (tới 3.5s) MỖI lần mở
-    //   dù cache có bản y hệt. Giờ: có cache → phục vụ NGAY (mở tức thì, cả offline/mạng yếu),
-    //   fetch nền cập nhật cache cho lần sau. BẢN MỚI vẫn được phát hiện như cũ qua
-    //   version.json (không cache) + checkForUpdate (auto chạy lúc boot) → auto-reload,
-    //   lúc reload cache đã được fetch nền cập nhật → lên bản mới nhanh. SW_VERSION bump
-    //   khi release vẫn xóa cache cũ + precache bản mới như trước.
+    // v3.70.83 (Sếp 13/10: "F5 cập nhật: app chạy chậm / mở mới cũng chậm") — CACHE-FIRST thật cho index.html:
+    //   có bản đã lưu → mở NGAY, không chờ mạng, không tải lại 4MB mỗi lần mở (v3.68.72 chờ mạng tới 4s + tải nền mỗi lần).
+    //   Bản mới vẫn tự lên: (a) app đọc version.json (không cache) lúc mở → cài SW mới (tải index 1 lần lúc cài) → tải lại trang
+    //   = phục vụ bản vừa cài; (b) chính SW cũng tự đọc version.json mỗi lần mở (vài trăm byte) → khác bản → tự cài SW mới,
+    //   nên kể cả bản lỗi không chạy nổi code kiểm tra cập nhật, lần mở sau vẫn lên bản sửa (chống "kẹt bản lỗi" như 3.68.68–70).
     event.respondWith((async () => {
-      const cached = (await caches.match(req)) || (await caches.match(req, {ignoreSearch:true}));   /* v3.68.74: ?v=…/?full=… vẫn dùng được bản đã lưu */
+      const cached = (await caches.match(req, {ignoreSearch:true})) || (await caches.match('./index.html', {ignoreSearch:true}));
+      if (cached) { event.waitUntil(_swSelfCheck()); return cached; }
+      // Chưa có bản lưu (lần cài đầu / cache bị xóa) → tải mạng, chờ tối đa 15s
       const networkUpdate = fetch(req, {cache:'no-store'}).then(res => {
-        if (res.ok) {
-          const clone = res.clone();
-          caches.open(CACHE_NAME).then(c => c.put(req, clone));
-        }
+        if (res.ok) { const clone = res.clone(); caches.open(CACHE_NAME).then(c => c.put(req, clone)); }
         return res;
       }).catch(() => null);
-      /* v3.68.72: có mạng → ƯU TIÊN bản mới (chờ tối đa 4 giây), quá 4s / mất mạng mới dùng bản đã lưu —
-         để bản lỗi không kẹt lại trên máy NV như sự cố 3.68.68–70. */
-      if (cached) {
-        const quick = await Promise.race([networkUpdate, new Promise(r => setTimeout(() => r(null), 4000))]);
-        if (quick && quick.ok) return quick;
-        return cached;
-      }
-      // Chưa có cache (lần cài đầu) → chờ mạng tối đa 15s; quá hạn / lỗi → thử cache index chung
       const net = await Promise.race([networkUpdate, new Promise(r => setTimeout(() => r(null), 15000))]);
       if (net) return net;
-      const any = await caches.match('./index.html', {ignoreSearch:true});
-      return any || networkUpdate.then(r => r || new Response('Không kết nối được máy chủ ERP — kiểm tra mạng rồi tải lại trang.', {status:503, headers:{'Content-Type':'text/plain; charset=utf-8'}}));
+      return networkUpdate.then(r => r || new Response('Không kết nối được máy chủ ERP — kiểm tra mạng rồi tải lại trang.', {status:503, headers:{'Content-Type':'text/plain; charset=utf-8'}}));
     })());
   } else {
     // Cache-first for assets
@@ -137,6 +127,17 @@ self.addEventListener('fetch', event => {
     );
   }
 });
+
+// v3.70.83: SW tự kiểm tra phiên bản (tối đa 1 lần / 60 giây) — version.json khác SW_VERSION → cài SW mới
+let _swLastCheck = 0;
+async function _swSelfCheck(){
+  try{
+    if (Date.now() - _swLastCheck < 60000) return; _swLastCheck = Date.now();
+    const r = await fetch('./version.json?_=' + Date.now(), {cache:'no-store'}); if (!r.ok) return;
+    const j = await r.json(); const v = j && (j.swVersion || j.version); if (!v) return;
+    if ('v' + String(v).replace(/^v/, '') !== SW_VERSION) { console.log('[SW] Có bản mới', v, '→ cài SW mới'); await self.registration.update(); }
+  }catch(e){ console.warn('[SW] self-check', e); }
+}
 
 // Allow page to trigger immediate update
 self.addEventListener('message', event => {
