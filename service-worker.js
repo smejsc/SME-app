@@ -17,7 +17,7 @@
    ⚠ QUAN TRỌNG: tăng SW_VERSION mỗi khi release bản mới của index.html để buộc trình duyệt bỏ cache cũ.
 */
 
-const SW_VERSION = 'v3.72.02';
+const SW_VERSION = 'v3.72.06';
 const CACHE_NAME = `seahorse-${SW_VERSION}`;
 
 // Pre-cache critical files on install
@@ -40,24 +40,28 @@ self.addEventListener('install', event => {
      mới ép {cache:'reload'} + phá cache CDN; còn lại dùng cache bình thường (nhanh hơn, vẫn tự làm
      mới theo chu kỳ cache tiêu chuẩn của trình duyệt/CDN — không tái phát lỗi "kẹt bản cũ" vì các
      file này không phải nguồn gây lỗi đó). */
-  const FORCE_FRESH = new Set(['./', './index.html']);
-  event.waitUntil(
-    caches.open(CACHE_NAME)
-      .then(cache => Promise.all(PRECACHE_URLS.map(url => {
-        /* v3.70.83: './' và './index.html' là CÙNG một file — chỉ tải 1 lần, lưu cho cả 2 (trước tải 2 lần × 4MB) */
-        if(url==='./') return null;
-        if(FORCE_FRESH.has(url)){
-          const bustUrl = url + (url.includes('?') ? '&' : '?') + '_sw=' + Date.now();
-          return fetch(new Request(bustUrl, {cache:'reload'}))
-            .then(res => { if(res.ok){ const c2=res.clone(); return Promise.all([cache.put(url, res), cache.put('./', c2)]); } })
-            .catch(e => console.warn('[SW] Precache fail (bỏ qua, không chặn cài đặt):', url, e));
-        }
-        return fetch(url)
-          .then(res => { if(res.ok) return cache.put(url, res); })
-          .catch(e => console.warn('[SW] Precache fail (bỏ qua, không chặn cài đặt):', url, e));
-      })))
-      .then(() => self.skipWaiting())
-  );
+  /* v3.72.06 (Sếp 18/10 — máy mất mạng / mạng chập chờn lâu ngày): CẬP NHẬT NGUYÊN TỬ.
+     Trước: tải index.html lỗi giữa chừng vẫn coi là cài xong → bước activate XOÁ cache bản cũ → mở app khi mất mạng
+     báo "Không kết nối được máy chủ ERP". Nay: index.html PHẢI tải đủ và ĐÚNG số phiên bản (APP_VERSION khớp SW_VERSION)
+     thì mới cài; sai / thiếu → ném lỗi → trình duyệt BỎ bản cài mới, GIỮ NGUYÊN SW + cache bản cũ (app vẫn mở offline),
+     lần sau có mạng tự thử lại. Tài sản phụ (icon/manifest/thư viện) lỗi thì chép lại từ cache cũ. */
+  const WANT = 'APP_VERSION="' + SW_VERSION.replace(/^v/, '') + '"';
+  event.waitUntil((async () => {
+    const res = await fetch(new Request('./index.html?_sw=' + Date.now(), {cache:'reload'}));
+    if (!res || !res.ok) throw new Error('[SW] index.html HTTP ' + (res && res.status));
+    const txt = await res.clone().text();
+    if (txt.length < 500000 || txt.indexOf(WANT) < 0) throw new Error('[SW] index.html chưa đủ / sai phiên bản (' + txt.length + ' ký tự) — giữ bản cũ');
+    const cache = await caches.open(CACHE_NAME);
+    const hdr = {headers:{'Content-Type':'text/html; charset=utf-8'}};
+    await cache.put('./index.html', new Response(txt, hdr));
+    await cache.put('./', new Response(txt, hdr));
+    await Promise.all(PRECACHE_URLS.filter(u => u !== './' && u !== './index.html').map(async url => {
+      try { const r = await fetch(url); if (r && r.ok) { await cache.put(url, r); return; } } catch (e) {}
+      try { const old = await caches.match(url); if (old) await cache.put(url, old.clone()); } catch (e) {}
+    }));
+    console.log('[SW] Đã tải đủ bản', SW_VERSION, '(' + txt.length + ' ký tự)');
+    await self.skipWaiting();
+  })());
 });
 
 self.addEventListener('activate', event => {
