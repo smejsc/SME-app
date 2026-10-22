@@ -17,7 +17,7 @@
    ⚠ QUAN TRỌNG: tăng SW_VERSION mỗi khi release bản mới của index.html để buộc trình duyệt bỏ cache cũ.
 */
 
-const SW_VERSION = 'v3.73.01';
+const SW_VERSION = 'v3.73.04';
 const CACHE_NAME = `seahorse-${SW_VERSION}`;
 
 // Pre-cache critical files on install
